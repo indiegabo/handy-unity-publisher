@@ -2,11 +2,11 @@
 
 ## Project
 
-Handy Unity Bulder
+Handy Unity Builder
 
 ## Summary
 
-Handy Unity Bulder is a self-hosted build orchestrator for Unity projects. The goal is to monitor registered repositories, detect new tagged releases, identify the Unity version required by each release, run builds with GameCI inside Docker, and publish the generated artifacts to configured distribution targets.
+Handy Unity Builder is a self-hosted build orchestrator for Unity projects. The goal is to monitor registered repositories, detect new tagged releases, identify the Unity version required by each release, run builds with GameCI inside Docker, and publish the generated artifacts to configured distribution targets.
 
 ## Current Stage
 
