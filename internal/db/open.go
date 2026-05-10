@@ -24,15 +24,12 @@ func Open(ctx context.Context, cfg config.Config) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
 	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
 
-	if err := database.PingContext(ctx); err != nil {
+	if err := primeConnection(ctx, database); err != nil {
 		_ = database.Close()
-		return nil, fmt.Errorf("ping sqlite database: %w", err)
-	}
-
-	if err := applyPragmas(ctx, database); err != nil {
-		_ = database.Close()
-		return nil, fmt.Errorf("apply sqlite pragmas: %w", err)
+		return nil, err
 	}
 
 	if err := migrate(ctx, database); err != nil {
@@ -55,13 +52,40 @@ func ensureDataLayout(cfg config.Config) error {
 	return nil
 }
 
+// pragmaExecutor captures the ExecContext behavior shared by sql.DB and
+// sql.Conn so connection bootstrap can target a single pooled SQLite handle.
+type pragmaExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// primeConnection configures the single pooled SQLite connection before any
+// other work uses it so busy_timeout and foreign key enforcement stay active
+// for the long-lived handle shared by one runtime process.
+func primeConnection(ctx context.Context, database *sql.DB) error {
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire sqlite connection: %w", err)
+	}
+	defer connection.Close()
+
+	if err := applyPragmas(ctx, connection); err != nil {
+		return fmt.Errorf("apply sqlite pragmas: %w", err)
+	}
+
+	if err := connection.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping sqlite database: %w", err)
+	}
+
+	return nil
+}
+
 // applyPragmas enables SQLite behaviors required by the local-first runtime,
 // including foreign keys, WAL mode, and bounded lock waits.
-func applyPragmas(ctx context.Context, database *sql.DB) error {
+func applyPragmas(ctx context.Context, database pragmaExecutor) error {
 	statements := []string{
+		"PRAGMA busy_timeout = 5000;",
 		"PRAGMA foreign_keys = ON;",
 		"PRAGMA journal_mode = WAL;",
-		"PRAGMA busy_timeout = 5000;",
 	}
 
 	for _, statement := range statements {
