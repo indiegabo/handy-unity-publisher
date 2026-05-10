@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -32,6 +33,13 @@ func run() int {
 		_, _ = fmt.Fprintf(os.Stderr, "load config: %v\n", err)
 		return 1
 	}
+
+	logger := slog.New(
+		slog.NewTextHandler(
+			os.Stdout,
+			&slog.HandlerOptions{Level: cfg.SLogLevel()},
+		),
+	)
 
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
@@ -72,7 +80,7 @@ func run() int {
 		buildStore,
 		queue,
 		processor,
-	).WithPublishPlanner(publishCoordinator)
+	).WithPublishPlanner(publishCoordinator).WithLogger(logger)
 
 	for {
 		select {
@@ -82,7 +90,7 @@ func run() int {
 		}
 
 		if _, err := worker.RunOnce(ctx); err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "run build worker: %v\n", err)
+			logger.Error("run build worker", "error", err)
 			return 1
 		}
 	}

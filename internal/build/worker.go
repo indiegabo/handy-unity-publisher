@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,7 @@ type Worker struct {
 	queue       worker.Queue
 	processor   Processor
 	publishPlan publishPlanner
+	logger      *slog.Logger
 	dequeueWait time.Duration
 }
 
@@ -83,6 +85,14 @@ func (w *Worker) WithDequeueWait(wait time.Duration) *Worker {
 // artifacts are persisted and before the build run is finalized.
 func (w *Worker) WithPublishPlanner(planner publishPlanner) *Worker {
 	w.publishPlan = planner
+	return w
+}
+
+// WithLogger attaches a structured logger used to report operator-visible
+// build failures without requiring direct inspection of the nested GameCI
+// container.
+func (w *Worker) WithLogger(logger *slog.Logger) *Worker {
+	w.logger = logger
 	return w
 }
 
@@ -144,16 +154,30 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	}
 
 	if err != nil {
-		if _, failErr := w.store.FailRun(ctx, run.ID, FailRunInput{
+		failedRun, failErr := w.store.FailRun(ctx, run.ID, FailRunInput{
 			WorkspacePath:    result.WorkspacePath,
 			LogPath:          result.LogPath,
 			ArtifactRootPath: result.ArtifactRootPath,
 			ErrorMessage:     err.Error(),
-		}); failErr != nil {
+		})
+		if failErr != nil {
 			return true, fmt.Errorf(
 				"persist failed build run %d: %w",
 				run.ID,
 				failErr,
+			)
+		}
+
+		if w.logger != nil {
+			w.logger.Error(
+				"build run failed",
+				"build_run_id", failedRun.ID,
+				"release_run_id", failedRun.ReleaseRunID,
+				"build_target_id", failedRun.BuildTargetID,
+				"error", pointerString(failedRun.ErrorMessage),
+				"log_path", pointerString(failedRun.LogPath),
+				"workspace_path", pointerString(failedRun.WorkspacePath),
+				"artifact_root_path", pointerString(failedRun.ArtifactRootPath),
 			)
 		}
 

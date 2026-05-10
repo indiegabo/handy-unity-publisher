@@ -1,9 +1,12 @@
 package build_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -198,6 +201,79 @@ func TestWorkerRunOncePersistsFailedBuildRun(t *testing.T) {
 
 	if _, err := os.Stat(workspaceRoot); !os.IsNotExist(err) {
 		t.Fatalf("expected workspace %q to be removed after failure, stat err=%v", workspaceRoot, err)
+	}
+}
+
+func TestWorkerRunOnceLogsFailedBuildRun(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	database := newTestDatabase(t)
+	redisServer := miniredis.RunT(t)
+	redisClient := redisv9.NewClient(&redisv9.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = redisClient.Close() })
+
+	buildStore, runs := newQueuedBuildScenario(t, ctx, database, "v3.0.1-log")
+	queue := workerredis.NewQueue(redisClient)
+	dispatcher := build.NewDispatcher(queue).WithCoordination(
+		workerredis.NewLockManager(redisClient),
+		workerredis.NewIdempotencyStore(redisClient),
+	)
+	if err := dispatcher.DispatchMany(ctx, runs); err != nil {
+		t.Fatalf("dispatch build runs: %v", err)
+	}
+
+	workspaceRoot := filepath.Join(t.TempDir(), "workspace-failed-log")
+	if err := os.MkdirAll(filepath.Join(workspaceRoot, "source"), 0o755); err != nil {
+		t.Fatalf("create workspace directory: %v", err)
+	}
+
+	var buffer bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buffer, nil))
+	worker := build.NewWorker(
+		buildStore,
+		queue,
+		build.ProcessorFunc(func(
+			_ context.Context,
+			_ build.WorkItem,
+		) (build.ExecutionResult, error) {
+			return build.ExecutionResult{
+				WorkspacePath:    workspaceRoot,
+				LogPath:          "/data/logs/build-failed.log",
+				ArtifactRootPath: "/data/artifacts/build-failed",
+			}, errors.New("unity build failed")
+		}),
+	).WithDequeueWait(time.Millisecond).WithLogger(logger)
+
+	processed, err := worker.RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("run worker once: %v", err)
+	}
+	if !processed {
+		t.Fatal("expected worker to process one queued build job")
+	}
+
+	lines := strings.Split(strings.TrimSpace(buffer.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected one log record, got %d in %q", len(lines), buffer.String())
+	}
+
+	var record map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
+		t.Fatalf("decode log record: %v", err)
+	}
+
+	if record["msg"] != "build run failed" {
+		t.Fatalf("expected log message %q, got %#v", "build run failed", record["msg"])
+	}
+	if record["error"] != "unity build failed" {
+		t.Fatalf("expected log error %q, got %#v", "unity build failed", record["error"])
+	}
+	if record["log_path"] != "/data/logs/build-failed.log" {
+		t.Fatalf("expected log_path %q, got %#v", "/data/logs/build-failed.log", record["log_path"])
+	}
+	if gotID, ok := record["build_run_id"].(float64); !ok || int64(gotID) != runs[0].ID {
+		t.Fatalf("expected build_run_id %d, got %#v", runs[0].ID, record["build_run_id"])
 	}
 }
 

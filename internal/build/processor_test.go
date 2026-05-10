@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -104,6 +105,48 @@ func TestExecutionProcessorReturnsPathsWhenExecutorFails(t *testing.T) {
 
 	if string(contents) != "build failed\n" {
 		t.Fatalf("expected failure log contents %q, got %q", "build failed\n", string(contents))
+	}
+}
+
+func TestExecutionProcessorEnrichesFailureWithDetectedSummary(t *testing.T) {
+	t.Parallel()
+
+	logPath := filepath.Join(t.TempDir(), "license-failed.log")
+	preparer := &workspacePreparerStub{prepared: PreparedWorkspace{
+		RootPath:             "/data/workspaces/build-run-12",
+		SourcePath:           "/data/workspaces/build-run-12/source",
+		HostRootPath:         "/host/data/workspaces/build-run-12",
+		HostSourcePath:       "/host/data/workspaces/build-run-12/source",
+		LogPath:              logPath,
+		ArtifactRootPath:     "/data/artifacts/revolutions.v2.1.0",
+		HostArtifactRootPath: "/host/data/artifacts/revolutions.v2.1.0",
+	}}
+	processor := NewExecutionProcessor(
+		&executionPlannerStub{plan: ExecutionPlan{
+			BuildRunID:     12,
+			RepositoryName: "revolutions",
+			RepositoryURL:  "file:///tmp/repo.git",
+			GitTag:         "v2.1.0",
+			TargetName:     "windows",
+			OutputKind:     plainStringPointer("archive"),
+		}},
+		preparer,
+		&executorStub{
+			output: []byte(
+				"Unity Editor version: 6000.4.3f1\n" +
+					"[Licensing::Module] Licensing is initialized (took 0.47s).\n" +
+					"No valid Unity Editor license found. Please activate your license.\n",
+			),
+			err: errors.New("run GameCI build container: exit status 198"),
+		},
+	)
+
+	_, err := processor.Process(context.Background(), WorkItem{Run: Run{ID: 12}})
+	if err == nil {
+		t.Fatal("expected execution error")
+	}
+	if !strings.Contains(err.Error(), "No valid Unity Editor license found. Please activate your license.") {
+		t.Fatalf("expected enriched failure summary, got %v", err)
 	}
 }
 

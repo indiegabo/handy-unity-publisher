@@ -122,10 +122,103 @@ func (p *ExecutionProcessor) Process(
 	}
 
 	if execErr != nil {
-		return result, execErr
+		return result, enrichExecutionError(execErr, output)
 	}
 
 	return result, nil
+}
+
+// enrichExecutionError appends the most relevant failure detail recovered from
+// the captured executor output so downstream persistence and worker logs expose
+// the real Unity/GameCI cause instead of only the container exit status.
+func enrichExecutionError(execErr error, output []byte) error {
+	summary := summarizeExecutionFailure(output)
+	if summary == "" {
+		return execErr
+	}
+	if strings.Contains(
+		strings.ToLower(execErr.Error()),
+		strings.ToLower(summary),
+	) {
+		return execErr
+	}
+
+	return fmt.Errorf("%w: %s", execErr, summary)
+}
+
+// summarizeExecutionFailure scans captured build output for the highest-signal
+// failure line so operators can see the likely root cause without opening the
+// raw nested container log.
+func summarizeExecutionFailure(output []byte) string {
+	bestLine := ""
+	bestScore := 0
+
+	for _, rawLine := range strings.Split(string(output), "\n") {
+		line := normalizeFailureSummaryLine(rawLine)
+		if line == "" {
+			continue
+		}
+
+		score := failureSummaryScore(line)
+		if score == 0 {
+			continue
+		}
+		if score >= bestScore {
+			bestLine = line
+			bestScore = score
+		}
+	}
+
+	return bestLine
+}
+
+// normalizeFailureSummaryLine trims one raw log line into a compact operator
+// summary shape and strips common timestamp prefixes emitted by container log
+// surfaces.
+func normalizeFailureSummaryLine(rawLine string) string {
+	line := strings.TrimSpace(rawLine)
+	if line == "" {
+		return ""
+	}
+
+	if parts := strings.SplitN(line, "|", 2); len(parts) == 2 {
+		left := strings.TrimSpace(parts[0])
+		right := strings.TrimSpace(parts[1])
+		if right != "" && strings.ContainsAny(left, ":-/.T") {
+			line = right
+		}
+	}
+
+	return strings.Join(strings.Fields(line), " ")
+}
+
+// failureSummaryScore ranks log lines by how likely they are to describe the
+// actionable root cause of a failed build.
+func failureSummaryScore(line string) int {
+	lowerLine := strings.ToLower(strings.TrimSpace(line))
+
+	switch {
+	case strings.Contains(lowerLine, "no valid unity editor license found"):
+		return 100
+	case strings.Contains(lowerLine, "please activate your license"):
+		return 95
+	case strings.Contains(lowerLine, "unauthorizedaccessexception"):
+		return 90
+	case strings.Contains(lowerLine, "access to the path"):
+		return 85
+	case strings.Contains(lowerLine, "permission denied"):
+		return 80
+	case strings.Contains(lowerLine, "licensing initialization failed"):
+		return 75
+	case strings.Contains(lowerLine, "error:"):
+		return 70
+	case strings.Contains(lowerLine, "exception"):
+		return 65
+	case strings.Contains(lowerLine, "failed"):
+		return 60
+	default:
+		return 0
+	}
 }
 
 // cleanupPreviousArtifactOutput removes any stale canonical output path before
