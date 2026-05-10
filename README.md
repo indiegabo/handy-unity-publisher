@@ -1,7 +1,14 @@
 # handy-unity-builder
 
+> "If your daily workstation can already build and publish your Unity project
+> manually, you should not need a second machine just to automate that same
+> work. handy-unity-builder exists to run that pipeline for you, on your own
+> machine, with repeatability, logs, and operator control."
+
 handy-unity-builder is a self-hosted, local-first build orchestration service
-for Unity repositories. It is not a Unity gameplay codebase. The server keeps
+for Unity repositories. It is built around the idea that the machine you use to
+develop a Unity project should also be able to automate its builds and
+publishing workflows. It is not a Unity gameplay codebase. The server keeps
 durable pipeline and execution state in SQLite, uses Redis only for transient
 coordination, and launches GameCI-compatible Unity builds through the host
 Docker daemon.
@@ -38,6 +45,28 @@ cp .env.template .env
 
 Then edit `.env` and set `HOST_DATA_DIR` to an absolute host path before
 starting the stack.
+
+For a local Unity 6 Personal license, place your Windows-generated
+`UnityEntitlementLicense.xml` file at:
+
+```text
+<HOST_DATA_DIR>/licenses/unity/UnityEntitlementLicense.xml
+```
+
+With the default repository-local setup, that usually means:
+
+```text
+data/licenses/unity/UnityEntitlementLicense.xml
+```
+
+Start with `UNITY_LICENSE_FILE` only. In most local setups, a valid
+`UnityEntitlementLicense.xml` or legacy `Unity_lic.ulf` file is enough to let
+the worker reuse the same licensing state you already use on your workstation.
+Leave `UNITY_EMAIL`, `UNITY_PASSWORD`, and `UNITY_SERIAL` empty unless Unity
+reports access token, entitlement refresh, or activation errors during the
+build. If you only have a legacy serial-style `Unity_lic.ulf` file, keep it
+under the mounted data directory and point `UNITY_LICENSE_FILE` to that file
+instead.
 
 Start the local stack:
 
@@ -136,6 +165,12 @@ Supported environment variables:
 - `HOST_DATA_DIR`
 - `PIPELINES_DIR`
 - `APP_DB_PATH`
+- `UNITY_LICENSE_FILE`
+- `UNITY_EMAIL`
+- `UNITY_PASSWORD`
+- `UNITY_LICENSE` (legacy fallback)
+- `UNITY_SERIAL`
+- `UNITY_LICENSING_SERVER`
 - `REDIS_ADDR`
 - `REDIS_USERNAME`
 - `REDIS_PASSWORD`
@@ -151,6 +186,7 @@ Example JSON config file:
 	"host_data_dir": "/absolute/host/path/to/data",
 	"pipelines_dir": "/workspace/pipelines",
 	"database_path": "/var/lib/handy-unity-bulder/hub.db",
+	"unity_license_file": "/data/licenses/unity/UnityEntitlementLicense.xml",
 	"redis_addr": "redis:6379",
 	"redis_db": 0,
 	"log_level": "debug"
@@ -167,6 +203,18 @@ Important details:
 - `APP_DB_PATH` overrides `database_path`. In the local Compose stack it should
 	point at the dedicated internal database volume path,
 	`/var/lib/handy-unity-bulder/hub.db`.
+- `UNITY_LICENSE_FILE` should point at the worker-visible path of the Unity
+	license file. For Unity 6 Personal named-user licensing in the local Compose
+	stack, keep the default `/data/licenses/unity/UnityEntitlementLicense.xml`
+	and place the real file on the host at
+	`<HOST_DATA_DIR>/licenses/unity/UnityEntitlementLicense.xml`. Legacy
+	serial-style `.ulf` files are still supported if you override the variable.
+- `UNITY_EMAIL` and `UNITY_PASSWORD` are optional fallback credentials in
+	`.env`. Start with them empty when `UNITY_LICENSE_FILE` points at a valid
+	license file, and only add them if Unity reports login, access token,
+	entitlement refresh, or activation problems.
+- Leave `UNITY_SERIAL` empty for a Personal license. Use it only for Pro or
+	Industry subscriptions.
 - `PIPELINES_DIR` points at the declarative manifest directory. In the local
 	Compose stack it should stay at `/workspace/pipelines`, which maps to the
 	repository-root `pipelines/` directory.

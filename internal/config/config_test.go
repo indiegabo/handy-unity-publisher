@@ -25,6 +25,10 @@ func TestLoadUsesDefaultDatabasePathInsideDataDir(t *testing.T) {
 		t.Fatalf("DBPath() = %q, want %q", cfg.DBPath(), want)
 	}
 
+	if cfg.UnityLicenseFilePath() != "/srv/handy/licenses/unity/UnityEntitlementLicense.xml" {
+		t.Fatalf("UnityLicenseFilePath() = %q", cfg.UnityLicenseFilePath())
+	}
+
 	if cfg.RedisAddr != "127.0.0.1:6379" {
 		t.Fatalf("RedisAddr = %q", cfg.RedisAddr)
 	}
@@ -80,6 +84,9 @@ func TestLoadUsesExplicitDatabasePathOverride(t *testing.T) {
 	}
 	if !containsPath(required, "/srv/handy") {
 		t.Fatalf("RequiredDirs() = %v, want data dir preserved for runtime storage", required)
+	}
+	if !containsPath(required, "/srv/handy/licenses/unity") {
+		t.Fatalf("RequiredDirs() = %v, want default Unity license directory", required)
 	}
 }
 
@@ -156,6 +163,23 @@ func TestLoadUsesExplicitPipelinesDirOverride(t *testing.T) {
 
 	if cfg.PipelinesDir != "/workspace/pipelines" {
 		t.Fatalf("PipelinesDir = %q", cfg.PipelinesDir)
+	}
+}
+
+func TestLoadUsesExplicitUnityLicenseFileOverride(t *testing.T) {
+	t.Setenv("DATA_DIR", "/srv/runtime-data")
+	t.Setenv("UNITY_LICENSE_FILE", "/srv/secrets/unity/personal.ulf")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.UnityLicenseFilePath() != "/srv/secrets/unity/personal.ulf" {
+		t.Fatalf("UnityLicenseFilePath() = %q", cfg.UnityLicenseFilePath())
+	}
+	if !containsPath(cfg.RequiredDirs(), "/srv/secrets/unity") {
+		t.Fatalf("RequiredDirs() = %v, want explicit Unity license directory", cfg.RequiredDirs())
 	}
 }
 

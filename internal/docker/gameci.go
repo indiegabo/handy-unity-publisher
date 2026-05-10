@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,10 +21,23 @@ import (
 // defaultOutputPathEnvName define the fixed Docker CLI contract used by the
 // GameCI executor.
 const (
-	dockerCommand            = "docker"
-	containerProjectPath     = "/workspace"
-	containerArtifactsPath   = "/artifacts"
-	defaultOutputPathEnvName = "HGB_OUTPUT_PATH"
+	dockerCommand                        = "docker"
+	containerProjectPath                 = "/workspace"
+	containerArtifactsPath               = "/artifacts"
+	containerRuntimeHomePath             = "/tmp/hgb-home"
+	containerSerialLicenseDirPath        = "/tmp/hgb-home/.local/share/unity3d/Unity"
+	containerSerialLicenseFilePath       = "/tmp/hgb-home/.local/share/unity3d/Unity/Unity_lic.ulf"
+	containerNamedUserLicenseDirPath     = "/tmp/hgb-home/.config/unity3d/Unity/licenses"
+	containerNamedUserLicenseFilePath    = "/tmp/hgb-home/.config/unity3d/Unity/licenses/UnityEntitlementLicense.xml"
+	containerUnityLicenseSourceMountPath = "/tmp/hgb-license-source"
+	defaultOutputPathEnvName             = "HGB_OUTPUT_PATH"
+)
+
+const (
+	unityLicenseEnvName     = "UNITY_LICENSE"
+	unityLicenseFileEnvName = "UNITY_LICENSE_FILE"
+	runtimeDataDirEnvName   = "DATA_DIR"
+	hostDataDirEnvName      = "HOST_DATA_DIR"
 )
 
 // licensingEnvKeys lists Unity licensing variables that are forwarded from the
@@ -57,6 +71,13 @@ func (execRunner) Run(
 // GameCIExecutor runs one Unity build in a GameCI editor image.
 type GameCIExecutor struct {
 	runner commandRunner
+}
+
+// unityLicenseMount describes one optional host license file bind and the
+// canonical target path Unity expects inside the nested GameCI container.
+type unityLicenseMount struct {
+	hostPath      string
+	containerPath string
 }
 
 // NewGameCIExecutor creates the default Docker CLI-backed executor.
@@ -139,6 +160,13 @@ func buildRunArgs(request build.ExecuteRequest) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	unityLicenseMount, hasUnityLicenseFile, err := resolveOptionalUnityLicenseFileMount()
+	if err != nil {
+		return nil, err
+	}
+	containerConfigPath := path.Join(containerRuntimeHomePath, ".config")
+	containerCachePath := path.Join(containerRuntimeHomePath, ".cache")
+	containerDataPath := path.Join(containerRuntimeHomePath, ".local", "share")
 
 	args := []string{
 		"run",
@@ -151,14 +179,30 @@ func buildRunArgs(request build.ExecuteRequest) ([]string, error) {
 		"--volume", fmt.Sprintf("%s:%s", workspace.HostSourcePath, containerProjectPath),
 		"--volume", fmt.Sprintf("%s:%s", workspace.HostArtifactRootPath, containerArtifactsPath),
 	}
+	if hasUnityLicenseFile {
+		args = append(
+			args,
+			"--volume",
+			fmt.Sprintf(
+				"%s:%s:ro",
+				unityLicenseMount.hostPath,
+				containerUnityLicenseSourceMountPath,
+			),
+		)
+	}
 
-	for _, envVar := range buildExecutionEnv(plan, containerOutputPath) {
+	for _, envVar := range buildExecutionEnv(
+		plan,
+		containerOutputPath,
+		containerConfigPath,
+		containerCachePath,
+		containerDataPath,
+		hasUnityLicenseFile,
+	) {
 		args = append(args, "--env", envVar)
 	}
 
-	args = append(
-		args,
-		plan.ImageRef,
+	unityCommand := shellJoin(
 		"unity-editor",
 		"-batchmode",
 		"-quit",
@@ -174,13 +218,54 @@ func buildRunArgs(request build.ExecuteRequest) ([]string, error) {
 		"-hgbOutputPath",
 		containerOutputPath,
 	)
+	bootstrapCommand := shellJoin(
+		"mkdir",
+		"-p",
+		containerRuntimeHomePath,
+		containerConfigPath,
+		containerCachePath,
+		containerDataPath,
+		containerSerialLicenseDirPath,
+		containerNamedUserLicenseDirPath,
+	) + " && exec " + unityCommand
+	if hasUnityLicenseFile {
+		bootstrapCommand = shellJoin(
+			"mkdir",
+			"-p",
+			containerRuntimeHomePath,
+			containerConfigPath,
+			containerCachePath,
+			containerDataPath,
+			containerSerialLicenseDirPath,
+			containerNamedUserLicenseDirPath,
+		) + " && " + shellJoin(
+			"cp",
+			containerUnityLicenseSourceMountPath,
+			unityLicenseMount.containerPath,
+		) + " && exec " + unityCommand
+	}
+
+	args = append(
+		args,
+		plan.ImageRef,
+		"sh",
+		"-lc",
+		bootstrapCommand,
+	)
 
 	return args, nil
 }
 
 // buildExecutionEnv returns the environment variables forwarded to the GameCI
 // container for build metadata, output location, and Unity licensing.
-func buildExecutionEnv(plan build.ExecutionPlan, containerOutputPath string) []string {
+func buildExecutionEnv(
+	plan build.ExecutionPlan,
+	containerOutputPath string,
+	containerConfigPath string,
+	containerCachePath string,
+	containerDataPath string,
+	hasMountedLicenseFile bool,
+) []string {
 	envs := []string{
 		fmt.Sprintf("HGB_BUILD_RUN_ID=%d", plan.BuildRunID),
 		fmt.Sprintf("HGB_RELEASE_RUN_ID=%d", plan.ReleaseRunID),
@@ -188,6 +273,11 @@ func buildExecutionEnv(plan build.ExecutionPlan, containerOutputPath string) []s
 		fmt.Sprintf("HGB_TARGET_PLATFORM=%s", strings.TrimSpace(plan.Platform)),
 		fmt.Sprintf("HGB_UNITY_VERSION=%s", strings.TrimSpace(plan.UnityVersion)),
 		fmt.Sprintf("%s=%s", defaultOutputPathEnvName, containerOutputPath),
+		fmt.Sprintf("HOME=%s", containerRuntimeHomePath),
+		fmt.Sprintf("XDG_CONFIG_HOME=%s", containerConfigPath),
+		fmt.Sprintf("XDG_CACHE_HOME=%s", containerCachePath),
+		fmt.Sprintf("XDG_DATA_HOME=%s", containerDataPath),
+		"TMPDIR=/tmp",
 	}
 
 	if plan.OutputKind != nil && strings.TrimSpace(*plan.OutputKind) != "" {
@@ -198,6 +288,10 @@ func buildExecutionEnv(plan build.ExecutionPlan, containerOutputPath string) []s
 	}
 
 	for _, key := range licensingEnvKeys {
+		if key == unityLicenseEnvName && hasMountedLicenseFile {
+			continue
+		}
+
 		value := strings.TrimSpace(os.Getenv(key))
 		if value == "" {
 			continue
@@ -207,6 +301,117 @@ func buildExecutionEnv(plan build.ExecutionPlan, containerOutputPath string) []s
 	}
 
 	return envs
+}
+
+// resolveOptionalUnityLicenseFileMount resolves the optional worker-visible
+// Unity license file path into the host-visible bind source needed by the host
+// Docker daemon that launches nested GameCI containers.
+func resolveOptionalUnityLicenseFileMount() (unityLicenseMount, bool, error) {
+	runtimePath := filepath.Clean(strings.TrimSpace(os.Getenv(unityLicenseFileEnvName)))
+	if runtimePath == "" || runtimePath == "." {
+		return unityLicenseMount{}, false, nil
+	}
+
+	info, err := os.Stat(runtimePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return unityLicenseMount{}, false, fmt.Errorf(
+				"%w: %s %q does not exist inside the build worker",
+				build.ErrInvalid,
+				unityLicenseFileEnvName,
+				runtimePath,
+			)
+		}
+
+		return unityLicenseMount{}, false, fmt.Errorf(
+			"inspect %s %q: %w",
+			unityLicenseFileEnvName,
+			runtimePath,
+			err,
+		)
+	}
+	if info.IsDir() {
+		return unityLicenseMount{}, false, fmt.Errorf(
+			"%w: %s %q must point to a file",
+			build.ErrInvalid,
+			unityLicenseFileEnvName,
+			runtimePath,
+		)
+	}
+
+	containerPath, err := resolveContainerUnityLicenseTargetPath(runtimePath)
+	if err != nil {
+		return unityLicenseMount{}, false, err
+	}
+
+	return unityLicenseMount{
+		hostPath:      translateRuntimePathToHost(runtimePath),
+		containerPath: containerPath,
+	}, true, nil
+}
+
+// resolveContainerUnityLicenseTargetPath maps the configured runtime license
+// file to the canonical Unity path required inside the nested build container.
+func resolveContainerUnityLicenseTargetPath(runtimePath string) (string, error) {
+	base := filepath.Base(strings.TrimSpace(runtimePath))
+	switch strings.ToLower(filepath.Ext(base)) {
+	case ".ulf":
+		return containerSerialLicenseFilePath, nil
+	case ".xml":
+		if strings.EqualFold(base, filepath.Base(containerNamedUserLicenseFilePath)) {
+			return containerNamedUserLicenseFilePath, nil
+		}
+
+		return path.Join(containerNamedUserLicenseDirPath, base), nil
+	default:
+		return "", fmt.Errorf(
+			"%w: %s %q must point to a .ulf or .xml file",
+			build.ErrInvalid,
+			unityLicenseFileEnvName,
+			runtimePath,
+		)
+	}
+}
+
+// translateRuntimePathToHost converts a worker-visible path under DATA_DIR to
+// the matching host-visible path required by the host Docker daemon.
+func translateRuntimePathToHost(runtimePath string) string {
+	runtimePath = filepath.Clean(strings.TrimSpace(runtimePath))
+	if runtimePath == "" || runtimePath == "." {
+		return runtimePath
+	}
+
+	dataDir := filepath.Clean(strings.TrimSpace(os.Getenv(runtimeDataDirEnvName)))
+	hostDataDir := filepath.Clean(strings.TrimSpace(os.Getenv(hostDataDirEnvName)))
+	if dataDir == "" || dataDir == "." || hostDataDir == "" || hostDataDir == "." {
+		return runtimePath
+	}
+	if runtimePath == dataDir {
+		return hostDataDir
+	}
+
+	prefix := dataDir + string(filepath.Separator)
+	if !strings.HasPrefix(runtimePath, prefix) {
+		return runtimePath
+	}
+
+	return filepath.Join(hostDataDir, strings.TrimPrefix(runtimePath, prefix))
+}
+
+// shellJoin quotes each token for POSIX sh and concatenates them into one
+// command string.
+func shellJoin(tokens ...string) string {
+	quoted := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		quoted = append(quoted, shellQuote(token))
+	}
+
+	return strings.Join(quoted, " ")
+}
+
+// shellQuote wraps one token for safe reuse inside `sh -lc`.
+func shellQuote(token string) string {
+	return "'" + strings.ReplaceAll(token, "'", "'\"'\"'") + "'"
 }
 
 // resolveContainerOutputPath validates and normalizes the build output path so

@@ -13,34 +13,36 @@ import (
 
 // Config contains the runtime settings shared across the process.
 type Config struct {
-	ConfigPath    string `json:"config_path,omitempty"`
-	Env           string `json:"env"`
-	HTTPAddr      string `json:"http_addr"`
-	DataDir       string `json:"data_dir"`
-	HostDataDir   string `json:"host_data_dir"`
-	PipelinesDir  string `json:"pipelines_dir"`
-	DatabasePath  string `json:"database_path"`
-	RedisAddr     string `json:"redis_addr"`
-	RedisUsername string `json:"redis_username,omitempty"`
-	RedisPassword string `json:"-"`
-	RedisDB       int    `json:"redis_db"`
-	LogLevel      string `json:"log_level"`
+	ConfigPath       string `json:"config_path,omitempty"`
+	Env              string `json:"env"`
+	HTTPAddr         string `json:"http_addr"`
+	DataDir          string `json:"data_dir"`
+	HostDataDir      string `json:"host_data_dir"`
+	PipelinesDir     string `json:"pipelines_dir"`
+	DatabasePath     string `json:"database_path"`
+	UnityLicenseFile string `json:"unity_license_file,omitempty"`
+	RedisAddr        string `json:"redis_addr"`
+	RedisUsername    string `json:"redis_username,omitempty"`
+	RedisPassword    string `json:"-"`
+	RedisDB          int    `json:"redis_db"`
+	LogLevel         string `json:"log_level"`
 }
 
 // fileConfig mirrors the optional JSON configuration file used to override
 // defaults before environment variables are applied.
 type fileConfig struct {
-	Env           *string `json:"env"`
-	HTTPAddr      *string `json:"http_addr"`
-	DataDir       *string `json:"data_dir"`
-	HostDataDir   *string `json:"host_data_dir"`
-	PipelinesDir  *string `json:"pipelines_dir"`
-	DatabasePath  *string `json:"database_path"`
-	RedisAddr     *string `json:"redis_addr"`
-	RedisUsername *string `json:"redis_username"`
-	RedisPassword *string `json:"redis_password"`
-	RedisDB       *int    `json:"redis_db"`
-	LogLevel      *string `json:"log_level"`
+	Env              *string `json:"env"`
+	HTTPAddr         *string `json:"http_addr"`
+	DataDir          *string `json:"data_dir"`
+	HostDataDir      *string `json:"host_data_dir"`
+	PipelinesDir     *string `json:"pipelines_dir"`
+	DatabasePath     *string `json:"database_path"`
+	UnityLicenseFile *string `json:"unity_license_file"`
+	RedisAddr        *string `json:"redis_addr"`
+	RedisUsername    *string `json:"redis_username"`
+	RedisPassword    *string `json:"redis_password"`
+	RedisDB          *int    `json:"redis_db"`
+	LogLevel         *string `json:"log_level"`
 }
 
 // Load reads the runtime configuration from defaults, an optional JSON file,
@@ -76,6 +78,14 @@ func Load() (Config, error) {
 	}
 	if strings.TrimSpace(cfg.DatabasePath) == "" {
 		cfg.DatabasePath = filepath.Join(cfg.DataDir, "app.db")
+	}
+	if strings.TrimSpace(cfg.UnityLicenseFile) == "" {
+		cfg.UnityLicenseFile = filepath.Join(
+			cfg.DataDir,
+			"licenses",
+			"unity",
+			"UnityEntitlementLicense.xml",
+		)
 	}
 
 	if strings.TrimSpace(cfg.HTTPAddr) == "" {
@@ -137,6 +147,9 @@ func applyFileConfig(cfg *Config, values fileConfig) {
 	if values.DatabasePath != nil {
 		cfg.DatabasePath = strings.TrimSpace(*values.DatabasePath)
 	}
+	if values.UnityLicenseFile != nil {
+		cfg.UnityLicenseFile = strings.TrimSpace(*values.UnityLicenseFile)
+	}
 	if values.RedisAddr != nil {
 		cfg.RedisAddr = strings.TrimSpace(*values.RedisAddr)
 	}
@@ -181,6 +194,9 @@ func applyEnvConfig(cfg *Config) error {
 	}
 	if value := strings.TrimSpace(os.Getenv("APP_DB_PATH")); value != "" {
 		cfg.DatabasePath = value
+	}
+	if value := strings.TrimSpace(os.Getenv("UNITY_LICENSE_FILE")); value != "" {
+		cfg.UnityLicenseFile = value
 	}
 	if value := strings.TrimSpace(os.Getenv("REDIS_ADDR")); value != "" {
 		cfg.RedisAddr = value
@@ -243,6 +259,12 @@ func (c Config) DBPath() string {
 	return c.DatabasePath
 }
 
+// UnityLicenseFilePath returns the worker-visible path to the optional Unity
+// license file mounted into nested GameCI containers.
+func (c Config) UnityLicenseFilePath() string {
+	return c.UnityLicenseFile
+}
+
 // LogsDir returns the persistent logs directory for runtime and build output.
 func (c Config) LogsDir() string {
 	return filepath.Join(c.DataDir, "logs")
@@ -279,6 +301,7 @@ func (c Config) RequiredDirs() []string {
 	return uniqueDirs(
 		c.DataDir,
 		filepath.Dir(c.DBPath()),
+		filepath.Dir(c.UnityLicenseFilePath()),
 		c.LogsDir(),
 		c.ArtifactsDir(),
 		c.WorkspacesDir(),

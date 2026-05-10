@@ -50,6 +50,12 @@ services:
       REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
       REDIS_DB: ${REDIS_DB:-0}
       LOG_LEVEL: ${LOG_LEVEL:-debug}
+      UNITY_LICENSE: ${UNITY_LICENSE:-}
+      UNITY_LICENSE_FILE: ${UNITY_LICENSE_FILE:-/data/licenses/unity/UnityEntitlementLicense.xml}
+      UNITY_EMAIL: ${UNITY_EMAIL:-}
+      UNITY_PASSWORD: ${UNITY_PASSWORD:-}
+      UNITY_SERIAL: ${UNITY_SERIAL:-}
+      UNITY_LICENSING_SERVER: ${UNITY_LICENSING_SERVER:-}
     init: true
     restart: unless-stopped
     volumes:
