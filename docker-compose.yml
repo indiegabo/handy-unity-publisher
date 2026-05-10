@@ -1,0 +1,97 @@
+services:
+  unity-build-api:
+    container_name: unity-build-api
+    build:
+      context: .
+      target: dev
+    command: ["air", "-c", ".air.toml"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_PORT: ${APP_PORT:-8080}
+      HTTP_ADDR: ${HTTP_ADDR:-}
+      DATA_DIR: ${DATA_DIR:-/data}
+      HOST_DATA_DIR: ${HOST_DATA_DIR:?set HOST_DATA_DIR in .env}
+      PIPELINES_DIR: ${PIPELINES_DIR:-/workspace/pipelines}
+      APP_DB_PATH: ${APP_DB_PATH:-}
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      REDIS_DB: ${REDIS_DB:-0}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      REVOLUTIONS_GIT_PAT: ${REVOLUTIONS_GIT_PAT:-}
+    init: true
+    ports:
+      - "${APP_PORT:-8080}:${APP_PORT:-8080}"
+    restart: unless-stopped
+    volumes:
+      - .:/workspace
+      - "${HOST_DATA_DIR:?set HOST_DATA_DIR in .env}:${DATA_DIR:-/data}"
+      - db-data:/var/lib/handy-unity-bulder
+      - go-mod-cache:/go/pkg/mod
+      - go-build-cache:/root/.cache/go-build
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /workspace
+
+  unity-build-worker:
+    container_name: unity-build-worker
+    build:
+      context: .
+      target: runtime
+    command: ["build-worker"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATA_DIR: ${DATA_DIR:-/data}
+      HOST_DATA_DIR: ${HOST_DATA_DIR:?set HOST_DATA_DIR in .env}
+      APP_DB_PATH: ${APP_DB_PATH:-}
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      REDIS_DB: ${REDIS_DB:-0}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+    init: true
+    restart: unless-stopped
+    volumes:
+      - "${HOST_DATA_DIR:?set HOST_DATA_DIR in .env}:${DATA_DIR:-/data}"
+      - db-data:/var/lib/handy-unity-bulder
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  artifact-publish-worker:
+    container_name: artifact-publish-worker
+    build:
+      context: .
+      target: runtime
+    command: ["publish-worker"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATA_DIR: ${DATA_DIR:-/data}
+      HOST_DATA_DIR: ${HOST_DATA_DIR:?set HOST_DATA_DIR in .env}
+      APP_DB_PATH: ${APP_DB_PATH:-}
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      REDIS_DB: ${REDIS_DB:-0}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+    init: true
+    restart: unless-stopped
+    volumes:
+      - "${HOST_DATA_DIR:?set HOST_DATA_DIR in .env}:${DATA_DIR:-/data}"
+      - db-data:/var/lib/handy-unity-bulder
+
+  redis:
+    container_name: redis
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  go-build-cache:
+  go-mod-cache:
