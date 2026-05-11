@@ -1,0 +1,10 @@
+{
+    "identifier": "default",
+    "description": "Default capability set for the bundled runtime shell.",
+    "windows": [
+        "main"
+    ],
+    "permissions": [
+        "core:default"
+    ]
+}

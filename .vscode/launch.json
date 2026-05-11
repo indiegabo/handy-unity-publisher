@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug desktop shell (Tauri)",
+      "program": "${workspaceFolder}/target/debug/desktop-shell.exe",
+      "preLaunchTask": "build desktop shell",
+      "cwd": "${workspaceFolder}",
+      "args": [],
+      "env": {
+        "RUST_BACKTRACE": "1"
+      },
+      "sourceLanguages": [
+        "rust"
+      ]
+    }
+  ]
+}

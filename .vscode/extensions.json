@@ -1,0 +1,9 @@
+{
+  "recommendations": [
+    "rust-lang.rust-analyzer",
+    "tauri-apps.tauri-vscode",
+    "vadimcn.vscode-lldb",
+    "tamasfe.even-better-toml",
+    "yy0931.vscode-sqlite3-editor"
+  ]
+}

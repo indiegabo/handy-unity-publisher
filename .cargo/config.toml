@@ -1,0 +1,3 @@
+[build]
+# Keep workspace-local Cargo artifacts under tmp/ so the repository root stays clean.
+target-dir = "tmp/cargo-targets/default"

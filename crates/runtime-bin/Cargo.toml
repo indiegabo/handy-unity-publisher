@@ -1,0 +1,21 @@
+[package]
+name = "runtime-bin"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[dependencies]
+runtime-config = { path = "../runtime-config" }
+runtime-core = { path = "../runtime-core" }
+runtime-git = { path = "../runtime-git" }
+runtime-manifests = { path = "../runtime-manifests" }
+runtime-publish = { path = "../runtime-publish" }
+runtime-runner = { path = "../runtime-runner" }
+runtime-store = { path = "../runtime-store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+zip = { workspace = true }
+
+[dev-dependencies]
+rusqlite = { workspace = true }

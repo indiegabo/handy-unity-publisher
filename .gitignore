@@ -4,3 +4,9 @@ tmp/
 .tmp*/
 pipelines/*.yml
 pipelines/*.yaml
+target/
+/target-*/
+apps/desktop/dist/
+apps/desktop/node_modules/
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/bin/
