@@ -5,9 +5,10 @@ targets for handy-unity-bulder.
 
 ## Why This Guide Exists
 
-This project uses GameCI-compatible Unity editor images, but it does not use a
-high-level GameCI wrapper that invents a default build procedure for every
-repository.
+This project executes Unity through a host-native runtime contract.
+
+Each repository must declare the build method that the runtime should execute
+for every target.
 
 The runtime executes Unity like this:
 
@@ -32,11 +33,11 @@ Editor process:
 - `platform` is converted into the Unity `BuildTarget`
 - `build_method` is passed through `-executeMethod`
 - the runtime computes a canonical output path inside the prepared artifact
-    root and exposes that path through both `HGB_OUTPUT_PATH` and the
-    `-hgbOutputPath` command-line argument
+  root and exposes that path through both `HGB_OUTPUT_PATH` and the
+  `-hgbOutputPath` command-line argument
 - `output_path_template` from repository configuration is only a requested
-    build path hint; for `archive` outputs it should be a staging path without a
-    `.zip` suffix
+  build path hint; for `archive` outputs it should be a staging path without a
+  `.zip` suffix
 - `output_kind` is exposed through `HGB_OUTPUT_KIND`
 - metadata such as `HGB_BUILD_RUN_ID`, `HGB_RELEASE_RUN_ID`,
   `HGB_BUILD_TARGET_ID`, `HGB_TARGET_PLATFORM`, and `HGB_UNITY_VERSION` are
@@ -73,13 +74,13 @@ controls the final release filename through a hardcoded `Builds/...` value.
 These are the common platform strings accepted by the current runtime and the
 recommended method names used in this guide.
 
-| Build Target `platform` | Unity BuildTarget | Recommended build method |
-| --- | --- | --- |
-| `linux` | `StandaloneLinux64` | `Builder.PerformLinux` |
-| `windows` | `StandaloneWindows64` | `Builder.PerformWindows` |
-| `macos` | `StandaloneOSX` | `Builder.PerformMacOS` |
-| `webgl` | `WebGL` | `Builder.PerformWebGL` |
-| `android` | `Android` | `Builder.PerformAndroid` |
+| Build Target `platform` | Unity BuildTarget     | Recommended build method |
+| ----------------------- | --------------------- | ------------------------ |
+| `linux`                 | `StandaloneLinux64`   | `Builder.PerformLinux`   |
+| `windows`               | `StandaloneWindows64` | `Builder.PerformWindows` |
+| `macos`                 | `StandaloneOSX`       | `Builder.PerformMacOS`   |
+| `webgl`                 | `WebGL`               | `Builder.PerformWebGL`   |
+| `android`               | `Android`             | `Builder.PerformAndroid` |
 
 ## Recommended Unity Script Location
 
@@ -122,6 +123,21 @@ public static class Builder
     {
         "_DoNotShip",
         "_BackUpThisFolder_ButDontShipItWithYourGame",
+    };
+
+    private static readonly string[] WindowsArchiveFileExclusions =
+    {
+        ".pdb",
+    };
+
+    private static readonly string[] MacOSArchivePathExclusions =
+    {
+        ".dSYM",
+    };
+
+    private static readonly string[] WebGLArchiveFileExclusions =
+    {
+        ".symbols.json",
     };
 
     public static void PerformLinux()
@@ -196,7 +212,7 @@ public static class Builder
             );
 
             RunBuild(target, playerPath);
-            CreateZipFromDirectory(tempRoot, requestedPath);
+            CreateZipFromDirectory(tempRoot, requestedPath, target);
             Directory.Delete(tempRoot, true);
             return;
         }
@@ -219,7 +235,7 @@ public static class Builder
         {
             string tempRoot = CreateTemporaryDirectory(defaultFolderName);
             RunBuild(target, tempRoot);
-            CreateZipFromDirectory(tempRoot, requestedPath);
+            CreateZipFromDirectory(tempRoot, requestedPath, target);
             Directory.Delete(tempRoot, true);
             return;
         }
@@ -326,7 +342,11 @@ public static class Builder
             || path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static void CreateZipFromDirectory(string sourceDirectory, string requestedPath)
+    private static void CreateZipFromDirectory(
+        string sourceDirectory,
+        string requestedPath,
+        BuildTarget target
+    )
     {
         string zipPath = requestedPath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
             ? requestedPath
@@ -353,7 +373,7 @@ public static class Builder
             ))
             {
                 string relativePath = ToArchiveRelativePath(sourceDirectory, filePath);
-                if (ShouldExcludeFromArchive(relativePath))
+                if (ShouldExcludeFromArchive(relativePath, target))
                 {
                     continue;
                 }
@@ -367,7 +387,10 @@ public static class Builder
         }
     }
 
-    private static bool ShouldExcludeFromArchive(string relativePath)
+    private static bool ShouldExcludeFromArchive(
+        string relativePath,
+        BuildTarget target
+    )
     {
         string[] segments = relativePath
             .Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
@@ -379,6 +402,29 @@ public static class Builder
             {
                 return true;
             }
+        }
+
+        string fileName = Path.GetFileName(relativePath);
+        if (target == BuildTarget.StandaloneWindows64
+            && WindowsArchiveFileExclusions.Any(suffix =>
+                fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        if (target == BuildTarget.StandaloneOSX
+            && segments.Any(segment =>
+                MacOSArchivePathExclusions.Any(suffix =>
+                    segment.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))))
+        {
+            return true;
+        }
+
+        if (target == BuildTarget.WebGL
+            && WebGLArchiveFileExclusions.Any(suffix =>
+                fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
         }
 
         return false;
@@ -442,8 +488,10 @@ The safe policy is:
 
 - keep the full build tree generated by Unity
 - exclude only paths that Unity explicitly marks as non-shippable
+- exclude platform-specific debug symbol sidecars that Unity documents as
+  optional debug outputs instead of runtime dependencies
 - keep the exclusion list narrow and name-based instead of platform-wide file
-    whitelists
+  whitelists
 
 The reference script above excludes path segments that end with:
 
@@ -453,116 +501,164 @@ The reference script above excludes path segments that end with:
 That covers the common Unity-generated directories such as Burst debug
 information folders while avoiding risky guesses about required runtime files.
 
+For archive outputs, handy-unity-bulder should also exclude these debug-only
+sidecars when Unity generates them:
+
+- macOS standalone: `*.dSYM` symbol bundles
+- Windows standalone: `*.pdb` when Copy PDB Files is enabled
+- WebGL: `*.symbols.json` when Debug Symbols is enabled
+
 Platform notes:
 
 - Windows and Linux standalone builds must usually keep the player executable,
-    the `*_Data` directory, and any sibling engine/runtime files that Unity emits
+  the `*_Data` directory, and any sibling engine/runtime files that Unity emits
+- macOS standalone archive outputs must keep the `.app` bundle, but should drop
+  sibling `*.dSYM` bundles because those are symbol bundles for debugging and
+  crash analysis, not runtime payload
+- Windows standalone builds may emit `*.pdb` symbol files for debugging; those
+  files are useful for investigation, but they are not required to ship the
+  player archive
 - WebGL builds must usually keep `index.html`, the `Build/` directory,
-    `TemplateData/`, and any additional root files Unity generates
+  `TemplateData/`, and any additional root files Unity generates
+- WebGL may emit `*.symbols.json` for demangled stack traces when debug symbols
+  are enabled; treat that file as debug payload, not shipping payload
+
+The runtime archive packager must enforce the same exclusions even if a Unity
+repository forgets to update its custom zip routine. Operator-facing build
+artifacts must not depend on every project remembering the denylist by hand.
 
 Do not replace this denylist with a short allowlist unless you fully control
 every backend and player setting in the repository. That is how people ship a
 beautiful zip with half the runtime missing.
 
-## Build Target Registration Examples
+## Build Target Manifest Examples
 
-These examples use `hgb` because it is the most explicit command surface for
-precise build-target definitions.
+These examples use declarative pipeline manifests because YAML under
+`pipelines/` is the supported configuration path.
 
 ### Linux
 
-```bash
-go run ./cmd/hgb build-targets create \
-  --repository-id 1 \
-  --name linux-player \
-  --platform linux \
-  --runner-type gameci \
-  --build-method Builder.PerformLinux \
-  --output-kind directory \
-  --output-path-template Builds/Linux \
-  --timeout-seconds 3600 \
-  --enabled=true
+```yaml
+spec:
+    build:
+        targets:
+            - name: linux-player
+                enabled: true
+                platform: StandaloneLinux64
+                buildMethod: Builder.PerformLinux
+                runner:
+                    type: host-native
+                    unityVersion: 2022.3.14f1
+                    timeoutSeconds: 3600
+                output:
+                    kind: directory
+                    path: Builds/Linux
+                config: {}
 ```
 
 ### Windows
 
-```bash
-go run ./cmd/hgb build-targets create \
-  --repository-id 1 \
-  --name windows-player \
-  --platform windows \
-  --runner-type gameci \
-  --build-method Builder.PerformWindows \
-  --output-kind directory \
-  --output-path-template Builds/Windows \
-  --timeout-seconds 3600 \
-  --enabled=true
+```yaml
+spec:
+    build:
+        targets:
+            - name: windows-player
+                enabled: true
+                platform: StandaloneWindows64
+                buildMethod: Builder.PerformWindows
+                runner:
+                    type: host-native
+                    unityVersion: 2022.3.14f1
+                    timeoutSeconds: 3600
+                output:
+                    kind: directory
+                    path: Builds/Windows
+                config: {}
 ```
 
 ### macOS
 
-```bash
-go run ./cmd/hgb build-targets create \
-  --repository-id 1 \
-  --name macos-player \
-  --platform macos \
-  --runner-type gameci \
-  --build-method Builder.PerformMacOS \
-  --output-kind directory \
-  --output-path-template Builds/macOS \
-  --timeout-seconds 3600 \
-  --enabled=true
+```yaml
+spec:
+    build:
+        targets:
+            - name: macos-player
+                enabled: true
+                platform: StandaloneOSX
+                buildMethod: Builder.PerformMacOS
+                runner:
+                    type: host-native
+                    unityVersion: 2022.3.14f1
+                    timeoutSeconds: 3600
+                output:
+                    kind: directory
+                    path: Builds/macOS
+                config: {}
 ```
 
 ### WebGL
 
-```bash
-go run ./cmd/hgb build-targets create \
-  --repository-id 1 \
-  --name webgl-player \
-  --platform webgl \
-  --runner-type gameci \
-  --build-method Builder.PerformWebGL \
-  --output-kind directory \
-  --output-path-template Builds/WebGL \
-  --timeout-seconds 3600 \
-  --enabled=true
+```yaml
+spec:
+    build:
+        targets:
+            - name: webgl-player
+                enabled: true
+                platform: WebGL
+                buildMethod: Builder.PerformWebGL
+                runner:
+                    type: host-native
+                    unityVersion: 2022.3.14f1
+                    timeoutSeconds: 3600
+                output:
+                    kind: directory
+                    path: Builds/WebGL
+                config: {}
 ```
 
 ### Android APK
 
-```bash
-go run ./cmd/hgb build-targets create \
-  --repository-id 1 \
-  --name android-apk \
-  --platform android \
-  --runner-type gameci \
-  --build-method Builder.PerformAndroid \
-  --output-kind binary \
-  --output-path-template Builds/Android/Game.apk \
-  --timeout-seconds 3600 \
-  --enabled=true
+```yaml
+spec:
+    build:
+        targets:
+            - name: android-apk
+                enabled: true
+                platform: Android
+                buildMethod: Builder.PerformAndroid
+                runner:
+                    type: host-native
+                    unityVersion: 2022.3.14f1
+                    timeoutSeconds: 3600
+                output:
+                    kind: binary
+                    path: Builds/Android/Game.apk
+                config: {}
 ```
 
 ### WebGL ZIP Archive
 
-```bash
-go run ./cmd/hgb build-targets create \
-  --repository-id 1 \
-  --name webgl-archive \
-  --platform webgl \
-  --runner-type gameci \
-  --build-method Builder.PerformWebGL \
-  --output-kind archive \
-    --output-path-template Builds/WebGL \
-  --timeout-seconds 3600 \
-  --enabled=true
+```yaml
+spec:
+    build:
+        targets:
+            - name: webgl-archive
+                enabled: true
+                platform: WebGL
+                buildMethod: Builder.PerformWebGL
+                runner:
+                    type: host-native
+                    unityVersion: 2022.3.14f1
+                    timeoutSeconds: 3600
+                output:
+                    kind: archive
+                    path: Builds/WebGL
+                config: {}
 ```
 
 The `Builder.PerformWebGL` method above automatically produces a zip file when
-`output_kind=archive`. The example script also accepts a `.zip` suffix as a
-fallback for manual use, but handy-unity-bulder configuration should express
-archive behavior through `output_kind=archive` and a non-zip requested path.
+`output.kind: archive`. handy-unity-bulder configuration should express archive
+behavior through `output.kind: archive` and a non-zip requested path.
 
 The reference archive routine also strips Unity-generated `DoNotShip` and
 backup folders from the zip while preserving the real runtime files.
@@ -580,7 +676,7 @@ do not hardcode the archive name.
   runtime branching across unrelated targets
 - Always verify that the build produces real files under the artifact root
 - Prefer explicit `output_path_template` values that communicate artifact style
-    or extension, not the final host-visible release filename
+  or extension, not the final host-visible release filename
 - Do not end `output_path_template` with `.zip` when `output_kind=archive`
 
 ## Common Failure Modes
@@ -623,3 +719,10 @@ Use a zip routine that filters only Unity-marked non-shippable paths such as
 `*_DoNotShip` and `*_BackUpThisFolder_ButDontShipItWithYourGame`. Do not try to
 guess a tiny allowlist of platform files unless you are ready to maintain it
 for every backend variation.
+
+### The archive contains debug symbol files that are not needed to ship
+
+Strip Unity-generated debug-only sidecars from shipping archives, especially
+`*.dSYM` on macOS standalone builds, `*.pdb` on Windows standalone builds, and
+`*.symbols.json` on WebGL builds.
+Those files belong in crash-analysis workflows, not in the end-user artifact.

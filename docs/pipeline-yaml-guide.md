@@ -12,19 +12,17 @@ Each repository pipeline lives in one YAML file under the repository-root
 - publish targets
 - build to publish bindings
 
-The runtime loads every `.yml` or `.yaml` file from `pipelines/` during server
-startup. Valid files are synchronized into the runtime state store before the
-automation coordinator starts. Invalid files are logged and skipped without
-blocking valid pipelines.
+The runtime loads every `.yml` or `.yaml` file from `pipelines/` during
+runtime bootstrap or an explicit manifest synchronization pass. Valid files are
+synchronized into the runtime state store before automation proceeds. Invalid
+files are logged and skipped without blocking valid pipelines.
 
-In local development, the Compose-backed `unity-build-api` process runs
-through `air`. Because the dev watcher includes `.yml` and `.yaml` files,
-changing manifest contents restarts the server and reapplies the pipeline set.
-Production-style runtimes still apply manifests during process startup only.
+In local development, rerun `cargo run -p runtime-bin -- manifests sync` after
+changing manifests, or relaunch the desktop shell when you want the full
+bootstrap path to re-evaluate the pipeline set.
 
-`hub runtime pipelines` returns the last startup synchronization report.
-
-`hub runtime automation` returns the live per-repository automation state,
+Use `cargo run -p runtime-bin -- automation inspect` or the desktop shell
+automation diagnostics when you need the live per-repository automation state,
 including whether polling is paused by an active build backlog and which tags
 are still queued behind the current release.
 
@@ -33,7 +31,9 @@ Important state model:
 - YAML is the configuration source of truth.
 - SQLite is still used for durable runtime state such as releases, build runs,
   publish runs, artifacts, and synchronization metadata.
-- `hub db export` and `hub db import` remain the supported snapshot flows.
+- Snapshot export and import are still being redefined for the desktop product.
+  Until that dedicated flow lands, treat the SQLite database and app-data
+  directory as runtime-managed state.
 
 ## Polling Execution Semantics
 
@@ -51,9 +51,9 @@ repository-local sequence:
 - the next queued tag only starts after every build target of the current
   release has reached a terminal status, even if some targets failed
 
-Use `hub runtime automation` when you need to confirm whether a repository is
-currently ready to poll, merely waiting for its next interval, or paused by a
-release backlog.
+Use `cargo run -p runtime-bin -- automation inspect` or the desktop shell when
+you need to confirm whether a repository is currently ready to poll, merely
+waiting for its next interval, or paused by a release backlog.
 
 ## Directory Contract
 
@@ -68,9 +68,9 @@ inside the repository root.
 Manifest files in that directory are git-ignored on purpose. They are treated
 as local runtime inputs, not committed application code.
 
-The server resolves that directory from `PIPELINES_DIR`. In Docker Compose the
-default value is `/workspace/pipelines`, which maps to the repository-root
-`pipelines/` directory through the existing workspace mount.
+The runtime resolves that directory from `PIPELINES_DIR`. The runtime manifest
+sync command defaults to `./pipelines` relative to the current working
+directory when no override is provided.
 
 ## Minimal Rules
 
@@ -78,8 +78,8 @@ default value is `/workspace/pipelines`, which maps to the repository-root
 - `metadata.name` must be unique across all files in `pipelines/`
 - use `.yml` or `.yaml`
 - use environment variables or files for secrets when possible
-- do not rely on `hub` or `hgb` to create configuration records; those CRUD
-  flows are no longer the supported path
+- manage repository pipeline definitions through declarative YAML plus runtime
+  synchronization
 
 ## Supported Declarative Features
 
@@ -129,7 +129,7 @@ spec:
         platform: StandaloneLinux64
         buildMethod: Builder.BuildLinux64
         runner:
-          type: gameci
+          type: host-native
           unityVersion: 2022.3.14f1
           timeoutSeconds: 5400
         output:
@@ -143,7 +143,7 @@ spec:
         platform: WebGL
         buildMethod: Builder.BuildWebGL
         runner:
-          type: gameci
+          type: host-native
           unityVersion: 2022.3.14f1
           timeoutSeconds: 5400
         output:
@@ -213,9 +213,8 @@ spec:
         platform: <unity-platform>
         buildMethod: <static-unity-method>
         runner:
-          type: gameci
+          type: host-native
           unityVersion: <unity-version-or-empty>
-          image: <image-override-or-empty>
           timeoutSeconds: 3600
         output:
           kind: <archive-or-directory>
@@ -269,7 +268,7 @@ Do not set more than one of `value`, `env`, or `file` on the same field.
 
 - `metadata.name` becomes the durable repository name.
 - `spec.repository.credentials` references one entry from `spec.credentials`.
-- `spec.build.targets[].runner.type` defaults to `gameci`.
+- `spec.build.targets[].runner.type` defaults to `host-native`.
 - `spec.build.targets[].runner.timeoutSeconds` defaults to the runtime build
   timeout when omitted or zero.
 - `spec.build.targets[].output.path` is an execution hint for the Unity build
@@ -346,12 +345,14 @@ information in this order and only then write the file:
    - Unity platform
    - Unity static build method
    - output kind
-  - output path hint or expected extension
-  - for archive outputs, ask for a staging path without a `.zip` suffix
-   - Unity version override if any
-   - image override if any
-   - timeout
-   - optional config object
+
+- output path hint or expected extension
+- for archive outputs, ask for a staging path without a `.zip` suffix
+- Unity version override if any
+- image override if any
+- timeout
+- optional config object
+
 10. Ask for publish targets one by one.
 11. If the user asks for a publish kind other than `filesystem`, explain that
     only `filesystem` is currently executed by the publish worker.

@@ -1,164 +1,203 @@
 # Project Brief
 
-Project name
+## Project Name
 
-Current repository name: handy-unity-bulder
+Current repository name: `handy-unity-bulder`
 
-Note: this name may contain a typo (bulder vs builder) and should be reviewed before the project grows.
+The repository name may contain a typo (`bulder` vs `builder`), but no
+coordinated rename should happen until the product surfaces, module names, and
+packaging strategy are ready to move together.
 
-Vision
+## Vision
 
-Create a self-hosted tool that automates Unity game builds from Git repositories.
+Build a self-hosted, local-first desktop application that automates Unity
+release pipelines from Git repositories.
 
-The tool should monitor registered repositories, detect new tags, build Unity projects automatically in Docker using GameCI-compatible images, and publish build artifacts to configured destinations such as Itch.io, Steam, and Google Drive.
+The product is a Tauri desktop shell backed by a bundled Rust runtime. It
+should let one operator manage repository pipelines, detect releasable tags,
+run Unity builds through locally installed editors, and publish artifacts to
+configured destinations through one local application with explicit state and
+operator-facing diagnostics.
 
-The system should be simple enough to run locally in Docker, especially inside a WSL-based development workflow, while remaining extensible for future growth.
+The system must stay lightweight enough for solo developers and small teams,
+while preserving clear boundaries for future growth in publish backends,
+runtime diagnostics, and richer desktop workflows.
 
-Problem to solve
+## Problem To Solve
 
-Unity projects often require repetitive manual work to:
+Unity release automation is usually fragmented across shell scripts, manual
+editor invocations, ad-hoc spreadsheets, and tribal knowledge about which tag
+needs which editor version.
 
-- monitor repositories for new release tags
-- determine which Unity version is needed
-- configure the correct build environment
-- generate builds for multiple platforms
-- gather artifacts different publication channels
+Teams repeatedly waste time on the same operational tasks:
 
-This project centralizes and automates that process.
+- checking repositories for new release tags
+- discovering the Unity version required by a given tag
+- preparing a clean local workspace for a reproducible build
+- executing platform-specific builds through the correct local editor
+- collecting artifacts and routing them to the right destinations
+- understanding what failed after a restart or interrupted run
 
-Primary goals
+This project centralizes those responsibilities into one local application with
+durable state, explicit workflow transitions, and operator-facing diagnostics.
 
-- register Unity repositories with credentials and polling rules
-- detect new tags automatically
-- identify the correct Unity version for each tag
-- launch isolated build containers through Docker
-- support multiple build targets per repository
-- support multiple publication targets per repository
-- allow explicit mapping between builds and publication targets
-- store state locally with SQLite
-- run the app itself inside Docker
-- keep the solution lightweight and self-hosted
+## Product Goals
 
-Non-goals for the initial phase
+- provide a Tauri desktop app as the primary operator experience
+- bundle a Rust runtime that owns orchestration, persistence, and recovery
+- register Unity repositories as full pipeline definitions, not simple watch entries
+- define Git access, trigger rules, build targets, publish targets, and bindings per repository
+- detect new tags automatically and support explicit manual release dispatch
+- resolve the required Unity version for each release from repository content
+- execute Unity builds host-natively through locally installed editors
+- persist workflow state durably in SQLite under the app data directory
+- keep logs, artifacts, and workspaces on the filesystem under app-managed paths
+- expose enough runtime health and diagnostics in the desktop shell to operate locally with confidence
 
-- full cloud SaaS platform
-- distributed worker cluster
-- complex multi-tenant permissions
-- advanced analytics
-- storing large build logs or artifacts inside the database
-- overengineering for scale before it is needed
+## Non-Goals For The Initial Phase
 
-Core workflow
+- full cloud SaaS deployment
+- distributed worker clusters
+- additional infrastructure requirements beyond the desktop app and the local
+  operator host
+- speculative multi-tenant permission systems
+- advanced reporting or analytics beyond operational diagnostics
+- storing large build logs or artifact blobs inside SQLite
+- a second primary product surface that competes with the desktop app
 
-1. user registers a Unity repository
-2. repository configuration includes:
-   - Git access
-   - polling settings
+## Core Workflow
+
+1. an operator defines one or more repository pipelines
+2. each pipeline includes:
+   - Git source access
+   - trigger or polling rules
    - build targets
-   - publication targets
-   - bindings between them
-3. the system polls for new tags
-4. when a new tag is found:
-   - a release run is created
-   - build runs are created for enabled build targets
-   - builds execute in Docker
-   - artifacts are collected
-   - publish runs are created from bindings
-   - artifacts are published to their configured destinations
-5. statuses are tracked for the whole release lifecycle
+   - publish targets
+   - build-to-publish bindings
+3. the runtime validates pipeline manifests and synchronizes them into SQLite
+4. polling or manual dispatch creates a durable `release_run`
+5. release planning resolves the Unity version and creates queued `build_runs`
+6. the runtime prepares a local workspace and executes each build through the
+   appropriate host-native Unity editor
+7. successful builds register artifacts on disk and expand queued `publish_runs`
+8. publish execution delivers artifacts to the configured destinations
+9. the runtime and desktop shell expose status, logs, artifacts, and recovery
+   state for the full lifecycle
 
-Key functional concepts
+## Key Functional Concepts
 
-Repository
-A registered Unity project plus its automation settings.
+### Repository Pipeline
 
-Build Target
-A definition of a specific Unity build output for a repository.
+A registered Unity project plus the automation settings required to build and
+publish releases.
 
-Examples:
+Each repository is a pipeline definition that describes:
+
+- what to build
+- how to detect releases
+- how to access source and credentials
+- where outputs should be published
+- which build outputs map to which publication targets
+
+### Build Target
+
+A named Unity build configuration for one repository.
+
+Examples include:
+
 - Windows
 - Linux
-- WebGL
 - macOS
+- WebGL
 - Android
 
-Publish Target
-A destination where built artifacts can be sent.
+### Publish Target
 
-Examples:
+A named artifact destination for one repository.
+
+Examples include:
+
+- local filesystem export
 - Itch.io
 - Steam
 - Google Drive
 
-Binding
-A link that tells the system which build target should publish to which publication target.
+### Binding
 
-Release Run
-A processing instance for a specific repository tag.
+A link that tells the system which build target produces artifacts for which
+publish target.
 
-Build Run target one release.
+### Release Run
 
-Publish Run
-An execution of one publication step for one built artifact or build output.
+One durable processing instance for a specific repository tag or manually
+requested release.
 
-Technical direction
+### Build Run
 
-Language
-- Go
+One durable execution unit for a single build target within a release run.
 
-Database
-- SQLite initially
+### Publish Run
 
-Persistence requirement
-The SQLite database file must be persisted in a mounted Docker volume and be exportable/accesssible from the Docker host machine.
+One durable execution unit for delivering a produced artifact or build output to
+one publish target.
 
-Runtime
-- main app runs in Docker
+## Technical Direction
 
-Build strategy
-- app controls Docker to launch ephemeral build containers
-- Docker socket access is expected
-- GameCI-compatible Unity build images are the initial strategy
+### Product Shape
 
-File storage strategy
-Database stores:
-- configuration
-- state
-- metadata
+- desktop shell: Tauri
+- runtime and application logic: Rust
+- durable local state: SQLite
+- mutable runtime files: filesystem under the resolved app data directory
+- Unity execution: host-native via locally installed editors
 
-Filesystem stores:
-- logs
-- artifacts
-- workspaces
+### Runtime Boundaries
 
-Suggested mounted data layout on.
+The desktop shell should remain thin and operator-facing.
 
-Likely initial modules
+The bundled runtime owns:
 
-cmd/
-  server/
-  hgb/
+- bootstrap and runtime directory initialization
+- manifest synchronization
+- polling and manual release intake
+- release, build, artifact, and publish state transitions
+- local recovery after restart
+- host capability checks and Unity invocation planning
+- operator-facing diagnostics consumed by the desktop shell
 
-internal/
-  app/
-  build/
-  cli/
-  config/
-  credentials/
-  db/
-  docker/
-  git/
-  publish/
-  release/
-  repository/
-  worker/
+### Repository Layout Direction
 
-Core data model direction
+The active Rust-first structure is:
 
-The initial schema is expected to include tables similar to:
+```text
+apps/
+  desktop/
+    src-tauri/
+    ui/
+
+crates/
+  runtime-bin/
+  runtime-config/
+  runtime-core/
+  runtime-git/
+  runtime-manifests/
+  runtime-publish/
+  runtime-runner/
+  runtime-store/
+```
+
+The active repository layout is Rust-first and organized around the desktop
+shell plus focused runtime crates.
+
+## Persistence And Filesystem Strategy
+
+SQLite is the durable source of truth for workflow state.
+
+Core tables include:
 
 - credentials
 - repositories
+- trigger_rules
 - build_targets
 - publish_targets
 - build_publish_bindings
@@ -167,33 +206,63 @@ The initial schema is expected to include tables similar to:
 - artifacts
 - publish_runs
 
-Important design rule
+The runtime should use explicit status transitions so release, build, and
+publish work can recover cleanly after restart.
 
-A repository is not just a repo to watch.
+Filesystem storage is reserved for:
 
-A repository is a configurable release pipeline definition.
+- logs
+- artifacts
+- workspaces
+- runtime health and supervision snapshots
 
-That means each repository should fully describe:
-- what to build
-- how to build
-- where to publish
-- which outputs go to which destinations
+The conceptual local layout is:
 
-Initial target users
+```text
+<runtime-root>/
+  state/
+    runtime.db
+    health.json
+    supervision.json
+    supervisor-state.json
+  logs/
+    runtime.jsonl
+  artifacts/
+  runs/
+```
 
-- indie developers
-- small teams
-- self-hosted Unity build workflows
-- local/Wsl/Docker-based development users
+The database stores metadata, configuration, state, and file references. It
+must not become blob storage for large artifacts or full log payloads.
 
-Immediate next steps
+## Configuration Model
 
-1. finalize naming
-2. create baseline docs
-3. define SQLite schema
-4. scaffold Go project
-5. add Docker-based local runtime
-6. implement repository configuration CRUD
-7. implement polling and tag detection
-8. implement build orchestration
-9. implement publishing integrations
+Repository pipelines are declared through YAML manifests under `pipelines/`.
+
+Each manifest defines:
+
+- Git access
+- trigger behavior
+- build targets
+- publish targets
+- build-to-publish bindings
+- credential references where required
+
+Manifest synchronization validates and materializes those definitions into the
+runtime store before automation proceeds.
+
+## Target Users
+
+- indie developers shipping Unity projects
+- small teams that want one local automation hub
+- self-hosted release workflows that prefer local control over hosted services
+- Windows-first operators who run Unity editors directly on the host machine
+
+## Immediate Next Steps
+
+1. finalize the product naming strategy without breaking active surfaces
+2. complete the desktop shell operator flows around runtime status, repositories, and credentials
+3. complete the active runtime roadmap and remove unused repository surfaces
+4. harden manifest validation and repository pipeline synchronization
+5. expand host capability diagnostics for Unity editors, paths, and credentials
+6. complete the end-to-end release flow from tag detection through publish execution
+7. add richer publish backends on top of the existing durable publish model

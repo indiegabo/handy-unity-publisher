@@ -15,22 +15,20 @@ It is an automation platform that builds Unity projects from Git repositories.
 
 The working technology stack for this repository is:
 
-- **Go** for application code.
-- **SQLite** for the initial database.
-- **Redis** for transient coordination, queues, locks, and worker signaling.
-- **Docker** and **Docker Compose** for local runtime.
-- **GameCI-compatible Unity build images** for isolated build execution.
+- **Rust** for runtime and application code.
+- **Tauri** for the desktop shell.
+- **SQLite** for durable local state.
+- **Host-native Unity execution** through locally installed editors.
 - **Git** for version control, following the commit workflow described in
   section 6.
 
 Supporting project files may also use:
 
 - **SQL** for migrations and schema evolution.
-- **YAML** for Docker Compose and automation configuration.
-- **Shell** for narrow operational scripts when Go is not the correct fit.
-- **Dockerfile syntax** for runtime and image composition.
+- **YAML** for pipeline manifests and runtime configuration.
+- **Shell** for narrow operational scripts when Rust is not the correct fit.
 
-Application logic must be implemented in **Go** unless the file being changed
+Application logic must be implemented in **Rust** unless the file being changed
 is inherently another supported format.
 Do not introduce unrelated runtime stacks such as **Node.js**, **Python**, or
 **C#** unless the user explicitly changes the project direction.
@@ -54,57 +52,52 @@ These assumptions define the political line of the codebase and must be
 preserved unless the user explicitly changes them:
 
 - The system is **self-hosted**, **local-first**, and intentionally lightweight.
-- The main application runs **inside Docker**.
-- A **Redis** service is expected alongside the main application for queues,
-  locks, idempotency keys, and short-lived coordination state.
-- The main application orchestrates **ephemeral build containers** through the
-  Docker socket or Docker API access.
+- The product is a **Tauri desktop application** with a bundled local runtime.
+- The runtime must work as a **self-contained local service** for normal
+  operation.
+- Unity execution is **host-native** and uses locally available editor
+  installations.
 - Registered repositories are **pipeline definitions**, not simple watch
   entries.
 - Each repository must be able to define Git access, polling rules, build
   targets, publish targets, and bindings between builds and publication
   destinations.
-- SQLite is the initial persistence layer and its database file must live in a
-  **mounted host volume**, accessible from both the container and the host.
-- SQLite remains the **durable source of truth** while Redis is reserved for
-  transient coordination concerns.
+- SQLite is the **durable source of truth** for the local runtime and its
+  database file must live under the resolved app data directory.
 - Logs, artifacts, and workspaces belong on the **filesystem**, not inside the
   SQLite database.
-- Prefer delegated workers, focused packages, and explicit interfaces over
-  growing the main application into a monolithic process.
-- The first phase prioritizes operational simplicity over distributed workers,
+- Prefer focused crates, explicit interfaces, and a narrow supervision
+  contract between shell and runtime.
+- The first phase prioritizes one local host over distributed workers,
   cloud-only dependencies, and speculative multi-tenant abstractions.
 
 The current repository name is **handy-unity-bulder**.
-That name may contain a typo, so do **not** rename modules, binaries, Docker
-images, documentation, package paths, or CLI surfaces unless the user
-explicitly requests a coordinated rename.
+That name may contain a typo, so do **not** rename modules, binaries,
+documentation, package paths, or CLI surfaces unless the user explicitly
+requests a coordinated rename.
 
 When the project structure is being created or expanded, prefer this direction:
 
 ```text
-cmd/
-  server/
-  hgb/
+apps/
+  desktop/
+    src-tauri/
+    ui/
 
-internal/
-  app/
-  build/
-  cli/
-  config/
-  credentials/
-  db/
-  docker/
-  git/
-  publish/
-  release/
-  repository/
-  worker/
+crates/
+  runtime-bin/
+  runtime-config/
+  runtime-core/
+  runtime-git/
+  runtime-manifests/
+  runtime-publish/
+  runtime-runner/
+  runtime-store/
 ```
 
-Keep HTTP handlers, CLI commands, and worker loops thin.
-Core orchestration rules belong in internal application packages, not in
-transport or command wrappers.
+Keep Tauri commands, CLI commands, and supervision loops thin.
+Core orchestration rules belong in the runtime crates, not in shell bindings
+or command wrappers.
 
 ---
 
@@ -133,41 +126,36 @@ existing snippet".
 
 ### 3.4 Mandatory documentation
 
-- **Go:** every new or modified Go package must be documented with
-  **GoDoc-style comments**.
-- Use **GoDoc comments** by default on packages and top-level declarations,
-  including internal and unexported types, interfaces, functions, methods,
-  and constants, unless a declaration is a trivial local helper whose purpose
-  is completely obvious from immediate context.
-- Go documentation must describe behavior, invariants, important side effects,
-  error conditions, and concurrency expectations when relevant.
-- Do not omit GoDoc comments from workflow-critical or cross-package code just
-  because it is not exported.
+- **Rust:** every new or modified crate module should be documented with
+  **rustdoc-style comments** when it defines workflow-critical behavior or a
+  non-trivial contract.
+- Use concise doc comments on modules, public items, important internal types,
+  and functions whose invariants or side effects are not obvious from local
+  context.
+- Rust documentation must describe behavior, invariants, error conditions, and
+  concurrency expectations when relevant.
 - **SQL migrations:** use descriptive migration names and comment non-obvious
   schema decisions.
 - **Operational files:** keep comments sparse, technical, and focused on real
   runtime behavior.
 
-### 3.5 Go implementation standards
+### 3.5 Rust implementation standards
 
-- Follow idiomatic Go and official formatting conventions.
-- Use **gofmt** and **goimports** style.
-- Prefer the standard library and small focused packages over heavy frameworks.
-- Keep package names short, lowercase, and free of underscores.
-- Prefer concrete types first; introduce interfaces at consumer boundaries, not
-  as speculative architecture.
-- Use **context.Context** for database calls, Docker operations, Git access,
-  networked publishers, and other external I/O.
-- Return errors instead of panicking outside truly unrecoverable startup
-  failures.
-- Wrap errors with `%w` when propagating them.
+- Follow idiomatic Rust and official formatting conventions.
+- Use **rustfmt** and keep code compatible with **clippy** expectations when
+  practical.
+- Prefer the standard library and focused crates over heavy frameworks.
+- Keep modules small, explicit, and easy to trace through the workspace.
+- Prefer concrete types first; introduce traits at consumer boundaries, not as
+  speculative architecture.
+- Use explicit result-based error handling and avoid panics outside truly
+  unrecoverable startup failures.
+- Prefer typed configuration structs over unstructured maps when a stable
+  schema exists.
 - Avoid global mutable state.
 - Keep dependency wiring explicit and easy to trace.
-- Prefer typed configuration structs over `map[string]any` when a stable schema
-  exists.
-- Prefer focused services and worker-oriented orchestration boundaries; avoid
-  god packages that mix HTTP, scheduling, queueing, and build execution
-  concerns.
+- Prefer focused crates and orchestration boundaries; avoid god modules that
+  mix supervision, scheduling, Git, storage, and Unity execution concerns.
 
 ### 3.6 Persistence and schema discipline
 
@@ -175,24 +163,27 @@ existing snippet".
 - Design SQLite usage for **WAL mode**, short transactions, and limited write
   concurrency.
 - Store configuration, state, metadata, and file references in SQLite.
-- Store logs, artifacts, and workspaces on disk under mounted data directories.
+- Store logs, artifacts, and workspaces on disk under application-managed data
+  directories.
 - Do **not** store large build logs or artifact blobs inside SQLite unless the
   user explicitly requests it.
-- Respect container and host visibility when choosing persisted paths.
+- Respect operator-visible host paths and application directory ownership when
+  choosing persisted paths.
 - Preserve foreign keys, uniqueness constraints, and explicit status modeling
   when they protect workflow correctness.
 
-### 3.7 Docker and build orchestration discipline
+### 3.7 Host-native build orchestration discipline
 
-- Treat build containers as ephemeral and isolated execution units.
-- Keep Docker integration behind explicit packages or services so orchestration
-  logic remains testable.
-- Make Unity version resolution and build image selection explicit,
-  deterministic, and overrideable.
-- Avoid hardcoded host-specific paths and assumptions that only work in one
-  Docker installation.
-- Preserve compatibility with local Docker and WSL-oriented workflows.
-- Prefer explicit mounted directories for `/data`, artifacts, logs, and
+- Treat Unity editor processes as explicit host-local execution units.
+- Keep runner selection and process execution behind explicit crates or
+  services so orchestration logic remains testable.
+- Make Unity version resolution, executable discovery, and per-host capability
+  checks explicit, deterministic, and overrideable.
+- Avoid hardcoded host-specific paths and assumptions that only work on one
+  machine layout.
+- Preserve compatibility with Windows-first workflows and treat WSL detection
+  as a host capability concern, not a required runtime topology.
+- Prefer explicit app-managed directories for state, artifacts, logs, and
   workspaces.
 
 ### 3.8 Testing and validation
@@ -202,8 +193,8 @@ existing snippet".
   repositories, HTTP handlers, CLI commands, or release orchestration.
 - Add end-to-end or smoke validation for critical operator workflows and
   runtime-critical paths.
-- When Docker or external services are involved, isolate decision logic so most
-  behavior can be tested without launching real containers.
+- When external tools are involved, isolate decision logic so most behavior can
+  be tested without launching real Unity processes.
 - Validate the narrowest affected surface first before running broader test
   suites.
 - A task is only considered ready when the related unit and end-to-end checks
@@ -249,15 +240,15 @@ existing snippet".
 
 ## 5. General Objective
 
-You exist to produce **ready-to-use, documented, readable, and scalable Go
-code**, along with the necessary SQL migrations, Docker runtime files,
-configuration, and operational documentation for this self-hosted Unity build
-automation system, always respecting:
+You exist to produce **ready-to-use, documented, readable, and scalable Rust
+code**, along with the necessary SQL migrations, Tauri shell integration,
+runtime configuration, and operational documentation for this self-hosted
+Unity build automation system, always respecting:
 
 - Technical excellence.
 - Communicative clarity.
 - Professional software engineering standards.
-- Architectural coherence with a local-first, containerized workflow.
+- Architectural coherence with a local-first desktop workflow.
 
 ---
 
@@ -334,13 +325,13 @@ Proposed Commits:
 1. feat(release): add initial tag polling coordinator
     Implements repository polling and release run creation.
     Files:
-      - internal/release/service.go
-      - internal/repository/store.go
+      - crates/runtime-store/src/releases.rs
+      - crates/runtime-bin/src/commands/releases.rs
 2. docs(project): align development guidelines with runtime architecture
     Updates project instructions and architecture notes.
     Files:
       - .github/copilot-instructions.md
-  - docs/ai-context.md
+      - docs/ai-context.md
 ```
 
 - Wait for user approval before proceeding.
@@ -348,7 +339,7 @@ Proposed Commits:
 **STEP 3 - Execute commits (requires explicit approval):**
 
 - Only proceed with `git add` and `git commit` commands after the user
-  explicitly approves (e.g., "pode commitar", "go ahead", "ok").
+  explicitly approves (e.g., "pode commitar", "pode seguir", "ok").
 - Execute the commits in the order proposed.
 - Confirm successful commit creation.
 - If the trigger contained an issue reference, ensure every executed commit

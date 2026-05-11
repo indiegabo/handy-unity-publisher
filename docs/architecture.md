@@ -1,82 +1,80 @@
 # Architecture
 
-See the companion delivery checklist in [V1 Delivery Plan](../planning/v1-delivery-plan.md).
+See the delivery roadmap in
+[Desktop Delivery Roadmap](../planning/desktop-delivery-roadmap.md).
 
 ## Overview
 
-handy-unity-bulder is a self-hosted Unity release orchestration system built
-for a single local or small-team host. The architecture keeps the HTTP server,
-CLI entrypoints, build execution, and publish execution separated so that each
-runtime stays narrow and operationally predictable.
+handy-unity-bulder is a self-hosted, local-first desktop orchestration system
+for Unity release pipelines.
 
-The system is intentionally local-first:
+The active product architecture is:
 
-- SQLite is the durable system of record.
-- Redis is used only for transient coordination.
-- Logs, artifacts, and workspaces stay on the filesystem.
-- Docker is used to launch isolated Unity build containers.
+- a Tauri desktop shell for operator interaction
+- a bundled Rust runtime for supervision, orchestration, and persistence
+- SQLite as the durable source of truth
+- filesystem-backed logs, artifacts, workspaces, and runtime snapshots
+- host-native Unity execution through locally installed editors
 
-## Runtime Components
+The current delivery scope targets one local host and one supervised runtime
+instance.
 
-### `unity-build-api`
+## System Shape
 
-The server exposes the operator-facing HTTP API and handles bootstrap for:
+### Desktop Shell
 
-- configuration loading
-- SQLite migrations and connection setup
-- Redis connectivity checks
-- health and root endpoints
-- runtime inspection endpoints for declarative manifest sync and live
-  automation state
-- CRUD endpoints for credentials, repositories, build targets, trigger rules,
-  publish targets, and build-publish bindings
+`apps/desktop/src-tauri` hosts the Tauri desktop shell.
 
-The server should remain thin. It is responsible for validating and persisting
-state, not for running long-lived Unity builds inline.
+The shell is responsible for:
 
-### `unity-build-worker`
+- launching or reconnecting to the bundled runtime process
+- exposing thin Tauri commands for operator-facing diagnostics and management
+- rendering the operator dashboard from `apps/desktop/ui`
+- presenting runtime health, lifecycle state, release status, repository
+  inspection, build history, artifact inspection, and credential management
 
-The build worker consumes queued build jobs from Redis and is responsible for:
+The shell remains intentionally thin. Orchestration rules belong in runtime
+crates, not in window bindings.
 
-- claiming durable queued `build_runs`
-- preparing repository workspaces for the requested Git tag
-- resolving Git credentials for workspace sync when needed
-- launching GameCI-compatible containers through the Docker CLI
-- writing captured build logs to disk
-- discovering and recording produced artifacts in SQLite
-- planning downstream publish runs after a successful build
+### Bundled Runtime
 
-### `artifact-publish-worker`
+`crates/runtime-bin` hosts the bundled runtime entrypoint.
 
-The publish worker consumes queued publish jobs from Redis and is responsible
-for:
+The runtime is responsible for:
 
-- claiming durable queued `publish_runs`
-- loading the execution plan that joins repository, release, target, and
-  artifact metadata
-- copying published artifacts through the selected publisher implementation
-- persisting terminal publish status and destination references
+- bootstrapping runtime directories and SQLite state
+- synchronizing declarative manifests from `pipelines/`
+- supervising one local orchestration loop
+- persisting durable release, build, artifact, and publish state
+- exposing diagnostic outputs consumed by the shell
 
-### `redis`
+The runtime may expose operator and development commands, but those commands are
+supporting surfaces around the desktop product rather than a competing product
+experience.
 
-Redis exists only for ephemeral coordination:
+### Focused Runtime Crates
 
-- job queues
-- locks
-- idempotency keys
-- worker signaling
+The runtime is intentionally decomposed into focused crates.
 
-Business state must not drift into Redis. If Redis is lost, the durable truth
-must still be reconstructible from SQLite and the filesystem.
+- `runtime-config` resolves paths, host settings, and app data layout.
+- `runtime-core` owns shared runtime contracts and supervision snapshots.
+- `runtime-store` owns SQLite-backed durable workflow state and local
+  coordination.
+- `runtime-manifests` validates and synchronizes declarative pipeline manifests.
+- `runtime-git` owns repository access and workspace preparation.
+- `runtime-runner` owns host capability checks and Unity execution planning.
+- `runtime-publish` owns artifact publication flows and destination execution.
 
 ## Durable Data Model
 
-The initial SQLite schema centers on these entities:
+SQLite is the durable source of truth for workflow state.
+
+Core entities include:
 
 - `credentials`
 - `repositories`
-- `build_targets`
 - `trigger_rules`
+- `build_targets`
 - `publish_targets`
 - `build_publish_bindings`
 - `release_runs`
@@ -85,138 +83,166 @@ The initial SQLite schema centers on these entities:
 - `publish_runs`
 
 These tables model one repository as a full release pipeline definition rather
-than a simple watched Git remote.
+than a single release event or isolated build invocation.
+
+The runtime uses explicit status transitions so release, build, and publish
+flows remain recoverable after restart.
 
 ## Filesystem Layout
 
-The runtime expects a mounted data directory with this shape:
+The runtime resolves an app-managed data directory and stores mutable runtime
+files there.
+
+The expected layout is conceptually:
 
 ```text
-/data/
-  app.db
+<runtime-root>/
+  state/
+    runtime.db
+    health.json
+    supervision.json
+    supervisor-state.json
   logs/
+    runtime.jsonl
   artifacts/
-  workspaces/
+  runs/
 ```
 
-Artifacts are grouped by release under `artifacts/<repository-name>.<git-tag>/`
-and each target is normalized to `<repository-name>.<git-tag>.<build-target><ext>`.
-Logs and workspaces keep execution-oriented `build-run-<id>` names because they
-are worker-internal scratch and trace paths.
+Filesystem responsibilities are split deliberately:
 
-The `repository-name` portion is a slugged form of the durable repository name:
-lowercase, spaces mapped to `-`, and accents or other special characters
-removed.
+- SQLite stores durable metadata, state, and file references.
+- logs stay on disk as operator-facing execution traces.
+- artifacts stay on disk as produced outputs.
+- runs stay on disk as execution-local scratch state.
+- runtime snapshots stay on disk as shell-readable health and supervision data.
 
-`HOST_DATA_DIR` must point to the host-visible version of that path when the
-application talks to the host Docker daemon through the mounted Docker socket.
-This keeps bind mounts for GameCI containers consistent between the worker
-container and the host daemon.
+The runtime should never treat the database as blob storage for large build
+logs or artifact payloads.
 
-## Control Surfaces
+## Configuration Model
 
-### HTTP API
+Repository pipeline configuration comes from YAML manifests under `pipelines/`.
 
-The server exposes JSON endpoints under `/api/v1/...` for operator management
-of pipeline definitions. These endpoints use the same store contracts as the
-CLI and do not embed orchestration logic that belongs in workers.
+Each manifest defines:
 
-### CLI
+- Git source access
+- trigger behavior
+- build targets
+- publish targets
+- build-to-publish bindings
+- credential references where required
 
-`cmd/hgb` mirrors the operator actions required for:
+Manifest synchronization materializes validated pipeline state into SQLite
+before automation proceeds.
 
-- configuration inspection
-- credentials CRUD
-- repository CRUD
-- build target CRUD
-- trigger rule CRUD
-- publish target CRUD
-- build-publish binding CRUD
-- manual release dispatch
-- release polling
-- release planning
+## Operator Surfaces
 
-The CLI is a thin transport over the same durable services used elsewhere.
+### Desktop Dashboard
+
+The desktop dashboard is the primary operator surface.
+
+It is responsible for presenting:
+
+- runtime health and lifecycle status
+- repository inspection
+- release status and local automation backlog
+- build history and artifact inspection
+- secret and credential management
+- runtime directories and Unity runner diagnostics
+- recent runtime logs
+
+### Runtime Commands
+
+The bundled runtime also exposes command surfaces for development,
+verification, and narrow operator diagnostics.
+
+Those commands remain thin wrappers around runtime crate behavior and support
+local development, tests, and focused inspection.
 
 ## Release Lifecycle
 
-The intended V1 flow is:
+The intended single-host flow is:
 
-1. an operator registers credentials, a repository, build targets, publish
-   targets, and bindings
-2. a release is created by manual dispatch or polling
-3. release planning resolves the Unity version and creates queued `build_runs`
-   for exactly one repository-local release at a time
-4. the build worker executes the build run and records artifacts
-5. successful build results expand into queued `publish_runs`
-6. the publish worker copies artifacts to the configured destination and
-   records the destination reference
+1. an operator declares one or more repository pipelines under `pipelines/`
+2. manifest sync validates and persists those pipelines into SQLite
+3. polling or manual dispatch creates durable `release_runs`
+4. release planning creates queued `build_runs`
+5. the local build execution path claims and completes build work
+6. successful build results register artifacts and expand queued
+   `publish_runs`
+7. publish execution claims and completes downstream delivery work
 
-Each stage keeps an explicit durable status transition in SQLite.
+Every stage records explicit durable transitions in SQLite so the runtime can
+recover after process restart.
 
-### Polling and Repository-Local Sequencing
+## Local Coordination Model
 
-Repository polling now treats one repository as a serialized release lane.
+The current product uses local coordination backed by SQLite and runtime-owned
+state files.
 
-- one polling pass can discover multiple unseen tags
-- every unseen tag is queued in ascending order from the durable
-  `last_seen_tag` baseline
-- the runtime only starts one release build process per repository at a time
-- one release build process means all enabled build targets for one Git tag
-- polling for that repository stays paused while the current release still has
-  queued or running build work
-- the next queued tag only starts after every target of the current release
-  reaches a terminal state, regardless of success or failure
+That means:
 
-This prevents the runtime from wasting tag-polling work while it already knows
-that a repository still has release work waiting in front of the next poll.
+- queued work is durable
+- release sequencing is repository-local and explicit
+- restart recovery can be driven from the store and runtime snapshots
+- runtime ownership of work claims is explicit and inspectable
 
-Operators can inspect that state through `GET /api/v1/runtime/automation` or
-`hub runtime automation`.
+The runtime should prefer short transactions, WAL mode, and explicit ownership
+of work claims.
 
-## Git and Credentials
+## Host Capability Model
 
-Repositories can reference a credentials record. V1 currently supports:
+Unity execution is host-native.
 
-- `git-http-basic`
-- `git-http-bearer`
+The runtime must make these concerns explicit:
 
-Those credentials are applied consistently across:
+- which host platform is active
+- which Unity editors are installed or discoverable
+- whether each configured build target has a valid local execution path
+- whether required files, paths, and credentials exist before claiming work
 
-- tag polling
-- Unity version detection during release planning
-- workspace synchronization before build execution
+Capability checks belong in runtime crates and should be visible in desktop
+diagnostics.
 
 ## Build Execution Boundary
 
-The build worker delegates container execution to the Docker integration
-package. That package is responsible for translating one execution plan into a
-GameCI-compatible `docker run` invocation with deterministic bind mounts and
-environment variables.
+Build execution should resolve one durable build plan into one host-local Unity
+invocation.
 
-This boundary matters because most release logic should stay testable without
-running Docker. The worker and store logic can be exercised with stubbed
-executors, while the Docker package carries the host-specific container launch
-concerns.
+That boundary is responsible for:
+
+- workspace preparation
+- Git synchronization for the requested tag or commit
+- Unity executable resolution
+- argument construction for the configured build method
+- captured logs and terminal status persistence
+- artifact discovery and registration
+
+The orchestration layer should remain testable without launching real Unity
+processes. Host-specific execution concerns belong behind explicit
+`runtime-runner` boundaries.
 
 ## Publish Execution Boundary
 
-The publish worker resolves one publish execution plan and delegates delivery
-to a publisher implementation. V1 ships a filesystem publisher as the baseline
-deterministic destination.
+Publish execution should resolve one durable publish plan into one destination
+operation.
 
-Remote publishers are intentionally deferred until the local-first path is
-proven with stable credential handling, error reporting, and operator
-diagnostics.
+The first supported path is filesystem publication. Additional remote
+publishers should layer on top of the same durable publish model rather than
+introducing parallel control flows.
 
-## V1 Scope Decision
+## Secret And Credential Management
 
-Strict V1 includes the filesystem publisher only. Itch.io is deferred to V1.1.
+Credentials are currently stored in SQLite configuration JSON and managed from
+the desktop shell.
 
-The reason is architectural discipline:
+The shell must never echo stored secret values back into operator diagnostics.
+Instead, it should expose:
 
-- the filesystem publisher proves artifact selection and handoff locally
-- Itch.io adds remote credential handling, API-specific retries, and external
-  failure modes
-- those concerns should be layered on top of a proven local publish path
-  rather than bundled into the first completeness milestone
+- credential kind
+- key-shape validation status
+- binding references
+- storage warnings
+
+Future secret backends must preserve the same redaction discipline and durable
+binding model.

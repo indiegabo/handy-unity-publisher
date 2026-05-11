@@ -1,120 +1,127 @@
-# Semantic Release Adoption Plan
+# Semantic Release Plan
 
 ## Objective
 
-Establish one automated semantic versioning and release flow for the Go
-application, its operator CLIs, and optional container artifacts without
+Establish one automated semantic versioning and release flow for the Tauri
+desktop application, bundled runtime, and published release artifacts without
 manual version bumps in source files.
 
-## Current State
+## Desired Outcome
 
-- A shared version package already exists at
-  `internal/version/version.go` with a `dev` fallback.
-- `hgb`, the HTTP server, and health responses already read from that package.
-- `hub` still prints a hardcoded `hub v0` string.
-- The Makefile and Dockerfile build binaries without `ldflags` version
-  injection.
-- The repository does not yet have GitHub Actions workflows or release
-  automation configuration.
+Every release round should produce one SemVer version that is shared by:
 
-## Recommended Tooling
+- the desktop shell package metadata
+- the bundled runtime version surfaces
+- release notes and Git tags
+- published desktop artifacts and checksums
 
-- Use Conventional Commits as the release input contract.
-- Use `go-semantic-release` to calculate the next version, create the Git tag,
-  and publish GitHub release notes.
-- Use GoReleaser to package binaries and optional Docker images after the
-  version has been determined.
-- Use GitHub Actions to enforce CI gates and execute the release workflow.
+## Current Baseline
+
+- the repository already has a Cargo workspace and Tauri desktop shell
+- the bundled runtime already exposes operator and diagnostics commands
+- runtime and shell version surfaces need one explicit shared release contract
+- `.github/workflows/ci.yml` now rejects deprecated build files and validates
+      the active Rust and Tauri slices
+- `.github/workflows/release-please.yml` now maintains release PRs and tags from
+      Conventional Commit history on `main`
+- `.github/workflows/release-bundle.yml` now builds and uploads the Windows
+      desktop bundle plus checksums for published releases
+
+## Recommended Release Model
+
+- use Conventional Commits as the release input contract
+- calculate the next SemVer from tags and commit history
+- create the Git tag and GitHub release notes in the same release workflow
+- build desktop artifacts from the tagged source
+- ensure the packaged shell and bundled runtime report the same release version
+
+## Release Artifact Scope
+
+Each stable release should publish:
+
+- platform-specific desktop bundles for the supported hosts
+- checksums for the published artifacts
+- GitHub release notes derived from the release commit range
+- runtime and shell version metadata that can be inspected after installation
 
 ## Task List
 
-### 1. Normalize the Version Source
+### 1. Normalize The Version Source
 
-- [ ] Replace the hardcoded `hub v0` output with the shared
-      `internal/version` package.
-- [ ] Decide the external format for CLI version output and keep it consistent
-      across `hub`, `hgb`, server logs, and HTTP responses.
-- [ ] Add focused tests that verify version output for the affected CLIs.
-- [ ] Decide whether operator-facing build metadata also needs commit SHA,
-      build date, or dirty state.
+- [ ] define one shared repository version source for the desktop shell and
+      bundled runtime
+- [ ] surface the resolved version in shell diagnostics and runtime contract
+      outputs
+- [ ] keep version formatting consistent across logs, status outputs, and the
+      desktop settings UI
+- [ ] decide whether build metadata also needs commit SHA, build date, or dirty
+      state
 
-### 2. Make Local and Container Builds Version-Aware
+### 2. Establish CI Preconditions
 
-- [ ] Introduce a `VERSION` variable in the Makefile with a `dev` default.
-- [ ] Inject `VERSION` into every Go build with
-      `-ldflags "-X github.com/indiegabo/handy-unity-bulder/internal/version.buildVersion=$(VERSION)"`.
-- [ ] Apply the same version injection in the Dockerfile builder stage.
-- [ ] Verify that local builds still report `dev` when `VERSION` is unset.
-- [ ] Verify that explicit builds such as `VERSION=v1.2.3 make build` stamp the
-      expected value into all produced binaries.
+- [ ] add a GitHub Actions CI workflow for pushes and pull requests
+- [ ] run formatting, compile, lint, and test gates before any release step can
+      execute
+- [ ] ensure release-capable workflows fetch tags and full history instead of
+      shallow clones
+- [ ] define the minimum repository permissions and secrets required for
+      release publication
 
-### 3. Establish CI Preconditions
+### 3. Adopt Semantic Release Automation
 
-- [ ] Add a GitHub Actions CI workflow for pushes and pull requests.
-- [ ] Run formatting validation and the relevant Go test suites before any
-      release step can execute.
-- [ ] Ensure release-capable workflows fetch tags and full history instead of
-      using shallow clones.
-- [ ] Define the minimum repository permissions and secrets required for release
-      publication.
+- [ ] configure Conventional Commit rules for `feat`, `fix`, and
+      `BREAKING CHANGE` semantics
+- [ ] add a release workflow triggered from the main release branch after CI
+      succeeds
+- [ ] calculate the next SemVer, create the new tag, and publish release notes
+      from the same workflow
+- [ ] decide whether prereleases are needed for non-main branches
+- [ ] ensure the workflow fails without tagging when validation, packaging, or
+      publication steps fail
 
-### 4. Adopt Semantic Release Automation
+### 4. Package Desktop Artifacts
 
-- [ ] Configure Conventional Commit rules for `feat`, `fix`, and
-      `BREAKING CHANGE` semantics.
-- [ ] Add a release workflow triggered from the main release branch after CI
-      succeeds.
-- [ ] Configure `go-semantic-release` to inspect commits since the last tag,
-      calculate the next SemVer, create the new tag, and publish release notes.
-- [ ] Decide whether prereleases are needed for any non-main branches.
-- [ ] Ensure the workflow fails without tagging when tests, packaging, or
-      publication steps fail.
+- [ ] build the Tauri desktop bundles for the supported operating system
+      targets
+- [ ] publish versioned artifacts and checksums for each supported host
+- [ ] ensure the bundled runtime version matches the release tag used for the
+      desktop package
+- [ ] verify that artifact names, release notes, and package metadata all carry
+      the same version string
 
-### 5. Package Release Artifacts
+### 5. Document The Operating Contract
 
-- [ ] Add a GoReleaser configuration for `hub`, `hgb`, `server`, `poller`,
-      `build-worker`, and `publish-worker`.
-- [ ] Publish versioned archives and checksums for the supported operating
-      system targets.
-- [ ] Decide whether Docker images are part of the same release scope.
-- [ ] If Docker images are released, publish semver-tagged images and ensure
-      the embedded binaries report the same version as the release tag.
+- [ ] document the Conventional Commit policy in the project documentation
+- [ ] document local dry-run commands for the release workflow
+- [ ] document how operators can inspect the running version from the desktop
+      shell and runtime command surfaces
+- [ ] document rollback and recovery steps for a bad tag or partial release
 
-### 6. Document the Operating Contract
+### 6. Validate End-To-End Release Behavior
 
-- [ ] Document the Conventional Commit policy in the README or contribution
-      guide.
-- [ ] Document local dry-run commands for semantic-release and GoReleaser.
-- [ ] Document how operators can inspect the running version from CLI and HTTP
-      surfaces.
-- [ ] Document rollback and recovery steps for a bad tag or partial release.
-
-### 7. Validate End-to-End Release Behavior
-
-- [ ] Run a dry release on a disposable branch or fork and verify the computed
-      version matches the commit history.
-- [ ] Run one real tagged release and verify the Git tag, GitHub release notes,
-      packaged binaries, and optional Docker images all align.
-- [ ] Verify that the released binaries return the same version through `hub
-      version`, `hgb version`, server startup logs, and HTTP health responses.
+- [ ] run a dry release on a disposable branch or fork and verify that the
+      computed version matches the commit history
+- [ ] run one real tagged release and verify the Git tag, GitHub release notes,
+      desktop artifacts, and checksums all align
+- [ ] verify that installed artifacts surface the expected version through shell
+      diagnostics and runtime outputs
 
 ## Acceptance Criteria
 
-- [ ] Version numbers are derived from commit history rather than manual source
-      edits.
-- [ ] All binaries share the same injected build version.
-- [ ] The release workflow creates exactly one SemVer tag per eligible commit
-      range.
-- [ ] Release artifacts are reproducible from the tagged source.
-- [ ] Operator documentation explains both the commit discipline and the
-      release execution path.
+- [ ] version numbers are derived from commit history rather than manual source
+      edits
+- [ ] shell and runtime surfaces report the same release version
+- [ ] the release workflow creates exactly one SemVer tag per eligible commit
+      range
+- [ ] published artifacts are reproducible from the tagged source
+- [ ] operator documentation explains the commit discipline and release
+      execution path
 
 ## Suggested Execution Order
 
-1. Normalize the version source.
-2. Make the build paths version-aware.
-3. Add CI gates.
-4. Add semantic-release automation.
-5. Add GoReleaser packaging.
-6. Document and dry-run the process.
-7. Perform the first real release.
+1. normalize the version source
+2. add CI gates
+3. add semantic release automation
+4. package desktop artifacts
+5. document and dry-run the process
+6. perform the first real release
