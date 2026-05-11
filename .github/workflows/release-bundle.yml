@@ -1,0 +1,83 @@
+name: Release Bundle
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  windows-bundle:
+    name: Windows Bundle
+    if: startsWith(github.event.release.tag_name, 'v')
+    runs-on: windows-latest
+
+    env:
+      TARGET_TRIPLE: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Prepare packaged runtime sidecar
+        shell: pwsh
+        run: ./scripts/prepare-tauri-sidecar.ps1 -TargetTriple $env:TARGET_TRIPLE -Profile release
+
+      - name: Install Tauri CLI
+        shell: bash
+        run: cargo install tauri-cli --version '^2' --locked
+
+      - name: Build Windows desktop bundle
+        shell: bash
+        run: cargo tauri build --manifest-path apps/desktop/src-tauri/Cargo.toml --config apps/desktop/src-tauri/tauri.release.conf.json --target "$TARGET_TRIPLE"
+
+      - name: Generate bundle checksums
+        shell: pwsh
+        run: |
+          $bundleRoot = Join-Path $PWD "target/$env:TARGET_TRIPLE/release/bundle"
+          if (-not (Test-Path $bundleRoot)) {
+              throw "bundle output directory was not found at $bundleRoot"
+          }
+
+          $assetFiles = Get-ChildItem -Path $bundleRoot -Recurse -File |
+              Where-Object { $_.Extension -in @('.msi', '.exe') }
+
+          if (-not $assetFiles) {
+              throw "no release assets were produced under $bundleRoot"
+          }
+
+          $checksumPath = Join-Path $bundleRoot "SHA256SUMS.txt"
+          $checksumLines = foreach ($asset in $assetFiles) {
+              $hash = (Get-FileHash -Path $asset.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($asset.Name)"
+          }
+
+          Set-Content -Path $checksumPath -Value $checksumLines
+
+      - name: Upload bundle assets to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.msi
+            target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.exe
+            target/${{ env.TARGET_TRIPLE }}/release/bundle/SHA256SUMS.txt

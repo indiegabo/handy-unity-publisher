@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  repository-shape:
+    name: Repository Shape
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Reject deprecated build files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t legacy_files < <(
+            git ls-files \
+              '*.go' \
+              'go.mod' \
+              'go.sum' \
+              'Dockerfile' \
+              'Dockerfile.*' \
+              'docker-compose.yml' \
+              'docker-compose.yaml' \
+              'docker-compose.*.yml' \
+              'docker-compose.*.yaml'
+          )
+
+          if (( ${#legacy_files[@]} > 0 )); then
+            printf 'Deprecated build files must not return to the repository:\n' >&2
+            printf '  %s\n' "${legacy_files[@]}" >&2
+            exit 1
+          fi
+
+  windows-validation:
+    name: Windows Validation
+    needs: repository-shape
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+          components: rustfmt
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        shell: bash
+        run: cargo fmt --all --check
+
+      - name: Compile workspace
+        shell: bash
+        run: cargo check --workspace
+
+      - name: Test runtime store
+        shell: bash
+        run: cargo test -p runtime-store -q
+
+      - name: Validate static desktop UI syntax
+        shell: bash
+        run: node --check apps/desktop/ui/app.js
