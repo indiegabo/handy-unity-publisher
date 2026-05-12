@@ -1,3 +1,6 @@
+//! Translates runtime concurrency settings into the scheduler policy enforced
+//! by the local host.
+
 use runtime_config::RuntimeConcurrencySettings;
 
 /// Declares the host-local concurrency policy used by the runtime scheduler.

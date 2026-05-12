@@ -1,0 +1,597 @@
+//! Hosts the runtime polling, supervision, and worker loop orchestration that
+//! drives the local automation host between individual command handlers.
+
+use super::*;
+
+pub(crate) fn run_release_planner_cycle(
+    storage: &StorageLayout,
+) -> Result<bool, Box<dyn Error>> {
+    let coordinator = LocalCoordinator::new(storage);
+
+    coordinator
+        .process_next_release_job(
+            RELEASE_PLANNER_WORKER_NAME,
+            Duration::ZERO,
+            RELEASE_QUEUE_LEASE_TTL,
+        )
+        .map_err(|error| Box::new(error) as Box<dyn Error>)
+}
+
+fn run_build_worker_cycle(
+    config: &RuntimeConfig,
+    storage: &StorageLayout,
+) -> Result<bool, Box<dyn Error>> {
+    Ok(run_build_run_next_command(&[], config, storage)? != "null")
+}
+
+fn run_publish_worker_cycle(
+    config: &RuntimeConfig,
+    storage: &StorageLayout,
+) -> Result<bool, Box<dyn Error>> {
+    Ok(run_publish_run_next_command(&[], config, storage)? != "null")
+}
+
+/// Tracks the next eligible poll instant for each repository between worker cycles.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct RepositoryPollSchedule {
+    pub(crate) next_poll_at_by_repository: HashMap<i64, SystemTime>,
+}
+
+impl RepositoryPollSchedule {
+    fn is_due(&self, repository_id: i64, now: SystemTime) -> bool {
+        self.next_poll_at_by_repository
+            .get(&repository_id)
+            .is_none_or(|next_poll_at| *next_poll_at <= now)
+    }
+
+    fn set_next_poll_at(&mut self, repository_id: i64, now: SystemTime, interval: Duration) {
+        self.next_poll_at_by_repository
+            .insert(repository_id, now + interval);
+    }
+
+    fn delete_repository(&mut self, repository_id: i64) {
+        self.next_poll_at_by_repository.remove(&repository_id);
+    }
+
+    fn retain_repositories(&mut self, repositories: &HashSet<i64>) {
+        self.next_poll_at_by_repository
+            .retain(|repository_id, _| repositories.contains(repository_id));
+    }
+}
+
+pub(crate) fn run_repository_poll_cycle(
+    coordinator: &LocalCoordinator,
+    mut poll_schedule: Option<&mut RepositoryPollSchedule>,
+) -> io::Result<AutomationPollReport> {
+    let repositories = coordinator.list_polling_repositories()?;
+    let tag_lister = GitTagLister::default();
+    let now = SystemTime::now();
+    let mut seen_repositories = HashSet::with_capacity(repositories.len());
+    let mut results = Vec::new();
+
+    for repository in repositories {
+        seen_repositories.insert(repository.id);
+
+        if !repository.enabled {
+            if let Some(schedule) = poll_schedule.as_deref_mut() {
+                schedule.delete_repository(repository.id);
+            }
+            results.push(skipped_poll_result(
+                &repository,
+                POLL_STATUS_SKIPPED_DISABLED,
+            ));
+            continue;
+        }
+
+        if repository.enabled_build_target_count == 0 {
+            if let Some(schedule) = poll_schedule.as_deref_mut() {
+                schedule.delete_repository(repository.id);
+            }
+            results.push(skipped_poll_result(
+                &repository,
+                POLL_STATUS_SKIPPED_NO_ENABLED_BUILD_TARGETS,
+            ));
+            continue;
+        }
+
+        match coordinator.advance_repository_release_queue(repository.id) {
+            Ok(true) => {
+                results.push(skipped_poll_result(
+                    &repository,
+                    POLL_STATUS_SKIPPED_ACTIVE_RELEASE_BACKLOG,
+                ));
+                continue;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                results.push(error_poll_result(&repository, error));
+                continue;
+            }
+        }
+
+        if let Some(schedule) = poll_schedule.as_deref_mut() {
+            if !schedule.is_due(repository.id, now) {
+                continue;
+            }
+            schedule.set_next_poll_at(
+                repository.id,
+                now,
+                Duration::from_secs(repository.polling_interval_seconds as u64),
+            );
+        }
+
+        match poll_repository(coordinator, &tag_lister, &repository) {
+            Ok(result) => {
+                if !result.queued_release_ids.is_empty() {
+                    if let Err(error) = coordinator.advance_repository_release_queue(repository.id)
+                    {
+                        results.push(error_poll_result(&repository, error));
+                        continue;
+                    }
+                }
+                results.push(result);
+            }
+            Err(error) => results.push(error_poll_result(&repository, error)),
+        }
+    }
+
+    if let Some(schedule) = poll_schedule {
+        schedule.retain_repositories(&seen_repositories);
+    }
+
+    Ok(AutomationPollReport { repositories: results })
+}
+
+fn poll_repository(
+    coordinator: &LocalCoordinator,
+    tag_lister: &GitTagLister,
+    repository: &PollingRepositoryRecord,
+) -> io::Result<RepositoryPollResult> {
+    let git_auth = resolve_repository_git_auth(coordinator, repository.credentials_id)?;
+    let tags = tag_lister.list_tags(&GitTagListRequest {
+        repository_url: repository.repo_url.clone(),
+        auth: git_auth,
+    })?;
+    let (selected_tags, status, ok) = select_queued_repository_tags(
+        &tags,
+        repository.last_seen_tag.as_deref(),
+    );
+    if !ok {
+        return Ok(RepositoryPollResult {
+            repository_id: repository.id,
+            repository_name: repository.name.clone(),
+            status: status.to_owned(),
+            error: None,
+            last_seen_tag_before: repository.last_seen_tag.clone(),
+            last_seen_tag_after: repository.last_seen_tag.clone(),
+            discovered_tags: Vec::new(),
+            queued_release_ids: Vec::new(),
+        });
+    }
+
+    let mut queued_release_ids = Vec::new();
+    let mut discovered_tags = Vec::new();
+    let mut last_seen_tag_after = repository.last_seen_tag.clone();
+
+    for tag in selected_tags {
+        match coordinator.dispatch_repository_poll_release(RepositoryPollDispatchInput {
+            repository_id: repository.id,
+            git_tag: tag.name.clone(),
+            git_commit: tag.commit.clone(),
+            observed_via: POLL_OBSERVED_VIA.to_owned(),
+        }) {
+            Ok(release) => {
+                coordinator.update_repository_last_seen_tag(repository.id, &tag.name)?;
+                last_seen_tag_after = Some(tag.name.clone());
+                discovered_tags.push(tag);
+                queued_release_ids.push(release.id);
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                coordinator.update_repository_last_seen_tag(repository.id, &tag.name)?;
+                last_seen_tag_after = Some(tag.name.clone());
+                discovered_tags.push(tag);
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                let status = if queued_release_ids.is_empty() {
+                    POLL_STATUS_BUILD_IN_PROGRESS
+                } else {
+                    POLL_STATUS_QUEUED
+                };
+                return Ok(RepositoryPollResult {
+                    repository_id: repository.id,
+                    repository_name: repository.name.clone(),
+                    status: status.to_owned(),
+                    error: None,
+                    last_seen_tag_before: repository.last_seen_tag.clone(),
+                    last_seen_tag_after,
+                    discovered_tags,
+                    queued_release_ids,
+                });
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    let status = if !queued_release_ids.is_empty() {
+        POLL_STATUS_QUEUED
+    } else {
+        POLL_STATUS_ALREADY_SEEN
+    };
+
+    Ok(RepositoryPollResult {
+        repository_id: repository.id,
+        repository_name: repository.name.clone(),
+        status: status.to_owned(),
+        error: None,
+        last_seen_tag_before: repository.last_seen_tag.clone(),
+        last_seen_tag_after,
+        discovered_tags,
+        queued_release_ids,
+    })
+}
+
+pub(crate) fn resolve_repository_git_auth(
+    coordinator: &LocalCoordinator,
+    credentials_id: Option<i64>,
+) -> io::Result<GitAuthOptions> {
+    let Some(credentials_id) = credentials_id else {
+        return Ok(GitAuthOptions::default());
+    };
+
+    let credentials = coordinator.get_credential_record(credentials_id)?;
+    git_auth_options_from_credentials(&credentials.kind, &credentials.config_json)
+}
+
+pub(crate) fn resolve_registration_checkout_ref(
+    repository: &RepositoryCheckoutRecord,
+    explicit_git_ref: Option<String>,
+) -> io::Result<(String, String)> {
+    if let Some(git_ref) = explicit_git_ref {
+        return Ok((git_ref, String::from("explicit")));
+    }
+
+    let default_branch = repository.default_branch.clone().ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "repository {} is missing default_branch; pass --ref to registrations checkout",
+                repository.id
+            ),
+        )
+    })?;
+
+    Ok((default_branch, String::from("default_branch")))
+}
+
+pub(crate) fn resolve_registration_checkout_workspace_root(
+    config: &RuntimeConfig,
+    repository: &RepositoryCheckoutRecord,
+) -> PathBuf {
+    repository
+        .workspace_root_override
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            config
+                .directories
+                .data_dir
+                .join("repositories")
+                .join(format!("repository-{}", repository.id))
+        })
+}
+
+pub(crate) fn read_checked_out_head_commit(source_path: &Path) -> io::Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(source_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "read checked out HEAD from {:?}: exit code {:?}; stderr: {}",
+            source_path,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )));
+    }
+
+    let head_commit = String::from_utf8_lossy(&output.stdout);
+    let trimmed = head_commit.trim();
+    if trimmed.is_empty() {
+        return Err(io::Error::other(format!(
+            "read checked out HEAD from {:?}: git returned an empty commit id",
+            source_path,
+        )));
+    }
+
+    Ok(trimmed.to_owned())
+}
+
+pub(crate) fn select_queued_repository_tags(
+    tags: &[GitTag],
+    last_seen_tag: Option<&str>,
+) -> (Vec<GitTag>, &'static str, bool) {
+    if tags.is_empty() {
+        return (Vec::new(), POLL_STATUS_NO_TAGS, false);
+    }
+
+    let normalized_last_seen = last_seen_tag.unwrap_or_default().trim();
+    if normalized_last_seen.is_empty() {
+        return (tags.to_vec(), "", true);
+    }
+
+    for (index, tag) in tags.iter().enumerate() {
+        if tag.name != normalized_last_seen {
+            continue;
+        }
+
+        if index == tags.len() - 1 {
+            return (Vec::new(), POLL_STATUS_UNCHANGED, false);
+        }
+
+        return (tags[index + 1..].to_vec(), "", true);
+    }
+
+    if tags.last().is_some_and(|tag| tag.name == normalized_last_seen) {
+        return (Vec::new(), POLL_STATUS_UNCHANGED, false);
+    }
+
+    (vec![tags[tags.len() - 1].clone()], "", true)
+}
+
+fn skipped_poll_result(
+    repository: &PollingRepositoryRecord,
+    status: &str,
+) -> RepositoryPollResult {
+    RepositoryPollResult {
+        repository_id: repository.id,
+        repository_name: repository.name.clone(),
+        status: status.to_owned(),
+        error: None,
+        last_seen_tag_before: repository.last_seen_tag.clone(),
+        last_seen_tag_after: repository.last_seen_tag.clone(),
+        discovered_tags: Vec::new(),
+        queued_release_ids: Vec::new(),
+    }
+}
+
+fn error_poll_result(
+    repository: &PollingRepositoryRecord,
+    error: io::Error,
+) -> RepositoryPollResult {
+    RepositoryPollResult {
+        repository_id: repository.id,
+        repository_name: repository.name.clone(),
+        status: POLL_STATUS_ERROR.to_owned(),
+        error: Some(error.to_string()),
+        last_seen_tag_before: repository.last_seen_tag.clone(),
+        last_seen_tag_after: repository.last_seen_tag.clone(),
+        discovered_tags: Vec::new(),
+        queued_release_ids: Vec::new(),
+    }
+}
+
+pub(crate) fn serve_runtime(
+    config: &RuntimeConfig,
+    storage: &StorageLayout,
+) -> Result<(), Box<dyn Error>> {
+    let executable = env::current_exe()?;
+    let attempt = current_supervision_attempt();
+    let snapshot = bootstrap_runtime(
+        config,
+        storage,
+        &executable,
+        RuntimeRestartPolicy::from_settings(&config.supervision),
+    )?;
+    let coordinator = LocalCoordinator::new(storage);
+    recover_interrupted_build_attempts(&coordinator, &snapshot.recovery_report);
+    let mut report = snapshot.health_report;
+    let mut heartbeat_count = 0_u32;
+    let mut poll_schedule = RepositoryPollSchedule::default();
+
+    loop {
+        if runtime_stop_requested(storage)? {
+            return Ok(());
+        }
+
+        let coordinator = LocalCoordinator::new(storage);
+        let _ = run_repository_poll_cycle(&coordinator, Some(&mut poll_schedule))?;
+        while run_release_planner_cycle(storage)? {}
+        while run_build_worker_cycle(config, storage)? {}
+        while run_publish_worker_cycle(config, storage)? {}
+
+        if let Some(max_heartbeats) = config.runtime_loop.max_heartbeats {
+            if heartbeat_count >= max_heartbeats {
+                let stopped = shutdown_runtime(config, storage)?;
+                println!("{}", stopped.to_json_pretty()?);
+                return Ok(());
+            }
+        }
+
+        thread::sleep(Duration::from_millis(
+            config.runtime_loop.heartbeat_interval_millis,
+        ));
+        if runtime_stop_requested(storage)? {
+            return Ok(());
+        }
+
+        heartbeat_count += 1;
+        report = update_runtime_health(
+            storage,
+            &report,
+            RuntimeStatus::Healthy,
+            RUNTIME_HEARTBEAT_EVENT,
+            format!(
+                "heartbeat {} on supervision attempt {}",
+                heartbeat_count, attempt
+            ),
+        )?;
+
+        if should_force_recoverable_crash(config, attempt, heartbeat_count) {
+            let _ = update_runtime_health(
+                storage,
+                &report,
+                RuntimeStatus::Unhealthy,
+                "runtime.crash.recoverable",
+                format!(
+                    "forcing recoverable crash after {} heartbeats on attempt {}",
+                    heartbeat_count, attempt
+                ),
+            )?;
+            process::exit(config.supervision.recoverable_exit_code);
+        }
+    }
+}
+
+pub(crate) fn runtime_stop_requested(storage: &StorageLayout) -> io::Result<bool> {
+    match read_health_report(&storage.health_report_path) {
+        Ok(report) => Ok(matches!(
+            report.status,
+            RuntimeStatus::ShuttingDown | RuntimeStatus::Stopped
+        )),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn supervise_runtime(
+    config: &RuntimeConfig,
+    storage: &StorageLayout,
+) -> Result<(), Box<dyn Error>> {
+    let executable = env::current_exe()?;
+    let restart_policy = RuntimeRestartPolicy::from_settings(&config.supervision);
+
+    let snapshot = bootstrap_runtime(config, storage, &executable, restart_policy.clone())?;
+    let coordinator = LocalCoordinator::new(storage);
+    recover_interrupted_build_attempts(&coordinator, &snapshot.recovery_report);
+
+    let supervisor_process_id = process::id();
+    let mut attempt = 1_u32;
+    let mut restart_count = 0_u32;
+
+    loop {
+        write_supervisor_snapshot(
+            storage,
+            &RuntimeSupervisorSnapshot::new(
+                config,
+                supervisor_process_id,
+                None,
+                attempt,
+                restart_count,
+                None,
+                RuntimeSupervisorStatus::Starting,
+                format!("spawning runtime serve attempt {attempt}"),
+            )?,
+        )?;
+
+        let mut child = Command::new(&executable)
+            .arg("serve")
+            .env(SUPERVISION_ATTEMPT_ENV, attempt.to_string())
+            .spawn()?;
+
+        write_supervisor_snapshot(
+            storage,
+            &RuntimeSupervisorSnapshot::new(
+                config,
+                supervisor_process_id,
+                Some(child.id()),
+                attempt,
+                restart_count,
+                None,
+                RuntimeSupervisorStatus::Running,
+                format!("runtime serve attempt {attempt} running as pid {}", child.id()),
+            )?,
+        )?;
+
+        let exit_status = child.wait()?;
+        let exit_code = exit_status.code();
+
+        if exit_status.success() {
+            let snapshot = RuntimeSupervisorSnapshot::new(
+                config,
+                supervisor_process_id,
+                None,
+                attempt,
+                restart_count,
+                exit_code,
+                RuntimeSupervisorStatus::Completed,
+                format!("runtime serve attempt {attempt} completed cleanly"),
+            )?;
+            write_supervisor_snapshot(storage, &snapshot)?;
+            println!("{}", snapshot.to_json_pretty()?);
+            return Ok(());
+        }
+
+        if restart_policy.should_restart(exit_code, restart_count) {
+            restart_count += 1;
+            let snapshot = RuntimeSupervisorSnapshot::new(
+                config,
+                supervisor_process_id,
+                None,
+                attempt,
+                restart_count,
+                exit_code,
+                RuntimeSupervisorStatus::Restarting,
+                format!(
+                    "recoverable exit {:?} detected, restarting after {} ms",
+                    exit_code,
+                    restart_policy.restart_backoff_millis
+                ),
+            )?;
+            write_supervisor_snapshot(storage, &snapshot)?;
+            thread::sleep(Duration::from_millis(
+                restart_policy.restart_backoff_millis,
+            ));
+            attempt += 1;
+            continue;
+        }
+
+        let snapshot = RuntimeSupervisorSnapshot::new(
+            config,
+            supervisor_process_id,
+            None,
+            attempt,
+            restart_count,
+            exit_code,
+            RuntimeSupervisorStatus::Failed,
+            format!("runtime serve exited unsuccessfully with code {:?}", exit_code),
+        )?;
+        write_supervisor_snapshot(storage, &snapshot)?;
+        if let Ok(report) = read_health_report(&storage.health_report_path) {
+            let _ = update_runtime_health(
+                storage,
+                &report,
+                RuntimeStatus::Unhealthy,
+                "runtime.supervisor.failed",
+                format!(
+                    "supervisor exhausted restart policy after exit code {:?}",
+                    exit_code
+                ),
+            )?;
+        }
+        return Err(format!("runtime serve exited unsuccessfully with code {:?}", exit_code).into());
+    }
+}
+
+fn current_supervision_attempt() -> u32 {
+    env::var(SUPERVISION_ATTEMPT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|attempt| *attempt > 0)
+        .unwrap_or(1)
+}
+
+fn should_force_recoverable_crash(
+    config: &RuntimeConfig,
+    attempt: u32,
+    heartbeat_count: u32,
+) -> bool {
+    match config.runtime_loop.crash_after_heartbeats {
+        Some(crash_after_heartbeats)
+            if config.runtime_loop.crash_attempts >= attempt
+                && heartbeat_count >= crash_after_heartbeats =>
+        {
+            true
+        }
+        _ => false,
+    }
+}

@@ -1,3 +1,6 @@
+//! Models the durable release, build, and publish lifecycle states enforced by
+//! the runtime store.
+
 use std::error::Error;
 use std::fmt;
 

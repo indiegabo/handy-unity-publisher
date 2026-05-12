@@ -1,0 +1,1821 @@
+//! Encapsulates build worker execution, retained execution reporting, and
+//! archive packaging for host-native Unity build runs.
+
+use super::*;
+
+const BUILD_EXECUTION_REPORT_SCHEMA_VERSION: u32 = 2;
+const BUILD_EXECUTION_CLEANUP_POLICY: &str = "retain-zipped-logs-json-report";
+const BUILD_EXECUTION_CLEANUP_PENDING: &str = "pending";
+const BUILD_EXECUTION_CLEANUP_COMPLETED: &str = "completed";
+const BUILD_EXECUTION_CLEANUP_FAILED: &str = "failed";
+const BUILD_EXECUTION_CLEANUP_TRIGGER_TERMINAL_STATE: &str = "terminal_state";
+const BUILD_EXECUTION_CLEANUP_TRIGGER_REQUESTED_INTERRUPTION: &str =
+    "requested_interruption";
+const BUILD_EXECUTION_CLEANUP_TRIGGER_SYSTEM_INTERRUPTION: &str =
+    "system_interruption";
+const BUILD_EXECUTION_RETAINED_DIR_NAME: &str = "retained";
+const BUILD_EXECUTION_REPORT_FILE_NAME: &str = "execution-report.json";
+const BUILD_EXECUTION_LOG_ARCHIVE_FILE_NAME: &str = "execution-logs.zip";
+const UNITY_NON_SHIPPABLE_ARCHIVE_PATH_SUFFIXES: &[&str] = &[
+    "_DoNotShip",
+    "_BackUpThisFolder_ButDontShipItWithYourGame",
+];
+const UNITY_MACOS_OPTIONAL_ARCHIVE_PATH_SUFFIXES: &[&str] = &[".dSYM"];
+const UNITY_WINDOWS_OPTIONAL_ARCHIVE_FILE_SUFFIXES: &[&str] = &[".pdb"];
+const UNITY_WEBGL_OPTIONAL_ARCHIVE_FILE_SUFFIXES: &[&str] = &[".symbols.json"];
+const QUEUE_LEASE_RENEWER_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MIN_QUEUE_LEASE_RENEW_INTERVAL: Duration = Duration::from_millis(20);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BuildProcessStage {
+    ValidateContext,
+    CheckoutRepository,
+    UnityBuild,
+    PackageArtifact,
+    RegisterArtifacts,
+}
+
+impl BuildProcessStage {
+    const fn key(self) -> &'static str {
+        match self {
+            Self::ValidateContext => "validate-build-context",
+            Self::CheckoutRepository => "checkout-repository",
+            Self::UnityBuild => "unity-build",
+            Self::PackageArtifact => "package-artifact",
+            Self::RegisterArtifacts => "register-artifacts",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ValidateContext => "Validate Build Context",
+            Self::CheckoutRepository => "Checkout Repository",
+            Self::UnityBuild => "Execute Unity Build",
+            Self::PackageArtifact => "Package Artifact",
+            Self::RegisterArtifacts => "Register Artifacts",
+        }
+    }
+
+    const fn writes_runtime_log(self) -> bool {
+        !matches!(self, Self::UnityBuild)
+    }
+}
+
+#[derive(Debug, Default)]
+struct BuildRunStageSequence {
+    ordered_stages: Vec<BuildProcessStage>,
+}
+
+impl BuildRunStageSequence {
+    fn execution_index(&mut self, stage: BuildProcessStage) -> usize {
+        if let Some(index) = self
+            .ordered_stages
+            .iter()
+            .position(|candidate| *candidate == stage)
+        {
+            return index + 1;
+        }
+
+        self.ordered_stages.push(stage);
+        self.ordered_stages.len()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildRunStageExecution {
+    position: i64,
+    log_path: PathBuf,
+}
+
+struct BuildRunStageTracker<'a> {
+    coordinator: &'a LocalCoordinator,
+    build_run_id: i64,
+    workspace_path: PathBuf,
+    artifact_root_path: PathBuf,
+    stage_sequence: Rc<RefCell<BuildRunStageSequence>>,
+}
+
+impl<'a> BuildRunStageTracker<'a> {
+    fn new(
+        coordinator: &'a LocalCoordinator,
+        build_run_id: i64,
+        workspace_path: impl Into<PathBuf>,
+        artifact_root_path: impl Into<PathBuf>,
+        stage_sequence: Rc<RefCell<BuildRunStageSequence>>,
+    ) -> io::Result<Self> {
+        let tracker = Self {
+            coordinator,
+            build_run_id,
+            workspace_path: workspace_path.into(),
+            artifact_root_path: artifact_root_path.into(),
+            stage_sequence,
+        };
+        fs::create_dir_all(tracker.logs_dir())?;
+        Ok(tracker)
+    }
+
+    fn logs_dir(&self) -> PathBuf {
+        self.workspace_path.join("logs")
+    }
+
+    fn stage_log_path(&self, stage: BuildProcessStage) -> PathBuf {
+        self.stage_execution(stage).log_path
+    }
+
+    fn stage_execution(&self, stage: BuildProcessStage) -> BuildRunStageExecution {
+        let execution_index = self.stage_sequence.borrow_mut().execution_index(stage);
+
+        BuildRunStageExecution {
+            position: execution_index as i64,
+            log_path: self
+                .logs_dir()
+                .join(format!("{execution_index:02}-{}.log", stage.key())),
+        }
+    }
+
+    fn start_stage(&self, stage: BuildProcessStage, message: &str) -> io::Result<()> {
+        let execution = self.stage_execution(stage);
+        self.write_stage_message(stage, &execution.log_path, message)?;
+        self.coordinator.start_build_run_stage(
+            self.build_run_id,
+            StartBuildRunStageInput {
+                position: execution.position,
+                step_key: String::from(stage.key()),
+                step_label: String::from(stage.label()),
+                step_log_path: execution.log_path.display().to_string(),
+                workspace_path: self.workspace_path.display().to_string(),
+                log_path: execution.log_path.display().to_string(),
+                artifact_root_path: self.artifact_root_path.display().to_string(),
+                message: message.to_owned(),
+            },
+        )?;
+        Ok(())
+    }
+
+    fn heartbeat_stage(&self, stage: BuildProcessStage, message: &str) -> io::Result<()> {
+        let execution = self.stage_execution(stage);
+        self.write_stage_message(stage, &execution.log_path, message)?;
+        self.coordinator.heartbeat_build_run_stage(
+            self.build_run_id,
+            HeartbeatBuildRunStageInput {
+                step_key: String::from(stage.key()),
+                step_label: String::from(stage.label()),
+                step_log_path: execution.log_path.display().to_string(),
+                workspace_path: self.workspace_path.display().to_string(),
+                log_path: execution.log_path.display().to_string(),
+                artifact_root_path: self.artifact_root_path.display().to_string(),
+                message: message.to_owned(),
+            },
+        )?;
+        Ok(())
+    }
+
+    fn complete_stage(&self, stage: BuildProcessStage, message: &str) -> io::Result<()> {
+        let execution = self.stage_execution(stage);
+        self.write_stage_message(stage, &execution.log_path, message)?;
+        self.coordinator.complete_build_run_stage(
+            self.build_run_id,
+            CompleteBuildRunStageInput {
+                step_key: String::from(stage.key()),
+                step_label: String::from(stage.label()),
+                step_log_path: execution.log_path.display().to_string(),
+                workspace_path: self.workspace_path.display().to_string(),
+                log_path: execution.log_path.display().to_string(),
+                artifact_root_path: self.artifact_root_path.display().to_string(),
+                message: message.to_owned(),
+            },
+        )?;
+        Ok(())
+    }
+
+    fn fail_stage(&self, stage: BuildProcessStage, error_message: &str) -> io::Result<()> {
+        let execution = self.stage_execution(stage);
+        self.write_stage_message(stage, &execution.log_path, error_message)?;
+        self.coordinator.fail_build_run_stage(
+            self.build_run_id,
+            FailBuildRunStageInput {
+                step_key: String::from(stage.key()),
+                step_label: String::from(stage.label()),
+                step_log_path: execution.log_path.display().to_string(),
+                workspace_path: self.workspace_path.display().to_string(),
+                log_path: execution.log_path.display().to_string(),
+                artifact_root_path: self.artifact_root_path.display().to_string(),
+                error_message: error_message.to_owned(),
+            },
+        )?;
+        Ok(())
+    }
+
+    fn write_stage_message(
+        &self,
+        stage: BuildProcessStage,
+        path: &Path,
+        message: &str,
+    ) -> io::Result<()> {
+        if !stage.writes_runtime_log() {
+            return Ok(());
+        }
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(
+            file,
+            "[{}] {}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            message,
+        )?;
+        Ok(())
+    }
+}
+
+struct BuildStageHeartbeatReporter<'a, 'b> {
+    tracker: &'a BuildRunStageTracker<'b>,
+    stage: BuildProcessStage,
+    error: Option<io::Error>,
+}
+
+impl<'a, 'b> BuildStageHeartbeatReporter<'a, 'b> {
+    fn new(tracker: &'a BuildRunStageTracker<'b>, stage: BuildProcessStage) -> Self {
+        Self {
+            tracker,
+            stage,
+            error: None,
+        }
+    }
+
+    fn take_error(&mut self) -> Option<io::Error> {
+        self.error.take()
+    }
+}
+
+impl ExecutionProgressReporter for BuildStageHeartbeatReporter<'_, '_> {
+    fn heartbeat(&mut self, progress: ExecutionProgress) {
+        if self.error.is_some() {
+            return;
+        }
+
+        if let Err(error) = self.tracker.heartbeat_stage(self.stage, &progress.message) {
+            self.error = Some(error);
+        }
+    }
+}
+
+fn queue_lease_renew_interval(lease_ttl: Duration) -> Duration {
+    let ttl_millis = lease_ttl.as_millis();
+    let minimum_millis = MIN_QUEUE_LEASE_RENEW_INTERVAL.as_millis();
+    let interval_millis = (ttl_millis / 3).max(minimum_millis);
+
+    Duration::from_millis(interval_millis.min(u64::MAX as u128) as u64)
+}
+
+fn store_queue_lease_renewer_error(slot: &Arc<Mutex<Option<String>>>, message: String) {
+    if let Ok(mut slot) = slot.lock() {
+        if slot.is_none() {
+            *slot = Some(message);
+        }
+    }
+}
+
+pub(crate) struct QueueLeaseRenewer {
+    stop_signal: Arc<AtomicBool>,
+    error_message: Arc<Mutex<Option<String>>>,
+    join_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl QueueLeaseRenewer {
+    pub(crate) fn spawn(
+        coordinator: LocalCoordinator,
+        message_id: i64,
+        lease_token: String,
+        lease_ttl: Duration,
+        context: &str,
+    ) -> Self {
+        let stop_signal = Arc::new(AtomicBool::new(false));
+        let error_message = Arc::new(Mutex::new(None));
+        let renew_interval = queue_lease_renew_interval(lease_ttl);
+        let context = context.to_owned();
+        let thread_stop_signal = Arc::clone(&stop_signal);
+        let thread_error_message = Arc::clone(&error_message);
+        let join_handle = thread::spawn(move || {
+            let mut last_renewed_at = std::time::Instant::now()
+                .checked_sub(renew_interval)
+                .unwrap_or_else(std::time::Instant::now);
+
+            loop {
+                if thread_stop_signal.load(Ordering::Acquire) {
+                    break;
+                }
+
+                thread::sleep(QUEUE_LEASE_RENEWER_POLL_INTERVAL);
+                if thread_stop_signal.load(Ordering::Acquire) {
+                    break;
+                }
+                if last_renewed_at.elapsed() < renew_interval {
+                    continue;
+                }
+
+                match coordinator.renew_message_lease(message_id, &lease_token, lease_ttl) {
+                    Ok(true) => {
+                        last_renewed_at = std::time::Instant::now();
+                    }
+                    Ok(false) => {
+                        if thread_stop_signal.load(Ordering::Acquire) {
+                            break;
+                        }
+
+                        store_queue_lease_renewer_error(
+                            &thread_error_message,
+                            format!(
+                                "{context} {message_id} lost its lease before work completed",
+                            ),
+                        );
+                        break;
+                    }
+                    Err(error) => {
+                        if thread_stop_signal.load(Ordering::Acquire) {
+                            break;
+                        }
+
+                        store_queue_lease_renewer_error(
+                            &thread_error_message,
+                            format!("renew {context} {message_id} lease: {error}"),
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+
+        Self {
+            stop_signal,
+            error_message,
+            join_handle: Some(join_handle),
+        }
+    }
+
+    pub(crate) fn stop(&self) {
+        self.stop_signal.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn finish(mut self) -> io::Result<()> {
+        self.stop();
+        if let Some(join_handle) = self.join_handle.take() {
+            join_handle
+                .join()
+                .map_err(|_| io::Error::other("queue lease renewer thread panicked"))?;
+        }
+
+        match self.error_message.lock() {
+            Ok(mut error_message) => match error_message.take() {
+                Some(message) => Err(io::Error::other(message)),
+                None => Ok(()),
+            },
+            Err(_) => Err(io::Error::other(
+                "queue lease renewer error state lock was poisoned",
+            )),
+        }
+    }
+}
+
+pub(crate) fn run_build_stage_next_command(
+    arguments: &[String],
+    config: &RuntimeConfig,
+    storage: &StorageLayout,
+) -> Result<String, Box<dyn Error>> {
+    if is_help_request(arguments) {
+        return Ok(build_stage_next_usage().to_owned());
+    }
+    if !arguments.is_empty() {
+        return Err(cli_usage_error(format!(
+            "builds stage-next does not accept positional arguments\n\n{}",
+            build_stage_next_usage()
+        ))
+        .into());
+    }
+
+    initialize_database(storage)?;
+    let coordinator = LocalCoordinator::new(storage);
+    let Some(message) = coordinator.claim_next_build_job(
+        BUILD_STAGER_WORKER_NAME,
+        Duration::ZERO,
+        BUILD_QUEUE_LEASE_TTL,
+        &config.concurrency,
+    )? else {
+        return Ok(String::from("null"));
+    };
+    let lease_renewer = QueueLeaseRenewer::spawn(
+        coordinator.clone(),
+        message.id,
+        message.lease_token.clone(),
+        BUILD_QUEUE_LEASE_TTL,
+        "build queue message",
+    );
+
+    let staged_result = stage_claimed_build_job(&coordinator, config, &message.payload).or_else(
+        |error| {
+            coordinator
+                .release_message(message.id, &message.lease_token)
+                .map_err(|release_error| {
+                    Box::new(io::Error::other(format!(
+                        "release claimed build message {} after error {error}: {release_error}",
+                        message.id
+                    ))) as Box<dyn Error>
+                })
+                .and_then(|_| Err(Box::new(error) as Box<dyn Error>))
+        },
+    );
+
+    lease_renewer.stop();
+    let staged = match staged_result {
+        Ok(staged) => staged,
+        Err(error) => {
+            if let Err(lease_error) = lease_renewer.finish() {
+                eprintln!(
+                    "queue lease renewer stopped with error after build staging failure: {lease_error}"
+                );
+            }
+            return Err(error);
+        }
+    };
+
+    let acknowledged = coordinator.acknowledge_message(message.id, &message.lease_token)?;
+    let renewer_result = lease_renewer.finish();
+    if !acknowledged {
+        renewer_result?;
+        return Err(Box::new(io::Error::other(format!(
+            "build queue message {} could not be acknowledged",
+            message.id
+        ))));
+    }
+    renewer_result?;
+
+    serde_json::to_string_pretty(&staged).map_err(|error| Box::new(error) as Box<dyn Error>)
+}
+
+pub(crate) fn run_build_run_next_command(
+    arguments: &[String],
+    config: &RuntimeConfig,
+    storage: &StorageLayout,
+) -> Result<String, Box<dyn Error>> {
+    if is_help_request(arguments) {
+        return Ok(build_run_next_usage().to_owned());
+    }
+    if !arguments.is_empty() {
+        return Err(cli_usage_error(format!(
+            "builds run-next does not accept positional arguments\n\n{}",
+            build_run_next_usage()
+        ))
+        .into());
+    }
+
+    initialize_database(storage)?;
+    let coordinator = LocalCoordinator::new(storage);
+    let Some(message) = coordinator.claim_next_build_job(
+        BUILD_STAGER_WORKER_NAME,
+        Duration::ZERO,
+        BUILD_QUEUE_LEASE_TTL,
+        &config.concurrency,
+    )? else {
+        return Ok(String::from("null"));
+    };
+    let lease_renewer = QueueLeaseRenewer::spawn(
+        coordinator.clone(),
+        message.id,
+        message.lease_token.clone(),
+        BUILD_QUEUE_LEASE_TTL,
+        "build queue message",
+    );
+    let record_result = (|| -> Result<BuildRunRecord, Box<dyn Error>> {
+        let resolved = match resolve_claimed_build_context(&coordinator, &message.payload) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                release_claimed_build_message(
+                    &coordinator,
+                    message.id,
+                    &message.lease_token,
+                    &error,
+                )?;
+                return Err(Box::new(error));
+            }
+        };
+
+        let planned = match WorkspacePreparer::new(&config.directories).plan(&resolved.preparation)
+        {
+            Ok(planned) => planned,
+            Err(error) => {
+                release_claimed_build_message(
+                    &coordinator,
+                    message.id,
+                    &message.lease_token,
+                    &error,
+                )?;
+                return Err(Box::new(error));
+            }
+        };
+
+        let stage_sequence = Rc::new(RefCell::new(BuildRunStageSequence::default()));
+        let validation_tracker = BuildRunStageTracker::new(
+            &coordinator,
+            resolved.plan.build_run_id,
+            planned.root_path.clone(),
+            planned.artifact_root_path.clone(),
+            stage_sequence.clone(),
+        )?;
+        let validation_log_path =
+            validation_tracker.stage_log_path(BuildProcessStage::ValidateContext);
+        let mut attempt_roots = vec![planned.root_path.clone()];
+
+        coordinator.start_build_run(
+            resolved.plan.build_run_id,
+            StartBuildRunInput {
+                workspace_path: planned.root_path.display().to_string(),
+                log_path: validation_log_path.display().to_string(),
+                artifact_root_path: planned.artifact_root_path.display().to_string(),
+            },
+        )?;
+        validation_tracker.start_stage(
+            BuildProcessStage::ValidateContext,
+            &format!(
+                "Validating build context for repository '{}' tag '{}' target '{}' ({}) using Unity {}.",
+                resolved.plan.repository_name,
+                resolved.plan.git_tag,
+                resolved.plan.target_name,
+                resolved.plan.platform,
+                resolved.plan.unity_version,
+            ),
+        )?;
+
+        let runner_plan = match resolve_runtime_build_execution_plan(config, &resolved.plan) {
+            Ok(plan) => {
+                validation_tracker.complete_stage(
+                    BuildProcessStage::ValidateContext,
+                    &format!(
+                        "Resolved host-native runner '{}' and build method '{}'.",
+                        plan.runner_type,
+                        plan.build_method,
+                    ),
+                )?;
+                plan
+            }
+            Err(error) => {
+                validation_tracker.fail_stage(
+                    BuildProcessStage::ValidateContext,
+                    &error.to_string(),
+                )?;
+                let record = coordinator.fail_build_run(
+                    resolved.plan.build_run_id,
+                    FailBuildRunInput {
+                        workspace_path: planned.root_path.display().to_string(),
+                        log_path: validation_log_path.display().to_string(),
+                        artifact_root_path: planned.artifact_root_path.display().to_string(),
+                        error_message: error.to_string(),
+                    },
+                )?;
+                run_build_cleanup(&coordinator, record.id, &attempt_roots);
+                return Ok(record);
+            }
+        };
+
+        let processor =
+            ExecutionProcessor::new(&config.directories, HostNativeUnityExecutor::new());
+        process_build_run_with_retry(
+            &coordinator,
+            &config.directories,
+            &processor,
+            &runner_plan,
+            &resolved.preparation,
+            resolved.plan.build_run_id,
+            stage_sequence,
+            &mut attempt_roots,
+        )
+        .map_err(|error| Box::new(error) as Box<dyn Error>)
+    })();
+
+    lease_renewer.stop();
+    let record = match record_result {
+        Ok(record) => record,
+        Err(error) => {
+            if let Err(lease_error) = lease_renewer.finish() {
+                eprintln!(
+                    "queue lease renewer stopped with error after build run failure: {lease_error}"
+                );
+            }
+            return Err(error);
+        }
+    };
+
+    let acknowledged = coordinator.acknowledge_message(message.id, &message.lease_token)?;
+    let renewer_result = lease_renewer.finish();
+    if !acknowledged {
+        renewer_result?;
+        return Err(Box::new(io::Error::other(format!(
+            "build queue message {} could not be acknowledged",
+            message.id
+        ))));
+    }
+    renewer_result?;
+
+    serde_json::to_string_pretty(&record).map_err(|error| Box::new(error) as Box<dyn Error>)
+}
+
+fn stage_claimed_build_job(
+    coordinator: &LocalCoordinator,
+    config: &RuntimeConfig,
+    payload: &[u8],
+) -> io::Result<BuildRunRecord> {
+    let resolved = resolve_claimed_build_context(coordinator, payload)?;
+    let preparer = WorkspacePreparer::new(&config.directories);
+    let planned = preparer.plan(&resolved.preparation)?;
+    let started = coordinator.start_build_run(
+        resolved.plan.build_run_id,
+        StartBuildRunInput {
+            workspace_path: planned.root_path.display().to_string(),
+            log_path: planned.log_path.display().to_string(),
+            artifact_root_path: planned.artifact_root_path.display().to_string(),
+        },
+    )?;
+
+    match preparer.prepare(&resolved.preparation) {
+        Ok(_) => Ok(started),
+        Err(error) => coordinator.fail_build_run(
+            resolved.plan.build_run_id,
+            FailBuildRunInput {
+                workspace_path: planned.root_path.display().to_string(),
+                log_path: planned.log_path.display().to_string(),
+                artifact_root_path: planned.artifact_root_path.display().to_string(),
+                error_message: error.to_string(),
+            },
+        ),
+    }
+}
+
+fn complete_successful_build_run(
+    coordinator: &LocalCoordinator,
+    build_run_id: i64,
+    runner_plan: &ExecutionPlan,
+    result: &ExecutionResult,
+    tracker: &BuildRunStageTracker<'_>,
+) -> io::Result<BuildRunRecord> {
+    if output_requires_runtime_archive(runner_plan) {
+        tracker.start_stage(
+            BuildProcessStage::PackageArtifact,
+            "Packaging Unity output into a runtime-owned zip archive.",
+        )?;
+        if let Err(error) = package_build_output(runner_plan, result) {
+            tracker.fail_stage(BuildProcessStage::PackageArtifact, &error.to_string())?;
+            return Err(error);
+        }
+        tracker.complete_stage(
+            BuildProcessStage::PackageArtifact,
+            "Runtime archive packaging completed.",
+        )?;
+    }
+
+    tracker.start_stage(
+        BuildProcessStage::RegisterArtifacts,
+        "Discovering artifacts, registering them, and dispatching publish work.",
+    )?;
+    register_artifacts_and_dispatch_publish_runs(coordinator, build_run_id, &result.artifact_root_path)
+        .map_err(|error| {
+            let _ = tracker.fail_stage(BuildProcessStage::RegisterArtifacts, &error.to_string());
+            error
+        })?;
+    tracker.complete_stage(
+        BuildProcessStage::RegisterArtifacts,
+        "Artifacts registered and downstream publish work dispatched.",
+    )?;
+
+    coordinator.complete_build_run(
+        build_run_id,
+        CompleteBuildRunInput {
+            workspace_path: result.workspace_path.display().to_string(),
+            log_path: result.log_path.display().to_string(),
+            artifact_root_path: result.artifact_root_path.display().to_string(),
+        },
+    )
+}
+
+fn output_requires_runtime_archive(plan: &ExecutionPlan) -> bool {
+    plan.output_kind
+        .as_deref()
+        .is_some_and(|output_kind| output_kind.eq_ignore_ascii_case("archive"))
+}
+
+pub(crate) fn package_build_output(
+    plan: &ExecutionPlan,
+    result: &ExecutionResult,
+) -> io::Result<()> {
+    let source_directory = &result.output_path;
+    if !source_directory.is_dir() {
+        return Err(io::Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "expected Unity archive source directory at {:?}",
+                source_directory.display()
+            ),
+        ));
+    }
+
+    let artifact_path = resolve_final_artifact_output_path(plan, &result.artifact_root_path)?;
+    if let Some(parent) = artifact_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if artifact_path.exists() {
+        let metadata = fs::metadata(&artifact_path)?;
+        if metadata.is_dir() {
+            fs::remove_dir_all(&artifact_path)?;
+        } else {
+            fs::remove_file(&artifact_path)?;
+        }
+    }
+
+    let file = fs::File::create(&artifact_path)?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+    add_build_output_directory_to_zip(
+        &mut zip,
+        source_directory,
+        source_directory,
+        options,
+        plan,
+    )?;
+    zip.finish().map_err(io::Error::other)?;
+
+    Ok(())
+}
+
+fn add_build_output_directory_to_zip<W>(
+    zip: &mut ZipWriter<W>,
+    root: &Path,
+    current: &Path,
+    options: SimpleFileOptions,
+    plan: &ExecutionPlan,
+) -> io::Result<()>
+where
+    W: io::Write + io::Seek,
+{
+    add_build_output_directory_to_zip_with_prefix(zip, root, current, options, plan, None)
+}
+
+fn add_build_output_directory_to_zip_with_prefix<W>(
+    zip: &mut ZipWriter<W>,
+    root: &Path,
+    current: &Path,
+    options: SimpleFileOptions,
+    plan: &ExecutionPlan,
+    archive_prefix: Option<&str>,
+) -> io::Result<()>
+where
+    W: io::Write + io::Seek,
+{
+    let mut entries = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let path = entry.path();
+        let relative_path = path.strip_prefix(root).map_err(io::Error::other)?;
+        if should_exclude_build_output_archive_path(plan, relative_path) {
+            continue;
+        }
+
+        let relative = relative_path.to_string_lossy().replace('\\', "/");
+        let archive_relative = match archive_prefix {
+            Some(prefix) if !relative.is_empty() => format!("{prefix}/{relative}"),
+            Some(prefix) => prefix.to_owned(),
+            None => relative,
+        };
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if !archive_relative.is_empty() {
+                zip.add_directory(format!("{archive_relative}/"), options)
+                    .map_err(io::Error::other)?;
+            }
+            add_build_output_directory_to_zip_with_prefix(
+                zip,
+                root,
+                &path,
+                options,
+                plan,
+                archive_prefix,
+            )?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+
+        zip.start_file(archive_relative, options)
+            .map_err(io::Error::other)?;
+        let mut source = fs::File::open(&path)?;
+        io::copy(&mut source, zip)?;
+    }
+
+    Ok(())
+}
+
+fn should_exclude_build_output_archive_path(plan: &ExecutionPlan, relative_path: &Path) -> bool {
+    if archive_path_has_non_shippable_segment(relative_path) {
+        return true;
+    }
+
+    archive_path_is_optional_debug_symbol(plan, relative_path)
+}
+
+fn archive_path_has_non_shippable_segment(relative_path: &Path) -> bool {
+    relative_path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .any(|segment| {
+            has_any_suffix_case_insensitive(segment, UNITY_NON_SHIPPABLE_ARCHIVE_PATH_SUFFIXES)
+        })
+}
+
+fn archive_path_is_optional_debug_symbol(plan: &ExecutionPlan, relative_path: &Path) -> bool {
+    let Some(file_name) = relative_path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+
+    match plan.platform.trim().to_ascii_lowercase().as_str() {
+        "macos" => has_any_suffix_case_insensitive(
+            file_name,
+            UNITY_MACOS_OPTIONAL_ARCHIVE_PATH_SUFFIXES,
+        ),
+        "windows" => has_any_suffix_case_insensitive(
+            file_name,
+            UNITY_WINDOWS_OPTIONAL_ARCHIVE_FILE_SUFFIXES,
+        ),
+        "webgl" => has_any_suffix_case_insensitive(
+            file_name,
+            UNITY_WEBGL_OPTIONAL_ARCHIVE_FILE_SUFFIXES,
+        ),
+        _ => false,
+    }
+}
+
+fn has_any_suffix_case_insensitive(value: &str, suffixes: &[&str]) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    suffixes
+        .iter()
+        .any(|suffix| normalized.ends_with(&suffix.to_ascii_lowercase()))
+}
+
+fn add_directory_to_zip_with_prefix<W>(
+    zip: &mut ZipWriter<W>,
+    root: &Path,
+    current: &Path,
+    options: SimpleFileOptions,
+    archive_prefix: Option<&str>,
+) -> io::Result<()>
+where
+    W: io::Write + io::Seek,
+{
+    let mut entries = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(io::Error::other)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let archive_relative = match archive_prefix {
+            Some(prefix) if !relative.is_empty() => format!("{prefix}/{relative}"),
+            Some(prefix) => prefix.to_owned(),
+            None => relative,
+        };
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if !archive_relative.is_empty() {
+                zip.add_directory(format!("{archive_relative}/"), options)
+                    .map_err(io::Error::other)?;
+            }
+            add_directory_to_zip_with_prefix(zip, root, &path, options, archive_prefix)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+
+        zip.start_file(archive_relative, options)
+            .map_err(io::Error::other)?;
+        let mut source = fs::File::open(&path)?;
+        io::copy(&mut source, zip)?;
+    }
+
+    Ok(())
+}
+
+fn build_execution_retained_dir(workspace_path: &Path) -> PathBuf {
+    workspace_path.join(BUILD_EXECUTION_RETAINED_DIR_NAME)
+}
+
+pub(crate) fn build_execution_report_path(workspace_path: &Path) -> PathBuf {
+    build_execution_retained_dir(workspace_path).join(BUILD_EXECUTION_REPORT_FILE_NAME)
+}
+
+pub(crate) fn build_execution_logs_archive_path(workspace_path: &Path) -> PathBuf {
+    build_execution_retained_dir(workspace_path).join(BUILD_EXECUTION_LOG_ARCHIVE_FILE_NAME)
+}
+
+fn push_attempt_root(attempt_roots: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !attempt_roots.iter().any(|existing| existing == &candidate) {
+        attempt_roots.push(candidate);
+    }
+}
+
+fn append_cleanup_error(current: &mut Option<String>, error: impl Into<String>) {
+    let error = error.into();
+    match current {
+        Some(existing) => {
+            existing.push_str("; ");
+            existing.push_str(&error);
+        }
+        None => *current = Some(error),
+    }
+}
+
+fn directory_size_bytes(path: &Path) -> io::Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let metadata = fs::metadata(path)?;
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+
+    let mut total = 0_u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        total = total.saturating_add(directory_size_bytes(&entry.path())?);
+    }
+
+    Ok(total)
+}
+
+fn total_workspace_size_bytes(paths: &[PathBuf]) -> io::Result<u64> {
+    let mut total = 0_u64;
+    for path in paths {
+        total = total.saturating_add(directory_size_bytes(path)?);
+    }
+
+    Ok(total)
+}
+
+fn archive_build_run_logs(
+    attempt_roots: &[PathBuf],
+    final_workspace_path: &Path,
+) -> io::Result<Option<BuildExecutionRetainedFile>> {
+    let log_roots = attempt_roots
+        .iter()
+        .filter_map(|attempt_root| {
+            let logs_dir = attempt_root.join("logs");
+            logs_dir.is_dir().then_some((attempt_root, logs_dir))
+        })
+        .collect::<Vec<_>>();
+    if log_roots.is_empty() {
+        return Ok(None);
+    }
+
+    let retained_dir = build_execution_retained_dir(final_workspace_path);
+    fs::create_dir_all(&retained_dir)?;
+
+    let archive_path = build_execution_logs_archive_path(final_workspace_path);
+    if archive_path.exists() {
+        fs::remove_file(&archive_path)?;
+    }
+
+    let file = fs::File::create(&archive_path)?;
+    let mut zip = ZipWriter::new(file);
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+
+    for (attempt_root, logs_dir) in log_roots {
+        let prefix = attempt_root
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("attempt");
+        add_directory_to_zip_with_prefix(
+            &mut zip,
+            attempt_root,
+            &logs_dir,
+            options,
+            Some(prefix),
+        )?;
+    }
+
+    zip.finish().map_err(io::Error::other)?;
+    let size_bytes = fs::metadata(&archive_path).ok().map(|metadata| metadata.len());
+
+    Ok(Some(BuildExecutionRetainedFile {
+        role: String::from("logs-archive"),
+        path: archive_path.display().to_string(),
+        source_path: None,
+        content_type: String::from("application/zip"),
+        content_encoding: None,
+        size_bytes,
+    }))
+}
+
+fn prune_build_run_workspaces(
+    attempt_roots: &[PathBuf],
+    final_workspace_path: &Path,
+) -> io::Result<usize> {
+    let mut removed_attempt_count = 0_usize;
+
+    for attempt_root in attempt_roots {
+        if attempt_root == final_workspace_path {
+            if !attempt_root.is_dir() {
+                continue;
+            }
+
+            for entry in fs::read_dir(attempt_root)? {
+                let entry = entry?;
+                if entry.file_name() == BUILD_EXECUTION_RETAINED_DIR_NAME {
+                    continue;
+                }
+
+                let path = entry.path();
+                if path.is_dir() {
+                    fs::remove_dir_all(path)?;
+                } else if path.exists() {
+                    fs::remove_file(path)?;
+                }
+            }
+
+            continue;
+        }
+
+        if !attempt_root.exists() {
+            continue;
+        }
+
+        if attempt_root.is_dir() {
+            fs::remove_dir_all(attempt_root)?;
+        } else {
+            fs::remove_file(attempt_root)?;
+        }
+        removed_attempt_count += 1;
+    }
+
+    Ok(removed_attempt_count)
+}
+
+fn collect_build_execution_retained_files(
+    workspace_path: &Path,
+) -> io::Result<Vec<BuildExecutionRetainedFile>> {
+    let archive_path = build_execution_logs_archive_path(workspace_path);
+    if !archive_path.is_file() {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![BuildExecutionRetainedFile {
+        role: String::from("logs-archive"),
+        path: archive_path.display().to_string(),
+        source_path: None,
+        content_type: String::from("application/zip"),
+        content_encoding: None,
+        size_bytes: Some(fs::metadata(&archive_path)?.len()),
+    }])
+}
+
+fn load_build_execution_report(report_path: &Path) -> io::Result<Option<BuildExecutionReport>> {
+    match fs::read(report_path) {
+        Ok(contents) => serde_json::from_slice(&contents)
+            .map(Some)
+            .map_err(io::Error::other),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn collect_build_execution_publish_snapshots(
+    coordinator: &LocalCoordinator,
+    build_run_id: i64,
+) -> io::Result<Vec<BuildExecutionPublishSnapshot>> {
+    let publish_runs = coordinator.list_publish_runs_by_build_run(build_run_id)?;
+    let mut snapshots = Vec::with_capacity(publish_runs.len());
+
+    for record in publish_runs {
+        let execution_plan = coordinator.get_publish_execution_plan(record.id).ok();
+        snapshots.push(BuildExecutionPublishSnapshot {
+            record,
+            execution_plan,
+        });
+    }
+
+    Ok(snapshots)
+}
+
+fn default_build_execution_cleanup_snapshot(
+    workspace_path: &Path,
+) -> BuildExecutionCleanupSnapshot {
+    BuildExecutionCleanupSnapshot {
+        status: String::from(BUILD_EXECUTION_CLEANUP_PENDING),
+        trigger: String::from(BUILD_EXECUTION_CLEANUP_TRIGGER_TERMINAL_STATE),
+        workspace_path: workspace_path.display().to_string(),
+        workspace_bytes_before: 0,
+        workspace_bytes_after: 0,
+        removed_attempt_count: 0,
+        error_message: None,
+    }
+}
+
+fn synchronize_build_execution_report(
+    coordinator: &LocalCoordinator,
+    build_run_id: i64,
+    attempts_override: Option<Vec<BuildExecutionAttemptSnapshot>>,
+    cleanup_override: Option<BuildExecutionCleanupSnapshot>,
+) -> io::Result<()> {
+    let build_run = coordinator.get_build_run_record(build_run_id)?;
+    let Some(workspace_path) = build_run
+        .workspace_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    else {
+        return Ok(());
+    };
+
+    synchronize_build_execution_report_for_workspace(
+        coordinator,
+        build_run_id,
+        &workspace_path,
+        attempts_override,
+        cleanup_override,
+        None,
+    )
+}
+
+fn synchronize_build_execution_report_for_workspace(
+    coordinator: &LocalCoordinator,
+    build_run_id: i64,
+    workspace_path: &Path,
+    attempts_override: Option<Vec<BuildExecutionAttemptSnapshot>>,
+    cleanup_override: Option<BuildExecutionCleanupSnapshot>,
+    interruption_override: Option<BuildExecutionInterruptionSnapshot>,
+) -> io::Result<()> {
+    let report_path = build_execution_report_path(workspace_path);
+    let existing = load_build_execution_report(&report_path)?;
+    let build_run = coordinator.get_build_run_record(build_run_id)?;
+    let build_plan = coordinator.get_build_execution_plan(build_run_id)?;
+    let stages = coordinator.list_build_run_stages(build_run_id)?;
+    let artifacts = coordinator.list_artifacts_by_build_run(build_run_id)?;
+    let publish_runs = collect_build_execution_publish_snapshots(coordinator, build_run_id)?;
+    let retained_files = collect_build_execution_retained_files(workspace_path)?;
+
+    let attempts = attempts_override
+        .or_else(|| existing.as_ref().map(|report| report.attempts.clone()))
+        .unwrap_or_default();
+    let cleanup = cleanup_override
+        .or_else(|| existing.as_ref().map(|report| report.cleanup.clone()))
+        .unwrap_or_else(|| default_build_execution_cleanup_snapshot(workspace_path));
+    let interruption = interruption_override
+        .or_else(|| existing.as_ref().and_then(|report| report.interruption.clone()));
+
+    let report = BuildExecutionReport {
+        schema_version: BUILD_EXECUTION_REPORT_SCHEMA_VERSION,
+        cleanup_policy: String::from(BUILD_EXECUTION_CLEANUP_POLICY),
+        build_plan,
+        build_run,
+        stages,
+        artifacts,
+        publish_runs,
+        attempts,
+        cleanup,
+        interruption,
+        retained_files,
+    };
+
+    fs::create_dir_all(build_execution_retained_dir(workspace_path))?;
+    fs::write(
+        report_path,
+        serde_json::to_vec_pretty(&report).map_err(io::Error::other)?,
+    )?;
+
+    Ok(())
+}
+
+fn run_build_cleanup(
+    coordinator: &LocalCoordinator,
+    build_run_id: i64,
+    attempt_roots: &[PathBuf],
+) {
+    let build_run = match coordinator.get_build_run_record(build_run_id) {
+        Ok(build_run) => build_run,
+        Err(error) => {
+            eprintln!(
+                "runtime cleanup could not reload build run {}: {}",
+                build_run_id, error
+            );
+            return;
+        }
+    };
+    let Some(final_workspace_path) = build_run
+        .workspace_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    else {
+        return;
+    };
+
+    let mut all_attempt_roots = Vec::new();
+    for attempt_root in attempt_roots {
+        push_attempt_root(&mut all_attempt_roots, attempt_root.clone());
+    }
+    push_attempt_root(&mut all_attempt_roots, final_workspace_path.clone());
+
+    let workspace_bytes_before = match total_workspace_size_bytes(&all_attempt_roots) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!(
+                "runtime cleanup could not size build run {} before pruning: {}",
+                build_run_id, error
+            );
+            0
+        }
+    };
+
+    let mut cleanup_error = None;
+    if let Err(error) = archive_build_run_logs(&all_attempt_roots, &final_workspace_path) {
+        append_cleanup_error(&mut cleanup_error, error.to_string());
+    }
+    let removed_attempt_count = match prune_build_run_workspaces(&all_attempt_roots, &final_workspace_path) {
+        Ok(count) => count,
+        Err(error) => {
+            append_cleanup_error(&mut cleanup_error, error.to_string());
+            0
+        }
+    };
+
+    let workspace_bytes_after = match total_workspace_size_bytes(&all_attempt_roots) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            append_cleanup_error(&mut cleanup_error, error.to_string());
+            0
+        }
+    };
+
+    let attempts = all_attempt_roots
+        .iter()
+        .map(|attempt_root| BuildExecutionAttemptSnapshot {
+            workspace_path: attempt_root.display().to_string(),
+            is_final_workspace: attempt_root == &final_workspace_path,
+            removed_after_cleanup: attempt_root != &final_workspace_path && !attempt_root.exists(),
+        })
+        .collect::<Vec<_>>();
+    let cleanup = BuildExecutionCleanupSnapshot {
+        status: String::from(if cleanup_error.is_some() {
+            BUILD_EXECUTION_CLEANUP_FAILED
+        } else {
+            BUILD_EXECUTION_CLEANUP_COMPLETED
+        }),
+        trigger: String::from(BUILD_EXECUTION_CLEANUP_TRIGGER_TERMINAL_STATE),
+        workspace_path: final_workspace_path.display().to_string(),
+        workspace_bytes_before,
+        workspace_bytes_after,
+        removed_attempt_count,
+        error_message: cleanup_error,
+    };
+
+    if let Err(error) = synchronize_build_execution_report(
+        coordinator,
+        build_run_id,
+        Some(attempts),
+        Some(cleanup),
+    ) {
+        eprintln!(
+            "runtime cleanup could not persist build execution report for {}: {}",
+            build_run_id, error
+        );
+    }
+}
+
+pub(crate) fn recover_interrupted_build_attempts(
+    coordinator: &LocalCoordinator,
+    recovery_report: &RuntimeRecoveryReport,
+) {
+    for interrupted_build in &recovery_report.interrupted_builds {
+        run_interrupted_build_cleanup(coordinator, interrupted_build);
+    }
+}
+
+fn run_interrupted_build_cleanup(
+    coordinator: &LocalCoordinator,
+    interrupted_build: &InterruptedBuildRecoveryRecord,
+) {
+    let workspace_path = PathBuf::from(interrupted_build.workspace_path.trim());
+    let attempt_roots = discover_build_run_attempt_roots(
+        interrupted_build.build_run_id,
+        &workspace_path,
+    )
+    .unwrap_or_else(|error| {
+        eprintln!(
+            "runtime recovery could not enumerate interrupted build attempts for {}: {}",
+            interrupted_build.build_run_id, error
+        );
+        vec![workspace_path.clone()]
+    });
+    let workspace_bytes_before = match total_workspace_size_bytes(&attempt_roots) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!(
+                "runtime recovery could not size interrupted build run {} before pruning: {}",
+                interrupted_build.build_run_id, error
+            );
+            0
+        }
+    };
+
+    let mut cleanup_error = None;
+    if let Err(error) = archive_build_run_logs(&attempt_roots, &workspace_path) {
+        append_cleanup_error(&mut cleanup_error, error.to_string());
+    }
+    let removed_attempt_count = match prune_build_run_workspaces(&attempt_roots, &workspace_path) {
+        Ok(count) => count,
+        Err(error) => {
+            append_cleanup_error(&mut cleanup_error, error.to_string());
+            0
+        }
+    };
+    let workspace_bytes_after = match total_workspace_size_bytes(&attempt_roots) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            append_cleanup_error(&mut cleanup_error, error.to_string());
+            0
+        }
+    };
+
+    let attempts = attempt_roots
+        .iter()
+        .map(|attempt_root| BuildExecutionAttemptSnapshot {
+            workspace_path: attempt_root.display().to_string(),
+            is_final_workspace: attempt_root == &workspace_path,
+            removed_after_cleanup: attempt_root != &workspace_path && !attempt_root.exists(),
+        })
+        .collect::<Vec<_>>();
+    let cleanup = BuildExecutionCleanupSnapshot {
+        status: String::from(if cleanup_error.is_some() {
+            BUILD_EXECUTION_CLEANUP_FAILED
+        } else {
+            BUILD_EXECUTION_CLEANUP_COMPLETED
+        }),
+        trigger: String::from(cleanup_trigger_for_interruption_kind(
+            &interrupted_build.interruption_kind,
+        )),
+        workspace_path: workspace_path.display().to_string(),
+        workspace_bytes_before,
+        workspace_bytes_after,
+        removed_attempt_count,
+        error_message: cleanup_error,
+    };
+    let interruption = BuildExecutionInterruptionSnapshot {
+        kind: interrupted_build.interruption_kind.clone(),
+        message: interrupted_build.interruption_message.clone(),
+    };
+
+    if let Err(error) = synchronize_build_execution_report_for_workspace(
+        coordinator,
+        interrupted_build.build_run_id,
+        &workspace_path,
+        Some(attempts),
+        Some(cleanup),
+        Some(interruption),
+    ) {
+        eprintln!(
+            "runtime recovery could not persist interrupted build execution report for {}: {}",
+            interrupted_build.build_run_id, error
+        );
+    }
+}
+
+fn cleanup_trigger_for_interruption_kind(interruption_kind: &str) -> &'static str {
+    match interruption_kind {
+        RECOVERY_INTERRUPTION_KIND_REQUESTED => {
+            BUILD_EXECUTION_CLEANUP_TRIGGER_REQUESTED_INTERRUPTION
+        }
+        RECOVERY_INTERRUPTION_KIND_SYSTEM => BUILD_EXECUTION_CLEANUP_TRIGGER_SYSTEM_INTERRUPTION,
+        _ => BUILD_EXECUTION_CLEANUP_TRIGGER_SYSTEM_INTERRUPTION,
+    }
+}
+
+fn discover_build_run_attempt_roots(
+    build_run_id: i64,
+    workspace_path: &Path,
+) -> io::Result<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+    let prefix = format!("build-run-{build_run_id}-attempt-");
+
+    if let Some(parent) = workspace_path.parent() {
+        if parent.is_dir() {
+            let mut entries = fs::read_dir(parent)?.collect::<Result<Vec<_>, _>>()?;
+            entries.sort_by_key(|entry| entry.path());
+            for entry in entries {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                if name.starts_with(&prefix) {
+                    push_attempt_root(&mut roots, path);
+                }
+            }
+        }
+    }
+
+    push_attempt_root(&mut roots, workspace_path.to_path_buf());
+    Ok(roots)
+}
+
+pub(crate) fn synchronize_build_execution_report_from_publish(
+    coordinator: &LocalCoordinator,
+    publish_run: &PublishRunRecord,
+) {
+    if let Err(error) = synchronize_build_execution_report(
+        coordinator,
+        publish_run.build_run_id,
+        None,
+        None,
+    ) {
+        eprintln!(
+            "runtime cleanup could not refresh build execution report for publish run {}: {}",
+            publish_run.id, error
+        );
+    }
+}
+
+fn process_build_run_with_retry(
+    coordinator: &LocalCoordinator,
+    directories: &runtime_config::RuntimeDirectories,
+    processor: &ExecutionProcessor<HostNativeUnityExecutor>,
+    runner_plan: &ExecutionPlan,
+    preparation: &WorkspacePreparationInput,
+    build_run_id: i64,
+    stage_sequence: Rc<RefCell<BuildRunStageSequence>>,
+    attempt_roots: &mut Vec<PathBuf>,
+) -> io::Result<BuildRunRecord> {
+    let mut current_preparation = preparation.clone();
+    let mut retry_available = true;
+
+    loop {
+        let planned = WorkspacePreparer::new(directories).plan(&current_preparation)?;
+        push_attempt_root(attempt_roots, planned.root_path.clone());
+        let tracker = BuildRunStageTracker::new(
+            coordinator,
+            build_run_id,
+            planned.root_path.clone(),
+            planned.artifact_root_path.clone(),
+            stage_sequence.clone(),
+        )?;
+        let checkout_log_path = tracker.stage_log_path(BuildProcessStage::CheckoutRepository);
+
+        tracker.start_stage(
+            BuildProcessStage::CheckoutRepository,
+            &format!(
+                "Checking out repository '{}' at tag '{}' into '{}'.",
+                current_preparation.repository_url,
+                current_preparation.git_tag,
+                planned.source_path.display(),
+            ),
+        )?;
+
+        let workspace = match processor.prepare_workspace(&current_preparation) {
+            Ok(workspace) => {
+                tracker.complete_stage(
+                    BuildProcessStage::CheckoutRepository,
+                    &format!(
+                        "Repository checkout completed at '{}'.",
+                        workspace.source_path.display(),
+                    ),
+                )?;
+                workspace
+            }
+            Err(error) => {
+                tracker.fail_stage(BuildProcessStage::CheckoutRepository, &error.to_string())?;
+                let record = coordinator.fail_build_run(
+                    build_run_id,
+                    FailBuildRunInput {
+                        workspace_path: planned.root_path.display().to_string(),
+                        log_path: checkout_log_path.display().to_string(),
+                        artifact_root_path: planned.artifact_root_path.display().to_string(),
+                        error_message: error.to_string(),
+                    },
+                )?;
+                run_build_cleanup(coordinator, record.id, attempt_roots);
+                return Ok(record);
+            }
+        };
+
+        let unity_log_path = tracker.stage_log_path(BuildProcessStage::UnityBuild);
+        let mut workspace = workspace;
+        workspace.log_path = unity_log_path.clone();
+
+        tracker.start_stage(
+            BuildProcessStage::UnityBuild,
+            &format!(
+                "Launching Unity build method '{}' for target '{}'.",
+                runner_plan.build_method,
+                runner_plan.platform,
+            ),
+        )?;
+
+        let mut reporter = BuildStageHeartbeatReporter::new(&tracker, BuildProcessStage::UnityBuild);
+        let execute_outcome = processor.execute_prepared(runner_plan, workspace, &mut reporter);
+        if let Some(error) = reporter.take_error() {
+            tracker.fail_stage(BuildProcessStage::UnityBuild, &error.to_string())?;
+            let record = coordinator.fail_build_run(
+                build_run_id,
+                FailBuildRunInput {
+                    workspace_path: planned.root_path.display().to_string(),
+                    log_path: unity_log_path.display().to_string(),
+                    artifact_root_path: planned.artifact_root_path.display().to_string(),
+                    error_message: error.to_string(),
+                },
+            )?;
+            run_build_cleanup(coordinator, record.id, attempt_roots);
+            return Ok(record);
+        }
+
+        match execute_outcome {
+            Ok(ExecutionProcessOutcome { result, error }) => match error {
+                Some(error) if retry_available && should_retry_in_fresh_workspace(&result.log_path)? => {
+                    tracker.fail_stage(
+                        BuildProcessStage::UnityBuild,
+                        &format!("{} Retrying once with a fresh workspace.", error),
+                    )?;
+                    retry_available = false;
+                    current_preparation.attempt_token = next_workspace_attempt_token()?;
+                    continue;
+                }
+                Some(error) => {
+                    tracker.fail_stage(BuildProcessStage::UnityBuild, &error.to_string())?;
+                    let record = persist_host_native_failure(
+                        coordinator,
+                        build_run_id,
+                        &result,
+                        &error,
+                    )?;
+                    run_build_cleanup(coordinator, record.id, attempt_roots);
+                    return Ok(record);
+                }
+                None => {
+                    tracker.complete_stage(
+                        BuildProcessStage::UnityBuild,
+                        &format!(
+                            "Unity build completed with raw output at '{}'.",
+                            result.output_path.display(),
+                        ),
+                    )?;
+                    let record = complete_successful_build_run(
+                        coordinator,
+                        build_run_id,
+                        runner_plan,
+                        &result,
+                        &tracker,
+                    )
+                    .or_else(|error| {
+                        coordinator.fail_build_run(
+                            build_run_id,
+                            FailBuildRunInput {
+                                workspace_path: result.workspace_path.display().to_string(),
+                                log_path: result.log_path.display().to_string(),
+                                artifact_root_path: result.artifact_root_path.display().to_string(),
+                                error_message: error.to_string(),
+                            },
+                        )
+                    })?;
+                    run_build_cleanup(coordinator, record.id, attempt_roots);
+                    return Ok(record);
+                }
+            },
+            Err(error) if retry_available && should_retry_in_fresh_workspace(&unity_log_path)? => {
+                tracker.fail_stage(
+                    BuildProcessStage::UnityBuild,
+                    &format!("{} Retrying once with a fresh workspace.", error),
+                )?;
+                retry_available = false;
+                current_preparation.attempt_token = next_workspace_attempt_token()?;
+                continue;
+            }
+            Err(error) => {
+                tracker.fail_stage(BuildProcessStage::UnityBuild, &error.to_string())?;
+                let record = coordinator.fail_build_run(
+                    build_run_id,
+                    FailBuildRunInput {
+                        workspace_path: planned.root_path.display().to_string(),
+                        log_path: unity_log_path.display().to_string(),
+                        artifact_root_path: planned.artifact_root_path.display().to_string(),
+                        error_message: error.to_string(),
+                    },
+                )?;
+                run_build_cleanup(coordinator, record.id, attempt_roots);
+                return Ok(record);
+            }
+        }
+    }
+}
+
+fn should_retry_in_fresh_workspace(log_path: &Path) -> io::Result<bool> {
+    let contents = match fs::read_to_string(log_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let normalized = contents.to_ascii_lowercase();
+
+    Ok(normalized.contains("packagecache")
+        && normalized.contains("rename")
+        && (normalized.contains("eperm") || normalized.contains("operation not permitted")))
+}
+
+fn register_artifacts_and_dispatch_publish_runs(
+    coordinator: &LocalCoordinator,
+    build_run_id: i64,
+    artifact_root_path: &Path,
+) -> io::Result<()> {
+    let artifacts = discover_artifacts(artifact_root_path)?;
+    let inputs = artifacts
+        .into_iter()
+        .map(|artifact| CreateArtifactRecordInput {
+            name: artifact.name,
+            kind: artifact.kind,
+            path: artifact.path,
+            size_bytes: artifact.size_bytes,
+            checksum_sha256: artifact.checksum_sha256,
+        })
+        .collect::<Vec<_>>();
+    coordinator.replace_build_artifacts(build_run_id, inputs)?;
+
+    for run in coordinator.plan_build_publish_runs(build_run_id)? {
+        if run.status != PublishStatus::Queued.as_str() {
+            continue;
+        }
+
+        match coordinator.dispatch_publish_run(run.id)? {
+            QueueDispatchOutcome::Enqueued | QueueDispatchOutcome::AlreadyClaimed => {}
+            QueueDispatchOutcome::InProgress => {
+                return Err(io::Error::new(
+                    ErrorKind::WouldBlock,
+                    format!("publish run {} dispatch is already in progress", run.id),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_claimed_build_context(
+    coordinator: &LocalCoordinator,
+    payload: &[u8],
+) -> io::Result<ResolvedBuildContext> {
+    let job: BuildDispatchJob = serde_json::from_slice(payload)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    let plan = coordinator.get_build_execution_plan(job.build_run_id)?;
+    let git_auth = match plan.repository_credentials_id {
+        Some(credentials_id) => {
+            let credentials = coordinator.get_credential_record(credentials_id)?;
+            git_auth_options_from_credentials(&credentials.kind, &credentials.config_json)?
+        }
+        None => GitAuthOptions::default(),
+    };
+
+    Ok(ResolvedBuildContext {
+        preparation: WorkspacePreparationInput {
+            build_run_id: plan.build_run_id,
+            attempt_token: next_workspace_attempt_token()?,
+            repository_name: plan.repository_name.clone(),
+            repository_url: plan.repository_url.clone(),
+            git_auth,
+            git_tag: plan.git_tag.clone(),
+            workspace_root_override: plan.workspace_root_override.clone(),
+            artifacts_root_override: plan.artifacts_root_override.clone(),
+        },
+        plan,
+    })
+}
+
+fn runner_execution_plan(plan: &StoredBuildExecutionPlan) -> io::Result<ExecutionPlan> {
+    let build_method = require_cli_value(
+        plan.build_method.as_deref().unwrap_or_default(),
+        "build method",
+    )?;
+    if plan.timeout_seconds <= 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "build run {} has invalid timeout_seconds {}",
+                plan.build_run_id, plan.timeout_seconds
+            ),
+        ));
+    }
+
+    Ok(ExecutionPlan {
+        build_run_id: plan.build_run_id,
+        release_run_id: plan.release_run_id,
+        build_target_id: plan.build_target_id,
+        repository_name: plan.repository_name.clone(),
+        repository_url: plan.repository_url.clone(),
+        git_tag: plan.git_tag.clone(),
+        target_name: plan.target_name.clone(),
+        platform: plan.platform.clone(),
+        runner_type: plan.runner_type.clone(),
+        build_method,
+        output_kind: plan.output_kind.clone(),
+        output_path_template: plan.output_path_template.clone(),
+        unity_version: plan.unity_version.clone(),
+        config_json: plan.config_json.clone(),
+        timeout_seconds: plan.timeout_seconds,
+    })
+}
+
+fn resolve_runtime_build_execution_plan(
+    config: &RuntimeConfig,
+    plan: &StoredBuildExecutionPlan,
+) -> io::Result<ExecutionPlan> {
+    let capability_profile = inspect_host_capability_profile(config.platform);
+    resolve_runtime_build_execution_plan_with_profile(plan, &capability_profile)
+}
+
+pub(crate) fn resolve_runtime_build_execution_plan_with_profile(
+    plan: &StoredBuildExecutionPlan,
+    capability_profile: &HostCapabilityProfile,
+) -> io::Result<ExecutionPlan> {
+    let runner_plan = runner_execution_plan(plan)?;
+    if runner_plan.runner_type.trim() != RunnerFamily::HostNative.label() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "build run {} uses unsupported runner_type {:?} for builds run-next",
+                runner_plan.build_run_id, runner_plan.runner_type
+            ),
+        ));
+    }
+
+    resolve_host_native_execution_plan(&runner_plan, capability_profile)
+}
+
+fn persist_host_native_failure(
+    coordinator: &LocalCoordinator,
+    build_run_id: i64,
+    result: &runtime_runner::ExecutionResult,
+    error: &io::Error,
+) -> io::Result<BuildRunRecord> {
+    if error.kind() == ErrorKind::TimedOut {
+        return coordinator.cancel_build_run(
+            build_run_id,
+            CancelBuildRunInput {
+                workspace_path: result.workspace_path.display().to_string(),
+                log_path: result.log_path.display().to_string(),
+                artifact_root_path: result.artifact_root_path.display().to_string(),
+                error_message: error.to_string(),
+            },
+        );
+    }
+
+    coordinator.fail_build_run(
+        build_run_id,
+        FailBuildRunInput {
+            workspace_path: result.workspace_path.display().to_string(),
+            log_path: result.log_path.display().to_string(),
+            artifact_root_path: result.artifact_root_path.display().to_string(),
+            error_message: error.to_string(),
+        },
+    )
+}
+
+fn release_claimed_build_message(
+    coordinator: &LocalCoordinator,
+    message_id: i64,
+    lease_token: &str,
+    error: &io::Error,
+) -> Result<(), Box<dyn Error>> {
+    coordinator
+        .release_message(message_id, lease_token)
+        .map_err(|release_error| {
+            Box::new(io::Error::other(format!(
+                "release claimed build message {message_id} after error {error}: {release_error}"
+            ))) as Box<dyn Error>
+        })?;
+
+    Ok(())
+}
