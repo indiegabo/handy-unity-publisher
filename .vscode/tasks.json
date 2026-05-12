@@ -2,6 +2,21 @@
   "version": "2.0.0",
   "tasks": [
     {
+      "label": "build desktop ui",
+      "type": "shell",
+      "command": "npm",
+      "args": [
+        "run",
+        "build",
+        "--prefix",
+        "apps/desktop/ui"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
       "label": "build desktop shell",
       "type": "shell",
       "command": "C:/Users/gabao/.cargo/bin/cargo.exe",
@@ -13,6 +28,9 @@
       "options": {
         "cwd": "${workspaceFolder}"
       },
+      "dependsOn": [
+        "build desktop ui"
+      ],
       "group": {
         "kind": "build",
         "isDefault": true

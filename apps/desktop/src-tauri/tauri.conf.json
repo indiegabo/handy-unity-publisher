@@ -4,7 +4,10 @@
     "identifier": "com.indiegabo.handyunitypublisher",
     "mainBinaryName": "HUP",
     "build": {
-        "frontendDist": "../ui"
+        "beforeDevCommand": "npm run dev --prefix ../ui",
+        "beforeBuildCommand": "npm run build --prefix ../ui",
+        "devUrl": "http://127.0.0.1:1420",
+        "frontendDist": "../ui/dist"
     },
     "app": {
         "withGlobalTauri": true,
