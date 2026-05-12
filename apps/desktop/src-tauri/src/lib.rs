@@ -32,7 +32,12 @@ use runtime_store::{
     list_publish_target_runtime_settings, LocalCoordinator, StorageLayout,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, RunEvent};
+use tauri::{
+    menu::MenuBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Manager, PhysicalPosition, PhysicalSize, RunEvent,
+    WebviewWindow, WindowEvent,
+};
 
 const RUNTIME_PACKAGE_NAME: &str = "runtime-bin";
 const RUNTIME_BINARY_NAME: &str = "hup-runtime";
@@ -44,6 +49,15 @@ const RUNTIME_SHUTDOWN_WAIT_POLL_MILLIS: u64 = 100;
 const RUNTIME_SHUTDOWN_WAIT_POLLS: usize = 20;
 const BUILD_EXECUTION_RETAINED_DIR_NAME: &str = "retained";
 const BUILD_EXECUTION_REPORT_FILE_NAME: &str = "execution-report.json";
+const MAIN_WINDOW_LABEL: &str = "main";
+const TRAY_ICON_ID: &str = "hup-tray";
+const TRAY_MENU_OPEN_ID: &str = "tray-open";
+const TRAY_MENU_QUIT_ID: &str = "tray-quit";
+const POPUP_WINDOW_WIDTH: u32 = 360;
+const POPUP_WINDOW_HEIGHT: u32 = 420;
+const POPUP_WINDOW_MIN_WIDTH: u32 = 360;
+const POPUP_WINDOW_MIN_HEIGHT: u32 = 420;
+const POPUP_WINDOW_EDGE_MARGIN: i32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeLaunchAction {
@@ -87,6 +101,11 @@ impl RuntimeCommandPlan {
 #[derive(Default)]
 struct RuntimeProcessState {
     child: Mutex<Option<Child>>,
+}
+
+#[derive(Default)]
+struct ShellLifecycleState {
+    is_quitting: Mutex<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -302,10 +321,138 @@ struct ApplicationVersionInfo {
     app_version: String,
 }
 
+fn main_window(app_handle: &AppHandle) -> Result<WebviewWindow, String> {
+    app_handle
+        .get_webview_window(MAIN_WINDOW_LABEL)
+        .ok_or_else(|| "main window handle is unavailable".to_string())
+}
+
+fn initialize_tray(app: &tauri::App) -> Result<(), String> {
+    let menu = MenuBuilder::new(app)
+        .text(TRAY_MENU_OPEN_ID, "Open HUP")
+        .separator()
+        .text(TRAY_MENU_QUIT_ID, "Quit")
+        .build()
+        .map_err(|error| error.to_string())?;
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| "default tray icon is unavailable".to_string())?;
+
+    TrayIconBuilder::with_id(TRAY_ICON_ID)
+        .icon(icon)
+        .tooltip("HUP")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .build(app)
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+fn configure_main_window(app_handle: &AppHandle) -> Result<(), String> {
+    let window = main_window(app_handle)?;
+    window
+        .set_resizable(false)
+        .map_err(|error| error.to_string())?;
+    window
+        .set_minimizable(false)
+        .map_err(|error| error.to_string())?;
+    window
+        .set_maximizable(false)
+        .map_err(|error| error.to_string())?;
+    window
+        .set_always_on_top(true)
+        .map_err(|error| error.to_string())?;
+    window
+        .set_skip_taskbar(true)
+        .map_err(|error| error.to_string())?;
+    window
+        .set_min_size(Some(PhysicalSize::new(
+            POPUP_WINDOW_MIN_WIDTH,
+            POPUP_WINDOW_MIN_HEIGHT,
+        )))
+        .map_err(|error| error.to_string())?;
+    pin_main_window_to_primary_monitor(app_handle)
+}
+
+fn pin_main_window_to_primary_monitor(app_handle: &AppHandle) -> Result<(), String> {
+    let window = main_window(app_handle)?;
+    let monitor = window
+        .primary_monitor()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "primary monitor is unavailable".to_string())?;
+    let work_area = monitor.work_area();
+    let width = POPUP_WINDOW_WIDTH.min(work_area.size.width);
+    let height = POPUP_WINDOW_HEIGHT.min(work_area.size.height);
+
+    window
+        .set_size(PhysicalSize::new(width, height))
+        .map_err(|error| error.to_string())?;
+
+    let outer_size = window.outer_size().map_err(|error| error.to_string())?;
+    let x = work_area.position.x + work_area.size.width as i32
+        - outer_size.width as i32
+        - POPUP_WINDOW_EDGE_MARGIN;
+    let y = work_area.position.y + work_area.size.height as i32
+        - outer_size.height as i32
+        - POPUP_WINDOW_EDGE_MARGIN;
+
+    window
+        .set_position(PhysicalPosition::new(
+            x.max(work_area.position.x),
+            y.max(work_area.position.y),
+        ))
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+fn show_main_window(app_handle: &AppHandle) {
+    if let Err(error) = pin_main_window_to_primary_monitor(app_handle) {
+        eprintln!("failed to position main window: {error}");
+    }
+
+    match main_window(app_handle) {
+        Ok(window) => {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        Err(error) => eprintln!("failed to show main window: {error}"),
+    }
+}
+
+fn hide_main_window(app_handle: &AppHandle) {
+    match main_window(app_handle) {
+        Ok(window) => {
+            let _ = window.hide();
+        }
+        Err(error) => eprintln!("failed to hide main window: {error}"),
+    }
+}
+
+fn request_app_exit(app_handle: &AppHandle) {
+    if let Ok(mut is_quitting) = app_handle.state::<ShellLifecycleState>().is_quitting.lock() {
+        *is_quitting = true;
+    }
+    app_handle.exit(0);
+}
+
+fn should_keep_running(app_handle: &AppHandle) -> bool {
+    app_handle
+        .state::<ShellLifecycleState>()
+        .is_quitting
+        .lock()
+        .map(|is_quitting| !*is_quitting)
+        .unwrap_or(false)
+}
+
 /// Runs the desktop shell and supervises the bundled local runtime process.
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(RuntimeProcessState::default())
+        .manage(ShellLifecycleState::default())
         .invoke_handler(tauri::generate_handler![
             application_version,
             runtime_health,
@@ -327,14 +474,50 @@ pub fn run() {
         .setup(|app| {
             launch_runtime_process(app)
                 .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
+            initialize_tray(app)
+                .map_err(|error| -> Box<dyn std::error::Error> { Box::new(io::Error::other(error)) })?;
+            configure_main_window(app.handle())
+                .map_err(|error| -> Box<dyn std::error::Error> { Box::new(io::Error::other(error)) })?;
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("desktop shell failed to build");
 
     app.run(|app_handle, event| {
-        if matches!(event, RunEvent::Exit) {
-            stop_runtime_process(app_handle);
+        match event {
+            RunEvent::Ready => show_main_window(app_handle),
+            RunEvent::WindowEvent { label, event, .. }
+                if label == MAIN_WINDOW_LABEL
+                    && matches!(event, WindowEvent::CloseRequested { .. }) =>
+            {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    if should_keep_running(app_handle) {
+                        api.prevent_close();
+                        hide_main_window(app_handle);
+                    }
+                }
+            }
+            RunEvent::MenuEvent(event) if event.id() == TRAY_MENU_OPEN_ID => {
+                show_main_window(app_handle);
+            }
+            RunEvent::MenuEvent(event) if event.id() == TRAY_MENU_QUIT_ID => {
+                request_app_exit(app_handle);
+            }
+            RunEvent::TrayIconEvent(TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            }) => {
+                show_main_window(app_handle);
+            }
+            RunEvent::TrayIconEvent(TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            }) => {
+                show_main_window(app_handle);
+            }
+            RunEvent::Exit => stop_runtime_process(app_handle),
+            _ => {}
         }
     });
 }

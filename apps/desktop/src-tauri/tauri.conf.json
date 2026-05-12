@@ -12,10 +12,12 @@
             {
                 "label": "main",
                 "title": "HUP",
-                "width": 1200,
-                "height": 800,
-                "resizable": true,
-                "visible": true
+                "width": 360,
+                "height": 420,
+                "resizable": false,
+                "visible": false,
+                "alwaysOnTop": true,
+                "skipTaskbar": true
             }
         ],
         "security": {

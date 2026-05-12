@@ -14,7 +14,7 @@ path = "src/main.rs"
 tauri-build = { workspace = true }
 
 [dependencies]
-tauri = { workspace = true, features = [] }
+tauri = { workspace = true, features = ["tray-icon"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 runtime-config = { path = "../../../crates/runtime-config" }
