@@ -30,7 +30,9 @@ The shell is responsible for:
 - launching or reconnecting to the bundled runtime process
 - creating the tray icon and compact popup window lifecycle
 - exposing thin Tauri commands for operator-facing diagnostics and management
-- rendering the current popup UI from `apps/desktop/ui`
+- loading the Vite-built popup UI from `apps/desktop/ui/dist`
+- composing that popup UI from reusable React primitives under
+  `apps/desktop/ui/src/components`
 - anchoring the popup window to the lower-right corner of the primary monitor
 - hiding the window to tray on close while keeping the runtime alive
 - executing the full shutdown path only when the tray `Quit` action is chosen
@@ -38,9 +40,10 @@ The shell is responsible for:
 The shell remains intentionally thin. Orchestration rules belong in runtime
 crates, not in window bindings.
 
-The current visible UI is intentionally minimal and only shows the `HUP`
-wordmark. The Tauri command surface for diagnostics and management remains in
-place behind that minimal shell while the next operator-facing view is rebuilt.
+The current visible UI is a compact React + TypeScript + Vite showcase built
+from reusable dark-theme primitives under `apps/desktop/ui/src/components`.
+The Tauri command surface for diagnostics and management remains in place
+behind that shell while the broader operator views are rebuilt.
 
 ### Bundled Runtime
 
@@ -157,8 +160,9 @@ Its current operator-visible behavior is:
 - the `Quit` tray action triggers intentional shell exit and runtime shutdown
 
 The runtime diagnostics, repository inspection, and credential management
-commands still exist behind the shell, but the current popup UI only renders a
-minimal placeholder while the tray lifecycle settles.
+commands still exist behind the shell, and the current popup UI now renders a
+compact dark showcase of the reusable component system that future operator
+views will extend.
 
 ### Runtime Commands
 

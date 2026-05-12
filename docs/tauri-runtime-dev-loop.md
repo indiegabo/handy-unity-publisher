@@ -33,9 +33,10 @@ crates/
   runtime-store/
 ```
 
-Static frontend assets live in `apps/desktop/ui`. That keeps the desktop shell
-runnable without adding a permanent frontend build pipeline before the runtime
-contract and operator flows settle.
+The desktop UI source lives in `apps/desktop/ui` as a Vite-driven React +
+TypeScript frontend. Shared buttons, fields, icons, badges, and surface
+primitives live under `apps/desktop/ui/src/components`. Production assets are
+emitted to `apps/desktop/ui/dist` and loaded by the shell build.
 
 The runtime crates divide responsibilities explicitly:
 
@@ -59,9 +60,8 @@ Install Rust through `rustup` first, then open a fresh terminal session so
 For the desktop shell, install the native prerequisites required by Tauri for
 your host platform.
 
-Keep Node available for focused static JavaScript validation with
-`node --check`, even though the shell currently serves static assets instead of
-using a dedicated frontend bundler.
+Keep Node available because the desktop shell now builds its popup surface with
+Vite, React, and TypeScript.
 
 ## Runtime Root Layout
 
@@ -96,6 +96,28 @@ Inspect the resolved runtime directories and file layout:
 
 ```bash
 cargo run -p runtime-bin -- status
+```
+
+Install the desktop UI dependencies once:
+
+```bash
+npm install --prefix apps/desktop/ui
+```
+
+Start the Vite development server when iterating on shared components in a
+browser preview:
+
+```bash
+npm run dev --prefix apps/desktop/ui
+```
+
+The browser preview is useful for component work but does not expose live
+Tauri command invocations.
+
+Build the desktop UI assets consumed by plain Cargo runs:
+
+```bash
+npm run build --prefix apps/desktop/ui
 ```
 
 Bootstrap runtime metadata, health reports, and SQLite state:
@@ -347,10 +369,10 @@ If durable workflow behavior changed:
 cargo test -p runtime-store -q
 ```
 
-If static UI JavaScript changed:
+If the React + TypeScript desktop UI or reusable component kit changed:
 
 ```bash
-node --check apps/desktop/ui/app.js
+npm run build --prefix apps/desktop/ui
 ```
 
 ## Typical Local Flow

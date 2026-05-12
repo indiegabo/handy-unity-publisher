@@ -16,7 +16,8 @@ Canonical Git remote: `git@github.com:indiegabo/handy-unity-publisher.git`.
 ## Product Model
 
 - `apps/desktop/src-tauri` hosts the desktop shell and Tauri command surface.
-- `apps/desktop/ui` ships the minimal tray popup view loaded by the shell.
+- `apps/desktop/ui` hosts the React + TypeScript + Vite tray popup and
+  reusable UI component kit loaded by the shell.
 - `crates/runtime-bin` hosts the bundled runtime entrypoint and developer
   command surface.
 - `crates/runtime-store` owns durable workflow state and local coordination.
@@ -44,8 +45,9 @@ normal document window.
 - the `Quit` tray action marks the shell as intentionally exiting and then runs
   the normal runtime shutdown path
 
-The current visible UI is intentionally minimal and only renders the `HUP`
-wordmark while the tray lifecycle and runtime supervision path settle.
+The current visible UI is a compact React + TypeScript + Vite showcase built
+from reusable dark-theme components. It verifies the Tauri command bridge and
+anchors the operator-facing design system for the next shell views.
 
 ## Repository Layout
 
@@ -94,18 +96,30 @@ Inspect the local runtime status:
 cargo run -p runtime-bin -- status
 ```
 
+Preview the desktop UI component showcase in a browser while iterating on the
+shared primitives:
+
+```bash
+npm run dev --prefix apps/desktop/ui
+```
+
+The browser preview is useful for component work but does not expose the Tauri
+command bridge.
+
 Launch the desktop shell:
 
 ```bash
+npm install --prefix apps/desktop/ui
+npm run build --prefix apps/desktop/ui
 cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml
 ```
 
 Validate the touched slices:
 
 ```bash
+npm run build --prefix apps/desktop/ui
 cargo check -p desktop-shell -j 1 -q
 cargo test -p runtime-store -q
-node --check apps/desktop/ui/app.js
 ```
 
 Run the runtime interrupted-recovery smoke target without contending for the
@@ -149,7 +163,8 @@ repository root.
 - Repository manifests define polling, build targets, publish targets, and
   build-to-publish bindings.
 - The desktop shell is the primary operator surface and currently ships as a
-  minimal tray popup while the larger operator views are being rebuilt.
+  dense dark showcase of reusable components while the larger operator views
+  are being rebuilt.
 - Runtime crates stay focused and explicit. Shell bindings stay thin.
 - Operator-facing recovery paths should be available in the app before the
   documentation asks for manual host intervention.

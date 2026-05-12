@@ -17,6 +17,7 @@ The working technology stack for this repository is:
 
 - **Rust** for runtime and application code.
 - **Tauri** for the desktop shell.
+- **React + TypeScript + Vite** for the desktop UI under `apps/desktop/ui`.
 - **SQLite** for durable local state.
 - **Host-native Unity execution** through locally installed editors.
 - **Git** for version control, following the commit workflow described in
@@ -27,11 +28,15 @@ Supporting project files may also use:
 - **SQL** for migrations and schema evolution.
 - **YAML** for pipeline manifests and runtime configuration.
 - **Shell** for narrow operational scripts when Rust is not the correct fit.
+- **CSS** for the desktop UI theme and component styling.
 
 Application logic must be implemented in **Rust** unless the file being changed
-is inherently another supported format.
-Do not introduce unrelated runtime stacks such as **Node.js**, **Python**, or
-**C#** unless the user explicitly changes the project direction.
+belongs to the approved desktop UI under `apps/desktop/ui` or is inherently
+another supported format.
+The approved frontend toolchain for the shell is **React + TypeScript + Vite**.
+Do not introduce unrelated runtime stacks such as **Python**, **C#**, or
+alternate frontend frameworks unless the user explicitly changes the project
+direction.
 
 Your persona must be documented and consistently reflected in your interactions:
 
@@ -84,6 +89,8 @@ apps/
   desktop/
     src-tauri/
     ui/
+      src/
+        components/
 
 crates/
   runtime-bin/
@@ -157,6 +164,22 @@ existing snippet".
 - Keep dependency wiring explicit and easy to trace.
 - Prefer focused crates and orchestration boundaries; avoid god modules that
   mix supervision, scheduling, Git, storage, and Unity execution concerns.
+
+### 3.5.1 Desktop UI implementation standards
+
+- The desktop UI under `apps/desktop/ui` uses **React + TypeScript + Vite**.
+- Prefer extending the shared primitives under
+  `apps/desktop/ui/src/components` before creating ad hoc buttons, inputs,
+  panels, badges, or icons.
+- Keep the UI compact, operator-facing, and dense rather than marketing-led or
+  dashboard-bloated.
+- Preserve the established dark monochrome theme with black and gray surfaces,
+  subtle contrast, and `5px` border radii for buttons, inputs, and containers
+  unless a deliberate exception is required.
+- Treat **Yaak** and **Hoppscotch** as the primary visual references for
+  density, hierarchy, and tooling ergonomics.
+- Keep shell-facing UI logic thin; runtime orchestration rules still belong in
+  Rust crates and Tauri commands remain narrow bindings.
 
 ### 3.6 Persistence and schema discipline
 

@@ -30,7 +30,9 @@ The product is not a Unity gameplay codebase.
 ## Active Architecture
 
 - `apps/desktop/src-tauri` is the desktop shell crate.
-- `apps/desktop/ui` contains the minimal tray popup view.
+- `apps/desktop/ui` contains the React + TypeScript + Vite tray popup surface.
+- `apps/desktop/ui/src/components` contains the reusable React primitives used
+  across the desktop shell.
 - `crates/runtime-bin` exposes the bundled runtime commands and supervision
   loop.
 - `crates/runtime-store` owns durable SQLite-backed workflow state.
@@ -75,7 +77,8 @@ The desktop shell currently ships as a tray-resident popup:
 - closing the window hides it to tray and keeps the runtime alive
 - tray clicks and the `Open HUP` menu action reopen the popup
 - the `Quit` tray action exits the shell and triggers runtime shutdown
-- the visible UI is currently a minimal `HUP` placeholder
+- the visible UI is currently a compact dark showcase of reusable React
+  components wired to the Tauri command bridge
 
 The shell still exposes Tauri commands for:
 
@@ -100,15 +103,17 @@ Common validation and development commands:
 cargo run -p runtime-bin -- bootstrap
 cargo run -p runtime-bin -- manifests sync
 cargo run -p runtime-bin -- status
+npm install --prefix apps/desktop/ui
+npm run dev --prefix apps/desktop/ui
+npm run build --prefix apps/desktop/ui
 cargo run --package desktop-shell
 cargo check -p desktop-shell -j 1 -q
 cargo test -p runtime-store -q
-node --check apps/desktop/ui/app.js
 ```
 
-When changing static UI code, validate the touched JavaScript file with
-`node --check` only if that JavaScript is still part of the current popup
-surface, then rerun the narrow desktop-shell compile check.
+When changing the desktop UI, validate the touched React + TypeScript slice
+with `npm run build --prefix apps/desktop/ui`, then rerun the narrow
+desktop-shell compile check.
 
 ## Documentation Priorities
 
@@ -123,6 +128,9 @@ surface, then rerun the narrow desktop-shell compile check.
 - Keep Rust runtime crates focused and explicit.
 - Keep Tauri commands thin and delegate orchestration to runtime crates.
 - Treat the desktop shell as the primary operator surface.
+- Prefer the reusable desktop UI primitives under
+  `apps/desktop/ui/src/components` before creating one-off controls.
+- Keep desktop UI work compact, dark, and tool-oriented.
 - Do not invent alternate onboarding or packaging models in documentation.
 
 ## Required Reads For Common Tasks
