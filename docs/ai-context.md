@@ -1,7 +1,7 @@
 # AI Context
 
-Conversation Reference: hgb-desktop-active-context
-Project Repository: indiegabo/handy-unity-bulder
+Conversation Reference: hup-desktop-active-context
+Project Repository: indiegabo/handy-unity-publisher
 
 ## Purpose
 
@@ -13,7 +13,7 @@ Any implementation or documentation work should start from that assumption.
 
 ## Product Summary
 
-handy-unity-bulder is a self-hosted, local-first build orchestration product
+HUP is a self-hosted, local-first build orchestration product
 for Unity repositories.
 
 The operator workflow is:

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This roadmap tracks the active delivery work for the handy-unity-bulder desktop
+This roadmap tracks the active delivery work for the HUP desktop
 product.
 
 It describes what is already established, what is currently in flight, and

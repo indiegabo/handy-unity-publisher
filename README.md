@@ -1,14 +1,17 @@
-# handy-unity-builder
+# HUP
 
 > "If your daily workstation can already build and publish your Unity project
 > manually, you should not need a second machine just to automate that same
-> work. handy-unity-builder exists to run that pipeline for you, on your own
+> work. HUP exists to run that pipeline for you, on your own
 > machine, with repeatability, logs, and operator control."
 
-handy-unity-builder is a local-first desktop orchestration product for Unity
+HUP is a local-first desktop orchestration product for Unity
 release pipelines. The shipped product model is a Tauri desktop shell with a
 bundled Rust runtime, SQLite-backed workflow state, filesystem-backed runtime
 assets, and host-native Unity execution.
+
+Repository and development surfaces use `handy-unity-publisher`.
+Canonical Git remote: `git@github.com:indiegabo/handy-unity-publisher.git`.
 
 ## Product Model
 

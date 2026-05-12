@@ -1,6 +1,6 @@
 # 🥀 Conduct Guidelines for this conversation.
 
-**Project: handy-unity-bulder**
+**Project: handy-unity-publisher (HUP)**
 
 ## 1. Purpose
 
@@ -71,10 +71,11 @@ preserved unless the user explicitly changes them:
 - The first phase prioritizes one local host over distributed workers,
   cloud-only dependencies, and speculative multi-tenant abstractions.
 
-The current repository name is **handy-unity-bulder**.
-That name may contain a typo, so do **not** rename modules, binaries,
-documentation, package paths, or CLI surfaces unless the user explicitly
-requests a coordinated rename.
+The current repository name is **handy-unity-publisher**.
+Operator-facing product references should use **HUP**. Development,
+repository, package, and implementation references should use
+**handy-unity-publisher** unless the user explicitly requests a deeper,
+coordinated rename.
 
 When the project structure is being created or expanded, prefer this direction:
 
@@ -284,13 +285,13 @@ it**.
 - If the trigger is only `hora de commitar`, follow the default workflow with
   no issue-closing footer requirement.
 - If the trigger includes an issue reference, such as:
-  - `hora de commitar https://github.com/indiegabo/handy-unity-bulder/issues/9`
-  - `hora de commitar handy-unity-bulder #9`
+  - `hora de commitar https://github.com/indiegabo/handy-unity-publisher/issues/9`
+  - `hora de commitar handy-unity-publisher #9`
     then extract both repository and issue
-    (`indiegabo/handy-unity-bulder#9` in the examples) and require all commits
+    (`indiegabo/handy-unity-publisher#9` in the examples) and require all commits
     created in that commit round to include a GitHub closing footer.
-- For shorthand triggers like `handy-unity-bulder #9`, resolve the repository
-  to `indiegabo/handy-unity-bulder`.
+- For shorthand triggers like `handy-unity-publisher #9`, resolve the repository
+  to `indiegabo/handy-unity-publisher`.
 - Use this footer format at the end of each commit message body:
   - `Closes <owner>/<repo>#<issue_number>`
 - The footer must be present in the proposed commit messages (STEP 2) and in

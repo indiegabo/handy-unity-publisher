@@ -1,7 +1,7 @@
 # Unity Build Method Guide
 
 This guide is for human developers and AI agents that create or update build
-targets for handy-unity-bulder.
+targets for HUP.
 
 ## Why This Guide Exists
 
@@ -96,7 +96,7 @@ must be inside an `Editor` folder or an Editor-only assembly definition.
 ## Complete Unity Example
 
 The script below is a complete example that can be committed into a Unity
-project and referenced by handy-unity-bulder build targets.
+project and referenced by HUP build targets.
 
 It supports:
 
@@ -501,7 +501,7 @@ The reference script above excludes path segments that end with:
 That covers the common Unity-generated directories such as Burst debug
 information folders while avoiding risky guesses about required runtime files.
 
-For archive outputs, handy-unity-bulder should also exclude these debug-only
+For archive outputs, HUP should also exclude these debug-only
 sidecars when Unity generates them:
 
 - macOS standalone: `*.dSYM` symbol bundles
@@ -657,7 +657,7 @@ spec:
 ```
 
 The `Builder.PerformWebGL` method above automatically produces a zip file when
-`output.kind: archive`. handy-unity-bulder configuration should express archive
+`output.kind: archive`. HUP configuration should express archive
 behavior through `output.kind: archive` and a non-zip requested path.
 
 The reference archive routine also strips Unity-generated `DoNotShip` and

@@ -5,7 +5,7 @@ See the delivery roadmap in
 
 ## Overview
 
-handy-unity-bulder is a self-hosted, local-first desktop orchestration system
+HUP is a self-hosted, local-first desktop orchestration system
 for Unity release pipelines.
 
 The active product architecture is:

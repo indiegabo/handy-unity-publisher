@@ -2,11 +2,14 @@
 
 ## Project Name
 
-Current repository name: `handy-unity-bulder`
+Product name: `HUP`
 
-The repository name may contain a typo (`bulder` vs `builder`), but no
-coordinated rename should happen until the product surfaces, module names, and
-packaging strategy are ready to move together.
+Repository name: `handy-unity-publisher`
+
+Canonical Git remote: `git@github.com:indiegabo/handy-unity-publisher.git`
+
+Operator-facing product references should use `HUP`. Development and
+repository references should use `handy-unity-publisher`.
 
 ## Vision
 

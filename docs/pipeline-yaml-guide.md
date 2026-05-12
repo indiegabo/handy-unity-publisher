@@ -99,7 +99,7 @@ this version.
 ## Full Example
 
 ```yaml
-apiVersion: handy.unity.builder/v1alpha1
+apiVersion: handy.unity.publisher/v1alpha1
 kind: Pipeline
 
 metadata:
@@ -183,7 +183,7 @@ as `Builds/WebGL` or `Builds/Linux64` instead.
 Use this as the starting point for a new repository pipeline:
 
 ```yaml
-apiVersion: handy.unity.builder/v1alpha1
+apiVersion: handy.unity.publisher/v1alpha1
 kind: Pipeline
 
 metadata:
