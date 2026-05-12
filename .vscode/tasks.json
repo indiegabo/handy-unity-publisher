@@ -5,12 +5,7 @@
       "label": "build desktop ui",
       "type": "shell",
       "command": "npm",
-      "args": [
-        "run",
-        "build",
-        "--prefix",
-        "apps/desktop/ui"
-      ],
+      "args": ["run", "build", "--prefix", "apps/desktop/ui"],
       "options": {
         "cwd": "${workspaceFolder}"
       },
@@ -19,25 +14,17 @@
     {
       "label": "build desktop shell",
       "type": "shell",
-      "command": "C:/Users/gabao/.cargo/bin/cargo.exe",
-      "args": [
-        "build",
-        "--package",
-        "desktop-shell"
-      ],
+      "command": "cargo",
+      "args": ["build", "--package", "desktop-shell"],
       "options": {
         "cwd": "${workspaceFolder}"
       },
-      "dependsOn": [
-        "build desktop ui"
-      ],
+      "dependsOn": ["build desktop ui"],
       "group": {
         "kind": "build",
         "isDefault": true
       },
-      "problemMatcher": [
-        "$rustc"
-      ]
+      "problemMatcher": ["$rustc"]
     }
   ]
 }
