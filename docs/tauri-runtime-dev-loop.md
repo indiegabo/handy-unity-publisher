@@ -297,15 +297,29 @@ The current defaults keep the host conservative:
 
 ## Desktop Shell Loop
 
-Run the desktop shell directly from the Tauri crate:
+Run the desktop shell directly from the repository root:
 
 ```bash
-cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml
+cargo run --package desktop-shell
 ```
 
 The shell starts or reconnects to the bundled runtime, reads the persisted
 health and supervision snapshots, and exposes thin Tauri commands for operator
 diagnostics and management.
+
+The current tray lifecycle works like this:
+
+- startup launches the runtime supervisor, initializes the tray icon, and shows
+  the popup window
+- the popup is always-on-top, skipped from the taskbar, and pinned to the
+  lower-right corner of the primary monitor work area
+- closing the popup hides it instead of terminating the app
+- tray left-click and the `Open HUP` tray action restore the popup window
+- the `Quit` tray action marks the shell as intentionally exiting and allows
+  the normal runtime shutdown path to run
+
+The current visible UI inside the popup is intentionally minimal and only shows
+the `HUP` wordmark while the tray shell behavior settles.
 
 ## Focused Validation
 

@@ -28,13 +28,19 @@ instance.
 The shell is responsible for:
 
 - launching or reconnecting to the bundled runtime process
+- creating the tray icon and compact popup window lifecycle
 - exposing thin Tauri commands for operator-facing diagnostics and management
-- rendering the operator dashboard from `apps/desktop/ui`
-- presenting runtime health, lifecycle state, release status, repository
-  inspection, build history, artifact inspection, and credential management
+- rendering the current popup UI from `apps/desktop/ui`
+- anchoring the popup window to the lower-right corner of the primary monitor
+- hiding the window to tray on close while keeping the runtime alive
+- executing the full shutdown path only when the tray `Quit` action is chosen
 
 The shell remains intentionally thin. Orchestration rules belong in runtime
 crates, not in window bindings.
+
+The current visible UI is intentionally minimal and only shows the `HUP`
+wordmark. The Tauri command surface for diagnostics and management remains in
+place behind that minimal shell while the next operator-facing view is rebuilt.
 
 ### Bundled Runtime
 
@@ -137,19 +143,22 @@ before automation proceeds.
 
 ## Operator Surfaces
 
-### Desktop Dashboard
+### Desktop Tray Shell
 
-The desktop dashboard is the primary operator surface.
+The desktop shell is the primary operator surface.
 
-It is responsible for presenting:
+Its current operator-visible behavior is:
 
-- runtime health and lifecycle status
-- repository inspection
-- release status and local automation backlog
-- build history and artifact inspection
-- secret and credential management
-- runtime directories and Unity runner diagnostics
-- recent runtime logs
+- startup opens a compact popup anchored to the lower-right corner of the
+  primary monitor
+- the popup stays always-on-top and out of the taskbar
+- window close requests hide the popup to tray instead of terminating the app
+- tray clicks and the `Open HUP` action reopen the popup
+- the `Quit` tray action triggers intentional shell exit and runtime shutdown
+
+The runtime diagnostics, repository inspection, and credential management
+commands still exist behind the shell, but the current popup UI only renders a
+minimal placeholder while the tray lifecycle settles.
 
 ### Runtime Commands
 

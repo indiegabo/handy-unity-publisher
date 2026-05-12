@@ -30,7 +30,7 @@ The product is not a Unity gameplay codebase.
 ## Active Architecture
 
 - `apps/desktop/src-tauri` is the desktop shell crate.
-- `apps/desktop/ui` contains the operator dashboard.
+- `apps/desktop/ui` contains the minimal tray popup view.
 - `crates/runtime-bin` exposes the bundled runtime commands and supervision
   loop.
 - `crates/runtime-store` owns durable SQLite-backed workflow state.
@@ -68,7 +68,16 @@ The product is not a Unity gameplay codebase.
 
 ## Active Operator Surfaces
 
-The desktop shell currently exposes:
+The desktop shell currently ships as a tray-resident popup:
+
+- startup shows a compact always-on-top window anchored to the lower-right
+  corner of the primary monitor
+- closing the window hides it to tray and keeps the runtime alive
+- tray clicks and the `Open HUP` menu action reopen the popup
+- the `Quit` tray action exits the shell and triggers runtime shutdown
+- the visible UI is currently a minimal `HUP` placeholder
+
+The shell still exposes Tauri commands for:
 
 - runtime health
 - lifecycle rules
@@ -91,14 +100,15 @@ Common validation and development commands:
 cargo run -p runtime-bin -- bootstrap
 cargo run -p runtime-bin -- manifests sync
 cargo run -p runtime-bin -- status
-cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml
+cargo run --package desktop-shell
 cargo check -p desktop-shell -j 1 -q
 cargo test -p runtime-store -q
 node --check apps/desktop/ui/app.js
 ```
 
 When changing static UI code, validate the touched JavaScript file with
-`node --check` and then rerun the narrow desktop-shell compile check.
+`node --check` only if that JavaScript is still part of the current popup
+surface, then rerun the narrow desktop-shell compile check.
 
 ## Documentation Priorities
 

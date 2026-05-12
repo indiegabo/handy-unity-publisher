@@ -16,7 +16,7 @@ Canonical Git remote: `git@github.com:indiegabo/handy-unity-publisher.git`.
 ## Product Model
 
 - `apps/desktop/src-tauri` hosts the desktop shell and Tauri command surface.
-- `apps/desktop/ui` ships the operator dashboard loaded by the shell.
+- `apps/desktop/ui` ships the minimal tray popup view loaded by the shell.
 - `crates/runtime-bin` hosts the bundled runtime entrypoint and developer
   command surface.
 - `crates/runtime-store` owns durable workflow state and local coordination.
@@ -27,6 +27,25 @@ Canonical Git remote: `git@github.com:indiegabo/handy-unity-publisher.git`.
 - SQLite stores durable metadata, configuration, and workflow state.
 - The filesystem stores logs, artifacts, workspaces, and runtime snapshots.
 - Unity execution runs through locally installed editors on the operator host.
+
+## Desktop Tray Lifecycle
+
+The desktop shell currently behaves like a tray-resident popup instead of a
+normal document window.
+
+- startup launches the bundled runtime supervisor, creates one tray icon, and
+  opens the main window pinned to the lower-right corner of the primary
+  monitor
+- the main window is always-on-top, hidden from the taskbar, and sized as a
+  compact popup instead of a full dashboard
+- closing the window hides it to the tray and keeps the runtime alive
+- left-clicking the tray icon or using the `Open HUP` tray action restores the
+  popup window
+- the `Quit` tray action marks the shell as intentionally exiting and then runs
+  the normal runtime shutdown path
+
+The current visible UI is intentionally minimal and only renders the `HUP`
+wordmark while the tray lifecycle and runtime supervision path settle.
 
 ## Repository Layout
 
@@ -129,9 +148,8 @@ repository root.
 
 - Repository manifests define polling, build targets, publish targets, and
   build-to-publish bindings.
-- The desktop shell is the primary operator surface for runtime health,
-  repositories, releases, build history, artifact inspection, and credential
-  management.
+- The desktop shell is the primary operator surface and currently ships as a
+  minimal tray popup while the larger operator views are being rebuilt.
 - Runtime crates stay focused and explicit. Shell bindings stay thin.
 - Operator-facing recovery paths should be available in the app before the
   documentation asks for manual host intervention.
