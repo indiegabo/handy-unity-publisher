@@ -96,6 +96,12 @@ Inspect the local runtime status:
 cargo run -p runtime-bin -- status
 ```
 
+Install the JavaScript workspace dependencies and the local Tauri CLI once:
+
+```bash
+npm install
+```
+
 Preview the desktop UI component showcase in a browser while iterating on the
 shared primitives:
 
@@ -106,10 +112,33 @@ npm run dev --prefix apps/desktop/ui
 The browser preview is useful for component work but does not expose the Tauri
 command bridge.
 
-Launch the desktop shell:
+Run the desktop shell development loop from the repository root:
 
 ```bash
-npm install --prefix apps/desktop/ui
+npm start
+```
+
+`npm start` resolves the local Tauri CLI from the root package and launches
+the desktop shell from `apps/desktop`. The Tauri development loop owns the UI
+development server through `beforeDevCommand`, and the desktop shell startup
+path then launches the bundled runtime supervisor. On Windows the runner also
+attempts to enter the Visual Studio developer environment before invoking
+Tauri, but it still requires the native Tauri prerequisites, including the
+Visual Studio C++ workload for the MSVC toolchain.
+
+The desktop app version is centralized in `Cargo.toml` under
+`[workspace.package].version`. Run `npm run version:sync` after changing that
+value if you need to refresh the mirrored version fields without starting the
+desktop development loop.
+
+When capturing ad hoc build or runtime output during troubleshooting, write
+those logs under `tmp/diagnostics/` instead of the repository root. The
+workspace already keeps Cargo artifacts under `tmp/` to avoid polluting the
+top-level tree with temporary files.
+
+Build the desktop shell without the Tauri development loop:
+
+```bash
 npm run build --prefix apps/desktop/ui
 cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml
 ```

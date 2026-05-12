@@ -1,0 +1,16 @@
+{
+    "name": "handy-unity-publisher",
+    "private": true,
+    "workspaces": [
+        "apps/desktop/ui"
+    ],
+    "scripts": {
+        "version:sync": "node ./scripts/sync-app-version.mjs",
+        "version:check": "node ./scripts/sync-app-version.mjs --check",
+        "start": "node ./scripts/sync-app-version.mjs && node ./scripts/start-desktop-dev.mjs",
+        "start:desktop": "node ./scripts/sync-app-version.mjs && node ./scripts/start-desktop-dev.mjs"
+    },
+    "devDependencies": {
+        "@tauri-apps/cli": "^2.11.0"
+    }
+}
