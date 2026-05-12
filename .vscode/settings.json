@@ -1,0 +1,3 @@
+{
+  "rust-analyzer.cargo.targetDir": "tmp/cargo-targets/flycheck"
+}
