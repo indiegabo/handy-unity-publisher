@@ -1,3 +1,6 @@
+//! Owns runtime bootstrap, health persistence, supervision contracts,
+//! structured lifecycle logging, and shutdown metadata.
+
 #![forbid(unsafe_code)]
 
 pub mod concurrency;
@@ -586,7 +589,7 @@ mod tests {
         let snapshot = bootstrap_runtime(
             &config,
             &storage,
-            Path::new("runtime-bin"),
+            Path::new("hup-runtime"),
             RuntimeRestartPolicy::from_settings(&config.supervision),
         )
         .expect("bootstrap should succeed");
@@ -637,7 +640,7 @@ mod tests {
         bootstrap_runtime(
             &config,
             &storage,
-            Path::new("runtime-bin"),
+            Path::new("hup-runtime"),
             RuntimeRestartPolicy::from_settings(&config.supervision),
         )
         .expect("bootstrap should succeed");
@@ -663,7 +666,7 @@ mod tests {
         bootstrap_runtime(
             &config,
             &storage,
-            Path::new("runtime-bin"),
+            Path::new("hup-runtime"),
             RuntimeRestartPolicy::from_settings(&config.supervision),
         )
         .expect("bootstrap should succeed");
@@ -742,7 +745,7 @@ mod tests {
             .expect("system time should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "handy-unity-builder-runtime-core-{label}-{}-{unix_time}",
+            "handy-unity-publisher-runtime-core-{label}-{}-{unix_time}",
             std::process::id()
         ))
     }

@@ -1,3 +1,6 @@
+//! Wraps the local Git CLI for authenticated tag discovery and deterministic
+//! workspace synchronization used by runtime automation flows.
+
 #![forbid(unsafe_code)]
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -1230,7 +1233,7 @@ mod tests {
 
     fn test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "handy-unity-builder-runtime-git-{label}-{}",
+            "handy-unity-publisher-runtime-git-{label}-{}",
             std::process::id()
         ))
     }

@@ -1,3 +1,6 @@
+//! Prepares host-native Unity workspaces, resolves execution plans, inspects
+//! host capabilities, and captures artifacts produced by build runs.
+
 #![forbid(unsafe_code)]
 
 use std::env;
@@ -792,7 +795,7 @@ fn execution_log_preamble(
     editor_log_path: Option<&Path>,
 ) -> Vec<u8> {
     let mut preamble = String::new();
-    preamble.push_str("handy-unity-builder host-native execution\n");
+    preamble.push_str("HUP host-native execution\n");
     preamble.push_str(&format!(
         "unity_executable_path: {}\n",
         unity_executable_path.trim()
@@ -3194,7 +3197,7 @@ executeMethod method Builder.PerformWindows threw exception.
 
     fn test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "handy-unity-builder-runtime-runner-{label}-{}",
+            "handy-unity-publisher-runtime-runner-{label}-{}",
             std::process::id()
         ))
     }

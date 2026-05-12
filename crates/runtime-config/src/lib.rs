@@ -1,3 +1,6 @@
+//! Resolves typed runtime configuration from environment variables and
+//! host-specific application directory conventions.
+
 #![forbid(unsafe_code)]
 
 use std::env;
@@ -5,58 +8,58 @@ use std::io;
 use std::path::PathBuf;
 
 /// Names the runtime process within diagnostics and supervision metadata.
-pub const RUNTIME_NAME: &str = "handy-unity-builder-runtime";
+pub const RUNTIME_NAME: &str = "handy-unity-publisher-runtime";
 
 /// Names the persistent application directory used under host-specific roots.
-pub const PRODUCT_DIRECTORY_NAME: &str = "handy-unity-builder";
+pub const PRODUCT_DIRECTORY_NAME: &str = "handy-unity-publisher";
 
 /// Overrides the default runtime root directory when set.
-pub const RUNTIME_ROOT_ENV: &str = "HANDY_UNITY_BUILDER_RUNTIME_ROOT";
+pub const RUNTIME_ROOT_ENV: &str = "HANDY_UNITY_PUBLISHER_RUNTIME_ROOT";
 
 /// Overrides the runtime log level when set.
-pub const LOG_LEVEL_ENV: &str = "HANDY_UNITY_BUILDER_LOG_LEVEL";
+pub const LOG_LEVEL_ENV: &str = "HANDY_UNITY_PUBLISHER_LOG_LEVEL";
 
 /// Overrides the heartbeat cadence of the runtime work loop when set.
 pub const HEARTBEAT_INTERVAL_MILLIS_ENV: &str =
-    "HANDY_UNITY_BUILDER_RUNTIME_HEARTBEAT_INTERVAL_MILLIS";
+    "HANDY_UNITY_PUBLISHER_RUNTIME_HEARTBEAT_INTERVAL_MILLIS";
 
 /// Limits the number of heartbeats emitted by the runtime work loop when set.
-pub const MAX_HEARTBEATS_ENV: &str = "HANDY_UNITY_BUILDER_RUNTIME_MAX_HEARTBEATS";
+pub const MAX_HEARTBEATS_ENV: &str = "HANDY_UNITY_PUBLISHER_RUNTIME_MAX_HEARTBEATS";
 
 /// Forces a recoverable crash after the configured heartbeat count when set.
 pub const CRASH_AFTER_HEARTBEATS_ENV: &str =
-    "HANDY_UNITY_BUILDER_RUNTIME_CRASH_AFTER_HEARTBEATS";
+    "HANDY_UNITY_PUBLISHER_RUNTIME_CRASH_AFTER_HEARTBEATS";
 
 /// Limits recoverable crash injection to the first N supervision attempts.
-pub const CRASH_ATTEMPTS_ENV: &str = "HANDY_UNITY_BUILDER_RUNTIME_CRASH_ATTEMPTS";
+pub const CRASH_ATTEMPTS_ENV: &str = "HANDY_UNITY_PUBLISHER_RUNTIME_CRASH_ATTEMPTS";
 
 /// Exposes the current supervision attempt to the child runtime process.
 pub const SUPERVISION_ATTEMPT_ENV: &str =
-    "HANDY_UNITY_BUILDER_RUNTIME_SUPERVISION_ATTEMPT";
+    "HANDY_UNITY_PUBLISHER_RUNTIME_SUPERVISION_ATTEMPT";
 
 /// Overrides the number of supervisor restarts allowed after recoverable exits.
 pub const SUPERVISION_MAX_RESTARTS_ENV: &str =
-    "HANDY_UNITY_BUILDER_RUNTIME_MAX_RESTARTS";
+    "HANDY_UNITY_PUBLISHER_RUNTIME_MAX_RESTARTS";
 
 /// Overrides the restart backoff between recoverable supervisor retries.
 pub const SUPERVISION_BACKOFF_MILLIS_ENV: &str =
-    "HANDY_UNITY_BUILDER_RUNTIME_RESTART_BACKOFF_MILLIS";
+    "HANDY_UNITY_PUBLISHER_RUNTIME_RESTART_BACKOFF_MILLIS";
 
 /// Overrides the recoverable exit code used by the runtime supervisor.
 pub const SUPERVISION_RECOVERABLE_EXIT_CODE_ENV: &str =
-    "HANDY_UNITY_BUILDER_RUNTIME_RECOVERABLE_EXIT_CODE";
+    "HANDY_UNITY_PUBLISHER_RUNTIME_RECOVERABLE_EXIT_CODE";
 
 /// Overrides the number of build runs the local host may claim at once.
 pub const MAX_CONCURRENT_BUILD_RUNS_ENV: &str =
-    "HANDY_UNITY_BUILDER_RUNTIME_MAX_CONCURRENT_BUILD_RUNS";
+    "HANDY_UNITY_PUBLISHER_RUNTIME_MAX_CONCURRENT_BUILD_RUNS";
 
 /// Overrides the number of publish runs the local host may claim at once.
 pub const MAX_CONCURRENT_PUBLISH_RUNS_ENV: &str =
-    "HANDY_UNITY_BUILDER_RUNTIME_MAX_CONCURRENT_PUBLISH_RUNS";
+    "HANDY_UNITY_PUBLISHER_RUNTIME_MAX_CONCURRENT_PUBLISH_RUNS";
 
 /// Overrides the number of active release lanes allowed per repository.
 pub const MAX_ACTIVE_RELEASES_PER_REPOSITORY_ENV: &str =
-    "HANDY_UNITY_BUILDER_RUNTIME_MAX_ACTIVE_RELEASES_PER_REPOSITORY";
+    "HANDY_UNITY_PUBLISHER_RUNTIME_MAX_ACTIVE_RELEASES_PER_REPOSITORY";
 
 /// Describes the host platform used for application directory selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,7 +432,7 @@ mod tests {
 
         assert_eq!(
             root,
-            PathBuf::from("C:/Users/test/AppData/Local/handy-unity-builder/runtime")
+            PathBuf::from("C:/Users/test/AppData/Local/handy-unity-publisher/runtime")
         );
     }
 
@@ -447,7 +450,7 @@ mod tests {
 
         assert_eq!(
             root,
-            PathBuf::from("/Users/test/Library/Application Support/handy-unity-builder/runtime")
+            PathBuf::from("/Users/test/Library/Application Support/handy-unity-publisher/runtime")
         );
     }
 
@@ -465,7 +468,7 @@ mod tests {
 
         assert_eq!(
             root,
-            PathBuf::from("/home/test/.data/handy-unity-builder/runtime")
+            PathBuf::from("/home/test/.data/handy-unity-publisher/runtime")
         );
     }
 

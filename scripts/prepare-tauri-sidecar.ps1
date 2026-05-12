@@ -11,6 +11,26 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
+$cargoCommand = Get-Command cargo -ErrorAction SilentlyContinue
+if ($cargoCommand) {
+    $cargoPath = $cargoCommand.Source
+}
+else {
+    $cargoPath = Join-Path $env:USERPROFILE ".cargo/bin/cargo.exe"
+}
+
+if (-not (Test-Path $cargoPath)) {
+    throw "cargo executable was not found; expected at $cargoPath"
+}
+
+$targetDirectory = & $cargoPath metadata --format-version 1 --no-deps |
+ConvertFrom-Json |
+Select-Object -ExpandProperty target_directory
+
+if (-not $targetDirectory) {
+    throw "cargo metadata did not report a target directory"
+}
+
 $profileArgs = @()
 $profileDirectory = $BuildProfile
 
@@ -31,13 +51,13 @@ $cargoArgs = @(
     $TargetTriple
 ) + $profileArgs
 
-& cargo @cargoArgs
+& $cargoPath @cargoArgs
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
 $extension = if ($TargetTriple.Contains("windows")) { ".exe" } else { "" }
-$sourcePath = Join-Path $repoRoot "target/$TargetTriple/$profileDirectory/runtime-bin$extension"
+$sourcePath = Join-Path $targetDirectory "$TargetTriple/$profileDirectory/hup-runtime$extension"
 
 if (-not (Test-Path $sourcePath)) {
     throw "built runtime binary was not found at $sourcePath"
@@ -46,7 +66,7 @@ if (-not (Test-Path $sourcePath)) {
 $destinationDir = Join-Path $repoRoot "apps/desktop/src-tauri/bin"
 New-Item -Path $destinationDir -ItemType Directory -Force | Out-Null
 
-$destinationPath = Join-Path $destinationDir "runtime-bin-$TargetTriple$extension"
+$destinationPath = Join-Path $destinationDir "hup-runtime-$TargetTriple$extension"
 Copy-Item -Path $sourcePath -Destination $destinationPath -Force
 
 Write-Host "Prepared Tauri runtime sidecar at $destinationPath"

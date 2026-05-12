@@ -1,4 +1,10 @@
+/**
+ * Renders the desktop diagnostics shell and coordinates Tauri command calls,
+ * view state, and operator-facing formatting in one module.
+ */
+
 const COMMANDS = {
+    applicationVersion: "application_version",
     runtimeHealth: "runtime_health",
     runtimeLogs: "runtime_logs",
     runtimeDirectories: "runtime_directories",
@@ -323,6 +329,7 @@ async function loadDiagnostics() {
     }
 
     const results = await Promise.allSettled([
+        invoker(COMMANDS.applicationVersion),
         invoker(COMMANDS.runtimeHealth),
         invoker(COMMANDS.runtimeLogs, { lineLimit: uiState.logLineLimit }),
         invoker(COMMANDS.runtimeDirectories),
@@ -336,16 +343,17 @@ async function loadDiagnostics() {
     ]);
 
     return {
-        health: settleResult(results[0]),
-        logs: settleResult(results[1]),
-        directories: settleResult(results[2]),
-        lifecycle: settleResult(results[3]),
-        releaseStatus: settleResult(results[4]),
-        repositoryInspection: settleResult(results[5]),
-        buildHistory: settleResult(results[6]),
-        artifactInspection: settleResult(results[7]),
-        secrets: settleResult(results[8]),
-        unity: settleResult(results[9]),
+        applicationVersion: settleResult(results[0]),
+        health: settleResult(results[1]),
+        logs: settleResult(results[2]),
+        directories: settleResult(results[3]),
+        lifecycle: settleResult(results[4]),
+        releaseStatus: settleResult(results[5]),
+        repositoryInspection: settleResult(results[6]),
+        buildHistory: settleResult(results[7]),
+        artifactInspection: settleResult(results[8]),
+        secrets: settleResult(results[9]),
+        unity: settleResult(results[10]),
         loadedAt: new Date(),
         connected: true,
     };
@@ -367,6 +375,7 @@ function offlineDiagnostics() {
     };
 
     return {
+        applicationVersion: offlineError,
         health: offlineError,
         logs: offlineError,
         directories: offlineError,
@@ -484,7 +493,7 @@ function renderDiagnostics(diagnostics) {
     )}`;
 
     renderSummaryCards(buildSummaryCards(diagnostics));
-    renderHealth(diagnostics.health);
+    renderHealth(diagnostics.health, diagnostics.applicationVersion);
     renderLifecycle(diagnostics.lifecycle);
     renderReleaseStatus(diagnostics.releaseStatus);
     renderRepositoryInspection(diagnostics.repositoryInspection);
@@ -1156,7 +1165,7 @@ function toneForArtifactPublishState(artifact) {
     return "neutral";
 }
 
-function renderHealth(result) {
+function renderHealth(result, applicationVersion) {
     if (!result.ok) {
         setPill("health-pill", "Error", "error");
         renderPanelBody("health-panel", errorMarkup(result.error));
@@ -1164,6 +1173,9 @@ function renderHealth(result) {
     }
 
     const health = result.data;
+    const applicationVersionLabel = applicationVersion?.ok
+        ? applicationVersion.data.app_version
+        : "Unavailable";
     setPill("health-pill", health.status, toneForStatus(health.status));
     renderPanelBody(
         "health-panel",
@@ -1171,7 +1183,8 @@ function renderHealth(result) {
             ${keyValueGrid([
             ["Status", health.status],
             ["Runtime", health.runtime_name],
-            ["Version", health.runtime_version],
+            ["Runtime version", health.runtime_version],
+            ["Desktop shell version", applicationVersionLabel],
             ["Process id", optionalNumber(health.process_id)],
             ["Updated", formatUnixSeconds(health.updated_at_unix)],
         ])}

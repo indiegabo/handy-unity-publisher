@@ -1,3 +1,6 @@
+//! Resolves publish destinations and executes filesystem-backed artifact
+//! publication for completed build outputs.
+
 #![forbid(unsafe_code)]
 
 use serde::Deserialize;
@@ -373,7 +376,7 @@ mod tests {
 
     fn test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "handy-unity-builder-runtime-publish-{label}-{}",
+            "handy-unity-publisher-runtime-publish-{label}-{}",
             std::process::id()
         ))
     }

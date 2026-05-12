@@ -1,3 +1,6 @@
+//! Implements the Tauri desktop shell bindings that supervise the bundled
+//! runtime and expose operator-facing diagnostics to the UI.
+
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io;
@@ -29,9 +32,10 @@ use runtime_store::{
     list_publish_target_runtime_settings, LocalCoordinator, StorageLayout,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, RunEvent};
+use tauri::{AppHandle, Manager, RunEvent};
 
-const RUNTIME_BINARY_NAME: &str = "runtime-bin";
+const RUNTIME_PACKAGE_NAME: &str = "runtime-bin";
+const RUNTIME_BINARY_NAME: &str = "hup-runtime";
 const DEFAULT_RUNTIME_LOG_LINE_LIMIT: usize = 100;
 const MAX_RUNTIME_LOG_LINE_LIMIT: usize = 500;
 const SECRET_STORAGE_MODEL_INLINE_SQLITE: &str = "sqlite-inline-config-json";
@@ -292,11 +296,18 @@ struct BuildExecutionRetentionPurgeReport {
     workspace_removed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ApplicationVersionInfo {
+    product_name: String,
+    app_version: String,
+}
+
 /// Runs the desktop shell and supervises the bundled local runtime process.
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(RuntimeProcessState::default())
         .invoke_handler(tauri::generate_handler![
+            application_version,
             runtime_health,
             runtime_logs,
             runtime_directories,
@@ -326,6 +337,15 @@ pub fn run() {
             stop_runtime_process(app_handle);
         }
     });
+}
+
+#[tauri::command]
+fn application_version(app_handle: AppHandle) -> Result<ApplicationVersionInfo, String> {
+    let package = app_handle.package_info();
+    Ok(ApplicationVersionInfo {
+        product_name: package.name.clone(),
+        app_version: package.version.to_string(),
+    })
 }
 
 #[tauri::command]
@@ -1244,6 +1264,8 @@ fn development_runtime_command_plan(
         args: vec![
             String::from("run"),
             String::from("-p"),
+            String::from(RUNTIME_PACKAGE_NAME),
+            String::from("--bin"),
             String::from(RUNTIME_BINARY_NAME),
             String::from("--"),
             String::from(action.as_arg()),
@@ -1321,7 +1343,7 @@ mod tests {
         load_secret_settings,
         load_unity_runner_settings,
         normalize_runtime_log_line_limit, packaged_runtime_command_plan,
-        runtime_binary_file_name, RuntimeLaunchAction,
+        runtime_binary_file_name, RuntimeLaunchAction, RUNTIME_BINARY_NAME,
         SaveSecretCredentialInput, UpdatePublishTargetSecretBindingInput,
         UpdateRepositorySecretBindingInput,
     };
@@ -1349,7 +1371,15 @@ mod tests {
         assert_eq!(plan.current_dir, Some(PathBuf::from("C:/repo")));
         assert_eq!(
             plan.args,
-            vec!["run", "-p", "runtime-bin", "--", "supervise"]
+            vec![
+                "run",
+                "-p",
+                "runtime-bin",
+                "--bin",
+                "hup-runtime",
+                "--",
+                "supervise",
+            ]
         );
         assert!(plan.inherit_stdio);
     }
@@ -1362,7 +1392,7 @@ mod tests {
         }
         std::fs::create_dir_all(&root).expect("temp directory should create");
 
-        let desktop_path = root.join(format!("desktop-shell{}", std::env::consts::EXE_SUFFIX));
+        let desktop_path = root.join(format!("HUP{}", std::env::consts::EXE_SUFFIX));
         let runtime_path = root.join(runtime_binary_file_name());
         std::fs::write(&desktop_path, b"desktop").expect("desktop binary placeholder should write");
         std::fs::write(&runtime_path, b"runtime").expect("runtime binary placeholder should write");
@@ -1389,7 +1419,7 @@ mod tests {
         bootstrap_runtime(
             &config,
             &storage,
-            Path::new("runtime-bin"),
+            Path::new(RUNTIME_BINARY_NAME),
             RuntimeRestartPolicy::from_settings(&config.supervision),
         )
         .expect("runtime bootstrap should persist health metadata");
@@ -1415,7 +1445,7 @@ mod tests {
         bootstrap_runtime(
             &config,
             &storage,
-            Path::new("runtime-bin"),
+            Path::new(RUNTIME_BINARY_NAME),
             RuntimeRestartPolicy::from_settings(&config.supervision),
         )
         .expect("runtime bootstrap should persist log metadata");
@@ -1490,7 +1520,7 @@ mod tests {
         bootstrap_runtime(
             &config,
             &storage,
-            Path::new("runtime-bin"),
+            Path::new(RUNTIME_BINARY_NAME),
             restart_policy.clone(),
         )
         .expect("runtime bootstrap should persist lifecycle metadata");

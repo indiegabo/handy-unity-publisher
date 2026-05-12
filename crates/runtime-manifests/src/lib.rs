@@ -1,3 +1,6 @@
+//! Loads pipeline manifests from disk, validates their schema, and synchronizes
+//! repository automation definitions into the runtime database.
+
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
@@ -11,7 +14,7 @@ use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-const API_VERSION: &str = "handy.unity.builder/v1alpha1";
+const API_VERSION: &str = "handy.unity.publisher/v1alpha1";
 const MANIFEST_KIND: &str = "Pipeline";
 const SQLITE_BUSY_TIMEOUT_MILLIS: u64 = 5_000;
 const DEFAULT_RUNNER_TYPE: &str = "host-native";
@@ -1861,7 +1864,7 @@ mod tests {
         write_manifest(
             &pipelines_dir.join("revolutions.yml"),
             concat!(
-                "apiVersion: handy.unity.builder/v1alpha1\n",
+                "apiVersion: handy.unity.publisher/v1alpha1\n",
                 "kind: Pipeline\n",
                 "metadata:\n",
                 "  name: revolutions\n",
@@ -2017,7 +2020,7 @@ mod tests {
         write_manifest(
             &manifest_path,
             concat!(
-                "apiVersion: handy.unity.builder/v1alpha1\n",
+                "apiVersion: handy.unity.publisher/v1alpha1\n",
                 "kind: Pipeline\n",
                 "metadata:\n",
                 "  name: alpha\n",
@@ -2046,7 +2049,7 @@ mod tests {
         write_manifest(
             &manifest_path,
             concat!(
-                "apiVersion: handy.unity.builder/v1alpha1\n",
+                "apiVersion: handy.unity.publisher/v1alpha1\n",
                 "kind: Pipeline\n",
                 "metadata:\n",
                 "  name: alpha\n",
@@ -2095,7 +2098,7 @@ mod tests {
         write_manifest(
             &pipelines_dir.join("revolutions.yml"),
             concat!(
-                "apiVersion: handy.unity.builder/v1alpha1\n",
+                "apiVersion: handy.unity.publisher/v1alpha1\n",
                 "kind: Pipeline\n",
                 "metadata:\n",
                 "  name: revolutions\n",
@@ -2134,7 +2137,7 @@ mod tests {
             &pipelines_dir.join("alpha.yml"),
             format!(
                 concat!(
-                    "apiVersion: handy.unity.builder/v1alpha1\n",
+                    "apiVersion: handy.unity.publisher/v1alpha1\n",
                     "kind: Pipeline\n",
                     "metadata:\n",
                     "  name: alpha\n",

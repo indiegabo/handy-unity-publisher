@@ -1,8 +1,8 @@
 {
-    "$schema": "https://schema.tauri.app/config/2",
-    "productName": "handy-unity-builder",
+    "productName": "HUP",
     "version": "0.1.0",
-    "identifier": "com.indiegabo.handyunitybuilder",
+    "identifier": "com.indiegabo.handyunitypublisher",
+    "mainBinaryName": "HUP",
     "build": {
         "frontendDist": "../ui"
     },
@@ -11,7 +11,7 @@
         "windows": [
             {
                 "label": "main",
-                "title": "handy-unity-builder",
+                "title": "HUP",
                 "width": 1200,
                 "height": 800,
                 "resizable": true,
@@ -24,6 +24,9 @@
     },
     "bundle": {
         "active": false,
-        "targets": "all"
+        "targets": "all",
+        "icon": [
+            "icons/icon.ico"
+        ]
     }
 }

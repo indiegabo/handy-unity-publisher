@@ -524,7 +524,7 @@ fn run_runtime_command(root: &Path, arguments: &[&str], extra_env: &[(&str, &str
 }
 
 fn runtime_bin_path() -> &'static str {
-    env!("CARGO_BIN_EXE_runtime-bin")
+    env!("CARGO_BIN_EXE_hup-runtime")
 }
 
 fn assert_command_success(label: &str, output: Output) {
@@ -609,7 +609,7 @@ fn test_root(name: &str) -> PathBuf {
         .expect("system clock should be after unix epoch")
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "handy-unity-builder-runtime-bin-e2e-{name}-{}-{unique_suffix}",
+        "handy-unity-publisher-runtime-bin-e2e-{name}-{}-{unique_suffix}",
         process::id()
     ));
     if root.exists() {
