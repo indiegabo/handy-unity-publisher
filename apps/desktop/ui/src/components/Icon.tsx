@@ -1,9 +1,12 @@
 import type { SVGProps } from "react";
 
 export type IconName =
+  | "alertCircle"
   | "arrowUpRight"
   | "box"
+  | "checkCircle"
   | "chevronDown"
+  | "queue"
   | "folder"
   | "layout"
   | "play"
@@ -51,6 +54,14 @@ export function Icon({
 
 function renderIcon(name: IconName) {
   switch (name) {
+    case "alertCircle":
+      return (
+        <>
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M12 8v5" />
+          <path d="M12 16.5h.01" />
+        </>
+      );
     case "arrowUpRight":
       return (
         <>
@@ -66,8 +77,24 @@ function renderIcon(name: IconName) {
           <path d="M12 12v9" />
         </>
       );
+    case "checkCircle":
+      return (
+        <>
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M8.5 12.5l2.2 2.2 4.8-5" />
+        </>
+      );
     case "chevronDown":
       return <path d="M6 9l6 6 6-6" />;
+    case "queue":
+      return (
+        <>
+          <path d="M5.5 7.5h8" />
+          <path d="M5.5 12h8" />
+          <path d="M5.5 16.5h8" />
+          <path d="M15.5 8.5l3 3.5-3 3.5" />
+        </>
+      );
     case "folder":
       return (
         <>
