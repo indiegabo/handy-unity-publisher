@@ -4,6 +4,9 @@
 #![forbid(unsafe_code)]
 
 pub mod concurrency;
+pub mod events;
+
+pub use events::*;
 
 use runtime_config::{RuntimeConfig, RuntimeSupervisionSettings};
 use runtime_store::{
@@ -317,6 +320,11 @@ pub fn bootstrap_runtime(
         started_at_unix,
     );
     persist_health_report(storage, &bootstrapping)?;
+    let bootstrap_started_message = format!(
+        "runtime directories ready at {} and sqlite opened at {}",
+        config.directories.data_dir.display(),
+        database_bootstrap.database_path.display()
+    );
     emit_log(
         &storage.runtime_log_path,
         StructuredLogEvent {
@@ -327,16 +335,23 @@ pub fn bootstrap_runtime(
             status: bootstrapping.status,
             process_id,
             timestamp_unix: bootstrapping.updated_at_unix,
-            message: format!(
-                "runtime directories ready at {} and sqlite opened at {}",
-                config.directories.data_dir.display(),
-                database_bootstrap.database_path.display()
-            ),
+            message: bootstrap_started_message.clone(),
         },
     )?;
+    let _ = emit_runtime_status_event(
+        storage,
+        &bootstrapping,
+        "runtime.bootstrap.started",
+        bootstrap_started_message,
+    );
 
     let healthy = bootstrapping.with_status(RuntimeStatus::Healthy, unix_timestamp()?);
     persist_health_report(storage, &healthy)?;
+    let bootstrap_completed_message = format!(
+        "runtime health report written to {} after applying {} migrations",
+        storage.health_report_path.display(),
+        database_bootstrap.applied_migrations.len()
+    );
     emit_log(
         &storage.runtime_log_path,
         StructuredLogEvent {
@@ -347,13 +362,15 @@ pub fn bootstrap_runtime(
             status: healthy.status,
             process_id,
             timestamp_unix: healthy.updated_at_unix,
-            message: format!(
-                "runtime health report written to {} after applying {} migrations",
-                storage.health_report_path.display(),
-                database_bootstrap.applied_migrations.len()
-            ),
+            message: bootstrap_completed_message.clone(),
         },
     )?;
+    let _ = emit_runtime_status_event(
+        storage,
+        &healthy,
+        "runtime.bootstrap.completed",
+        bootstrap_completed_message,
+    );
 
     Ok(RuntimeStateSnapshot {
         database_bootstrap,
@@ -405,6 +422,7 @@ pub fn shutdown_runtime(
 
     let shutting_down = current.with_status(RuntimeStatus::ShuttingDown, unix_timestamp()?);
     persist_health_report(storage, &shutting_down)?;
+    let shutdown_started_message = String::from("runtime shutdown marker persisted");
     emit_log(
         &storage.runtime_log_path,
         StructuredLogEvent {
@@ -415,12 +433,19 @@ pub fn shutdown_runtime(
             status: shutting_down.status,
             process_id: shutting_down.process_id,
             timestamp_unix: shutting_down.updated_at_unix,
-            message: "runtime shutdown marker persisted".to_owned(),
+            message: shutdown_started_message.clone(),
         },
     )?;
+    let _ = emit_runtime_status_event(
+        storage,
+        &shutting_down,
+        "runtime.shutdown.started",
+        shutdown_started_message,
+    );
 
     let stopped = shutting_down.with_status(RuntimeStatus::Stopped, unix_timestamp()?);
     persist_health_report(storage, &stopped)?;
+    let shutdown_completed_message = String::from("runtime stopped cleanly");
     emit_log(
         &storage.runtime_log_path,
         StructuredLogEvent {
@@ -431,9 +456,15 @@ pub fn shutdown_runtime(
             status: stopped.status,
             process_id: stopped.process_id,
             timestamp_unix: stopped.updated_at_unix,
-            message: "runtime stopped cleanly".to_owned(),
+            message: shutdown_completed_message.clone(),
         },
     )?;
+    let _ = emit_runtime_status_event(
+        storage,
+        &stopped,
+        "runtime.shutdown.completed",
+        shutdown_completed_message,
+    );
 
     Ok(stopped)
 }
@@ -477,9 +508,12 @@ pub fn update_runtime_health(
             status: next.status,
             process_id: next.process_id,
             timestamp_unix: next.updated_at_unix,
-            message,
+            message: message.clone(),
         },
     )?;
+    if next.status != report.status {
+        let _ = emit_runtime_status_event(storage, &next, event, message.clone());
+    }
     Ok(next)
 }
 
@@ -505,7 +539,9 @@ pub fn write_supervisor_snapshot(
             timestamp_unix: snapshot.updated_at_unix,
             message: snapshot.message.clone(),
         },
-    )
+    )?;
+    let _ = emit_runtime_supervisor_event(storage, snapshot);
+    Ok(())
 }
 
 fn persist_health_report(storage: &StorageLayout, report: &RuntimeHealthReport) -> io::Result<()> {
@@ -531,6 +567,64 @@ fn emit_log(path: &Path, event: StructuredLogEvent) -> io::Result<()> {
 
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{line}")
+}
+
+fn emit_runtime_status_event(
+    storage: &StorageLayout,
+    report: &RuntimeHealthReport,
+    event: &'static str,
+    message: String,
+) -> io::Result<()> {
+    emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: String::from("runtime.status_changed"),
+            severity: String::from(log_level_for_status(report.status)),
+            origin: String::from("runtime-core"),
+            user_requested: false,
+            repository_id: None,
+            release_run_id: None,
+            build_run_id: None,
+            publish_run_id: None,
+            summary: message,
+            payload: serde_json::json!({
+                "event": event,
+                "status": report.status.as_str(),
+                "runtime_name": &report.runtime_name,
+                "runtime_version": &report.runtime_version,
+                "process_id": report.process_id,
+            }),
+        },
+    )?;
+    Ok(())
+}
+
+fn emit_runtime_supervisor_event(
+    storage: &StorageLayout,
+    snapshot: &RuntimeSupervisorSnapshot,
+) -> io::Result<()> {
+    emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: String::from("runtime.status_changed"),
+            severity: String::from(log_level_for_supervisor_status(snapshot.status)),
+            origin: String::from("runtime-core"),
+            user_requested: false,
+            repository_id: None,
+            release_run_id: None,
+            build_run_id: None,
+            publish_run_id: None,
+            summary: snapshot.message.clone(),
+            payload: serde_json::json!({
+                "supervisor_status": snapshot.status.as_str(),
+                "attempt": snapshot.attempt,
+                "restart_count": snapshot.restart_count,
+                "last_exit_code": snapshot.last_exit_code,
+                "active_child_process_id": snapshot.active_child_process_id,
+            }),
+        },
+    )?;
+    Ok(())
 }
 
 fn log_level_for_status(status: RuntimeStatus) -> &'static str {

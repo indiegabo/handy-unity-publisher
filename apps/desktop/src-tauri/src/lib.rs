@@ -1,6 +1,8 @@
 //! Implements the Tauri desktop shell bindings that supervise the bundled
 //! runtime and expose operator-facing diagnostics to the UI.
 
+mod runtime_events;
+
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io;
@@ -11,11 +13,13 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
-use runtime_config::{HostPlatform, RuntimeConfig};
+use runtime_config::{
+    HostPlatform, RuntimeConfig, PRODUCT_DIRECTORY_NAME, RUNTIME_ROOT_ENV,
+};
 use runtime_core::{
     read_health_report, read_supervision_contract, read_supervisor_snapshot,
     RuntimeHealthReport, RuntimeRestartPolicy, RuntimeSupervisorSnapshot,
-    RuntimeSupervisorStatus,
+    RuntimeStatus, RuntimeSupervisorStatus,
 };
 use runtime_git::{KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER};
 use runtime_runner::{
@@ -25,13 +29,15 @@ use runtime_runner::{
 };
 use runtime_store::{
     ArtifactInspectionRecord, AutomationSnapshot, BuildHistoryRecord,
-    ReleaseAutomationStatus, UpsertCredentialRecordInput,
+    ProcessFeedPage, ReleaseAutomationStatus, UpsertCredentialRecordInput,
     initialize_database, list_artifact_inspection_records,
-    list_build_history_records,
+    list_build_history_records, list_process_feed_page,
     list_build_target_runtime_settings, list_credential_records,
     list_publish_target_runtime_settings, LocalCoordinator, StorageLayout,
 };
+use runtime_events::start_runtime_event_bridge;
 use serde::{Deserialize, Serialize};
+use sysinfo::{Pid, System};
 use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -58,6 +64,9 @@ const POPUP_WINDOW_HEIGHT: u32 = 420;
 const POPUP_WINDOW_MIN_WIDTH: u32 = 360;
 const POPUP_WINDOW_MIN_HEIGHT: u32 = 420;
 const POPUP_WINDOW_EDGE_MARGIN: i32 = 16;
+const DEFAULT_PROCESS_FEED_PAGE_SIZE: u32 = 6;
+const MAX_PROCESS_FEED_PAGE_SIZE: u32 = 50;
+const LEGACY_PRODUCT_DIRECTORY_NAME: &str = "handy-unity-builder";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeLaunchAction {
@@ -119,6 +128,8 @@ struct RuntimeDirectorySettings {
     health_report_path: PathBuf,
     supervision_contract_path: PathBuf,
     supervisor_state_path: PathBuf,
+    runtime_events_path: PathBuf,
+    runtime_events_cursor_path: PathBuf,
     runtime_log_path: PathBuf,
 }
 
@@ -229,6 +240,23 @@ struct UpdateRepositorySecretBindingInput {
 struct UpdatePublishTargetSecretBindingInput {
     publish_target_id: i64,
     credentials_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+struct ProcessFeedInput {
+    page: Option<u32>,
+    page_size: Option<u32>,
+}
+
+impl ProcessFeedInput {
+    fn normalized(&self) -> (u32, u32) {
+        (
+            self.page.unwrap_or(1).max(1),
+            self.page_size
+                .unwrap_or(DEFAULT_PROCESS_FEED_PAGE_SIZE)
+                .clamp(1, MAX_PROCESS_FEED_PAGE_SIZE),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -451,10 +479,12 @@ fn should_keep_running(app_handle: &AppHandle) -> bool {
 /// Runs the desktop shell and supervises the bundled local runtime process.
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .manage(RuntimeProcessState::default())
         .manage(ShellLifecycleState::default())
         .invoke_handler(tauri::generate_handler![
             application_version,
+            process_feed,
             runtime_health,
             runtime_logs,
             runtime_directories,
@@ -474,6 +504,10 @@ pub fn run() {
         .setup(|app| {
             launch_runtime_process(app)
                 .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
+            let config = load_shell_runtime_config()
+                .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
+            let storage = StorageLayout::from_directories(&config.directories);
+            start_runtime_event_bridge(app.handle().clone(), storage);
             initialize_tray(app)
                 .map_err(|error| -> Box<dyn std::error::Error> { Box::new(io::Error::other(error)) })?;
             configure_main_window(app.handle())
@@ -532,57 +566,63 @@ fn application_version(app_handle: AppHandle) -> Result<ApplicationVersionInfo, 
 }
 
 #[tauri::command]
+fn process_feed(input: Option<ProcessFeedInput>) -> Result<ProcessFeedPage, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    load_process_feed(&config, input.unwrap_or_default()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn runtime_health() -> Result<RuntimeHealthReport, String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_runtime_health_report(&config).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn runtime_logs(line_limit: Option<usize>) -> Result<Vec<String>, String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_runtime_log_lines(&config, normalize_runtime_log_line_limit(line_limit))
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn runtime_directories() -> Result<RuntimeDirectorySettings, String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_runtime_directory_settings(&config).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn runtime_lifecycle_settings() -> Result<RuntimeLifecycleSettings, String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_runtime_lifecycle_settings(&config).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn release_status() -> Result<AutomationSnapshot, String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_release_status(&config).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn repository_inspection() -> Result<RepositoryInspectionSettings, String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_repository_inspection(&config).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn build_history() -> Result<Vec<BuildHistoryRecord>, String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_build_history(&config).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn artifact_inspection() -> Result<Vec<ArtifactInspectionRecord>, String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_artifact_inspection(&config).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn build_execution_report(build_run_id: i64) -> Result<BuildExecutionReportPayload, String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_build_execution_report(&config, build_run_id).map_err(|error| error.to_string())
 }
 
@@ -590,20 +630,20 @@ fn build_execution_report(build_run_id: i64) -> Result<BuildExecutionReportPaylo
 fn purge_build_execution_retention(
     build_run_id: i64,
 ) -> Result<BuildExecutionRetentionPurgeReport, String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     purge_build_execution_retention_files(&config, build_run_id)
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn secret_settings() -> Result<SecretSettings, String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_secret_settings(&config).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn save_secret_credential(input: SaveSecretCredentialInput) -> Result<(), String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     persist_secret_credential(&config, input).map_err(|error| error.to_string())
 }
 
@@ -611,7 +651,7 @@ fn save_secret_credential(input: SaveSecretCredentialInput) -> Result<(), String
 fn update_repository_secret_binding(
     input: UpdateRepositorySecretBindingInput,
 ) -> Result<(), String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     persist_repository_secret_binding(&config, input)
         .map_err(|error| error.to_string())
 }
@@ -620,20 +660,27 @@ fn update_repository_secret_binding(
 fn update_publish_target_secret_binding(
     input: UpdatePublishTargetSecretBindingInput,
 ) -> Result<(), String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     persist_publish_target_secret_binding(&config, input)
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn unity_runner_settings() -> Result<UnityRunnerSettings, String> {
-    let config = RuntimeConfig::load().map_err(|error| error.to_string())?;
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_unity_runner_settings(&config).map_err(|error| error.to_string())
 }
 
 fn launch_runtime_process<R: tauri::Runtime>(app: &tauri::App<R>) -> io::Result<()> {
+    let config = load_shell_runtime_config()?;
+    if runtime_process_is_running(&config)? {
+        return Ok(());
+    }
+
     let plan = current_runtime_command_plan(RuntimeLaunchAction::Supervise)?;
-    let mut child = plan.into_command().spawn()?;
+    let mut command = plan.into_command();
+    command.env(RUNTIME_ROOT_ENV, &config.directories.data_dir);
+    let mut child = command.spawn()?;
 
     thread::sleep(Duration::from_millis(RUNTIME_STARTUP_PROBE_MILLIS));
     if let Some(status) = child.try_wait()? {
@@ -678,8 +725,11 @@ fn stop_runtime_process<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
 }
 
 fn request_runtime_shutdown() -> io::Result<()> {
+    let config = load_shell_runtime_config()?;
     let plan = current_runtime_command_plan(RuntimeLaunchAction::Shutdown)?;
-    let status = plan.into_command().status()?;
+    let mut command = plan.into_command();
+    command.env(RUNTIME_ROOT_ENV, &config.directories.data_dir);
+    let status = command.status()?;
     if status.success() {
         Ok(())
     } else {
@@ -734,6 +784,8 @@ fn load_runtime_directory_settings(
         health_report_path: storage.health_report_path,
         supervision_contract_path: storage.supervision_contract_path,
         supervisor_state_path: storage.supervisor_state_path,
+        runtime_events_path: storage.runtime_events_path,
+        runtime_events_cursor_path: storage.runtime_events_cursor_path,
         runtime_log_path: storage.runtime_log_path,
     })
 }
@@ -909,6 +961,20 @@ fn load_build_history(config: &RuntimeConfig) -> io::Result<Vec<BuildHistoryReco
     list_build_history_records(&storage)
 }
 
+fn load_process_feed(
+    config: &RuntimeConfig,
+    input: ProcessFeedInput,
+) -> io::Result<ProcessFeedPage> {
+    config.directories.ensure_exists()?;
+    let storage = StorageLayout::from_directories(&config.directories);
+    let (page, page_size) = input.normalized();
+    if !storage.database_path.is_file() {
+        return Ok(empty_process_feed_page(page, page_size));
+    }
+
+    list_process_feed_page(&storage, page, page_size)
+}
+
 fn load_artifact_inspection(
     config: &RuntimeConfig,
 ) -> io::Result<Vec<ArtifactInspectionRecord>> {
@@ -923,6 +989,19 @@ fn load_artifact_inspection(
 
 fn build_execution_retained_dir(workspace_path: &Path) -> PathBuf {
     workspace_path.join(BUILD_EXECUTION_RETAINED_DIR_NAME)
+}
+
+fn empty_process_feed_page(page: u32, page_size: u32) -> ProcessFeedPage {
+    ProcessFeedPage {
+        generated_at: String::new(),
+        page,
+        page_size,
+        total_items: 0,
+        total_pages: 0,
+        has_previous_page: false,
+        has_next_page: false,
+        items: Vec::new(),
+    }
 }
 
 fn build_execution_report_path(workspace_path: &Path) -> PathBuf {
@@ -1407,6 +1486,129 @@ fn load_runtime_restart_policy(
     }
 }
 
+fn load_shell_runtime_config() -> io::Result<RuntimeConfig> {
+    let config = RuntimeConfig::load()?;
+    if std::env::var_os(RUNTIME_ROOT_ENV).is_some() {
+        return Ok(config);
+    }
+
+    resolve_shell_runtime_config(config)
+}
+
+fn resolve_shell_runtime_config(config: RuntimeConfig) -> io::Result<RuntimeConfig> {
+    let Some(legacy_root) = legacy_runtime_root(&config.directories.data_dir) else {
+        return Ok(config);
+    };
+    if !legacy_root.is_dir() {
+        return Ok(config);
+    }
+
+    let current_storage = StorageLayout::from_directories(&config.directories);
+    if runtime_storage_has_operator_state(&current_storage)? {
+        return Ok(config);
+    }
+
+    let legacy_config = RuntimeConfig::from_root(&legacy_root);
+    let legacy_storage = StorageLayout::from_directories(&legacy_config.directories);
+    if runtime_storage_has_operator_state(&legacy_storage)? {
+        return Ok(legacy_config);
+    }
+
+    Ok(config)
+}
+
+fn legacy_runtime_root(current_root: &Path) -> Option<PathBuf> {
+    if current_root.file_name()? != "runtime" {
+        return None;
+    }
+
+    let product_dir = current_root.parent()?;
+    if product_dir.file_name()? != PRODUCT_DIRECTORY_NAME {
+        return None;
+    }
+
+    Some(
+        product_dir
+            .parent()?
+            .join(LEGACY_PRODUCT_DIRECTORY_NAME)
+            .join("runtime"),
+    )
+}
+
+fn runtime_storage_has_operator_state(storage: &StorageLayout) -> io::Result<bool> {
+    if !storage.database_path.is_file() {
+        return Ok(false);
+    }
+
+    let process_feed = list_process_feed_page(storage, 1, 1)?;
+    if process_feed.total_items > 0 {
+        return Ok(true);
+    }
+
+    let snapshot = LocalCoordinator::new(storage).automation_snapshot()?;
+    Ok(
+        !snapshot.repositories.is_empty()
+            || snapshot
+                .queue_messages
+                .iter()
+                .any(|queue| queue.ready_count > 0 || queue.leased_count > 0),
+    )
+}
+
+fn runtime_process_is_running(config: &RuntimeConfig) -> io::Result<bool> {
+    let storage = StorageLayout::from_directories(&config.directories);
+    let candidate_pids = runtime_process_ids(&storage)?;
+    if candidate_pids.is_empty() {
+        return Ok(false);
+    }
+
+    let system = System::new_all();
+    Ok(candidate_pids
+        .into_iter()
+        .any(|pid| system.process(Pid::from_u32(pid)).is_some()))
+}
+
+fn runtime_process_ids(storage: &StorageLayout) -> io::Result<Vec<u32>> {
+    let mut pids = Vec::new();
+
+    match read_supervisor_snapshot(&storage.supervisor_state_path) {
+        Ok(snapshot)
+            if matches!(
+                snapshot.status,
+                RuntimeSupervisorStatus::Starting
+                    | RuntimeSupervisorStatus::Running
+                    | RuntimeSupervisorStatus::Restarting
+            ) => {
+                pids.push(snapshot.supervisor_process_id);
+                if let Some(active_child_process_id) = snapshot.active_child_process_id {
+                    pids.push(active_child_process_id);
+                }
+            }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    match read_health_report(&storage.health_report_path) {
+        Ok(report)
+            if matches!(
+                report.status,
+                RuntimeStatus::Bootstrapping
+                    | RuntimeStatus::Healthy
+                    | RuntimeStatus::ShuttingDown
+            ) => {
+                pids.push(report.process_id);
+            }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    pids.sort_unstable();
+    pids.dedup();
+    Ok(pids)
+}
+
 fn runtime_shutdown_grace_period_millis() -> u64 {
     RUNTIME_SHUTDOWN_WAIT_POLL_MILLIS * RUNTIME_SHUTDOWN_WAIT_POLLS as u64
 }
@@ -1524,6 +1726,7 @@ mod tests {
         persist_secret_credential,
         purge_build_execution_retention_files,
         load_secret_settings,
+        resolve_shell_runtime_config,
         load_unity_runner_settings,
         normalize_runtime_log_line_limit, packaged_runtime_command_plan,
         runtime_binary_file_name, RuntimeLaunchAction, RUNTIME_BINARY_NAME,
@@ -1588,6 +1791,91 @@ mod tests {
         assert!(!plan.inherit_stdio);
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn resolve_shell_runtime_config_prefers_legacy_root_with_process_feed_activity() {
+        let base = std::env::temp_dir().join("desktop-shell-runtime-root-fallback-test");
+        if base.exists() {
+            std::fs::remove_dir_all(&base)
+                .expect("existing temp directory should be removable");
+        }
+
+        let current_root = base.join("handy-unity-publisher").join("runtime");
+        let legacy_root = base.join("handy-unity-builder").join("runtime");
+        let current_config = RuntimeConfig::from_root(&current_root);
+        let legacy_config = RuntimeConfig::from_root(&legacy_root);
+        let current_storage = StorageLayout::from_directories(&current_config.directories);
+        let legacy_storage = StorageLayout::from_directories(&legacy_config.directories);
+        initialize_database(&current_storage).expect("current database should initialize");
+        initialize_database(&legacy_storage).expect("legacy database should initialize");
+        seed_process_feed_release(&legacy_storage, "legacy-repo", "v1.0.4");
+
+        let resolved =
+            resolve_shell_runtime_config(current_config).expect("runtime config should resolve");
+
+        assert_eq!(resolved.directories.data_dir, legacy_root);
+
+        std::fs::remove_dir_all(base).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn resolve_shell_runtime_config_keeps_current_root_when_current_has_activity() {
+        let base = std::env::temp_dir().join("desktop-shell-runtime-root-current-test");
+        if base.exists() {
+            std::fs::remove_dir_all(&base)
+                .expect("existing temp directory should be removable");
+        }
+
+        let current_root = base.join("handy-unity-publisher").join("runtime");
+        let legacy_root = base.join("handy-unity-builder").join("runtime");
+        let current_config = RuntimeConfig::from_root(&current_root);
+        let legacy_config = RuntimeConfig::from_root(&legacy_root);
+        let current_storage = StorageLayout::from_directories(&current_config.directories);
+        let legacy_storage = StorageLayout::from_directories(&legacy_config.directories);
+        initialize_database(&current_storage).expect("current database should initialize");
+        initialize_database(&legacy_storage).expect("legacy database should initialize");
+        seed_process_feed_release(&current_storage, "current-repo", "v2.0.0");
+        seed_process_feed_release(&legacy_storage, "legacy-repo", "v1.0.4");
+
+        let resolved = resolve_shell_runtime_config(current_config.clone())
+            .expect("runtime config should resolve");
+
+        assert_eq!(resolved.directories.data_dir, current_config.directories.data_dir);
+
+        std::fs::remove_dir_all(base).expect("temp directory should be removable");
+    }
+
+    fn seed_process_feed_release(storage: &StorageLayout, repository_name: &str, git_tag: &str) {
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO repositories (name, repo_url) VALUES (?, ?)",
+                params![repository_name, format!("https://example.com/{repository_name}.git")],
+            )
+            .expect("repository should insert");
+        let repository_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO release_runs (
+                    repository_id,
+                    git_tag,
+                    git_commit,
+                    unity_version,
+                    status
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ",
+                params![
+                    repository_id,
+                    git_tag,
+                    "deadbeef",
+                    "6000.4.3f1",
+                    "queued",
+                ],
+            )
+            .expect("release run should insert");
     }
 
     #[test]
@@ -1678,6 +1966,14 @@ mod tests {
         assert_eq!(
             settings.supervisor_state_path,
             settings.state_dir.join("supervisor-state.json")
+        );
+        assert_eq!(
+            settings.runtime_events_path,
+            settings.state_dir.join("runtime-events.jsonl")
+        );
+        assert_eq!(
+            settings.runtime_events_cursor_path,
+            settings.state_dir.join("runtime-events.cursor.json")
         );
         assert_eq!(settings.runtime_log_path, settings.logs_dir.join("runtime.jsonl"));
         assert!(settings.data_dir.is_dir());

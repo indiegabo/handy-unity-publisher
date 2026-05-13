@@ -114,6 +114,14 @@ struct PublishQueueJob {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ReleaseRunReconciliation {
+    status: String,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AvailableQueueMessage {
     id: i64,
     payload: Vec<u8>,
@@ -612,6 +620,14 @@ impl LocalCoordinator {
         let _ = self.release_lock(&lock.name, &lock.token);
 
         outcome
+    }
+
+    /// Loads one persisted release run by identifier.
+    pub fn get_release_run_record(&self, release_run_id: i64) -> io::Result<ReleaseRunRecord> {
+        require_positive_identifier(release_run_id, "release run id")?;
+        self.load_release_run_record(release_run_id)?.ok_or_else(|| {
+            not_found_error(format!("release run {release_run_id} was not found"))
+        })
     }
 
     /// Plans queued build runs for one queued release and dispatches queued work.
@@ -1409,11 +1425,14 @@ impl LocalCoordinator {
             ));
         }
 
-        self.load_build_run_record(build_run_id)?.ok_or_else(|| {
+        let record = self.load_build_run_record(build_run_id)?.ok_or_else(|| {
             not_found_error(format!(
                 "started build run {build_run_id} could not be reloaded"
             ))
-        })
+        })?;
+        self.reconcile_release_run_status(record.release_run_id)?;
+
+        Ok(record)
     }
 
     /// Marks one running build run as completed and clears any stored error.
@@ -1457,11 +1476,14 @@ impl LocalCoordinator {
             ));
         }
 
-        self.load_build_run_record(build_run_id)?.ok_or_else(|| {
+        let record = self.load_build_run_record(build_run_id)?.ok_or_else(|| {
             not_found_error(format!(
                 "completed build run {build_run_id} could not be reloaded"
             ))
-        })
+        })?;
+        self.reconcile_release_run_status(record.release_run_id)?;
+
+        Ok(record)
     }
 
     /// Marks one running build run as failed and stores the terminal error message.
@@ -1507,11 +1529,14 @@ impl LocalCoordinator {
             ));
         }
 
-        self.load_build_run_record(build_run_id)?.ok_or_else(|| {
+        let record = self.load_build_run_record(build_run_id)?.ok_or_else(|| {
             not_found_error(format!(
                 "failed build run {build_run_id} could not be reloaded"
             ))
-        })
+        })?;
+        self.reconcile_release_run_status(record.release_run_id)?;
+
+        Ok(record)
     }
 
     /// Marks one running build run as canceled and stores the terminal reason.
@@ -1557,11 +1582,14 @@ impl LocalCoordinator {
             ));
         }
 
-        self.load_build_run_record(build_run_id)?.ok_or_else(|| {
+        let record = self.load_build_run_record(build_run_id)?.ok_or_else(|| {
             not_found_error(format!(
                 "canceled build run {build_run_id} could not be reloaded"
             ))
-        })
+        })?;
+        self.reconcile_release_run_status(record.release_run_id)?;
+
+        Ok(record)
     }
 
     /// Starts or refreshes one named stage under a running build run.
@@ -2248,11 +2276,14 @@ impl LocalCoordinator {
             ));
         }
 
-        self.load_publish_run_record(publish_run_id)?.ok_or_else(|| {
+        let record = self.load_publish_run_record(publish_run_id)?.ok_or_else(|| {
             not_found_error(format!(
                 "started publish run {publish_run_id} could not be reloaded"
             ))
-        })
+        })?;
+        self.reconcile_release_run_status(record.release_run_id)?;
+
+        Ok(record)
     }
 
     /// Marks one running publish run as succeeded.
@@ -2292,11 +2323,14 @@ impl LocalCoordinator {
             ));
         }
 
-        self.load_publish_run_record(publish_run_id)?.ok_or_else(|| {
+        let record = self.load_publish_run_record(publish_run_id)?.ok_or_else(|| {
             not_found_error(format!(
                 "completed publish run {publish_run_id} could not be reloaded"
             ))
-        })
+        })?;
+        self.reconcile_release_run_status(record.release_run_id)?;
+
+        Ok(record)
     }
 
     /// Marks one running publish run as failed and stores the terminal error message.
@@ -2338,11 +2372,14 @@ impl LocalCoordinator {
             ));
         }
 
-        self.load_publish_run_record(publish_run_id)?.ok_or_else(|| {
+        let record = self.load_publish_run_record(publish_run_id)?.ok_or_else(|| {
             not_found_error(format!(
                 "failed publish run {publish_run_id} could not be reloaded"
             ))
-        })
+        })?;
+        self.reconcile_release_run_status(record.release_run_id)?;
+
+        Ok(record)
     }
 
     /// Claims the next eligible release job from the local queue for repository-scoped planning.
@@ -2416,6 +2453,8 @@ impl LocalCoordinator {
 
     /// Returns one read-only snapshot of the local automation queues, leases, and repository backlog.
     pub fn automation_snapshot(&self) -> io::Result<AutomationSnapshot> {
+        self.reconcile_release_run_statuses()?;
+
         let now = unix_timestamp_millis()?;
         let mut connection = open_connection(&self.database_path)?;
         let transaction = connection
@@ -3298,6 +3337,63 @@ impl LocalCoordinator {
             .map_err(sqlite_error)
     }
 
+    fn load_release_run_record_in_transaction(
+        &self,
+        transaction: &Transaction<'_>,
+        release_run_id: i64,
+    ) -> io::Result<Option<ReleaseRunRecord>> {
+        transaction
+            .query_row(
+                "
+                SELECT id,
+                       repository_id,
+                       git_tag,
+                       git_commit,
+                       trigger_source,
+                       trigger_rule_id,
+                       source_metadata_json,
+                       unity_version,
+                       status,
+                       started_at,
+                       finished_at,
+                       error_message,
+                       created_at,
+                       updated_at
+                FROM release_runs
+                WHERE id = ?
+                ",
+                [release_run_id],
+                scan_release_run_record,
+            )
+            .optional()
+            .map_err(sqlite_error)
+    }
+
+    /// Recomputes one release status from the durable child build and publish rows.
+    fn reconcile_release_run_status(&self, release_run_id: i64) -> io::Result<()> {
+        let mut connection = open_connection(&self.database_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        self.reconcile_release_run_status_in_transaction(&transaction, release_run_id)?;
+        transaction.commit().map_err(sqlite_error)
+    }
+
+    /// Repairs non-terminal release rows that no longer match their child execution state.
+    fn reconcile_release_run_statuses(&self) -> io::Result<()> {
+        let mut connection = open_connection(&self.database_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        let release_run_ids = self.list_open_release_run_ids(&transaction)?;
+
+        for release_run_id in release_run_ids {
+            self.reconcile_release_run_status_in_transaction(&transaction, release_run_id)?;
+        }
+
+        transaction.commit().map_err(sqlite_error)
+    }
+
     fn load_build_run_record(&self, build_run_id: i64) -> io::Result<Option<BuildRunRecord>> {
         let connection = open_connection(&self.database_path)?;
         connection
@@ -4006,6 +4102,88 @@ impl LocalCoordinator {
         Ok(runs)
     }
 
+    fn list_open_release_run_ids(
+        &self,
+        transaction: &Transaction<'_>,
+    ) -> io::Result<Vec<i64>> {
+        let mut statement = transaction
+            .prepare(
+                "
+                SELECT id
+                FROM release_runs
+                WHERE status IN (?, ?, ?)
+                ORDER BY id ASC
+                ",
+            )
+            .map_err(sqlite_error)?;
+        let rows = statement
+            .query_map(
+                params![
+                    ReleaseStatus::Detected.as_str(),
+                    ReleaseStatus::Queued.as_str(),
+                    ReleaseStatus::Running.as_str(),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(sqlite_error)?;
+
+        let mut release_run_ids = Vec::new();
+        for row in rows {
+            release_run_ids.push(row.map_err(sqlite_error)?);
+        }
+
+        Ok(release_run_ids)
+    }
+
+    fn reconcile_release_run_status_in_transaction(
+        &self,
+        transaction: &Transaction<'_>,
+        release_run_id: i64,
+    ) -> io::Result<()> {
+        let Some(release) = self.load_release_run_record_in_transaction(transaction, release_run_id)?
+        else {
+            return Ok(());
+        };
+        let build_runs = self.list_build_runs_by_release(transaction, release_run_id)?;
+        let publish_runs = self.list_publish_runs_by_release(transaction, release_run_id)?;
+        let Some(reconciliation) =
+            derive_release_run_reconciliation(&release, &build_runs, &publish_runs)
+        else {
+            return Ok(());
+        };
+
+        if release.status == reconciliation.status
+            && release.started_at == reconciliation.started_at
+            && release.finished_at == reconciliation.finished_at
+            && release.error_message == reconciliation.error_message
+        {
+            return Ok(());
+        }
+
+        transaction
+            .execute(
+                "
+                UPDATE release_runs
+                SET status = ?,
+                    started_at = ?,
+                    finished_at = ?,
+                    error_message = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                ",
+                params![
+                    reconciliation.status,
+                    reconciliation.started_at.as_deref(),
+                    reconciliation.finished_at.as_deref(),
+                    reconciliation.error_message.as_deref(),
+                    release_run_id,
+                ],
+            )
+            .map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
     fn list_build_runs_by_release_readonly(
         &self,
         release_run_id: i64,
@@ -4554,6 +4732,76 @@ pub fn open_connection(database_path: &Path) -> io::Result<Connection> {
     Ok(connection)
 }
 
+/// Lists one paginated release-level process feed for the desktop home view.
+pub fn list_process_feed_page(
+    storage: &StorageLayout,
+    page: u32,
+    page_size: u32,
+) -> io::Result<ProcessFeedPage> {
+    let coordinator = LocalCoordinator::new(storage);
+    coordinator.reconcile_release_run_statuses()?;
+
+    let requested_page = page.max(1);
+    let normalized_page_size = page_size.clamp(1, 50);
+    let mut connection = open_connection(&storage.database_path)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(sqlite_error)?;
+    let generated_at = transaction
+        .query_row(
+            "SELECT STRFTIME('%Y-%m-%dT%H:%M:%SZ', 'now')",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(sqlite_error)?;
+    let total_items = transaction
+        .query_row("SELECT COUNT(1) FROM release_runs", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(sqlite_error)?;
+    let total_pages = if total_items == 0 {
+        0
+    } else {
+        ((total_items - 1) / i64::from(normalized_page_size) + 1) as u32
+    };
+    let effective_page = if total_pages == 0 {
+        1
+    } else {
+        requested_page.min(total_pages)
+    };
+    let offset = i64::from(effective_page.saturating_sub(1)) * i64::from(normalized_page_size);
+    let page_rows = list_process_feed_release_rows(
+        &transaction,
+        i64::from(normalized_page_size),
+        offset,
+    )?;
+    let mut items = Vec::with_capacity(page_rows.len());
+
+    for row in page_rows {
+        let build_runs = coordinator.list_build_runs_by_release(&transaction, row.release.id)?;
+        let publish_runs =
+            coordinator.list_publish_runs_by_release(&transaction, row.release.id)?;
+        items.push(summarize_process_feed_record(
+            row,
+            &build_runs,
+            &publish_runs,
+        ));
+    }
+
+    transaction.commit().map_err(sqlite_error)?;
+
+    Ok(ProcessFeedPage {
+        generated_at,
+        page: effective_page,
+        page_size: normalized_page_size,
+        total_items,
+        total_pages,
+        has_previous_page: total_pages > 0 && effective_page > 1,
+        has_next_page: total_pages > 0 && effective_page < total_pages,
+        items,
+    })
+}
+
 /// Lists persisted build runs enriched for operator-facing history surfaces.
 pub fn list_build_history_records(
     storage: &StorageLayout,
@@ -4837,6 +5085,23 @@ pub fn list_publish_target_runtime_settings(
     }
 
     Ok(targets)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessFeedReleaseRow {
+    release: ReleaseRunRecord,
+    repository_name: String,
+    repository_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct RunStatusCounts {
+    total: i64,
+    queued: i64,
+    running: i64,
+    succeeded: i64,
+    failed: i64,
+    canceled: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5395,6 +5660,551 @@ fn nullable_string(value: &str) -> Option<&str> {
     }
 }
 
+fn list_process_feed_release_rows(
+    transaction: &rusqlite::Transaction<'_>,
+    limit: i64,
+    offset: i64,
+) -> io::Result<Vec<ProcessFeedReleaseRow>> {
+    let mut statement = transaction
+        .prepare(
+            "
+            SELECT rr.id,
+                   rr.repository_id,
+                   r.name,
+                   r.repo_url,
+                   rr.git_tag,
+                   rr.git_commit,
+                   rr.trigger_source,
+                   rr.trigger_rule_id,
+                   rr.source_metadata_json,
+                   rr.unity_version,
+                   rr.status,
+                   rr.started_at,
+                   rr.finished_at,
+                   rr.error_message,
+                   rr.created_at,
+                   rr.updated_at
+            FROM release_runs rr
+            JOIN repositories r ON r.id = rr.repository_id
+            ORDER BY COALESCE(rr.started_at, rr.created_at) DESC,
+                     rr.id DESC
+            LIMIT ? OFFSET ?
+            ",
+        )
+        .map_err(sqlite_error)?;
+    let rows = statement
+        .query_map(params![limit, offset], scan_process_feed_release_row)
+        .map_err(sqlite_error)?;
+
+    let mut releases = Vec::new();
+    for row in rows {
+        releases.push(row.map_err(sqlite_error)?);
+    }
+
+    Ok(releases)
+}
+
+fn summarize_process_feed_record(
+    row: ProcessFeedReleaseRow,
+    build_runs: &[BuildRunRecord],
+    publish_runs: &[PublishRunRecord],
+) -> ProcessFeedRecord {
+    let ProcessFeedReleaseRow {
+        release,
+        repository_name,
+        repository_url,
+    } = row;
+    let build_counts = count_run_statuses(build_runs.iter().map(|run| run.status.as_str()));
+    let publish_counts =
+        count_run_statuses(publish_runs.iter().map(|run| run.status.as_str()));
+    let display_status =
+        classify_process_feed_status(&release, build_counts, publish_counts).to_owned();
+    let (current_step_label, current_step_status, current_step_detail) =
+        summarize_process_feed_step(
+            &release,
+            build_runs,
+            publish_runs,
+            build_counts,
+            publish_counts,
+        );
+    let error_message = select_process_feed_error_message(&release, build_runs, publish_runs);
+
+    ProcessFeedRecord {
+        release_run_id: release.id,
+        repository_id: release.repository_id,
+        repository_name,
+        repository_url,
+        git_tag: release.git_tag,
+        git_commit: release.git_commit,
+        unity_version: release.unity_version,
+        display_status,
+        current_step_label,
+        current_step_status,
+        current_step_detail,
+        queued_build_runs: build_counts.queued,
+        running_build_runs: build_counts.running,
+        succeeded_build_runs: build_counts.succeeded,
+        failed_build_runs: build_counts.failed,
+        canceled_build_runs: build_counts.canceled,
+        queued_publish_runs: publish_counts.queued,
+        running_publish_runs: publish_counts.running,
+        succeeded_publish_runs: publish_counts.succeeded,
+        failed_publish_runs: publish_counts.failed,
+        canceled_publish_runs: publish_counts.canceled,
+        total_build_runs: build_counts.total,
+        total_publish_runs: publish_counts.total,
+        started_at: release.started_at,
+        finished_at: release.finished_at,
+        error_message,
+        created_at: release.created_at,
+        updated_at: release.updated_at,
+    }
+}
+
+fn summarize_process_feed_step(
+    release: &ReleaseRunRecord,
+    build_runs: &[BuildRunRecord],
+    publish_runs: &[PublishRunRecord],
+    build_counts: RunStatusCounts,
+    publish_counts: RunStatusCounts,
+) -> (String, String, Option<String>) {
+    if let Some(run) = latest_build_run_by_status(build_runs, BuildStatus::Running.as_str()) {
+        return (
+            run.current_stage_label
+                .clone()
+                .unwrap_or_else(|| String::from("Build running")),
+            run.current_stage_status
+                .clone()
+                .unwrap_or_else(|| String::from(BuildStatus::Running.as_str())),
+            run.last_progress_message.clone().or_else(|| {
+                Some(format!(
+                    "{} build target(s) are currently running",
+                    build_counts.running
+                ))
+            }),
+        );
+    }
+
+    if publish_counts.running > 0 {
+        return (
+            String::from("Publishing"),
+            String::from(PublishStatus::Running.as_str()),
+            Some(format!(
+                "{} publish task(s) are currently running",
+                publish_counts.running
+            )),
+        );
+    }
+
+    if build_counts.queued > 0 {
+        return (
+            String::from("Queued for build"),
+            String::from(BuildStatus::Queued.as_str()),
+            Some(format!(
+                "{} build target(s) are waiting to start",
+                build_counts.queued
+            )),
+        );
+    }
+
+    if publish_counts.queued > 0 {
+        return (
+            String::from("Queued for publishing"),
+            String::from(PublishStatus::Queued.as_str()),
+            Some(format!(
+                "{} publish task(s) are waiting to start",
+                publish_counts.queued
+            )),
+        );
+    }
+
+    if let Some(run) = latest_build_run_by_status(build_runs, BuildStatus::Failed.as_str()) {
+        return (
+            run.current_stage_label
+                .clone()
+                .unwrap_or_else(|| String::from("Build failed")),
+            String::from(BuildStatus::Failed.as_str()),
+            run.error_message.clone().or(run.last_progress_message.clone()),
+        );
+    }
+
+    if publish_counts.failed > 0 {
+        return (
+            String::from("Publishing failed"),
+            String::from(PublishStatus::Failed.as_str()),
+            latest_publish_run_by_status(publish_runs, PublishStatus::Failed.as_str())
+                .and_then(|run| run.error_message.clone())
+                .or_else(|| {
+                    Some(format!(
+                        "{} publish task(s) failed",
+                        publish_counts.failed
+                    ))
+                }),
+        );
+    }
+
+    if let Some(run) = latest_build_run_by_status(build_runs, BuildStatus::Canceled.as_str()) {
+        return (
+            run.current_stage_label
+                .clone()
+                .unwrap_or_else(|| String::from("Build canceled")),
+            String::from(BuildStatus::Canceled.as_str()),
+            run.error_message.clone().or(run.last_progress_message.clone()),
+        );
+    }
+
+    if publish_counts.canceled > 0 {
+        return (
+            String::from("Publishing canceled"),
+            String::from(PublishStatus::Canceled.as_str()),
+            latest_publish_run_by_status(publish_runs, PublishStatus::Canceled.as_str())
+                .and_then(|run| run.error_message.clone())
+                .or_else(|| {
+                    Some(format!(
+                        "{} publish task(s) were canceled",
+                        publish_counts.canceled
+                    ))
+                }),
+        );
+    }
+
+    if release.status == ReleaseStatus::Failed.as_str() {
+        return (
+            String::from("Release failed"),
+            String::from(ReleaseStatus::Failed.as_str()),
+            release.error_message.clone(),
+        );
+    }
+
+    if release.status == ReleaseStatus::Canceled.as_str() {
+        return (
+            String::from("Release canceled"),
+            String::from(ReleaseStatus::Canceled.as_str()),
+            release.error_message.clone(),
+        );
+    }
+
+    if release.status == ReleaseStatus::Succeeded.as_str()
+        && build_counts.total == 0
+        && publish_counts.total == 0
+    {
+        return (
+            String::from("Completed"),
+            String::from(ReleaseStatus::Succeeded.as_str()),
+            None,
+        );
+    }
+
+    if build_counts.total == 0 && publish_counts.total == 0 {
+        return (
+            String::from("Awaiting build planning"),
+            if release.status == ReleaseStatus::Running.as_str() {
+                String::from(ReleaseStatus::Running.as_str())
+            } else {
+                String::from(ReleaseStatus::Queued.as_str())
+            },
+            Some(String::from(
+                "The runtime has not planned build targets for this process yet.",
+            )),
+        );
+    }
+
+    if publish_counts.total > 0 {
+        return (
+            String::from("Publishing completed"),
+            String::from(PublishStatus::Succeeded.as_str()),
+            Some(format!(
+                "{} publish task(s) completed",
+                publish_counts.succeeded
+            )),
+        );
+    }
+
+    (
+        String::from("Build completed"),
+        String::from(BuildStatus::Succeeded.as_str()),
+        Some(format!(
+            "{} build target(s) completed",
+            build_counts.succeeded
+        )),
+    )
+}
+
+fn classify_process_feed_status(
+    release: &ReleaseRunRecord,
+    build_counts: RunStatusCounts,
+    publish_counts: RunStatusCounts,
+) -> &'static str {
+    if build_counts.running > 0
+        || publish_counts.running > 0
+        || release.status == ReleaseStatus::Running.as_str()
+    {
+        return "running";
+    }
+
+    if build_counts.queued > 0
+        || publish_counts.queued > 0
+        || release.status == ReleaseStatus::Detected.as_str()
+        || release.status == ReleaseStatus::Queued.as_str()
+    {
+        return "queued";
+    }
+
+    if build_counts.failed > 0
+        || publish_counts.failed > 0
+        || release.status == ReleaseStatus::Failed.as_str()
+    {
+        return "failed";
+    }
+
+    if build_counts.canceled > 0
+        || publish_counts.canceled > 0
+        || release.status == ReleaseStatus::Canceled.as_str()
+    {
+        return "canceled";
+    }
+
+    "succeeded"
+}
+
+fn derive_release_run_reconciliation(
+    release: &ReleaseRunRecord,
+    build_runs: &[BuildRunRecord],
+    publish_runs: &[PublishRunRecord],
+) -> Option<ReleaseRunReconciliation> {
+    if build_runs.is_empty() && publish_runs.is_empty() {
+        return None;
+    }
+
+    let has_running = build_runs
+        .iter()
+        .any(|run| run.status == BuildStatus::Running.as_str())
+        || publish_runs
+            .iter()
+            .any(|run| run.status == PublishStatus::Running.as_str());
+    let has_queued = build_runs
+        .iter()
+        .any(|run| run.status == BuildStatus::Queued.as_str())
+        || publish_runs
+            .iter()
+            .any(|run| run.status == PublishStatus::Queued.as_str());
+    let has_failed = build_runs
+        .iter()
+        .any(|run| run.status == BuildStatus::Failed.as_str())
+        || publish_runs
+            .iter()
+            .any(|run| run.status == PublishStatus::Failed.as_str());
+    let has_canceled = build_runs
+        .iter()
+        .any(|run| run.status == BuildStatus::Canceled.as_str())
+        || publish_runs
+            .iter()
+            .any(|run| run.status == PublishStatus::Canceled.as_str());
+    let all_children_succeeded = build_runs
+        .iter()
+        .all(|run| run.status == BuildStatus::Succeeded.as_str())
+        && publish_runs
+            .iter()
+            .all(|run| run.status == PublishStatus::Succeeded.as_str());
+
+    let status = if has_running {
+        ReleaseStatus::Running.as_str()
+    } else if has_queued {
+        ReleaseStatus::Queued.as_str()
+    } else if has_failed {
+        ReleaseStatus::Failed.as_str()
+    } else if has_canceled {
+        ReleaseStatus::Canceled.as_str()
+    } else if all_children_succeeded {
+        ReleaseStatus::Succeeded.as_str()
+    } else {
+        return None;
+    };
+
+    let started_at = release
+        .started_at
+        .clone()
+        .or_else(|| first_release_child_started_at(build_runs, publish_runs));
+    let finished_at = if status == ReleaseStatus::Succeeded.as_str()
+        || status == ReleaseStatus::Failed.as_str()
+        || status == ReleaseStatus::Canceled.as_str()
+    {
+        release
+            .finished_at
+            .clone()
+            .or_else(|| latest_release_child_finished_at(build_runs, publish_runs))
+    } else {
+        None
+    };
+    let error_message = match status {
+        value if value == ReleaseStatus::Failed.as_str() => latest_release_child_error_message(
+            build_runs,
+            publish_runs,
+            BuildStatus::Failed.as_str(),
+            PublishStatus::Failed.as_str(),
+        )
+        .or_else(|| release.error_message.clone()),
+        value if value == ReleaseStatus::Canceled.as_str() => {
+            latest_release_child_error_message(
+                build_runs,
+                publish_runs,
+                BuildStatus::Canceled.as_str(),
+                PublishStatus::Canceled.as_str(),
+            )
+            .or_else(|| release.error_message.clone())
+        }
+        _ => None,
+    };
+
+    Some(ReleaseRunReconciliation {
+        status: String::from(status),
+        started_at,
+        finished_at,
+        error_message,
+    })
+}
+
+fn first_release_child_started_at(
+    build_runs: &[BuildRunRecord],
+    publish_runs: &[PublishRunRecord],
+) -> Option<String> {
+    build_runs
+        .iter()
+        .filter_map(|run| run.started_at.as_deref())
+        .chain(
+            publish_runs
+                .iter()
+                .filter_map(|run| run.started_at.as_deref()),
+        )
+        .min()
+        .map(str::to_owned)
+}
+
+fn latest_release_child_finished_at(
+    build_runs: &[BuildRunRecord],
+    publish_runs: &[PublishRunRecord],
+) -> Option<String> {
+    build_runs
+        .iter()
+        .filter_map(|run| run.finished_at.as_deref())
+        .chain(
+            publish_runs
+                .iter()
+                .filter_map(|run| run.finished_at.as_deref()),
+        )
+        .max()
+        .map(str::to_owned)
+}
+
+fn latest_release_child_error_message(
+    build_runs: &[BuildRunRecord],
+    publish_runs: &[PublishRunRecord],
+    build_status: &str,
+    publish_status: &str,
+) -> Option<String> {
+    let build_candidate = latest_build_run_by_status(build_runs, build_status).and_then(|run| {
+        run.error_message
+            .as_ref()
+            .map(|message| (build_run_activity_key(run), message.clone()))
+    });
+    let publish_candidate = latest_publish_run_by_status(publish_runs, publish_status)
+        .and_then(|run| {
+            run.error_message
+                .as_ref()
+                .map(|message| (publish_run_activity_key(run), message.clone()))
+        });
+
+    match (build_candidate, publish_candidate) {
+        (Some((build_key, build_message)), Some((publish_key, publish_message))) => {
+            if publish_key > build_key {
+                Some(publish_message)
+            } else {
+                Some(build_message)
+            }
+        }
+        (Some((_, message)), None) | (None, Some((_, message))) => Some(message),
+        (None, None) => None,
+    }
+}
+
+fn select_process_feed_error_message(
+    release: &ReleaseRunRecord,
+    build_runs: &[BuildRunRecord],
+    publish_runs: &[PublishRunRecord],
+) -> Option<String> {
+    release
+        .error_message
+        .clone()
+        .or_else(|| {
+            latest_build_run_by_status(build_runs, BuildStatus::Failed.as_str())
+                .and_then(|run| run.error_message.clone())
+        })
+        .or_else(|| {
+            latest_publish_run_by_status(publish_runs, PublishStatus::Failed.as_str())
+                .and_then(|run| run.error_message.clone())
+        })
+        .or_else(|| {
+            latest_build_run_by_status(build_runs, BuildStatus::Canceled.as_str())
+                .and_then(|run| run.error_message.clone())
+        })
+        .or_else(|| {
+            latest_publish_run_by_status(publish_runs, PublishStatus::Canceled.as_str())
+                .and_then(|run| run.error_message.clone())
+        })
+}
+
+fn count_run_statuses<'a>(statuses: impl Iterator<Item = &'a str>) -> RunStatusCounts {
+    let mut counts = RunStatusCounts::default();
+
+    for status in statuses {
+        counts.total += 1;
+
+        match status {
+            value if value == BuildStatus::Queued.as_str() => counts.queued += 1,
+            value if value == BuildStatus::Running.as_str() => counts.running += 1,
+            value if value == BuildStatus::Succeeded.as_str() => counts.succeeded += 1,
+            value if value == BuildStatus::Failed.as_str() => counts.failed += 1,
+            value if value == BuildStatus::Canceled.as_str() => counts.canceled += 1,
+            _ => {}
+        }
+    }
+
+    counts
+}
+
+fn latest_build_run_by_status<'a>(
+    runs: &'a [BuildRunRecord],
+    status: &str,
+) -> Option<&'a BuildRunRecord> {
+    runs.iter()
+        .filter(|run| run.status == status)
+        .max_by_key(|run| (build_run_activity_key(run), run.id))
+}
+
+fn latest_publish_run_by_status<'a>(
+    runs: &'a [PublishRunRecord],
+    status: &str,
+) -> Option<&'a PublishRunRecord> {
+    runs.iter()
+        .filter(|run| run.status == status)
+        .max_by_key(|run| (publish_run_activity_key(run), run.id))
+}
+
+fn build_run_activity_key(run: &BuildRunRecord) -> &str {
+    run.heartbeat_at
+        .as_deref()
+        .or(run.finished_at.as_deref())
+        .or(run.started_at.as_deref())
+        .unwrap_or(run.updated_at.as_str())
+}
+
+fn publish_run_activity_key(run: &PublishRunRecord) -> &str {
+    run.finished_at
+        .as_deref()
+        .or(run.started_at.as_deref())
+        .unwrap_or(run.updated_at.as_str())
+}
+
 fn map_release_store_sqlite_error(error: rusqlite::Error) -> io::Error {
     let lower_error = error.to_string().to_ascii_lowercase();
     if lower_error.contains("unique constraint failed") {
@@ -5429,6 +6239,31 @@ fn scan_release_run_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReleaseR
         error_message: normalize_optional_string(row.get(11)?),
         created_at: row.get(12)?,
         updated_at: row.get(13)?,
+    })
+}
+
+fn scan_process_feed_release_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ProcessFeedReleaseRow> {
+    Ok(ProcessFeedReleaseRow {
+        release: ReleaseRunRecord {
+            id: row.get(0)?,
+            repository_id: row.get(1)?,
+            git_tag: row.get::<_, String>(4)?.trim().to_owned(),
+            git_commit: normalize_optional_string(row.get(5)?),
+            trigger_source: row.get::<_, String>(6)?.trim().to_owned(),
+            trigger_rule_id: row.get(7)?,
+            source_metadata_json: row.get(8)?,
+            unity_version: normalize_optional_string(row.get(9)?),
+            status: row.get(10)?,
+            started_at: normalize_optional_string(row.get(11)?),
+            finished_at: normalize_optional_string(row.get(12)?),
+            error_message: normalize_optional_string(row.get(13)?),
+            created_at: row.get(14)?,
+            updated_at: row.get(15)?,
+        },
+        repository_name: row.get(2)?,
+        repository_url: row.get::<_, String>(3)?.trim().to_owned(),
     })
 }
 
@@ -6114,6 +6949,7 @@ mod tests {
         apply_pragmas, decode_release_dispatch_job,
         ensure_migration_ledger, initialize_database,
         list_artifact_inspection_records, list_build_history_records,
+        list_process_feed_page,
         list_build_target_runtime_settings,
         list_credential_records,
         list_publish_target_runtime_settings, open_connection, recover_runtime_state,
@@ -6161,6 +6997,14 @@ mod tests {
         assert_eq!(
             layout.supervisor_state_path,
             PathBuf::from("/tmp/runtime/state/supervisor-state.json")
+        );
+        assert_eq!(
+            layout.runtime_events_path,
+            PathBuf::from("/tmp/runtime/state/runtime-events.jsonl")
+        );
+        assert_eq!(
+            layout.runtime_events_cursor_path,
+            PathBuf::from("/tmp/runtime/state/runtime-events.cursor.json")
         );
         assert_eq!(
             layout.runtime_log_path,
@@ -6511,6 +7355,170 @@ mod tests {
     }
 
     #[test]
+    fn list_process_feed_page_returns_release_level_history_and_pagination() {
+        let root = test_root("list-process-feed-page");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let fixture = seed_repository_fixture(&connection, "process-feed");
+
+        let completed_release_run_id = insert_release_run(
+            &connection,
+            fixture.repository_id,
+            "v1.0.0",
+            ReleaseStatus::Succeeded.as_str(),
+        );
+        connection
+            .execute(
+                "
+                UPDATE release_runs
+                SET git_commit = ?,
+                    unity_version = ?,
+                    started_at = ?,
+                    finished_at = ?
+                WHERE id = ?
+                ",
+                params![
+                    "cafebabe",
+                    "2022.3.18f1",
+                    "2026-01-10T10:00:00Z",
+                    "2026-01-10T10:04:00Z",
+                    completed_release_run_id,
+                ],
+            )
+            .expect("completed release metadata should update");
+        let completed_build_run_id = insert_build_run(
+            &connection,
+            completed_release_run_id,
+            fixture.primary_build_target_id,
+            BuildStatus::Succeeded.as_str(),
+        );
+        update_build_run_plan(
+            &connection,
+            completed_build_run_id,
+            "2022.3.18f1",
+            DEFAULT_HOST_NATIVE_RUNNER_TYPE,
+        );
+        connection
+            .execute(
+                "
+                UPDATE build_runs
+                SET started_at = ?,
+                    finished_at = ?
+                WHERE id = ?
+                ",
+                params![
+                    "2026-01-10T10:01:00Z",
+                    "2026-01-10T10:03:00Z",
+                    completed_build_run_id,
+                ],
+            )
+            .expect("completed build metadata should update");
+
+        let running_release_run_id = insert_release_run(
+            &connection,
+            fixture.repository_id,
+            "v1.1.0",
+            ReleaseStatus::Queued.as_str(),
+        );
+        connection
+            .execute(
+                "
+                UPDATE release_runs
+                SET git_commit = ?,
+                    unity_version = ?,
+                    started_at = ?
+                WHERE id = ?
+                ",
+                params![
+                    "deadbeef",
+                    "2022.3.20f1",
+                    "2026-01-11T11:00:00Z",
+                    running_release_run_id,
+                ],
+            )
+            .expect("running release metadata should update");
+        let running_build_run_id = insert_build_run(
+            &connection,
+            running_release_run_id,
+            fixture.secondary_build_target_id,
+            BuildStatus::Running.as_str(),
+        );
+        update_build_run_plan(
+            &connection,
+            running_build_run_id,
+            "2022.3.20f1",
+            DEFAULT_HOST_NATIVE_RUNNER_TYPE,
+        );
+        connection
+            .execute(
+                "
+                UPDATE build_runs
+                SET current_stage_key = ?,
+                    current_stage_label = ?,
+                    current_stage_status = ?,
+                    heartbeat_at = ?,
+                    last_progress_message = ?,
+                    started_at = ?
+                WHERE id = ?
+                ",
+                params![
+                    "build-player",
+                    "Build player",
+                    BuildStatus::Running.as_str(),
+                    "2026-01-11T11:02:00Z",
+                    "Packaging Linux player",
+                    "2026-01-11T11:01:00Z",
+                    running_build_run_id,
+                ],
+            )
+            .expect("running build metadata should update");
+        drop(connection);
+
+        let first_page = list_process_feed_page(&layout, 1, 1)
+            .expect("first process feed page should load");
+
+        assert!(!first_page.generated_at.is_empty());
+        assert_eq!(first_page.page, 1);
+        assert_eq!(first_page.page_size, 1);
+        assert_eq!(first_page.total_items, 2);
+        assert_eq!(first_page.total_pages, 2);
+        assert!(!first_page.has_previous_page);
+        assert!(first_page.has_next_page);
+        assert_eq!(first_page.items.len(), 1);
+        assert_eq!(first_page.items[0].release_run_id, running_release_run_id);
+        assert_eq!(first_page.items[0].repository_name, "process-feed");
+        assert_eq!(first_page.items[0].git_tag, "v1.1.0");
+        assert_eq!(first_page.items[0].display_status, "running");
+        assert_eq!(first_page.items[0].current_step_label, "Build player");
+        assert_eq!(first_page.items[0].current_step_status, "running");
+        assert_eq!(
+            first_page.items[0].current_step_detail.as_deref(),
+            Some("Packaging Linux player")
+        );
+        assert_eq!(first_page.items[0].running_build_runs, 1);
+        assert_eq!(first_page.items[0].total_build_runs, 1);
+
+        let second_page = list_process_feed_page(&layout, 2, 1)
+            .expect("second process feed page should load");
+
+        assert_eq!(second_page.page, 2);
+        assert!(second_page.has_previous_page);
+        assert!(!second_page.has_next_page);
+        assert_eq!(second_page.items.len(), 1);
+        assert_eq!(second_page.items[0].release_run_id, completed_release_run_id);
+        assert_eq!(second_page.items[0].display_status, "succeeded");
+        assert_eq!(second_page.items[0].current_step_label, "Build completed");
+        assert_eq!(second_page.items[0].current_step_status, "succeeded");
+        assert_eq!(second_page.items[0].succeeded_build_runs, 1);
+        assert_eq!(second_page.items[0].total_publish_runs, 0);
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
     fn list_artifact_inspection_records_returns_joined_artifact_activity() {
         let root = test_root("list-artifact-inspection-records");
         let directories = RuntimeDirectories::from_root(&root);
@@ -6662,6 +7670,49 @@ mod tests {
         assert_eq!(record.succeeded_publish_runs, 1);
         assert_eq!(record.failed_publish_runs, 0);
         assert_eq!(record.canceled_publish_runs, 0);
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn list_process_feed_page_marks_unstarted_builds_as_queued() {
+        let root = test_root("list-process-feed-page-queued");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let fixture = seed_repository_fixture(&connection, "process-feed-queued");
+        let release_run_id = insert_release_run(
+            &connection,
+            fixture.repository_id,
+            "v1.2.0",
+            ReleaseStatus::Queued.as_str(),
+        );
+        let queued_build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            fixture.primary_build_target_id,
+            BuildStatus::Queued.as_str(),
+        );
+        update_build_run_plan(
+            &connection,
+            queued_build_run_id,
+            "2022.3.21f1",
+            DEFAULT_HOST_NATIVE_RUNNER_TYPE,
+        );
+        drop(connection);
+
+        let page = list_process_feed_page(&layout, 1, 10)
+            .expect("queued process feed page should load");
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].release_run_id, release_run_id);
+        assert_eq!(page.items[0].display_status, "queued");
+        assert_eq!(page.items[0].current_step_label, "Queued for build");
+        assert_eq!(page.items[0].current_step_status, "queued");
+        assert_eq!(page.items[0].queued_build_runs, 1);
+        assert_eq!(page.items[0].running_build_runs, 0);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -8301,6 +9352,14 @@ mod tests {
         assert!(running.finished_at.is_none());
         assert!(running.error_message.is_none());
 
+        let release_after_start = coordinator
+            .load_release_run_record(fixture.release_run_id)
+            .expect("started release should reload")
+            .expect("started release should exist");
+        assert_eq!(release_after_start.status, ReleaseStatus::Running.as_str());
+        assert_eq!(release_after_start.started_at, running.started_at);
+        assert!(release_after_start.finished_at.is_none());
+
         let completed = coordinator
             .complete_build_run(
                 fixture.build_run_id,
@@ -8322,6 +9381,79 @@ mod tests {
         );
         assert!(completed.finished_at.is_some());
         assert!(completed.error_message.is_none());
+
+        let release_after_complete = coordinator
+            .load_release_run_record(fixture.release_run_id)
+            .expect("completed release should reload")
+            .expect("completed release should exist");
+        assert_eq!(release_after_complete.status, ReleaseStatus::Succeeded.as_str());
+        assert_eq!(release_after_complete.finished_at, completed.finished_at);
+        assert!(release_after_complete.error_message.is_none());
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn list_process_feed_page_reconciles_stale_release_status_from_terminal_builds() {
+        let root = test_root("process-feed-release-reconciliation");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let fixture = seed_repository_fixture(&connection, "process-feed-reconcile");
+        let release_run_id = insert_release_run(
+            &connection,
+            fixture.repository_id,
+            "v2.0.0",
+            ReleaseStatus::Queued.as_str(),
+        );
+        let build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            fixture.primary_build_target_id,
+            BuildStatus::Succeeded.as_str(),
+        );
+        connection
+            .execute(
+                "
+                UPDATE build_runs
+                SET started_at = ?,
+                    finished_at = ?,
+                    current_stage_label = ?,
+                    current_stage_status = ?,
+                    last_progress_message = ?
+                WHERE id = ?
+                ",
+                params![
+                    "2026-01-11T14:00:00Z",
+                    "2026-01-11T14:07:00Z",
+                    "Register Artifacts",
+                    BuildStatus::Succeeded.as_str(),
+                    "Artifacts registered and downstream publish work dispatched.",
+                    build_run_id,
+                ],
+            )
+            .expect("completed build metadata should update");
+        drop(connection);
+
+        let page = list_process_feed_page(&layout, 1, 10)
+            .expect("process feed page should reconcile stale release rows");
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].release_run_id, release_run_id);
+        assert_eq!(page.items[0].display_status, "succeeded");
+        assert_eq!(page.items[0].current_step_label, "Build completed");
+        assert_eq!(page.items[0].current_step_status, "succeeded");
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let release = coordinator
+            .load_release_run_record(release_run_id)
+            .expect("reconciled release should reload")
+            .expect("reconciled release should exist");
+        assert_eq!(release.status, ReleaseStatus::Succeeded.as_str());
+        assert_eq!(release.started_at.as_deref(), Some("2026-01-11T14:00:00Z"));
+        assert_eq!(release.finished_at.as_deref(), Some("2026-01-11T14:07:00Z"));
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -8924,6 +10056,12 @@ mod tests {
             .expect("publish run should start");
         assert_eq!(running.status, PublishStatus::Running.as_str());
 
+        let release_after_publish_start = coordinator
+            .load_release_run_record(release_run_id)
+            .expect("publish-started release should reload")
+            .expect("publish-started release should exist");
+        assert_eq!(release_after_publish_start.status, ReleaseStatus::Running.as_str());
+
         let completed = coordinator
             .complete_publish_run(
                 publish_run_id,
@@ -8937,6 +10075,16 @@ mod tests {
             completed.destination_ref.as_deref(),
             Some("C:/published/revolutions/v9.0.0/nested/game.zip")
         );
+
+        let release_after_publish_complete = coordinator
+            .load_release_run_record(release_run_id)
+            .expect("completed publish release should reload")
+            .expect("completed publish release should exist");
+        assert_eq!(
+            release_after_publish_complete.status,
+            ReleaseStatus::Succeeded.as_str()
+        );
+        assert!(release_after_publish_complete.finished_at.is_some());
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }

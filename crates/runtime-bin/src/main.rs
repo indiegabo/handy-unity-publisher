@@ -37,7 +37,8 @@ use runtime_publish::{
 };
 use runtime_core::{
     bootstrap_runtime, read_health_report, read_supervision_contract, shutdown_runtime,
-    update_runtime_health, write_supervisor_snapshot, RuntimeRestartPolicy,
+    update_runtime_health, write_supervisor_snapshot, emit_runtime_event,
+    RuntimeEventInput, RuntimeRestartPolicy,
     RuntimeSupervisionContract, RuntimeSupervisorSnapshot, RuntimeSupervisorStatus,
     RuntimeStatus, RUNTIME_HEARTBEAT_EVENT,
 };
@@ -91,12 +92,345 @@ const POLL_STATUS_BUILD_IN_PROGRESS: &str = "build_in_progress";
 const POLL_STATUS_ERROR: &str = "error";
 const POLL_OBSERVED_VIA: &str = "hup-runtime";
 const DEFAULT_REVOLUTIONS_PROJECT_PAT_ENV: &str = "REVOLUTIONS_PROJECT_PAT";
+const EVENT_TOPIC_RELEASE_QUEUED: &str = "automation.release_queued";
+const EVENT_TOPIC_BUILD_RUN_STARTED: &str = "build.run_started";
+const EVENT_TOPIC_BUILD_RUN_FINISHED: &str = "build.run_finished";
+const EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED: &str = "build.stage_updated";
+const EVENT_TOPIC_PUBLISH_RUN_STARTED: &str = "publish.run_started";
+const EVENT_TOPIC_PUBLISH_RUN_FINISHED: &str = "publish.run_finished";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReleaseEventContext {
+    release_run_id: i64,
+    repository_id: i64,
+    repository_name: String,
+    git_tag: String,
+    git_commit: Option<String>,
+    user_requested: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildRunEventContext {
+    release_run_id: i64,
+    build_run_id: i64,
+    repository_id: i64,
+    repository_name: String,
+    git_tag: String,
+    target_name: String,
+    platform: String,
+    user_requested: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublishRunEventContext {
+    release_run_id: i64,
+    build_run_id: i64,
+    publish_run_id: i64,
+    repository_id: i64,
+    repository_name: String,
+    git_tag: String,
+    publish_target_id: i64,
+    publish_target_name: String,
+    artifact_name: String,
+    user_requested: bool,
+}
 
 fn main() {
     if let Err(error) = run() {
         eprintln!("runtime command failed: {error}");
         process::exit(1);
     }
+}
+
+fn user_requested_from_trigger_source(trigger_source: &str) -> bool {
+    trigger_source.eq_ignore_ascii_case("manual")
+}
+
+fn build_run_event_context(
+    coordinator: &LocalCoordinator,
+    plan: &StoredBuildExecutionPlan,
+) -> BuildRunEventContext {
+    let user_requested = coordinator
+        .get_release_run_record(plan.release_run_id)
+        .map(|release| user_requested_from_trigger_source(&release.trigger_source))
+        .unwrap_or(false);
+
+    BuildRunEventContext {
+        release_run_id: plan.release_run_id,
+        build_run_id: plan.build_run_id,
+        repository_id: plan.repository_id,
+        repository_name: plan.repository_name.clone(),
+        git_tag: plan.git_tag.clone(),
+        target_name: plan.target_name.clone(),
+        platform: plan.platform.clone(),
+        user_requested,
+    }
+}
+
+fn publish_run_event_context(
+    coordinator: &LocalCoordinator,
+    plan: &PublishExecutionPlan,
+) -> PublishRunEventContext {
+    let user_requested = coordinator
+        .get_release_run_record(plan.release_run_id)
+        .map(|release| user_requested_from_trigger_source(&release.trigger_source))
+        .unwrap_or(false);
+
+    PublishRunEventContext {
+        release_run_id: plan.release_run_id,
+        build_run_id: plan.build_run_id,
+        publish_run_id: plan.publish_run_id,
+        repository_id: plan.repository_id,
+        repository_name: plan.repository_name.clone(),
+        git_tag: plan.git_tag.clone(),
+        publish_target_id: plan.publish_target_id,
+        publish_target_name: plan.publish_target_name.clone(),
+        artifact_name: plan.artifact_name.clone(),
+        user_requested,
+    }
+}
+
+fn log_runtime_event_failure(topic: &str, error: &io::Error) {
+    eprintln!("failed to emit runtime event {topic}: {error}");
+}
+
+fn terminal_event_severity(status: &str) -> &'static str {
+    match status {
+        "failed" => "error",
+        "canceled" | "cancelled" => "warn",
+        _ => "info",
+    }
+}
+
+fn emit_release_queued_event(
+    storage: &StorageLayout,
+    context: &ReleaseEventContext,
+) -> io::Result<()> {
+    let mode = if context.user_requested {
+        "Manual"
+    } else {
+        "Automatic"
+    };
+    emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: String::from(EVENT_TOPIC_RELEASE_QUEUED),
+            severity: String::from("info"),
+            origin: String::from("runtime-bin"),
+            user_requested: context.user_requested,
+            repository_id: Some(context.repository_id),
+            release_run_id: Some(context.release_run_id),
+            build_run_id: None,
+            publish_run_id: None,
+            summary: format!(
+                "{mode} release queued for {} {}",
+                context.repository_name, context.git_tag
+            ),
+            payload: serde_json::json!({
+                "repository_name": &context.repository_name,
+                "git_tag": &context.git_tag,
+                "git_commit": &context.git_commit,
+                "status": "queued",
+            }),
+        },
+    )?;
+    Ok(())
+}
+
+fn emit_build_run_started_event(
+    storage: &StorageLayout,
+    context: &BuildRunEventContext,
+) -> io::Result<()> {
+    let mode = if context.user_requested {
+        "Manual"
+    } else {
+        "Automatic"
+    };
+    emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: String::from(EVENT_TOPIC_BUILD_RUN_STARTED),
+            severity: String::from("info"),
+            origin: String::from("runtime-bin"),
+            user_requested: context.user_requested,
+            repository_id: Some(context.repository_id),
+            release_run_id: Some(context.release_run_id),
+            build_run_id: Some(context.build_run_id),
+            publish_run_id: None,
+            summary: format!(
+                "{mode} build started for {} {} ({})",
+                context.repository_name, context.git_tag, context.target_name
+            ),
+            payload: serde_json::json!({
+                "repository_name": &context.repository_name,
+                "git_tag": &context.git_tag,
+                "target_name": &context.target_name,
+                "platform": &context.platform,
+                "status": "running",
+            }),
+        },
+    )?;
+    Ok(())
+}
+
+fn emit_build_run_finished_event(
+    storage: &StorageLayout,
+    context: &BuildRunEventContext,
+    record: &BuildRunRecord,
+) -> io::Result<()> {
+    let mode = if context.user_requested {
+        "Manual"
+    } else {
+        "Automatic"
+    };
+    emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: String::from(EVENT_TOPIC_BUILD_RUN_FINISHED),
+            severity: String::from(terminal_event_severity(&record.status)),
+            origin: String::from("runtime-bin"),
+            user_requested: context.user_requested,
+            repository_id: Some(context.repository_id),
+            release_run_id: Some(context.release_run_id),
+            build_run_id: Some(context.build_run_id),
+            publish_run_id: None,
+            summary: format!(
+                "{mode} build {} for {} {} ({})",
+                record.status, context.repository_name, context.git_tag, context.target_name
+            ),
+            payload: serde_json::json!({
+                "repository_name": &context.repository_name,
+                "git_tag": &context.git_tag,
+                "target_name": &context.target_name,
+                "platform": &context.platform,
+                "status": &record.status,
+                "error_message": &record.error_message,
+            }),
+        },
+    )?;
+    Ok(())
+}
+
+fn emit_build_run_stage_updated_event(
+    storage: &StorageLayout,
+    context: &BuildRunEventContext,
+    stage_key: &str,
+    stage_label: &str,
+    message: &str,
+) -> io::Result<()> {
+    let mode = if context.user_requested {
+        "Manual"
+    } else {
+        "Automatic"
+    };
+    emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: String::from(EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED),
+            severity: String::from("info"),
+            origin: String::from("runtime-bin"),
+            user_requested: context.user_requested,
+            repository_id: Some(context.repository_id),
+            release_run_id: Some(context.release_run_id),
+            build_run_id: Some(context.build_run_id),
+            publish_run_id: None,
+            summary: format!(
+                "{mode} build stage updated for {} {} ({}): {}",
+                context.repository_name, context.git_tag, context.target_name, stage_label
+            ),
+            payload: serde_json::json!({
+                "repository_name": &context.repository_name,
+                "git_tag": &context.git_tag,
+                "target_name": &context.target_name,
+                "platform": &context.platform,
+                "stage_key": stage_key,
+                "stage_label": stage_label,
+                "status": "running",
+                "message": message,
+            }),
+        },
+    )?;
+    Ok(())
+}
+
+fn emit_publish_run_started_event(
+    storage: &StorageLayout,
+    context: &PublishRunEventContext,
+) -> io::Result<()> {
+    let mode = if context.user_requested {
+        "Manual"
+    } else {
+        "Automatic"
+    };
+    emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: String::from(EVENT_TOPIC_PUBLISH_RUN_STARTED),
+            severity: String::from("info"),
+            origin: String::from("runtime-bin"),
+            user_requested: context.user_requested,
+            repository_id: Some(context.repository_id),
+            release_run_id: Some(context.release_run_id),
+            build_run_id: Some(context.build_run_id),
+            publish_run_id: Some(context.publish_run_id),
+            summary: format!(
+                "{mode} publish started for {} {} ({})",
+                context.repository_name, context.git_tag, context.publish_target_name
+            ),
+            payload: serde_json::json!({
+                "repository_name": &context.repository_name,
+                "git_tag": &context.git_tag,
+                "publish_target_id": context.publish_target_id,
+                "publish_target_name": &context.publish_target_name,
+                "artifact_name": &context.artifact_name,
+                "status": "running",
+            }),
+        },
+    )?;
+    Ok(())
+}
+
+fn emit_publish_run_finished_event(
+    storage: &StorageLayout,
+    context: &PublishRunEventContext,
+    record: &PublishRunRecord,
+) -> io::Result<()> {
+    let mode = if context.user_requested {
+        "Manual"
+    } else {
+        "Automatic"
+    };
+    emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: String::from(EVENT_TOPIC_PUBLISH_RUN_FINISHED),
+            severity: String::from(terminal_event_severity(&record.status)),
+            origin: String::from("runtime-bin"),
+            user_requested: context.user_requested,
+            repository_id: Some(context.repository_id),
+            release_run_id: Some(context.release_run_id),
+            build_run_id: Some(context.build_run_id),
+            publish_run_id: Some(context.publish_run_id),
+            summary: format!(
+                "{mode} publish {} for {} {} ({})",
+                record.status,
+                context.repository_name,
+                context.git_tag,
+                context.publish_target_name
+            ),
+            payload: serde_json::json!({
+                "repository_name": &context.repository_name,
+                "git_tag": &context.git_tag,
+                "publish_target_id": context.publish_target_id,
+                "publish_target_name": &context.publish_target_name,
+                "artifact_name": &context.artifact_name,
+                "status": &record.status,
+                "destination_ref": &record.destination_ref,
+                "error_message": &record.error_message,
+            }),
+        },
+    )?;
+    Ok(())
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
@@ -272,7 +606,7 @@ fn run_automation_poll_once_command(
 
     initialize_database(storage)?;
     let coordinator = LocalCoordinator::new(storage);
-    let report = run_repository_poll_cycle(&coordinator, None)?;
+    let report = run_repository_poll_cycle(&coordinator, storage, None)?;
 
     serde_json::to_string_pretty(&report).map_err(|error| Box::new(error) as Box<dyn Error>)
 }
@@ -376,6 +710,18 @@ fn run_manual_release_dispatch_command(
     } else {
         coordinator.dispatch_manual_release(input)?
     };
+    let repository = coordinator.get_repository_checkout_record(command.repository_id)?;
+    let context = ReleaseEventContext {
+        release_run_id: record.id,
+        repository_id: record.repository_id,
+        repository_name: repository.name,
+        git_tag: record.git_tag.clone(),
+        git_commit: record.git_commit.clone(),
+        user_requested: user_requested_from_trigger_source(&record.trigger_source),
+    };
+    if let Err(error) = emit_release_queued_event(storage, &context) {
+        log_runtime_event_failure(EVENT_TOPIC_RELEASE_QUEUED, &error);
+    }
 
     serde_json::to_string_pretty(&record).map_err(|error| Box::new(error) as Box<dyn Error>)
 }
@@ -612,6 +958,7 @@ fn run_publish_run_next_command(
         PUBLISH_QUEUE_LEASE_TTL,
         "publish queue message",
     );
+    let mut publish_event_context = None;
     let record_result = (|| -> Result<PublishRunRecord, Box<dyn Error>> {
         let resolved = match resolve_claimed_publish_context(&coordinator, &message.payload) {
             Ok(resolved) => resolved,
@@ -637,11 +984,16 @@ fn run_publish_run_next_command(
                 return Err(Box::new(error));
             }
         };
+        let event_context = publish_run_event_context(&coordinator, &publish_plan);
+        publish_event_context = Some(event_context.clone());
 
         coordinator.start_publish_run(
             resolved.plan.publish_run_id,
             StartPublishRunInput::default(),
         )?;
+        if let Err(error) = emit_publish_run_started_event(storage, &event_context) {
+            log_runtime_event_failure(EVENT_TOPIC_PUBLISH_RUN_STARTED, &error);
+        }
 
         let processor = PublishExecutionProcessor::new();
         let record = match processor.process(&publish_plan) {
@@ -684,6 +1036,12 @@ fn run_publish_run_next_command(
         ))));
     }
     renewer_result?;
+
+    if let Some(context) = publish_event_context.as_ref() {
+        if let Err(error) = emit_publish_run_finished_event(storage, context, &record) {
+            log_runtime_event_failure(EVENT_TOPIC_PUBLISH_RUN_FINISHED, &error);
+        }
+    }
 
     serde_json::to_string_pretty(&record).map_err(|error| Box::new(error) as Box<dyn Error>)
 }
@@ -907,8 +1265,10 @@ mod tests {
         run_publish_inspect_command,
         run_manual_release_dispatch_command, run_release_plan_command,
         run_publish_run_next_command, run_release_planner_cycle,
+        run_runtime_worker_iteration,
         runtime_stop_requested, select_queued_repository_tags,
         AutomationPollReport, BuildExecutionReport, BuildRunRecord, RegistrationCheckoutReport,
+        RepositoryPollSchedule,
         RegistrationSeedReport,
         PublishedOutputInspectionReport,
     };
@@ -2256,6 +2616,90 @@ mod tests {
         assert_eq!(persisted_unity_version, "2021.3.33f1");
         assert_eq!(queue_message_count(&connection, "release-runs"), 0);
         assert_eq!(queue_message_count(&connection, "build-runs"), 1);
+        drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn runtime_worker_iteration_does_not_starve_builds_when_release_retry_later_exists() {
+        let root = test_root("runtime-bin-worker-iteration-no-starvation");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let repository_url = create_unity_repository_with_tags(
+            &root.join("runtime-bin-worker-iteration-source"),
+            "2021.3.33f1",
+            &["v13.0.5", "v13.0.6"],
+        );
+        let script_path =
+            create_fake_unity_script(&root, "worker-iteration-no-starvation", ScriptKind::Success);
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let repository_id = seed_repository_with_url(
+            &connection,
+            "runtime-bin-worker-iteration-no-starvation",
+            &repository_url,
+        );
+        let build_target_id = seed_host_native_build_target(
+            &connection,
+            repository_id,
+            "windows-player",
+            "windows",
+            "Builder.PerformWindows",
+            &script_path,
+        );
+        let publish_target_id =
+            seed_publish_target(&connection, repository_id, "filesystem-release", "filesystem");
+        seed_build_publish_binding(&connection, build_target_id, publish_target_id);
+        drop(connection);
+
+        let first_release: ReleaseRunRecord = serde_json::from_str(
+            &run_manual_release_dispatch_command(
+                &[
+                    String::from("--repository-id"),
+                    repository_id.to_string(),
+                    String::from("--git-tag"),
+                    String::from("v13.0.5"),
+                ],
+                &storage,
+            )
+            .expect("first manual release dispatch should succeed"),
+        )
+        .expect("first release dispatch output should decode");
+
+        let _: ReleaseRunRecord = serde_json::from_str(
+            &run_manual_release_dispatch_command(
+                &[
+                    String::from("--repository-id"),
+                    repository_id.to_string(),
+                    String::from("--git-tag"),
+                    String::from("v13.0.6"),
+                ],
+                &storage,
+            )
+            .expect("second manual release dispatch should succeed"),
+        )
+        .expect("second release dispatch output should decode");
+
+        assert!(run_release_planner_cycle(&storage)
+            .expect("release planner should queue the first release build"));
+
+        let mut poll_schedule = RepositoryPollSchedule::default();
+        run_runtime_worker_iteration(&config, &storage, &mut poll_schedule)
+            .expect("worker iteration should continue past retry-later release planning");
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let completed_builds: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM build_runs WHERE release_run_id = ? AND status = 'succeeded'",
+                [first_release.id],
+                |row| row.get(0),
+            )
+            .expect("first release build status should load");
+        assert_eq!(completed_builds, 1);
+        assert_eq!(queue_message_count(&connection, "release-runs"), 1);
         drop(connection);
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");

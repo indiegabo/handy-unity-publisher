@@ -31,6 +31,22 @@ fn run_publish_worker_cycle(
     Ok(run_publish_run_next_command(&[], config, storage)? != "null")
 }
 
+pub(crate) fn run_runtime_worker_iteration(
+    config: &RuntimeConfig,
+    storage: &StorageLayout,
+    poll_schedule: &mut RepositoryPollSchedule,
+) -> Result<(), Box<dyn Error>> {
+    let coordinator = LocalCoordinator::new(storage);
+    let _ = run_repository_poll_cycle(&coordinator, storage, Some(poll_schedule))?;
+    // RetryLater planner messages must not monopolize the serve loop, or
+    // queued build work for earlier releases never gets a chance to start.
+    let _ = run_release_planner_cycle(storage)?;
+    while run_build_worker_cycle(config, storage)? {}
+    while run_publish_worker_cycle(config, storage)? {}
+
+    Ok(())
+}
+
 /// Tracks the next eligible poll instant for each repository between worker cycles.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct RepositoryPollSchedule {
@@ -61,6 +77,7 @@ impl RepositoryPollSchedule {
 
 pub(crate) fn run_repository_poll_cycle(
     coordinator: &LocalCoordinator,
+    storage: &StorageLayout,
     mut poll_schedule: Option<&mut RepositoryPollSchedule>,
 ) -> io::Result<AutomationPollReport> {
     let repositories = coordinator.list_polling_repositories()?;
@@ -120,7 +137,7 @@ pub(crate) fn run_repository_poll_cycle(
             );
         }
 
-        match poll_repository(coordinator, &tag_lister, &repository) {
+        match poll_repository(coordinator, storage, &tag_lister, &repository) {
             Ok(result) => {
                 if !result.queued_release_ids.is_empty() {
                     if let Err(error) = coordinator.advance_repository_release_queue(repository.id)
@@ -144,6 +161,7 @@ pub(crate) fn run_repository_poll_cycle(
 
 fn poll_repository(
     coordinator: &LocalCoordinator,
+    storage: &StorageLayout,
     tag_lister: &GitTagLister,
     repository: &PollingRepositoryRecord,
 ) -> io::Result<RepositoryPollResult> {
@@ -183,6 +201,17 @@ fn poll_repository(
             Ok(release) => {
                 coordinator.update_repository_last_seen_tag(repository.id, &tag.name)?;
                 last_seen_tag_after = Some(tag.name.clone());
+                let context = ReleaseEventContext {
+                    release_run_id: release.id,
+                    repository_id: release.repository_id,
+                    repository_name: repository.name.clone(),
+                    git_tag: release.git_tag.clone(),
+                    git_commit: release.git_commit.clone(),
+                    user_requested: user_requested_from_trigger_source(&release.trigger_source),
+                };
+                if let Err(error) = emit_release_queued_event(storage, &context) {
+                    log_runtime_event_failure(EVENT_TOPIC_RELEASE_QUEUED, &error);
+                }
                 discovered_tags.push(tag);
                 queued_release_ids.push(release.id);
             }
@@ -393,11 +422,7 @@ pub(crate) fn serve_runtime(
             return Ok(());
         }
 
-        let coordinator = LocalCoordinator::new(storage);
-        let _ = run_repository_poll_cycle(&coordinator, Some(&mut poll_schedule))?;
-        while run_release_planner_cycle(storage)? {}
-        while run_build_worker_cycle(config, storage)? {}
-        while run_publish_worker_cycle(config, storage)? {}
+        run_runtime_worker_iteration(config, storage, &mut poll_schedule)?;
 
         if let Some(max_heartbeats) = config.runtime_loop.max_heartbeats {
             if heartbeat_count >= max_heartbeats {

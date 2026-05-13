@@ -266,6 +266,23 @@ impl ExecutionProgressReporter for BuildStageHeartbeatReporter<'_, '_> {
     }
 }
 
+fn emit_build_stage_started_event(
+    storage: &StorageLayout,
+    context: &BuildRunEventContext,
+    stage: BuildProcessStage,
+    message: &str,
+) {
+    if let Err(error) = emit_build_run_stage_updated_event(
+        storage,
+        context,
+        stage.key(),
+        stage.label(),
+        message,
+    ) {
+        log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED, &error);
+    }
+}
+
 fn queue_lease_renew_interval(lease_ttl: Duration) -> Duration {
     let ttl_millis = lease_ttl.as_millis();
     let minimum_millis = MIN_QUEUE_LEASE_RENEW_INTERVAL.as_millis();
@@ -417,19 +434,20 @@ pub(crate) fn run_build_stage_next_command(
         "build queue message",
     );
 
-    let staged_result = stage_claimed_build_job(&coordinator, config, &message.payload).or_else(
-        |error| {
-            coordinator
-                .release_message(message.id, &message.lease_token)
-                .map_err(|release_error| {
-                    Box::new(io::Error::other(format!(
-                        "release claimed build message {} after error {error}: {release_error}",
-                        message.id
-                    ))) as Box<dyn Error>
-                })
-                .and_then(|_| Err(Box::new(error) as Box<dyn Error>))
-        },
-    );
+    let staged_result =
+        stage_claimed_build_job(&coordinator, config, storage, &message.payload).or_else(
+            |error| {
+                coordinator
+                    .release_message(message.id, &message.lease_token)
+                    .map_err(|release_error| {
+                        Box::new(io::Error::other(format!(
+                            "release claimed build message {} after error {error}: {release_error}",
+                            message.id
+                        ))) as Box<dyn Error>
+                    })
+                    .and_then(|_| Err(Box::new(error) as Box<dyn Error>))
+            },
+        );
 
     lease_renewer.stop();
     let staged = match staged_result {
@@ -491,6 +509,7 @@ pub(crate) fn run_build_run_next_command(
         BUILD_QUEUE_LEASE_TTL,
         "build queue message",
     );
+    let mut build_event_context = None;
     let record_result = (|| -> Result<BuildRunRecord, Box<dyn Error>> {
         let resolved = match resolve_claimed_build_context(&coordinator, &message.payload) {
             Ok(resolved) => resolved,
@@ -504,6 +523,8 @@ pub(crate) fn run_build_run_next_command(
                 return Err(Box::new(error));
             }
         };
+        let event_context = build_run_event_context(&coordinator, &resolved.plan);
+        build_event_context = Some(event_context.clone());
 
         let planned = match WorkspacePreparer::new(&config.directories).plan(&resolved.preparation)
         {
@@ -539,17 +560,27 @@ pub(crate) fn run_build_run_next_command(
                 artifact_root_path: planned.artifact_root_path.display().to_string(),
             },
         )?;
+        if let Err(error) = emit_build_run_started_event(storage, &event_context) {
+            log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STARTED, &error);
+        }
+        let validation_message = format!(
+            "Validating build context for repository '{}' tag '{}' target '{}' ({}) using Unity {}.",
+            resolved.plan.repository_name,
+            resolved.plan.git_tag,
+            resolved.plan.target_name,
+            resolved.plan.platform,
+            resolved.plan.unity_version,
+        );
         validation_tracker.start_stage(
             BuildProcessStage::ValidateContext,
-            &format!(
-                "Validating build context for repository '{}' tag '{}' target '{}' ({}) using Unity {}.",
-                resolved.plan.repository_name,
-                resolved.plan.git_tag,
-                resolved.plan.target_name,
-                resolved.plan.platform,
-                resolved.plan.unity_version,
-            ),
+            &validation_message,
         )?;
+        emit_build_stage_started_event(
+            storage,
+            &event_context,
+            BuildProcessStage::ValidateContext,
+            &validation_message,
+        );
 
         let runner_plan = match resolve_runtime_build_execution_plan(config, &resolved.plan) {
             Ok(plan) => {
@@ -586,11 +617,13 @@ pub(crate) fn run_build_run_next_command(
             ExecutionProcessor::new(&config.directories, HostNativeUnityExecutor::new());
         process_build_run_with_retry(
             &coordinator,
+            storage,
             &config.directories,
             &processor,
             &runner_plan,
             &resolved.preparation,
             resolved.plan.build_run_id,
+            &event_context,
             stage_sequence,
             &mut attempt_roots,
         )
@@ -621,17 +654,25 @@ pub(crate) fn run_build_run_next_command(
     }
     renewer_result?;
 
+    if let Some(context) = build_event_context.as_ref() {
+        if let Err(error) = emit_build_run_finished_event(storage, context, &record) {
+            log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_FINISHED, &error);
+        }
+    }
+
     serde_json::to_string_pretty(&record).map_err(|error| Box::new(error) as Box<dyn Error>)
 }
 
 fn stage_claimed_build_job(
     coordinator: &LocalCoordinator,
     config: &RuntimeConfig,
+    storage: &StorageLayout,
     payload: &[u8],
 ) -> io::Result<BuildRunRecord> {
     let resolved = resolve_claimed_build_context(coordinator, payload)?;
     let preparer = WorkspacePreparer::new(&config.directories);
     let planned = preparer.plan(&resolved.preparation)?;
+    let event_context = build_run_event_context(coordinator, &resolved.plan);
     let started = coordinator.start_build_run(
         resolved.plan.build_run_id,
         StartBuildRunInput {
@@ -640,6 +681,9 @@ fn stage_claimed_build_job(
             artifact_root_path: planned.artifact_root_path.display().to_string(),
         },
     )?;
+    if let Err(error) = emit_build_run_started_event(storage, &event_context) {
+        log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STARTED, &error);
+    }
 
     match preparer.prepare(&resolved.preparation) {
         Ok(_) => Ok(started),
@@ -657,16 +701,23 @@ fn stage_claimed_build_job(
 
 fn complete_successful_build_run(
     coordinator: &LocalCoordinator,
+    storage: &StorageLayout,
+    event_context: &BuildRunEventContext,
     build_run_id: i64,
     runner_plan: &ExecutionPlan,
     result: &ExecutionResult,
     tracker: &BuildRunStageTracker<'_>,
 ) -> io::Result<BuildRunRecord> {
     if output_requires_runtime_archive(runner_plan) {
-        tracker.start_stage(
+        let packaging_message =
+            "Packaging Unity output into a runtime-owned zip archive.";
+        tracker.start_stage(BuildProcessStage::PackageArtifact, packaging_message)?;
+        emit_build_stage_started_event(
+            storage,
+            event_context,
             BuildProcessStage::PackageArtifact,
-            "Packaging Unity output into a runtime-owned zip archive.",
-        )?;
+            packaging_message,
+        );
         if let Err(error) = package_build_output(runner_plan, result) {
             tracker.fail_stage(BuildProcessStage::PackageArtifact, &error.to_string())?;
             return Err(error);
@@ -677,10 +728,15 @@ fn complete_successful_build_run(
         )?;
     }
 
-    tracker.start_stage(
+    let register_message =
+        "Discovering artifacts, registering them, and dispatching publish work.";
+    tracker.start_stage(BuildProcessStage::RegisterArtifacts, register_message)?;
+    emit_build_stage_started_event(
+        storage,
+        event_context,
         BuildProcessStage::RegisterArtifacts,
-        "Discovering artifacts, registering them, and dispatching publish work.",
-    )?;
+        register_message,
+    );
     register_artifacts_and_dispatch_publish_runs(coordinator, build_run_id, &result.artifact_root_path)
         .map_err(|error| {
             let _ = tracker.fail_stage(BuildProcessStage::RegisterArtifacts, &error.to_string());
@@ -1465,11 +1521,13 @@ pub(crate) fn synchronize_build_execution_report_from_publish(
 
 fn process_build_run_with_retry(
     coordinator: &LocalCoordinator,
+    storage: &StorageLayout,
     directories: &runtime_config::RuntimeDirectories,
     processor: &ExecutionProcessor<HostNativeUnityExecutor>,
     runner_plan: &ExecutionPlan,
     preparation: &WorkspacePreparationInput,
     build_run_id: i64,
+    event_context: &BuildRunEventContext,
     stage_sequence: Rc<RefCell<BuildRunStageSequence>>,
     attempt_roots: &mut Vec<PathBuf>,
 ) -> io::Result<BuildRunRecord> {
@@ -1488,15 +1546,19 @@ fn process_build_run_with_retry(
         )?;
         let checkout_log_path = tracker.stage_log_path(BuildProcessStage::CheckoutRepository);
 
-        tracker.start_stage(
+        let checkout_message = format!(
+            "Checking out repository '{}' at tag '{}' into '{}'.",
+            current_preparation.repository_url,
+            current_preparation.git_tag,
+            planned.source_path.display(),
+        );
+        tracker.start_stage(BuildProcessStage::CheckoutRepository, &checkout_message)?;
+        emit_build_stage_started_event(
+            storage,
+            event_context,
             BuildProcessStage::CheckoutRepository,
-            &format!(
-                "Checking out repository '{}' at tag '{}' into '{}'.",
-                current_preparation.repository_url,
-                current_preparation.git_tag,
-                planned.source_path.display(),
-            ),
-        )?;
+            &checkout_message,
+        );
 
         let workspace = match processor.prepare_workspace(&current_preparation) {
             Ok(workspace) => {
@@ -1529,14 +1591,18 @@ fn process_build_run_with_retry(
         let mut workspace = workspace;
         workspace.log_path = unity_log_path.clone();
 
-        tracker.start_stage(
+        let unity_build_message = format!(
+            "Launching Unity build method '{}' for target '{}'.",
+            runner_plan.build_method,
+            runner_plan.platform,
+        );
+        tracker.start_stage(BuildProcessStage::UnityBuild, &unity_build_message)?;
+        emit_build_stage_started_event(
+            storage,
+            event_context,
             BuildProcessStage::UnityBuild,
-            &format!(
-                "Launching Unity build method '{}' for target '{}'.",
-                runner_plan.build_method,
-                runner_plan.platform,
-            ),
-        )?;
+            &unity_build_message,
+        );
 
         let mut reporter = BuildStageHeartbeatReporter::new(&tracker, BuildProcessStage::UnityBuild);
         let execute_outcome = processor.execute_prepared(runner_plan, workspace, &mut reporter);
@@ -1587,6 +1653,8 @@ fn process_build_run_with_retry(
                     )?;
                     let record = complete_successful_build_run(
                         coordinator,
+                        storage,
+                        event_context,
                         build_run_id,
                         runner_plan,
                         &result,

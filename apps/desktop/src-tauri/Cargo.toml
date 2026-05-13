@@ -15,8 +15,10 @@ tauri-build = { workspace = true }
 
 [dependencies]
 tauri = { workspace = true, features = ["tray-icon"] }
+tauri-plugin-notification = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sysinfo = { workspace = true }
 runtime-config = { path = "../../../crates/runtime-config" }
 runtime-core = { path = "../../../crates/runtime-core" }
 runtime-git = { path = "../../../crates/runtime-git" }

@@ -10,6 +10,8 @@ pub struct StorageLayout {
     pub health_report_path: PathBuf,
     pub supervision_contract_path: PathBuf,
     pub supervisor_state_path: PathBuf,
+    pub runtime_events_path: PathBuf,
+    pub runtime_events_cursor_path: PathBuf,
     pub runtime_log_path: PathBuf,
 }
 
@@ -21,6 +23,8 @@ impl StorageLayout {
             health_report_path: directories.state_dir.join("health.json"),
             supervision_contract_path: directories.state_dir.join("supervision.json"),
             supervisor_state_path: directories.state_dir.join("supervisor-state.json"),
+            runtime_events_path: directories.state_dir.join("runtime-events.jsonl"),
+            runtime_events_cursor_path: directories.state_dir.join("runtime-events.cursor.json"),
             runtime_log_path: directories.logs_dir.join("runtime.jsonl"),
         }
     }
@@ -395,6 +399,52 @@ pub struct BuildExecutionPlan {
     pub image_ref: String,
     pub timeout_seconds: i64,
     pub status: String,
+}
+
+/// Aggregates one release run into the operator-facing desktop home process feed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessFeedRecord {
+    pub release_run_id: i64,
+    pub repository_id: i64,
+    pub repository_name: String,
+    pub repository_url: String,
+    pub git_tag: String,
+    pub git_commit: Option<String>,
+    pub unity_version: Option<String>,
+    pub display_status: String,
+    pub current_step_label: String,
+    pub current_step_status: String,
+    pub current_step_detail: Option<String>,
+    pub queued_build_runs: i64,
+    pub running_build_runs: i64,
+    pub succeeded_build_runs: i64,
+    pub failed_build_runs: i64,
+    pub canceled_build_runs: i64,
+    pub queued_publish_runs: i64,
+    pub running_publish_runs: i64,
+    pub succeeded_publish_runs: i64,
+    pub failed_publish_runs: i64,
+    pub canceled_publish_runs: i64,
+    pub total_build_runs: i64,
+    pub total_publish_runs: i64,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Defines one paginated release-level process feed page for the desktop home view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessFeedPage {
+    pub generated_at: String,
+    pub page: u32,
+    pub page_size: u32,
+    pub total_items: i64,
+    pub total_pages: u32,
+    pub has_previous_page: bool,
+    pub has_next_page: bool,
+    pub items: Vec<ProcessFeedRecord>,
 }
 
 /// Joins the persisted build, release, repository, artifact, and publish metadata
