@@ -89,7 +89,7 @@ fn relay_pending_runtime_events<R: Runtime>(
         app_handle
             .emit_to(MAIN_WINDOW_LABEL, RUNTIME_EVENT_NAME, event.clone())
             .map_err(|error| io::Error::other(error.to_string()))?;
-        if let Err(error) = maybe_notify_native_build_event(app_handle, &event) {
+        if let Err(error) = maybe_notify_native_runtime_event(app_handle, &event) {
             eprintln!("failed to show native notification for {}: {error}", event.event_id);
         }
         remember_runtime_event_id(recent_event_ids, &event.event_id);
@@ -127,7 +127,7 @@ fn remember_runtime_event_id(recent_event_ids: &mut VecDeque<String>, event_id: 
     recent_event_ids.push_back(event_id.to_owned());
 }
 
-fn maybe_notify_native_build_event<R: Runtime>(
+fn maybe_notify_native_runtime_event<R: Runtime>(
     app_handle: &AppHandle<R>,
     event: &RuntimeEventRecord,
 ) -> io::Result<()> {
@@ -160,6 +160,7 @@ fn native_notification_policy(event: &RuntimeEventRecord) -> Option<NativeNotifi
     }
 
     match event.topic.as_str() {
+        "automation.poll_auth_failed" => Some(NativeNotificationPolicy::Always),
         "build.run_started" => Some(NativeNotificationPolicy::Always),
         "build.run_finished" => Some(NativeNotificationPolicy::WhenWindowHidden),
         _ => None,
@@ -178,6 +179,7 @@ fn should_show_native_notification(
 
 fn native_notification_content(event: &RuntimeEventRecord) -> (String, String) {
     let title = match event.topic.as_str() {
+        "automation.poll_auth_failed" => String::from("Repository polling stopped"),
         "build.run_started" => String::from("Automatic build started"),
         "build.run_finished" => match build_status_from_event(event) {
             Some("failed") => String::from("Automatic build failed"),
@@ -381,7 +383,11 @@ mod tests {
     }
 
     #[test]
-    fn native_notification_policy_only_targets_automatic_build_events() {
+    fn native_notification_policy_targets_automatic_builds_and_poll_auth_failures() {
+        assert_eq!(
+            native_notification_policy(&test_event("automation.poll_auth_failed", false, None)),
+            Some(NativeNotificationPolicy::Always)
+        );
         assert_eq!(
             native_notification_policy(&test_event("build.run_started", false, None)),
             Some(NativeNotificationPolicy::Always)
@@ -423,6 +429,10 @@ mod tests {
     #[test]
     fn native_notification_content_uses_build_status_for_finished_events() {
         assert_eq!(
+            native_notification_content(&test_event("automation.poll_auth_failed", false, None)).0,
+            "Repository polling stopped"
+        );
+        assert_eq!(
             native_notification_content(&test_event("build.run_started", false, None)).0,
             "Automatic build started"
         );
@@ -452,7 +462,9 @@ mod tests {
             release_run_id: Some(2),
             build_run_id: Some(3),
             publish_run_id: None,
-            summary: String::from("Automatic build update for Revolutions v1.0.3"),
+            summary: String::from(
+                "Automatic polling stopped for Revolutions after an authentication failure",
+            ),
             payload: serde_json::json!({ "status": status }),
         }
     }

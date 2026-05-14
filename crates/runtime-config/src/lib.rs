@@ -23,6 +23,10 @@ pub const LOG_LEVEL_ENV: &str = "HANDY_UNITY_PUBLISHER_LOG_LEVEL";
 pub const HEARTBEAT_INTERVAL_MILLIS_ENV: &str =
     "HANDY_UNITY_PUBLISHER_RUNTIME_HEARTBEAT_INTERVAL_MILLIS";
 
+/// Overrides the scheduler sleep between worker loop iterations when set.
+pub const WORKER_LOOP_INTERVAL_MILLIS_ENV: &str =
+    "HANDY_UNITY_PUBLISHER_RUNTIME_WORKER_LOOP_INTERVAL_MILLIS";
+
 /// Limits the number of heartbeats emitted by the runtime work loop when set.
 pub const MAX_HEARTBEATS_ENV: &str = "HANDY_UNITY_PUBLISHER_RUNTIME_MAX_HEARTBEATS";
 
@@ -148,6 +152,7 @@ impl RuntimeDirectories {
 /// Configures the long-running runtime work loop used by supervised processes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeLoopConfig {
+    pub worker_loop_interval_millis: u64,
     pub heartbeat_interval_millis: u64,
     pub max_heartbeats: Option<u32>,
     pub crash_after_heartbeats: Option<u32>,
@@ -157,9 +162,13 @@ pub struct RuntimeLoopConfig {
 impl RuntimeLoopConfig {
     fn load() -> io::Result<Self> {
         Ok(Self {
+            worker_loop_interval_millis: parse_env_u64(
+                WORKER_LOOP_INTERVAL_MILLIS_ENV,
+                1_000,
+            )?,
             heartbeat_interval_millis: parse_env_u64(
                 HEARTBEAT_INTERVAL_MILLIS_ENV,
-                1_000,
+                5_000,
             )?,
             max_heartbeats: parse_optional_env_u32(MAX_HEARTBEATS_ENV)?,
             crash_after_heartbeats: parse_optional_env_u32(CRASH_AFTER_HEARTBEATS_ENV)?,
@@ -169,7 +178,8 @@ impl RuntimeLoopConfig {
 
     fn development() -> Self {
         Self {
-            heartbeat_interval_millis: 1_000,
+            worker_loop_interval_millis: 1_000,
+            heartbeat_interval_millis: 5_000,
             max_heartbeats: None,
             crash_after_heartbeats: None,
             crash_attempts: 0,
@@ -479,5 +489,13 @@ mod tests {
         assert_eq!(config.concurrency.max_concurrent_build_runs, 1);
         assert_eq!(config.concurrency.max_concurrent_publish_runs, 1);
         assert_eq!(config.concurrency.max_active_releases_per_repository, 1);
+    }
+
+    #[test]
+    fn from_root_uses_fast_worker_loop_and_slower_heartbeat_defaults() {
+        let config = RuntimeConfig::from_root(PathBuf::from("/tmp/runtime"));
+
+        assert_eq!(config.runtime_loop.worker_loop_interval_millis, 1_000);
+        assert_eq!(config.runtime_loop.heartbeat_interval_millis, 5_000);
     }
 }

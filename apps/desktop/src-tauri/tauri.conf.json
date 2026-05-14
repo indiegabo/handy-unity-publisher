@@ -14,7 +14,7 @@
         "windows": [
             {
                 "label": "main",
-                "title": "HUP",
+                "title": "Handy Unity Publisher",
                 "width": 360,
                 "height": 420,
                 "resizable": false,

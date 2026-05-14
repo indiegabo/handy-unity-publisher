@@ -18,6 +18,12 @@ pub const KIND_GIT_HTTP_BASIC: &str = "git-http-basic";
 /// Identifies Git credentials backed by HTTP bearer authentication.
 pub const KIND_GIT_HTTP_BEARER: &str = "git-http-bearer";
 
+const GIT_TERMINAL_PROMPT_ENV: &str = "GIT_TERMINAL_PROMPT";
+const GIT_TERMINAL_PROMPT_DISABLED: &str = "0";
+const GCM_INTERACTIVE_ENV: &str = "GCM_INTERACTIVE";
+const GCM_INTERACTIVE_NEVER: &str = "never";
+const GIT_CREDENTIAL_HELPER_RESET: &str = "credential.helper=";
+
 /// Lists the Git transport strategy supported by the runtime scaffold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitTooling {
@@ -63,6 +69,18 @@ impl GitAuthOptions {
 
         resolved
     }
+}
+
+/// Receives coarse checkout progress updates emitted by the Git workspace syncer.
+pub trait GitProgressReporter {
+    fn report(&mut self, message: &str);
+}
+
+#[derive(Debug, Default)]
+struct NoopGitProgressReporter;
+
+impl GitProgressReporter for NoopGitProgressReporter {
+    fn report(&mut self, _message: &str) {}
 }
 
 /// Resolves stored credentials into Git CLI authentication headers.
@@ -181,19 +199,45 @@ impl GitWorkspaceSyncer {
 
     /// Clones or refreshes one local workspace and checks out the requested tag in detached HEAD state.
     pub fn sync_tag(&self, request: &GitWorkspaceSyncRequest) -> io::Result<()> {
-        self.sync_ref(&GitWorkspaceSyncRefRequest {
+        let mut reporter = NoopGitProgressReporter;
+        self.sync_tag_with_progress(request, &mut reporter)
+    }
+
+    /// Clones or refreshes one local workspace and checks out the requested tag in detached HEAD state.
+    pub fn sync_tag_with_progress(
+        &self,
+        request: &GitWorkspaceSyncRequest,
+        reporter: &mut dyn GitProgressReporter,
+    ) -> io::Result<()> {
+        self.sync_ref_with_progress(&GitWorkspaceSyncRefRequest {
             repository_url: request.repository_url.clone(),
             workspace_path: request.workspace_path.clone(),
             git_ref: request.git_tag.clone(),
             auth: request.auth.clone(),
-        })
+        }, reporter)
     }
 
     /// Clones or refreshes one local workspace and checks out the requested ref in detached HEAD state.
     pub fn sync_ref(&self, request: &GitWorkspaceSyncRefRequest) -> io::Result<()> {
+        let mut reporter = NoopGitProgressReporter;
+        self.sync_ref_with_progress(request, &mut reporter)
+    }
+
+    /// Clones or refreshes one local workspace and checks out the requested ref in detached HEAD state.
+    pub fn sync_ref_with_progress(
+        &self,
+        request: &GitWorkspaceSyncRefRequest,
+        reporter: &mut dyn GitProgressReporter,
+    ) -> io::Result<()> {
         let repository_url = require_non_empty(&request.repository_url, "repository url")?;
         let git_ref = require_non_empty(&request.git_ref, "git ref")?;
         let workspace_path = normalize_workspace_path(&request.workspace_path)?;
+        let workspace_display = workspace_path.display().to_string();
+
+        reporter.report(&format!(
+            "Preparing checkout workspace at '{}'.",
+            workspace_display,
+        ));
 
         if let Some(parent) = workspace_path.parent() {
             fs::create_dir_all(parent)?;
@@ -201,6 +245,10 @@ impl GitWorkspaceSyncer {
 
         let git_dir = workspace_path.join(".git");
         if !git_dir.exists() {
+            reporter.report(&format!(
+                "Cloning repository metadata into '{}'.",
+                workspace_display,
+            ));
             reset_workspace_path(&workspace_path)?;
             let clone_destination = workspace_path.display().to_string();
             run_git_command(
@@ -216,6 +264,10 @@ impl GitWorkspaceSyncer {
                 "clone repository into workspace: {error}"
             )))?;
         } else {
+            reporter.report(&format!(
+                "Refreshing Git remote configuration for existing workspace '{}'.",
+                workspace_display,
+            ));
             run_git_command(
                 Some(&workspace_path),
                 vec![
@@ -230,10 +282,19 @@ impl GitWorkspaceSyncer {
             )))?;
         }
 
+        reporter.report(&format!(
+            "Ensuring Git long path support for '{}'.",
+            workspace_display,
+        ));
         ensure_workspace_long_paths(&workspace_path).map_err(|error| {
             io::Error::other(format!("configure workspace long path support: {error}"))
         })?;
 
+        reporter.report(&format!(
+            "Fetching ref '{}' from origin into '{}'.",
+            git_ref,
+            workspace_display,
+        ));
         run_git_command(
             Some(&workspace_path),
             request.auth.append_git_args([
@@ -248,6 +309,10 @@ impl GitWorkspaceSyncer {
             "fetch repository ref {git_ref:?}: {error}"
         )))?;
 
+        reporter.report(&format!(
+            "Checking out fetched ref '{}' in detached HEAD mode.",
+            git_ref,
+        ));
         run_git_command(
             Some(&workspace_path),
             vec![
@@ -261,13 +326,25 @@ impl GitWorkspaceSyncer {
             "checkout repository ref {git_ref:?}: {error}"
         )))?;
 
+        reporter.report(&format!(
+            "Cleaning untracked files in '{}'.",
+            workspace_display,
+        ));
         run_git_command(
             Some(&workspace_path),
             vec![String::from("clean"), String::from("-fdx")],
         )
         .map_err(|error| io::Error::other(format!(
             "clean workspace after checkout: {error}"
-        )))
+        )))?;
+
+        reporter.report(&format!(
+            "Repository ref '{}' is ready at '{}'.",
+            git_ref,
+            workspace_display,
+        ));
+
+        Ok(())
     }
 }
 
@@ -324,13 +401,7 @@ fn run_git_command(working_dir: Option<&Path>, args: Vec<String>) -> io::Result<
 }
 
 fn run_git_command_with_output(working_dir: Option<&Path>, args: Vec<String>) -> io::Result<String> {
-    let args = platform_git_command_args(args);
-    let preview = args.join(" ");
-    let mut command = Command::new("git");
-    command.args(args.iter().map(String::as_str));
-    if let Some(working_dir) = working_dir {
-        command.current_dir(working_dir);
-    }
+    let (preview, mut command) = prepare_git_command(working_dir, args);
 
     let output = command.output().map_err(|error| {
         io::Error::other(format!("spawn git {preview}: {error}"))
@@ -343,6 +414,28 @@ fn run_git_command_with_output(working_dir: Option<&Path>, args: Vec<String>) ->
         &preview,
         &output,
     )))
+}
+
+fn prepare_git_command(
+    working_dir: Option<&Path>,
+    args: Vec<String>,
+) -> (String, Command) {
+    let args = platform_git_command_args(args);
+    let preview = args.join(" ");
+    let mut command = Command::new("git");
+    command.args(args.iter().map(String::as_str));
+    configure_non_interactive_git_command(&mut command);
+    if let Some(working_dir) = working_dir {
+        command.current_dir(working_dir);
+    }
+
+    (preview, command)
+}
+
+fn configure_non_interactive_git_command(command: &mut Command) {
+    command
+        .env(GIT_TERMINAL_PROMPT_ENV, GIT_TERMINAL_PROMPT_DISABLED)
+        .env(GCM_INTERACTIVE_ENV, GCM_INTERACTIVE_NEVER);
 }
 
 fn format_git_command_failure(preview: &str, output: &Output) -> String {
@@ -384,11 +477,14 @@ fn ensure_workspace_long_paths(workspace_path: &Path) -> io::Result<()> {
 }
 
 fn platform_git_command_args(args: Vec<String>) -> Vec<String> {
-    if !cfg!(windows) {
-        return args;
+    let mut platform_args = vec![
+        String::from("-c"),
+        String::from(GIT_CREDENTIAL_HELPER_RESET),
+    ];
+    if cfg!(windows) {
+        platform_args.push(String::from("-c"));
+        platform_args.push(String::from("core.longpaths=true"));
     }
-
-    let mut platform_args = vec![String::from("-c"), String::from("core.longpaths=true")];
     platform_args.extend(args);
     platform_args
 }
@@ -436,10 +532,12 @@ fn parse_git_tags(output: &str) -> io::Result<Vec<GitTag>> {
 mod tests {
     use super::{
         format_git_command_failure, git_auth_options_from_credentials,
-        platform_git_command_args, GitAuthOptions, GitTagListRequest, GitTagLister,
-        GitWorkspaceSyncRefRequest, GitWorkspaceSyncRequest, GitWorkspaceSyncer,
-        KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER,
+        platform_git_command_args, prepare_git_command, GitAuthOptions,
+        GitTagListRequest, GitTagLister, GitWorkspaceSyncRefRequest,
+        GitWorkspaceSyncRequest, GitWorkspaceSyncer, KIND_GIT_HTTP_BASIC,
+        KIND_GIT_HTTP_BEARER,
     };
+    use std::ffi::OsStr;
     use std::fs;
     use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
     use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -737,14 +835,41 @@ mod tests {
             String::from("-fdx"),
         ]);
 
+        assert_eq!(args[0], "-c");
+        assert_eq!(args[1], "credential.helper=");
         if cfg!(windows) {
-            assert_eq!(args[0], "-c");
-            assert_eq!(args[1], "core.longpaths=true");
+            assert_eq!(args[2], "-c");
+            assert_eq!(args[3], "core.longpaths=true");
+            assert_eq!(args[4], "clean");
+            assert_eq!(args[5], "-fdx");
+        } else {
             assert_eq!(args[2], "clean");
             assert_eq!(args[3], "-fdx");
-        } else {
-            assert_eq!(args, vec![String::from("clean"), String::from("-fdx")]);
         }
+    }
+
+    #[test]
+    fn prepare_git_command_disables_interactive_authentication() {
+        let (_, command) = prepare_git_command(None, vec![String::from("ls-remote")]);
+
+        assert_eq!(
+            command_env_value(&command, "GIT_TERMINAL_PROMPT").as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            command_env_value(&command, "GCM_INTERACTIVE").as_deref(),
+            Some("never")
+        );
+    }
+
+    fn command_env_value(command: &Command, key: &str) -> Option<String> {
+        command.get_envs().find_map(|(name, value)| {
+            if name == OsStr::new(key) {
+                value.map(|resolved| resolved.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        })
     }
 
     #[derive(Debug)]

@@ -47,7 +47,7 @@ use runtime_runner::{
     ExecutionProcessOutcome, ExecutionProcessor, ExecutionProgress,
     ExecutionProgressReporter, ExecutionResult,
     inspect_host_capability_profile, resolve_host_native_execution_plan,
-    next_workspace_attempt_token, HostCapabilityProfile, HostNativeUnityExecutor, RunnerFamily,
+    HostCapabilityProfile, HostNativeUnityExecutor, RunnerFamily,
     WorkspacePreparationInput, WorkspacePreparer,
 };
 use runtime_store::lifecycle::PublishStatus;
@@ -93,6 +93,7 @@ const POLL_STATUS_ERROR: &str = "error";
 const POLL_OBSERVED_VIA: &str = "hup-runtime";
 const DEFAULT_REVOLUTIONS_PROJECT_PAT_ENV: &str = "REVOLUTIONS_PROJECT_PAT";
 const EVENT_TOPIC_RELEASE_QUEUED: &str = "automation.release_queued";
+const EVENT_TOPIC_POLL_AUTH_FAILED: &str = "automation.poll_auth_failed";
 const EVENT_TOPIC_BUILD_RUN_STARTED: &str = "build.run_started";
 const EVENT_TOPIC_BUILD_RUN_FINISHED: &str = "build.run_finished";
 const EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED: &str = "build.stage_updated";
@@ -880,7 +881,11 @@ fn run_registration_checkout_command(
         resolve_registration_checkout_ref(&repository, command.git_ref)?;
     let workspace_root_path = resolve_registration_checkout_workspace_root(config, &repository);
     let checkout_path = workspace_root_path.join("checkout");
-    let git_auth = resolve_repository_git_auth(&coordinator, repository.credentials_id)?;
+    let git_auth = resolve_repository_git_auth(
+        &coordinator,
+        &repository_url,
+        repository.credentials_id,
+    )?;
 
     GitWorkspaceSyncer::new().sync_ref(&GitWorkspaceSyncRefRequest {
         repository_url,
@@ -1252,6 +1257,7 @@ mod tests {
         build_execution_logs_archive_path, build_execution_report_path,
         recover_interrupted_build_attempts,
         run_automation_inspect_command, run_automation_poll_once_command,
+        run_repository_poll_cycle,
         parse_manifest_sync_command, parse_manual_release_dispatch_command,
         parse_registration_import_runtime_db_command,
         parse_registration_checkout_command,
@@ -1266,14 +1272,18 @@ mod tests {
         run_manual_release_dispatch_command, run_release_plan_command,
         run_publish_run_next_command, run_release_planner_cycle,
         run_runtime_worker_iteration,
-        runtime_stop_requested, select_queued_repository_tags,
-        AutomationPollReport, BuildExecutionReport, BuildRunRecord, RegistrationCheckoutReport,
+        failed_poll_attempt_log_path, normalize_repository_git_auth_config,
+        record_failed_poll_attempt, runtime_stop_requested,
+        select_queued_repository_tags,
+        AutomationPollReport, BuildExecutionReport, BuildRunRecord,
+        EVENT_TOPIC_POLL_AUTH_FAILED,
+        RegistrationCheckoutReport, RuntimeLoopCadence,
         RepositoryPollSchedule,
         RegistrationSeedReport,
         PublishedOutputInspectionReport,
     };
     use rusqlite::{params, Connection};
-    use runtime_core::shutdown_runtime;
+    use runtime_core::{read_runtime_event_batch, shutdown_runtime};
     use runtime_config::{HostPlatform, RuntimeConfig, RuntimeDirectories};
     use runtime_git::GitTag;
     use runtime_manifests::ApplyReport as ManifestApplyReport;
@@ -1291,7 +1301,7 @@ mod tests {
     use std::fs;
     use runtime_store::{
         initialize_database, AutomationSnapshot, BuildExecutionPlan,
-        PublishRunRecord, ReleaseRunRecord, StorageLayout,
+        PollingRepositoryRecord, PublishRunRecord, ReleaseRunRecord, StorageLayout,
     };
     use std::io::Read;
     use std::path::{Path, PathBuf};
@@ -2311,12 +2321,22 @@ mod tests {
             "2022.3.20f1",
         );
         let artifact_root_path = root.join("artifacts");
+        let workspace_path = root.join("runs").join("build-run-88");
         fs::create_dir_all(&artifact_root_path).expect("artifact root should create");
-        let build_run_id = seed_succeeded_build_run(
+        fs::create_dir_all(workspace_path.join("source"))
+            .expect("workspace root should create");
+        fs::write(workspace_path.join("source").join("build.txt"), "workspace")
+            .expect("workspace marker should write");
+        fs::write(artifact_root_path.join("rebuilt.zip"), "artifact")
+            .expect("artifact marker should write");
+        let build_run_id = seed_succeeded_build_run_with_workspace(
             &connection,
             release_run_id,
             build_target_id,
             &artifact_root_path,
+            &workspace_path,
+            "2022.3.20f1",
+            "host-native",
         );
         let artifact_id = insert_artifact_record(
             &connection,
@@ -2381,6 +2401,9 @@ mod tests {
         assert_eq!(persisted_publish_run_count, 0);
         assert_eq!(queue_message_count(&connection, "release-runs"), 1);
         drop(connection);
+
+        assert!(!workspace_path.exists());
+        assert!(!artifact_root_path.exists());
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -2723,12 +2746,319 @@ mod tests {
         ];
 
         let (selected, status, ok) =
-            select_queued_repository_tags(&tags, Some("v0.9.0"));
+            select_queued_repository_tags(&tags, Some("v0.9.0"), true);
 
         assert!(ok);
         assert_eq!(status, "");
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].name, "v1.2.0");
+    }
+
+    #[test]
+    fn select_queued_repository_tags_only_keeps_latest_for_initial_repository_without_history() {
+        let tags = vec![
+            GitTag {
+                name: String::from("v1.0.0"),
+                commit: String::from("1111111"),
+            },
+            GitTag {
+                name: String::from("v1.1.0"),
+                commit: String::from("2222222"),
+            },
+            GitTag {
+                name: String::from("v1.2.0"),
+                commit: String::from("3333333"),
+            },
+        ];
+
+        let (selected, status, ok) = select_queued_repository_tags(&tags, None, false);
+
+        assert!(ok);
+        assert_eq!(status, "");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "v1.2.0");
+    }
+
+    #[test]
+    fn runtime_loop_cadence_keeps_worker_ticks_fast_while_heartbeat_waits_five_seconds() {
+        let config = RuntimeConfig::from_root(test_root("runtime-bin-loop-cadence"));
+        let cadence = RuntimeLoopCadence::from_config(&config);
+
+        assert_eq!(cadence.worker_loop_interval(), Duration::from_secs(1));
+        assert!(!cadence.should_emit_heartbeat(Duration::from_secs(1)));
+        assert!(!cadence.should_emit_heartbeat(Duration::from_secs(4)));
+        assert!(cadence.should_emit_heartbeat(Duration::from_secs(5)));
+
+        if config.directories.data_dir.exists() {
+            std::fs::remove_dir_all(&config.directories.data_dir)
+                .expect("temporary runtime root should be removable");
+        }
+    }
+
+    #[test]
+    fn runtime_poll_schedule_checks_repository_immediately_on_first_tick() {
+        let root = test_root("runtime-bin-poll-immediate-first-tick");
+        let directories = RuntimeDirectories::from_root(&root);
+        let storage = StorageLayout::from_directories(&directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let repository_url = create_unity_repository_with_tags(
+            &root.join("runtime-bin-poll-immediate-first-tick-source"),
+            "2021.3.33f1",
+            &["v1.0.0"],
+        );
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let repository_id = seed_repository_with_url(
+            &connection,
+            "runtime-bin-poll-immediate-first-tick",
+            &repository_url,
+        );
+        seed_build_target(&connection, repository_id, "windows-player", "windows");
+        connection
+            .execute(
+                "UPDATE repositories SET last_seen_tag = ? WHERE id = ?",
+                params!["v1.0.0", repository_id],
+            )
+            .expect("repository baseline should update");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&storage);
+        let mut poll_schedule = RepositoryPollSchedule::default();
+
+        let first_report = run_repository_poll_cycle(
+            &coordinator,
+            &storage,
+            Some(&mut poll_schedule),
+        )
+        .expect("first polling cycle should run immediately");
+
+        assert_eq!(first_report.repositories.len(), 1);
+        let repository = &first_report.repositories[0];
+        assert_eq!(repository.repository_id, repository_id);
+        assert_eq!(repository.status, "unchanged");
+        assert_eq!(repository.last_seen_tag_before.as_deref(), Some("v1.0.0"));
+        assert_eq!(repository.last_seen_tag_after.as_deref(), Some("v1.0.0"));
+        assert!(repository.queued_release_ids.is_empty());
+        assert!(repository.discovered_tags.is_empty());
+
+        let second_report = run_repository_poll_cycle(
+            &coordinator,
+            &storage,
+            Some(&mut poll_schedule),
+        )
+        .expect("second polling cycle should respect the scheduled wait");
+
+        assert!(second_report.repositories.is_empty());
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        assert_eq!(
+            load_repository_last_seen_tag(&connection, repository_id).as_deref(),
+            Some("v1.0.0")
+        );
+        assert_eq!(
+            release_tags_for_repository(&connection, repository_id),
+            Vec::<String>::new()
+        );
+        drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn automation_poll_once_command_queues_only_latest_tag_for_repository_without_process_history() {
+        let root = test_root("runtime-bin-automation-poll-once-initial-latest-only");
+        let directories = RuntimeDirectories::from_root(&root);
+        let storage = StorageLayout::from_directories(&directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let repository_url = create_unity_repository_with_tags(
+            &root.join("runtime-bin-automation-poll-once-initial-latest-only-source"),
+            "2021.3.33f1",
+            &["v1.0.0", "v1.1.0", "v1.2.0"],
+        );
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let repository_id = seed_repository_with_url(
+            &connection,
+            "runtime-bin-automation-poll-once-initial-latest-only",
+            &repository_url,
+        );
+        seed_build_target(&connection, repository_id, "windows-player", "windows");
+        drop(connection);
+
+        let output = run_automation_poll_once_command(&[], &storage)
+            .expect("automation poll-once command should succeed");
+        let report: AutomationPollReport =
+            serde_json::from_str(&output).expect("poll output should decode");
+
+        assert_eq!(report.repositories.len(), 1);
+        let repository = &report.repositories[0];
+        assert_eq!(repository.repository_id, repository_id);
+        assert_eq!(repository.status, "queued");
+        assert_eq!(repository.last_seen_tag_before, None);
+        assert_eq!(repository.last_seen_tag_after.as_deref(), Some("v1.2.0"));
+        assert_eq!(repository.queued_release_ids.len(), 1);
+        assert_eq!(repository.discovered_tags.len(), 1);
+        assert_eq!(repository.discovered_tags[0].name, "v1.2.0");
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        assert_eq!(
+            load_repository_last_seen_tag(&connection, repository_id).as_deref(),
+            Some("v1.2.0")
+        );
+        assert_eq!(
+            release_tags_for_repository(&connection, repository_id),
+            vec![String::from("v1.2.0")]
+        );
+        assert_eq!(queue_message_count(&connection, "release-runs"), 1);
+        drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn normalize_repository_git_auth_config_rewrites_legacy_github_placeholder_username() {
+        let normalized = normalize_repository_git_auth_config(
+            "https://github.com/indiegabo/revolutions.git",
+            "git-http-basic",
+            r#"{"username":"git","password":"solidarity"}"#,
+        )
+        .expect("github auth config should normalize");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&normalized).expect("normalized config should decode");
+
+        assert_eq!(parsed["username"], "indiegabo");
+        assert_eq!(parsed["password"], "solidarity");
+    }
+
+    #[test]
+    fn record_failed_poll_attempt_writes_repository_scoped_jsonl_log() {
+        let root = test_root("runtime-bin-failed-poll-attempt-log");
+        let directories = RuntimeDirectories::from_root(&root);
+        let storage = StorageLayout::from_directories(&directories);
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
+        let repository = PollingRepositoryRecord {
+            id: 41,
+            name: String::from("Revolutions Main"),
+            repo_url: String::from("https://github.com/indiegabo/revolutions.git"),
+            credentials_id: Some(7),
+            enabled: true,
+            polling_interval_seconds: 300,
+            last_seen_tag: Some(String::from("v1.0.0")),
+            enabled_build_target_count: 2,
+            has_release_history: true,
+        };
+        let error = std::io::Error::other("Authentication failed for GitHub");
+
+        let written_path = record_failed_poll_attempt(
+            &storage,
+            &repository,
+            "poll_remote",
+            &error,
+        )
+        .expect("failed poll attempt log should persist");
+
+        assert_eq!(written_path, failed_poll_attempt_log_path(&storage, &repository));
+        let contents = std::fs::read_to_string(&written_path)
+            .expect("failed poll attempt log should read");
+        let line = contents
+            .lines()
+            .last()
+            .expect("failed poll attempt log should contain one line");
+        let parsed: serde_json::Value =
+            serde_json::from_str(line).expect("failed poll attempt line should decode");
+
+        assert_eq!(parsed["repository_id"], 41);
+        assert_eq!(parsed["repository_name"], "Revolutions Main");
+        assert_eq!(parsed["stage"], "poll_remote");
+        assert_eq!(parsed["last_seen_tag"], "v1.0.0");
+        assert!(parsed["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Authentication failed"));
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn run_repository_poll_cycle_stops_on_authentication_failure_and_emits_runtime_event() {
+        let root = test_root("runtime-bin-poll-auth-failure");
+        let directories = RuntimeDirectories::from_root(&root);
+        let storage = StorageLayout::from_directories(&directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let credentials_id = seed_credentials(
+            &connection,
+            "Revolutions/origin",
+            "git-http-basic",
+            &json!({
+                "username": "indiegabo",
+                "password": "keyring://github/revolutions-origin"
+            })
+            .to_string(),
+        );
+        let repository_id = seed_repository_with_url_and_credentials(
+            &connection,
+            "Revolutions",
+            "https://github.com/indiegabo/revolutions.git",
+            Some(credentials_id),
+        );
+        seed_build_target(&connection, repository_id, "windows-player", "windows");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&storage);
+        let error = run_repository_poll_cycle(&coordinator, &storage, None)
+            .expect_err("authentication failures should stop the poll cycle");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error
+            .to_string()
+            .contains("fatal repository poll authentication failure"));
+        assert!(error
+            .to_string()
+            .contains("host keyring error"));
+
+        let repository = coordinator
+            .list_polling_repositories()
+            .expect("repository listing should load")
+            .into_iter()
+            .next()
+            .expect("polling repository should exist");
+        let failed_attempt_path = failed_poll_attempt_log_path(&storage, &repository);
+        let failed_attempt_contents = fs::read_to_string(&failed_attempt_path)
+            .expect("failed poll attempt log should exist");
+        let failed_attempt: serde_json::Value = serde_json::from_str(
+            failed_attempt_contents
+                .lines()
+                .last()
+                .expect("failed poll attempt log should contain one record"),
+        )
+        .expect("failed poll attempt log should decode");
+        assert_eq!(failed_attempt["stage"], "poll_remote");
+        assert!(failed_attempt["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("host keyring error"));
+
+        let runtime_events = read_runtime_event_batch(&storage.runtime_events_path, 0)
+            .expect("runtime event stream should read");
+        assert_eq!(runtime_events.events.len(), 1);
+        let event = &runtime_events.events[0];
+        assert_eq!(event.topic, EVENT_TOPIC_POLL_AUTH_FAILED);
+        assert_eq!(event.repository_id, Some(repository_id));
+        assert!(event.summary.contains("Revolutions"));
+        assert_eq!(event.payload["stage"], "poll_remote");
+        assert_eq!(event.payload["worker_action"], "stop");
+        assert!(event.payload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("host keyring error"));
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
 
     #[test]
@@ -3014,6 +3344,9 @@ mod tests {
             .expect("workspace directory name should exist")
             .to_owned();
         let archived_logs_path = build_execution_logs_archive_path(&workspace_path);
+        let workspace_output_path = workspace_path
+            .join("outputs")
+            .join("runtime-bin-build-run-next-success.v13.0.0.webgl-player");
         let report = load_build_execution_report(&workspace_path);
         assert_eq!(log_path, workspace_path.join("logs").join("03-unity-build.log"));
         assert!(!log_path.exists());
@@ -3026,6 +3359,8 @@ mod tests {
         assert!(log_contents.contains("build_target: WebGL"));
         assert!(!workspace_path.join("source").exists());
         assert!(!workspace_path.join("logs").exists());
+        assert!(workspace_output_path.is_dir());
+        assert!(workspace_output_path.join("artifact.txt").is_file());
         assert_eq!(report.cleanup.status, "completed");
         assert_eq!(report.attempts.len(), 1);
         assert_eq!(report.retained_files.len(), 1);
@@ -3158,18 +3493,23 @@ mod tests {
             .join("runtime-bin-build-run-next-overrides.v13.1.0");
         let expected_artifact_path = expected_artifact_root
             .join("runtime-bin-build-run-next-overrides.v13.1.0.webgl-player.zip");
+        let expected_workspace_output_path = expected_workspace_root
+            .join("outputs")
+            .join("runtime-bin-build-run-next-overrides.v13.1.0.webgl-player");
         let expected_workspace_path = expected_workspace_root.display().to_string();
+        let expected_workspace_dir_name = format!("build-run-{}", record.id);
         let expected_log_path_string = expected_log_path.display().to_string();
         let expected_artifact_root_string = expected_artifact_root.display().to_string();
 
         assert_eq!(record.status, "succeeded");
         assert!(expected_workspace_root.starts_with(workspace_root_override.join("runs")));
         assert_eq!(expected_log_path, expected_workspace_root.join("logs").join("03-unity-build.log"));
-        assert!(expected_workspace_root
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .starts_with(&format!("build-run-{}-attempt-", record.id)));
+        assert_eq!(
+            expected_workspace_root
+                .file_name()
+                .and_then(|value| value.to_str()),
+            Some(expected_workspace_dir_name.as_str())
+        );
         assert_eq!(record.workspace_path.as_deref(), Some(expected_workspace_path.as_str()));
         assert_eq!(record.log_path.as_deref(), Some(expected_log_path_string.as_str()));
         assert_eq!(
@@ -3178,6 +3518,8 @@ mod tests {
         );
         assert!(!expected_workspace_root.join("source").exists());
         assert!(!expected_workspace_root.join("logs").exists());
+        assert!(expected_workspace_output_path.is_dir());
+        assert!(expected_workspace_output_path.join("artifact.txt").is_file());
         assert!(!expected_log_path.exists());
         assert!(build_execution_logs_archive_path(&expected_workspace_root).is_file());
         assert!(build_execution_report_path(&expected_workspace_root).is_file());
@@ -3660,17 +4002,21 @@ mod tests {
                 .expect("workspace path should persist"),
         );
         let log_path = PathBuf::from(record.log_path.clone().expect("log path should persist"));
-        assert!(workspace_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .starts_with(&format!("build-run-{}-attempt-", record.id)));
+        assert_eq!(
+            workspace_path
+                .file_name()
+                .and_then(|value| value.to_str()),
+            Some(format!("build-run-{}", record.id).as_str())
+        );
         assert_eq!(log_path, workspace_path.join("logs").join("03-unity-build.log"));
         assert!(!log_path.exists());
         assert!(!workspace_path.join("logs").exists());
         let report = load_build_execution_report(&workspace_path);
-        assert_eq!(report.attempts.len(), 2);
-        assert!(report.attempts.iter().any(|attempt| attempt.removed_after_cleanup));
+        assert_eq!(report.attempts.len(), 1);
+        assert!(report
+            .attempts
+            .iter()
+            .all(|attempt| !attempt.removed_after_cleanup));
         assert!(build_execution_logs_archive_path(&workspace_path).is_file());
 
         let state_path = root.join("run-next-retry-package-cache.state");

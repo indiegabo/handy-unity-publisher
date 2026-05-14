@@ -14,6 +14,7 @@ const BUILD_EXECUTION_CLEANUP_TRIGGER_REQUESTED_INTERRUPTION: &str =
 const BUILD_EXECUTION_CLEANUP_TRIGGER_SYSTEM_INTERRUPTION: &str =
     "system_interruption";
 const BUILD_EXECUTION_RETAINED_DIR_NAME: &str = "retained";
+const BUILD_EXECUTION_WORKSPACE_OUTPUTS_DIR_NAME: &str = "outputs";
 const BUILD_EXECUTION_REPORT_FILE_NAME: &str = "execution-report.json";
 const BUILD_EXECUTION_LOG_ARCHIVE_FILE_NAME: &str = "execution-logs.zip";
 const UNITY_NON_SHIPPABLE_ARCHIVE_PATH_SUFFIXES: &[&str] = &[
@@ -85,6 +86,35 @@ impl BuildRunStageSequence {
 struct BuildRunStageExecution {
     position: i64,
     log_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreservedStageLog {
+    path: PathBuf,
+    contents: String,
+}
+
+fn capture_stage_log(path: &Path) -> io::Result<Option<PreservedStageLog>> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(PreservedStageLog {
+            path: path.to_path_buf(),
+            contents,
+        })),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn restore_stage_log_if_missing(stage_log: &PreservedStageLog) -> io::Result<()> {
+    if stage_log.path.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = stage_log.path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(&stage_log.path, &stage_log.contents)
 }
 
 struct BuildRunStageTracker<'a> {
@@ -236,14 +266,23 @@ impl<'a> BuildRunStageTracker<'a> {
 
 struct BuildStageHeartbeatReporter<'a, 'b> {
     tracker: &'a BuildRunStageTracker<'b>,
+    storage: &'a StorageLayout,
+    context: &'a BuildRunEventContext,
     stage: BuildProcessStage,
     error: Option<io::Error>,
 }
 
 impl<'a, 'b> BuildStageHeartbeatReporter<'a, 'b> {
-    fn new(tracker: &'a BuildRunStageTracker<'b>, stage: BuildProcessStage) -> Self {
+    fn new(
+        tracker: &'a BuildRunStageTracker<'b>,
+        storage: &'a StorageLayout,
+        context: &'a BuildRunEventContext,
+        stage: BuildProcessStage,
+    ) -> Self {
         Self {
             tracker,
+            storage,
+            context,
             stage,
             error: None,
         }
@@ -262,6 +301,17 @@ impl ExecutionProgressReporter for BuildStageHeartbeatReporter<'_, '_> {
 
         if let Err(error) = self.tracker.heartbeat_stage(self.stage, &progress.message) {
             self.error = Some(error);
+            return;
+        }
+
+        if let Err(error) = emit_build_run_stage_updated_event(
+            self.storage,
+            self.context,
+            self.stage.key(),
+            self.stage.label(),
+            &progress.message,
+        ) {
+            log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED, &error);
         }
     }
 }
@@ -582,7 +632,8 @@ pub(crate) fn run_build_run_next_command(
             &validation_message,
         );
 
-        let runner_plan = match resolve_runtime_build_execution_plan(config, &resolved.plan) {
+        let (runner_plan, preserved_validation_log) =
+            match resolve_runtime_build_execution_plan(config, &resolved.plan) {
             Ok(plan) => {
                 validation_tracker.complete_stage(
                     BuildProcessStage::ValidateContext,
@@ -592,7 +643,8 @@ pub(crate) fn run_build_run_next_command(
                         plan.build_method,
                     ),
                 )?;
-                plan
+                let preserved_validation_log = capture_stage_log(&validation_log_path)?;
+                (plan, preserved_validation_log)
             }
             Err(error) => {
                 validation_tracker.fail_stage(
@@ -625,6 +677,7 @@ pub(crate) fn run_build_run_next_command(
             resolved.plan.build_run_id,
             &event_context,
             stage_sequence,
+            preserved_validation_log,
             &mut attempt_roots,
         )
         .map_err(|error| Box::new(error) as Box<dyn Error>)
@@ -1101,7 +1154,9 @@ fn prune_build_run_workspaces(
 
             for entry in fs::read_dir(attempt_root)? {
                 let entry = entry?;
-                if entry.file_name() == BUILD_EXECUTION_RETAINED_DIR_NAME {
+                if entry.file_name() == BUILD_EXECUTION_RETAINED_DIR_NAME
+                    || entry.file_name() == BUILD_EXECUTION_WORKSPACE_OUTPUTS_DIR_NAME
+                {
                     continue;
                 }
 
@@ -1529,9 +1584,10 @@ fn process_build_run_with_retry(
     build_run_id: i64,
     event_context: &BuildRunEventContext,
     stage_sequence: Rc<RefCell<BuildRunStageSequence>>,
+    preserved_validation_log: Option<PreservedStageLog>,
     attempt_roots: &mut Vec<PathBuf>,
 ) -> io::Result<BuildRunRecord> {
-    let mut current_preparation = preparation.clone();
+    let current_preparation = preparation.clone();
     let mut retry_available = true;
 
     loop {
@@ -1560,7 +1616,40 @@ fn process_build_run_with_retry(
             &checkout_message,
         );
 
-        let workspace = match processor.prepare_workspace(&current_preparation) {
+        let mut reporter = BuildStageHeartbeatReporter::new(
+            &tracker,
+            storage,
+            event_context,
+            BuildProcessStage::CheckoutRepository,
+        );
+        let workspace_outcome =
+            processor.prepare_workspace_with_reporter(&current_preparation, &mut reporter);
+        if let Some(stage_log) = preserved_validation_log.as_ref() {
+            if let Err(error) = restore_stage_log_if_missing(stage_log) {
+                eprintln!(
+                    "runtime build run {} could not restore validation stage log at '{}': {}",
+                    build_run_id,
+                    stage_log.path.display(),
+                    error
+                );
+            }
+        }
+        if let Some(error) = reporter.take_error() {
+            tracker.fail_stage(BuildProcessStage::CheckoutRepository, &error.to_string())?;
+            let record = coordinator.fail_build_run(
+                build_run_id,
+                FailBuildRunInput {
+                    workspace_path: planned.root_path.display().to_string(),
+                    log_path: checkout_log_path.display().to_string(),
+                    artifact_root_path: planned.artifact_root_path.display().to_string(),
+                    error_message: error.to_string(),
+                },
+            )?;
+            run_build_cleanup(coordinator, record.id, attempt_roots);
+            return Ok(record);
+        }
+
+        let workspace = match workspace_outcome {
             Ok(workspace) => {
                 tracker.complete_stage(
                     BuildProcessStage::CheckoutRepository,
@@ -1604,7 +1693,12 @@ fn process_build_run_with_retry(
             &unity_build_message,
         );
 
-        let mut reporter = BuildStageHeartbeatReporter::new(&tracker, BuildProcessStage::UnityBuild);
+        let mut reporter = BuildStageHeartbeatReporter::new(
+            &tracker,
+            storage,
+            event_context,
+            BuildProcessStage::UnityBuild,
+        );
         let execute_outcome = processor.execute_prepared(runner_plan, workspace, &mut reporter);
         if let Some(error) = reporter.take_error() {
             tracker.fail_stage(BuildProcessStage::UnityBuild, &error.to_string())?;
@@ -1629,7 +1723,6 @@ fn process_build_run_with_retry(
                         &format!("{} Retrying once with a fresh workspace.", error),
                     )?;
                     retry_available = false;
-                    current_preparation.attempt_token = next_workspace_attempt_token()?;
                     continue;
                 }
                 Some(error) => {
@@ -1681,7 +1774,6 @@ fn process_build_run_with_retry(
                     &format!("{} Retrying once with a fresh workspace.", error),
                 )?;
                 retry_available = false;
-                current_preparation.attempt_token = next_workspace_attempt_token()?;
                 continue;
             }
             Err(error) => {
@@ -1770,7 +1862,7 @@ fn resolve_claimed_build_context(
     Ok(ResolvedBuildContext {
         preparation: WorkspacePreparationInput {
             build_run_id: plan.build_run_id,
-            attempt_token: next_workspace_attempt_token()?,
+            attempt_token: String::new(),
             repository_name: plan.repository_name.clone(),
             repository_url: plan.repository_url.clone(),
             git_auth,
@@ -1886,4 +1978,94 @@ fn release_claimed_build_message(
         })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(label: &str) -> io::Result<Self> {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "hup-runtime-bin-{label}-{}-{timestamp}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path)?;
+            Ok(Self { path })
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn prune_build_run_workspaces_preserves_outputs_in_final_workspace() {
+        let root = TestDir::new("prune-build-workspaces")
+            .expect("temporary test directory should be created");
+        let previous_attempt_path = root.path().join("build-run-1-attempt-1");
+        let final_workspace_path = root.path().join("build-run-1");
+        let retained_path = final_workspace_path.join(BUILD_EXECUTION_RETAINED_DIR_NAME);
+        let outputs_path = final_workspace_path
+            .join(BUILD_EXECUTION_WORKSPACE_OUTPUTS_DIR_NAME)
+            .join("artifact-output");
+
+        fs::create_dir_all(previous_attempt_path.join("source"))
+            .expect("previous attempt directory should be created");
+        fs::write(previous_attempt_path.join("source").join("stale.txt"), b"stale")
+            .expect("previous attempt file should be created");
+        fs::create_dir_all(&retained_path)
+            .expect("retained directory should be created");
+        fs::create_dir_all(&outputs_path)
+            .expect("outputs directory should be created");
+        fs::create_dir_all(final_workspace_path.join("source"))
+            .expect("final workspace source directory should be created");
+        fs::create_dir_all(final_workspace_path.join("logs"))
+            .expect("final workspace logs directory should be created");
+        fs::write(
+            retained_path.join(BUILD_EXECUTION_LOG_ARCHIVE_FILE_NAME),
+            b"archive",
+        )
+        .expect("retained archive should be created");
+        fs::write(outputs_path.join("artifact.txt"), b"artifact")
+            .expect("output artifact should be created");
+        fs::write(
+            final_workspace_path.join(BUILD_EXECUTION_REPORT_FILE_NAME),
+            b"{}",
+        )
+        .expect("execution report should be created");
+
+        let removed_attempt_count = prune_build_run_workspaces(
+            &[previous_attempt_path.clone(), final_workspace_path.clone()],
+            &final_workspace_path,
+        )
+        .expect("workspace pruning should succeed");
+
+        assert_eq!(removed_attempt_count, 1);
+        assert!(!previous_attempt_path.exists());
+        assert!(retained_path.join(BUILD_EXECUTION_LOG_ARCHIVE_FILE_NAME).is_file());
+        assert!(outputs_path.join("artifact.txt").is_file());
+        assert!(!final_workspace_path.join("source").exists());
+        assert!(!final_workspace_path.join("logs").exists());
+        assert!(
+            !final_workspace_path
+                .join(BUILD_EXECUTION_REPORT_FILE_NAME)
+                .exists()
+        );
+    }
 }

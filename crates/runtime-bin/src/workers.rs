@@ -3,6 +3,64 @@
 
 use super::*;
 
+use std::time::Instant;
+
+const POLL_FAILURE_STAGE_ADVANCE_RELEASE_QUEUE_PRECHECK: &str =
+    "advance_release_queue_precheck";
+const POLL_FAILURE_STAGE_POLL_REMOTE: &str = "poll_remote";
+const POLL_FAILURE_STAGE_ADVANCE_RELEASE_QUEUE_POST_POLL: &str =
+    "advance_release_queue_post_poll";
+const AUTHENTICATION_FAILURE_PATTERNS: &[&str] = &[
+    "authentication failed",
+    "invalid username or token",
+    "could not read username",
+    "could not read password",
+    "host keyring error",
+    "no matching entry found in secure storage",
+    "access denied",
+    "permission denied",
+    "unauthorized",
+];
+
+#[derive(Debug, Serialize)]
+struct FailedPollAttemptLogRecord<'a> {
+    attempted_at_unix_millis: u128,
+    repository_id: i64,
+    repository_name: &'a str,
+    repository_url: &'a str,
+    polling_interval_seconds: i64,
+    last_seen_tag: Option<&'a str>,
+    stage: &'a str,
+    error: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RuntimeLoopCadence {
+    worker_loop_interval: Duration,
+    heartbeat_interval: Duration,
+}
+
+impl RuntimeLoopCadence {
+    pub(crate) fn from_config(config: &RuntimeConfig) -> Self {
+        Self {
+            worker_loop_interval: Duration::from_millis(
+                config.runtime_loop.worker_loop_interval_millis,
+            ),
+            heartbeat_interval: Duration::from_millis(
+                config.runtime_loop.heartbeat_interval_millis,
+            ),
+        }
+    }
+
+    pub(crate) fn worker_loop_interval(self) -> Duration {
+        self.worker_loop_interval
+    }
+
+    pub(crate) fn should_emit_heartbeat(self, elapsed_since_last_heartbeat: Duration) -> bool {
+        elapsed_since_last_heartbeat >= self.heartbeat_interval
+    }
+}
+
 pub(crate) fn run_release_planner_cycle(
     storage: &StorageLayout,
 ) -> Result<bool, Box<dyn Error>> {
@@ -121,6 +179,12 @@ pub(crate) fn run_repository_poll_cycle(
             }
             Ok(false) => {}
             Err(error) => {
+                log_failed_poll_attempt(
+                    storage,
+                    &repository,
+                    POLL_FAILURE_STAGE_ADVANCE_RELEASE_QUEUE_PRECHECK,
+                    &error,
+                );
                 results.push(error_poll_result(&repository, error));
                 continue;
             }
@@ -142,13 +206,40 @@ pub(crate) fn run_repository_poll_cycle(
                 if !result.queued_release_ids.is_empty() {
                     if let Err(error) = coordinator.advance_repository_release_queue(repository.id)
                     {
+                        log_failed_poll_attempt(
+                            storage,
+                            &repository,
+                            POLL_FAILURE_STAGE_ADVANCE_RELEASE_QUEUE_POST_POLL,
+                            &error,
+                        );
                         results.push(error_poll_result(&repository, error));
                         continue;
                     }
                 }
                 results.push(result);
             }
-            Err(error) => results.push(error_poll_result(&repository, error)),
+            Err(error) => {
+                log_failed_poll_attempt(
+                    storage,
+                    &repository,
+                    POLL_FAILURE_STAGE_POLL_REMOTE,
+                    &error,
+                );
+                if is_authentication_poll_error(&error) {
+                    log_poll_auth_failure_event(
+                        storage,
+                        &repository,
+                        POLL_FAILURE_STAGE_POLL_REMOTE,
+                        &error,
+                    );
+                    return Err(fatal_poll_auth_failure(
+                        &repository,
+                        POLL_FAILURE_STAGE_POLL_REMOTE,
+                        error,
+                    ));
+                }
+                results.push(error_poll_result(&repository, error));
+            }
         }
     }
 
@@ -165,7 +256,11 @@ fn poll_repository(
     tag_lister: &GitTagLister,
     repository: &PollingRepositoryRecord,
 ) -> io::Result<RepositoryPollResult> {
-    let git_auth = resolve_repository_git_auth(coordinator, repository.credentials_id)?;
+    let git_auth = resolve_repository_git_auth(
+        coordinator,
+        &repository.repo_url,
+        repository.credentials_id,
+    )?;
     let tags = tag_lister.list_tags(&GitTagListRequest {
         repository_url: repository.repo_url.clone(),
         auth: git_auth,
@@ -173,6 +268,7 @@ fn poll_repository(
     let (selected_tags, status, ok) = select_queued_repository_tags(
         &tags,
         repository.last_seen_tag.as_deref(),
+        repository.has_release_history,
     );
     if !ok {
         return Ok(RepositoryPollResult {
@@ -261,6 +357,7 @@ fn poll_repository(
 
 pub(crate) fn resolve_repository_git_auth(
     coordinator: &LocalCoordinator,
+    repository_url: &str,
     credentials_id: Option<i64>,
 ) -> io::Result<GitAuthOptions> {
     let Some(credentials_id) = credentials_id else {
@@ -268,7 +365,229 @@ pub(crate) fn resolve_repository_git_auth(
     };
 
     let credentials = coordinator.get_credential_record(credentials_id)?;
-    git_auth_options_from_credentials(&credentials.kind, &credentials.config_json)
+    let resolved_config_json = runtime_store::resolve_credential_secret_config_json(
+        &credentials.kind,
+        &credentials.config_json,
+    )?;
+    let normalized_config_json = normalize_repository_git_auth_config(
+        repository_url,
+        &credentials.kind,
+        &resolved_config_json,
+    )?;
+
+    git_auth_options_from_credentials(&credentials.kind, &normalized_config_json)
+}
+
+pub(crate) fn normalize_repository_git_auth_config(
+    repository_url: &str,
+    kind: &str,
+    config_json: &str,
+) -> io::Result<String> {
+    if kind.trim() != "git-http-basic" {
+        return Ok(config_json.to_owned());
+    }
+
+    let Some(owner) = github_repository_owner(repository_url) else {
+        return Ok(config_json.to_owned());
+    };
+    let mut parsed = serde_json::from_str::<serde_json::Value>(config_json)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    let Some(object) = parsed.as_object_mut() else {
+        return Ok(config_json.to_owned());
+    };
+    let Some(username) = object.get("username").and_then(|value| value.as_str()) else {
+        return Ok(config_json.to_owned());
+    };
+    if !username.eq_ignore_ascii_case("git") {
+        return Ok(config_json.to_owned());
+    }
+
+    // Legacy wizard-created GitHub PAT credentials used a placeholder
+    // username. Use the repository owner as a compatibility fallback so
+    // runtime-owned Git operations keep working for personal repositories.
+    object.insert(String::from("username"), serde_json::Value::String(owner));
+    serde_json::to_string(&parsed).map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
+}
+
+fn github_repository_owner(repository_url: &str) -> Option<String> {
+    let repository_url = repository_url.trim();
+    let without_scheme = repository_url
+        .strip_prefix("https://")
+        .or_else(|| repository_url.strip_prefix("http://"))?;
+    let (host, path) = without_scheme.split_once('/')?;
+    if !host.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+
+    let owner = path.split('/').next()?.trim();
+    if owner.is_empty() {
+        return None;
+    }
+
+    Some(owner.to_owned())
+}
+
+pub(crate) fn failed_poll_attempt_log_path(
+    storage: &StorageLayout,
+    repository: &PollingRepositoryRecord,
+) -> PathBuf {
+    let logs_root = storage
+        .runtime_log_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    logs_root
+        .join("repositories")
+        .join(format!(
+            "repository-{}-{}",
+            repository.id,
+            repository_log_slug(&repository.name)
+        ))
+        .join("failed-poll-attempts.jsonl")
+}
+
+pub(crate) fn record_failed_poll_attempt(
+    storage: &StorageLayout,
+    repository: &PollingRepositoryRecord,
+    stage: &str,
+    error: &io::Error,
+) -> io::Result<PathBuf> {
+    let log_path = failed_poll_attempt_log_path(storage, repository);
+    let parent = log_path.parent().ok_or_else(|| {
+        io::Error::other("failed poll attempt log path is missing a parent directory")
+    })?;
+    fs::create_dir_all(parent)?;
+
+    let record = FailedPollAttemptLogRecord {
+        attempted_at_unix_millis: SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+        repository_id: repository.id,
+        repository_name: &repository.name,
+        repository_url: &repository.repo_url,
+        polling_interval_seconds: repository.polling_interval_seconds,
+        last_seen_tag: repository.last_seen_tag.as_deref(),
+        stage,
+        error: error.to_string(),
+    };
+
+    let encoded = serde_json::to_string(&record)
+        .map_err(|serialization_error| io::Error::new(ErrorKind::InvalidData, serialization_error))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    writeln!(file, "{encoded}")?;
+
+    Ok(log_path)
+}
+
+fn log_failed_poll_attempt(
+    storage: &StorageLayout,
+    repository: &PollingRepositoryRecord,
+    stage: &str,
+    error: &io::Error,
+) {
+    if let Err(log_error) = record_failed_poll_attempt(storage, repository, stage, error) {
+        eprintln!(
+            "failed to persist poll failure log for repository {}: {}",
+            repository.id,
+            log_error
+        );
+    }
+}
+
+fn is_authentication_poll_error(error: &io::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    AUTHENTICATION_FAILURE_PATTERNS
+        .iter()
+        .any(|pattern| message.contains(pattern))
+}
+
+fn fatal_poll_auth_failure(
+    repository: &PollingRepositoryRecord,
+    stage: &str,
+    error: io::Error,
+) -> io::Error {
+    io::Error::new(
+        ErrorKind::PermissionDenied,
+        format!(
+            "fatal repository poll authentication failure for repository {} ({}), stage {}: {}",
+            repository.id,
+            repository.name,
+            stage,
+            error
+        ),
+    )
+}
+
+fn log_poll_auth_failure_event(
+    storage: &StorageLayout,
+    repository: &PollingRepositoryRecord,
+    stage: &str,
+    error: &io::Error,
+) {
+    let summary = format!(
+        "Automatic polling stopped for {} after an authentication failure",
+        repository.name
+    );
+
+    if let Err(event_error) = emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: String::from(EVENT_TOPIC_POLL_AUTH_FAILED),
+            severity: String::from("error"),
+            origin: String::from("runtime-bin"),
+            user_requested: false,
+            repository_id: Some(repository.id),
+            release_run_id: None,
+            build_run_id: None,
+            publish_run_id: None,
+            summary,
+            payload: serde_json::json!({
+                "repository_name": &repository.name,
+                "repository_url": &repository.repo_url,
+                "polling_interval_seconds": repository.polling_interval_seconds,
+                "last_seen_tag": &repository.last_seen_tag,
+                "stage": stage,
+                "error": error.to_string(),
+                "worker_action": "stop",
+            }),
+        },
+    ) {
+        eprintln!(
+            "failed to emit poll auth failure event for repository {}: {}",
+            repository.id,
+            event_error,
+        );
+    }
+}
+
+fn repository_log_slug(name: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_was_separator = false;
+
+    for character in name.chars() {
+        let lowered = character.to_ascii_lowercase();
+        if lowered.is_ascii_alphanumeric() {
+            slug.push(lowered);
+            previous_was_separator = false;
+            continue;
+        }
+
+        if !previous_was_separator && !slug.is_empty() {
+            slug.push('-');
+            previous_was_separator = true;
+        }
+    }
+
+    if slug.is_empty() {
+        String::from("repository")
+    } else {
+        slug.trim_matches('-').to_owned()
+    }
 }
 
 pub(crate) fn resolve_registration_checkout_ref(
@@ -338,6 +657,7 @@ pub(crate) fn read_checked_out_head_commit(source_path: &Path) -> io::Result<Str
 pub(crate) fn select_queued_repository_tags(
     tags: &[GitTag],
     last_seen_tag: Option<&str>,
+    has_release_history: bool,
 ) -> (Vec<GitTag>, &'static str, bool) {
     if tags.is_empty() {
         return (Vec::new(), POLL_STATUS_NO_TAGS, false);
@@ -345,6 +665,10 @@ pub(crate) fn select_queued_repository_tags(
 
     let normalized_last_seen = last_seen_tag.unwrap_or_default().trim();
     if normalized_last_seen.is_empty() {
+        if !has_release_history {
+            return (vec![tags[tags.len() - 1].clone()], "", true);
+        }
+
         return (tags.to_vec(), "", true);
     }
 
@@ -416,13 +740,26 @@ pub(crate) fn serve_runtime(
     let mut report = snapshot.health_report;
     let mut heartbeat_count = 0_u32;
     let mut poll_schedule = RepositoryPollSchedule::default();
+    let cadence = RuntimeLoopCadence::from_config(config);
+    let mut last_heartbeat_at = Instant::now();
 
     loop {
         if runtime_stop_requested(storage)? {
             return Ok(());
         }
 
-        run_runtime_worker_iteration(config, storage, &mut poll_schedule)?;
+        if let Err(error) = run_runtime_worker_iteration(config, storage, &mut poll_schedule) {
+            if let Err(health_error) = update_runtime_health(
+                storage,
+                &report,
+                RuntimeStatus::Unhealthy,
+                "runtime.worker.failed",
+                error.to_string(),
+            ) {
+                eprintln!("failed to write runtime worker failure health update: {health_error}");
+            }
+            return Err(error);
+        }
 
         if let Some(max_heartbeats) = config.runtime_loop.max_heartbeats {
             if heartbeat_count >= max_heartbeats {
@@ -432,37 +769,38 @@ pub(crate) fn serve_runtime(
             }
         }
 
-        thread::sleep(Duration::from_millis(
-            config.runtime_loop.heartbeat_interval_millis,
-        ));
+        thread::sleep(cadence.worker_loop_interval());
         if runtime_stop_requested(storage)? {
             return Ok(());
         }
 
-        heartbeat_count += 1;
-        report = update_runtime_health(
-            storage,
-            &report,
-            RuntimeStatus::Healthy,
-            RUNTIME_HEARTBEAT_EVENT,
-            format!(
-                "heartbeat {} on supervision attempt {}",
-                heartbeat_count, attempt
-            ),
-        )?;
-
-        if should_force_recoverable_crash(config, attempt, heartbeat_count) {
-            let _ = update_runtime_health(
+        if cadence.should_emit_heartbeat(last_heartbeat_at.elapsed()) {
+            heartbeat_count += 1;
+            report = update_runtime_health(
                 storage,
                 &report,
-                RuntimeStatus::Unhealthy,
-                "runtime.crash.recoverable",
+                RuntimeStatus::Healthy,
+                RUNTIME_HEARTBEAT_EVENT,
                 format!(
-                    "forcing recoverable crash after {} heartbeats on attempt {}",
+                    "heartbeat {} on supervision attempt {}",
                     heartbeat_count, attempt
                 ),
             )?;
-            process::exit(config.supervision.recoverable_exit_code);
+            last_heartbeat_at = Instant::now();
+
+            if should_force_recoverable_crash(config, attempt, heartbeat_count) {
+                let _ = update_runtime_health(
+                    storage,
+                    &report,
+                    RuntimeStatus::Unhealthy,
+                    "runtime.crash.recoverable",
+                    format!(
+                        "forcing recoverable crash after {} heartbeats on attempt {}",
+                        heartbeat_count, attempt
+                    ),
+                )?;
+                process::exit(config.supervision.recoverable_exit_code);
+            }
         }
     }
 }

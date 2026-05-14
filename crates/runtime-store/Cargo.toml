@@ -6,6 +6,7 @@ publish.workspace = true
 version.workspace = true
 
 [dependencies]
+keyring = { workspace = true }
 rusqlite = { workspace = true }
 runtime-config = { path = "../runtime-config" }
 runtime-git = { path = "../runtime-git" }

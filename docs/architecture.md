@@ -249,6 +249,11 @@ introducing parallel control flows.
 Credentials are currently stored in SQLite configuration JSON and managed from
 the desktop shell.
 
+Repository project creation currently treats PAT input as the only first-class
+operator authentication path. Once the operator provides that PAT, repository
+polling and workspace synchronization must remain seamless and non-interactive
+for runtime-owned Git operations.
+
 The shell must never echo stored secret values back into operator diagnostics.
 Instead, it should expose:
 
@@ -256,6 +261,17 @@ Instead, it should expose:
 - key-shape validation status
 - binding references
 - storage warnings
+
+PAT secret values should live in the host keyring or another redacted secret
+backend, while SQLite persists only the credential metadata and secret
+references required to resolve them at execution time.
+
+Future wizard work will add an explicit operator choice between PAT input and a
+provider-specific interactive sign-in flow when that flow is supported by the
+repository host and current platform. When that capability arrives, any login
+window belongs to project creation or credential refresh only, and the runtime
+must continue to execute Git operations non-interactively after the required
+token has been stored.
 
 Future secret backends must preserve the same redaction discipline and durable
 binding model.

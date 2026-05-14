@@ -295,6 +295,7 @@ pub struct PollingRepositoryRecord {
     pub polling_interval_seconds: i64,
     pub last_seen_tag: Option<String>,
     pub enabled_build_target_count: i64,
+    pub has_release_history: bool,
 }
 
 /// Stores one repository registration row needed to materialize a managed checkout.
@@ -636,6 +637,52 @@ pub struct UpsertCredentialRecordInput {
     pub name: String,
     pub kind: String,
     pub config_json: String,
+}
+
+/// Defines one credentials row that must be created alongside a repository project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateRepositoryProjectCredentialInput {
+    pub name: String,
+    pub kind: String,
+    pub config_json: String,
+}
+
+/// Defines one build target that must be attached to a new repository project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateRepositoryProjectBuildTargetInput {
+    pub name: String,
+    pub platform: String,
+    pub runner_type: String,
+    pub build_method: String,
+    pub output_kind: Option<String>,
+    pub output_path_template: Option<String>,
+    pub unity_version_override: Option<String>,
+    pub timeout_seconds: i64,
+    pub enabled: bool,
+    pub config_json: String,
+}
+
+/// Defines the durable payload required to register one managed repository project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateRepositoryProjectInput {
+    pub name: String,
+    pub repo_url: String,
+    pub credentials: Option<CreateRepositoryProjectCredentialInput>,
+    pub default_branch: Option<String>,
+    pub artifacts_root_override: Option<String>,
+    pub workspace_root_override: Option<String>,
+    pub polling_interval_seconds: i64,
+    pub enabled: bool,
+    pub build_targets: Vec<CreateRepositoryProjectBuildTargetInput>,
+}
+
+/// Reports one repository project created through the operator wizard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatedRepositoryProjectRecord {
+    pub repository_id: i64,
+    pub repository_name: String,
+    pub credentials_id: Option<i64>,
+    pub build_target_ids: Vec<i64>,
 }
 
 /// Defines the queued-to-running transition input for one publish run.

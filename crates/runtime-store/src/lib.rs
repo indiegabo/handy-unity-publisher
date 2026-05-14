@@ -9,6 +9,7 @@ mod models;
 pub use models::*;
 
 use crate::lifecycle::{BuildStatus, PublishStatus, ReleaseStatus};
+use keyring::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -21,7 +22,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use runtime_config::{RuntimeConcurrencySettings, RuntimeDirectories};
-use runtime_git::{git_auth_options_from_credentials, GitAuthOptions};
+use runtime_git::{
+    git_auth_options_from_credentials, GitAuthOptions,
+    KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER,
+};
 use serde::{Deserialize, Serialize};
 use sysinfo::System;
 
@@ -36,7 +40,11 @@ const DISPATCH_LOCK_TTL: Duration = Duration::from_secs(30);
 const RELEASE_PLANNING_LOCK_TTL: Duration = Duration::from_secs(30 * 60);
 const DISPATCH_IDEMPOTENCY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const DEFAULT_HOST_NATIVE_RUNNER_TYPE: &str = "host-native";
+const DEFAULT_REPOSITORY_POLL_TRIGGER_RULE_NAME: &str = "poll-release-tags";
+pub const HOST_KEYRING_SERVICE: &str = "handy-unity-publisher";
+pub const KEYRING_SECRET_REF_PREFIX: &str = "keyring://";
 const TRIGGER_SOURCE_MANUAL: &str = "manual";
+const TRIGGER_SOURCE_POLL: &str = "poll";
 const TRIGGER_SOURCE_REPOSITORY_POLL: &str = "repository-poll";
 const PROJECT_VERSION_FILE_PATH: &str = "ProjectSettings/ProjectVersion.txt";
 
@@ -868,6 +876,140 @@ impl LocalCoordinator {
         self.get_credential_record(credential_id)
     }
 
+    /// Creates one managed repository project and all of its build targets in one transaction.
+    pub fn create_repository_project(
+        &self,
+        input: CreateRepositoryProjectInput,
+    ) -> io::Result<CreatedRepositoryProjectRecord> {
+        let normalized = normalize_create_repository_project_input(input)?;
+        let mut connection = open_connection(&self.database_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+
+        reject_duplicate_repository_project_name(&transaction, &normalized.name)?;
+        reject_duplicate_repository_project_url(&transaction, &normalized.repo_url)?;
+
+        let credentials_id = if let Some(credentials) = normalized.credentials {
+            transaction
+                .execute(
+                    "
+                    INSERT INTO credentials (name, kind, config_json)
+                    VALUES (?, ?, ?)
+                    ",
+                    params![
+                        credentials.name,
+                        credentials.kind,
+                        credentials.config_json,
+                    ],
+                )
+                .map_err(sqlite_error)?;
+            Some(transaction.last_insert_rowid())
+        } else {
+            None
+        };
+
+        transaction
+            .execute(
+                "
+                INSERT INTO repositories (
+                    name,
+                    source_mode,
+                    workspace_strategy,
+                    repo_url,
+                    local_path,
+                    credentials_id,
+                    default_branch,
+                    artifacts_root_override,
+                    workspace_root_override,
+                    polling_interval_seconds,
+                    last_seen_tag,
+                    enabled
+                )
+                VALUES (?, 'managed_repository', 'managed_checkout', ?, NULL, ?, ?, ?, ?, ?, NULL, ?)
+                ",
+                params![
+                    normalized.name,
+                    normalized.repo_url,
+                    credentials_id,
+                    normalized.default_branch,
+                    normalized.artifacts_root_override,
+                    normalized.workspace_root_override,
+                    normalized.polling_interval_seconds,
+                    normalized.enabled,
+                ],
+            )
+            .map_err(sqlite_error)?;
+        let repository_id = transaction.last_insert_rowid();
+
+        transaction
+            .execute(
+                "
+                INSERT INTO trigger_rules (
+                    repository_id,
+                    name,
+                    source,
+                    enabled,
+                    config_json
+                )
+                VALUES (?, ?, ?, 1, '{}')
+                ",
+                params![
+                    repository_id,
+                    DEFAULT_REPOSITORY_POLL_TRIGGER_RULE_NAME,
+                    TRIGGER_SOURCE_POLL,
+                ],
+            )
+            .map_err(sqlite_error)?;
+
+        let mut build_target_ids = Vec::with_capacity(normalized.build_targets.len());
+        for target in normalized.build_targets {
+            transaction
+                .execute(
+                    "
+                    INSERT INTO build_targets (
+                        repository_id,
+                        name,
+                        platform,
+                        runner_type,
+                        build_method,
+                        output_kind,
+                        output_path_template,
+                        unity_version_override,
+                        timeout_seconds,
+                        enabled,
+                        config_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ",
+                    params![
+                        repository_id,
+                        target.name,
+                        target.platform,
+                        target.runner_type,
+                        target.build_method,
+                        target.output_kind,
+                        target.output_path_template,
+                        target.unity_version_override,
+                        target.timeout_seconds,
+                        target.enabled,
+                        target.config_json,
+                    ],
+                )
+                .map_err(sqlite_error)?;
+            build_target_ids.push(transaction.last_insert_rowid());
+        }
+
+        transaction.commit().map_err(sqlite_error)?;
+
+        Ok(CreatedRepositoryProjectRecord {
+            repository_id,
+            repository_name: normalized.name,
+            credentials_id,
+            build_target_ids,
+        })
+    }
+
     /// Updates the credentials binding stored for one repository row.
     pub fn update_repository_credentials_binding(
         &self,
@@ -941,7 +1083,12 @@ impl LocalCoordinator {
                        r.enabled,
                        r.polling_interval_seconds,
                        r.last_seen_tag,
-                       COUNT(bt.id) AS enabled_build_target_count
+                      COUNT(bt.id) AS enabled_build_target_count,
+                      EXISTS(
+                          SELECT 1
+                          FROM release_runs rr
+                          WHERE rr.repository_id = r.id
+                      ) AS has_release_history
                 FROM repositories r
                 LEFT JOIN build_targets bt
                   ON bt.repository_id = r.id
@@ -964,6 +1111,7 @@ impl LocalCoordinator {
                     polling_interval_seconds: row.get(5)?,
                     last_seen_tag: normalize_optional_string(row.get(6)?),
                     enabled_build_target_count: row.get(7)?,
+                    has_release_history: row.get::<_, i64>(8)? != 0,
                 })
             })
             .map_err(sqlite_error)?;
@@ -2563,7 +2711,9 @@ impl LocalCoordinator {
         Ok(detected_unity_version)
     }
 
-    fn resolve_release_git_auth(
+    /// Resolves one stored credential binding into Git authentication headers,
+    /// including host-keyring-backed secret references.
+    pub fn resolve_release_git_auth(
         &self,
         credentials_id: Option<i64>,
     ) -> io::Result<GitAuthOptions> {
@@ -2572,7 +2722,9 @@ impl LocalCoordinator {
         };
 
         let credentials = self.get_credential_record(credentials_id)?;
-        git_auth_options_from_credentials(&credentials.kind, &credentials.config_json)
+        let resolved_config_json =
+            resolve_credential_secret_config_json(&credentials.kind, &credentials.config_json)?;
+        git_auth_options_from_credentials(&credentials.kind, &resolved_config_json)
     }
 
     fn create_manual_release_dispatch(
@@ -2682,6 +2834,14 @@ impl LocalCoordinator {
 
         let metadata_json = manual_dispatch_metadata_json(&input.requested_via)?;
         let mut connection = open_connection(&self.database_path)?;
+        let cleanup_paths = Self::collect_release_run_rebuild_cleanup_paths(
+            &connection,
+            existing_release_run_id,
+        )?;
+        Self::remove_release_run_rebuild_cleanup_paths(
+            &cleanup_paths,
+            existing_release_run_id,
+        )?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_error)?;
@@ -2725,6 +2885,84 @@ impl LocalCoordinator {
             ))
         })
     }
+
+fn collect_release_run_rebuild_cleanup_paths(
+    connection: &Connection,
+    release_run_id: i64,
+) -> io::Result<Vec<PathBuf>> {
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT workspace_path, artifact_root_path
+            FROM build_runs
+            WHERE release_run_id = ?
+            ",
+        )
+        .map_err(sqlite_error)?;
+    let rows = statement
+        .query_map([release_run_id], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .map_err(sqlite_error)?;
+
+    let mut paths = HashSet::new();
+    for row in rows {
+        let (workspace_path, artifact_root_path) = row.map_err(sqlite_error)?;
+        for candidate in [workspace_path, artifact_root_path] {
+            let Some(path) = candidate
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+
+            paths.insert(PathBuf::from(path));
+        }
+    }
+
+    let mut paths = paths.into_iter().collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
+
+fn remove_release_run_rebuild_cleanup_paths(
+    paths: &[PathBuf],
+    release_run_id: i64,
+) -> io::Result<()> {
+    for path in paths {
+        if !path.exists() {
+            continue;
+        }
+
+        let metadata = fs::metadata(path).map_err(|error| {
+            io::Error::other(format!(
+                "inspect rebuild cleanup path '{}' for release run {release_run_id}: {error}",
+                path.display()
+            ))
+        })?;
+        if metadata.is_dir() {
+            fs::remove_dir_all(path).map_err(|error| {
+                io::Error::other(format!(
+                    "remove rebuild cleanup directory '{}' for release run {release_run_id}: {error}",
+                    path.display()
+                ))
+            })?;
+        } else {
+            fs::remove_file(path).map_err(|error| {
+                io::Error::other(format!(
+                    "remove rebuild cleanup file '{}' for release run {release_run_id}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+
+    Ok(())
+}
 
     fn queue_release_run_locked(&self, release_run_id: i64) -> io::Result<ReleaseRunRecord> {
         let record = self
@@ -6862,6 +7100,97 @@ fn normalize_upsert_credential_record_input(
     })
 }
 
+fn normalize_create_repository_project_input(
+    input: CreateRepositoryProjectInput,
+) -> io::Result<CreateRepositoryProjectInput> {
+    let name = require_non_empty(&input.name, "repository project name")?;
+    let repo_url = require_non_empty(&input.repo_url, "repository project repo_url")?;
+    let default_branch = normalize_optional_input_string(input.default_branch);
+    let artifacts_root_override = normalize_optional_input_string(input.artifacts_root_override);
+    let workspace_root_override = normalize_optional_input_string(input.workspace_root_override);
+    if input.polling_interval_seconds <= 0 {
+        return Err(invalid_input_error(
+            "repository project polling_interval_seconds must be greater than zero",
+        ));
+    }
+    if input.build_targets.is_empty() {
+        return Err(invalid_input_error(
+            "repository project must include at least one build target",
+        ));
+    }
+
+    let credentials = input
+        .credentials
+        .map(normalize_create_repository_project_credentials_input)
+        .transpose()?;
+    let mut build_target_names = HashSet::new();
+    let mut build_targets = Vec::with_capacity(input.build_targets.len());
+    for target in input.build_targets {
+        let normalized = normalize_create_repository_project_build_target_input(target)?;
+        let duplicate_key = normalized.name.to_ascii_lowercase();
+        if !build_target_names.insert(duplicate_key) {
+            return Err(invalid_input_error(
+                "repository project build target names must be unique",
+            ));
+        }
+        build_targets.push(normalized);
+    }
+
+    Ok(CreateRepositoryProjectInput {
+        name,
+        repo_url,
+        credentials,
+        default_branch,
+        artifacts_root_override,
+        workspace_root_override,
+        polling_interval_seconds: input.polling_interval_seconds,
+        enabled: input.enabled,
+        build_targets,
+    })
+}
+
+fn normalize_create_repository_project_credentials_input(
+    input: CreateRepositoryProjectCredentialInput,
+) -> io::Result<CreateRepositoryProjectCredentialInput> {
+    Ok(CreateRepositoryProjectCredentialInput {
+        name: require_non_empty(&input.name, "repository project credentials name")?,
+        kind: require_non_empty(&input.kind, "repository project credentials kind")?,
+        config_json: normalize_credential_config_json(&input.config_json)?,
+    })
+}
+
+fn normalize_create_repository_project_build_target_input(
+    input: CreateRepositoryProjectBuildTargetInput,
+) -> io::Result<CreateRepositoryProjectBuildTargetInput> {
+    if input.timeout_seconds <= 0 {
+        return Err(invalid_input_error(
+            "repository project build target timeout_seconds must be greater than zero",
+        ));
+    }
+
+    Ok(CreateRepositoryProjectBuildTargetInput {
+        name: require_non_empty(&input.name, "repository project build target name")?,
+        platform: require_non_empty(
+            &input.platform,
+            "repository project build target platform",
+        )?,
+        runner_type: require_non_empty(
+            &input.runner_type,
+            "repository project build target runner_type",
+        )?,
+        build_method: require_non_empty(
+            &input.build_method,
+            "repository project build target build_method",
+        )?,
+        output_kind: normalize_optional_input_string(input.output_kind),
+        output_path_template: normalize_optional_input_string(input.output_path_template),
+        unity_version_override: normalize_optional_input_string(input.unity_version_override),
+        timeout_seconds: input.timeout_seconds,
+        enabled: input.enabled,
+        config_json: normalize_credential_config_json(&input.config_json)?,
+    })
+}
+
 fn normalize_credential_config_json(config_json: &str) -> io::Result<String> {
     let config_json = require_non_empty(config_json, "credentials config_json")?;
     let parsed = serde_json::from_str::<serde_json::Value>(&config_json).map_err(|error| {
@@ -6877,6 +7206,155 @@ fn normalize_credential_config_json(config_json: &str) -> io::Result<String> {
     }
 
     Ok(config_json)
+}
+
+fn normalize_optional_input_string(value: Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn reject_duplicate_repository_project_name(
+    transaction: &Transaction<'_>,
+    repository_name: &str,
+) -> io::Result<()> {
+    let exists: i64 = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM repositories WHERE name = ?)",
+            [repository_name],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    if exists != 0 {
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!("repository project {:?} already exists", repository_name),
+        ));
+    }
+
+    Ok(())
+}
+
+fn reject_duplicate_repository_project_url(
+    transaction: &Transaction<'_>,
+    repo_url: &str,
+) -> io::Result<()> {
+    let exists: i64 = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM repositories WHERE repo_url = ?)",
+            [repo_url],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    if exists != 0 {
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!("repository project URL {:?} is already registered", repo_url),
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn store_host_secret(account: &str, secret_value: &str) -> io::Result<String> {
+    let account = require_non_empty(account, "host keyring account")?;
+    let secret_value = require_non_empty(secret_value, "host keyring secret value")?;
+    let entry = open_host_keyring_entry(HOST_KEYRING_SERVICE, &account)?;
+    entry.set_password(&secret_value).map_err(keyring_error)?;
+
+    Ok(format!(
+        "{KEYRING_SECRET_REF_PREFIX}{HOST_KEYRING_SERVICE}/{account}"
+    ))
+}
+
+pub fn delete_host_secret(secret_ref: &str) -> io::Result<()> {
+    let (service, account) = parse_host_secret_reference(secret_ref)?;
+    let entry = open_host_keyring_entry(&service, &account)?;
+    entry.delete_credential().map_err(keyring_error)
+}
+
+/// Resolves host-keyring-backed secret references inside one credential config JSON blob.
+pub fn resolve_credential_secret_config_json(
+    kind: &str,
+    config_json: &str,
+) -> io::Result<String> {
+    let config_json = require_non_empty(config_json, "credentials config_json")?;
+    let mut parsed = serde_json::from_str::<serde_json::Value>(&config_json)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    let Some(object) = parsed.as_object_mut() else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "credentials config_json must decode to a JSON object",
+        ));
+    };
+
+    for key in credential_secret_value_keys(kind) {
+        let Some(secret_value) = object.get(*key).and_then(|value| value.as_str()) else {
+            continue;
+        };
+
+        object.insert(
+            String::from(*key),
+            serde_json::Value::String(resolve_host_secret_reference(secret_value)?),
+        );
+    }
+
+    serde_json::to_string(&parsed).map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
+}
+
+fn credential_secret_value_keys(kind: &str) -> &'static [&'static str] {
+    match kind.trim() {
+        KIND_GIT_HTTP_BASIC => &["password"],
+        KIND_GIT_HTTP_BEARER => &["token"],
+        _ => &[],
+    }
+}
+
+fn resolve_host_secret_reference(secret_ref: &str) -> io::Result<String> {
+    let secret_ref = require_non_empty(secret_ref, "host keyring secret reference")?;
+    let Some(reference_tail) = secret_ref.strip_prefix(KEYRING_SECRET_REF_PREFIX) else {
+        return Ok(secret_ref.to_owned());
+    };
+    let (service, account) = reference_tail.split_once('/').ok_or_else(|| {
+        invalid_input_error(
+            "host keyring secret reference must follow keyring://<service>/<account>",
+        )
+    })?;
+    let service = require_non_empty(service, "host keyring service")?;
+    let account = require_non_empty(account, "host keyring account")?;
+    let entry = open_host_keyring_entry(&service, &account)?;
+    let secret_value = entry.get_password().map_err(keyring_error)?;
+
+    require_non_empty(&secret_value, "resolved host keyring secret value")
+}
+
+fn parse_host_secret_reference(secret_ref: &str) -> io::Result<(String, String)> {
+    let secret_ref = require_non_empty(secret_ref, "host keyring secret reference")?;
+    let Some(reference_tail) = secret_ref.strip_prefix(KEYRING_SECRET_REF_PREFIX) else {
+        return Err(invalid_input_error(
+            "host keyring secret reference must begin with keyring://",
+        ));
+    };
+    let (service, account) = reference_tail.split_once('/').ok_or_else(|| {
+        invalid_input_error(
+            "host keyring secret reference must follow keyring://<service>/<account>",
+        )
+    })?;
+
+    Ok((
+        require_non_empty(service, "host keyring service")?,
+        require_non_empty(account, "host keyring account")?,
+    ))
+}
+
+fn open_host_keyring_entry(service: &str, account: &str) -> io::Result<Entry> {
+    Entry::new(service, account).map_err(keyring_error)
+}
+
+fn keyring_error(error: keyring::Error) -> io::Error {
+    io::Error::other(format!("host keyring error: {error}"))
 }
 
 fn validate_optional_credentials_binding(
@@ -6951,11 +7429,15 @@ mod tests {
         list_artifact_inspection_records, list_build_history_records,
         list_process_feed_page,
         list_build_target_runtime_settings,
+        CreateRepositoryProjectBuildTargetInput,
+        CreateRepositoryProjectCredentialInput,
+        CreateRepositoryProjectInput,
         list_credential_records,
         list_publish_target_runtime_settings, open_connection, recover_runtime_state,
         select_orphan_build_process_roots,
         BuildDispatchJob, BuildExecutionPlan, BuildRunRecord,
         BuildTargetRuntimeSettingsRecord, CancelBuildRunInput,
+        CreatedRepositoryProjectRecord,
         CompleteBuildRunInput, CreateArtifactRecordInput, FailBuildRunInput,
         CompletePublishRunInput, CredentialRecord, LocalCoordinator,
         InterruptedBuildRecoveryRecord, ObservedProcess,
@@ -6964,10 +7446,12 @@ mod tests {
         ReleaseRunRecord, RuntimeRecoveryReport,
         StartBuildRunInput, StartPublishRunInput, StorageLayout,
         UpsertCredentialRecordInput,
+        KIND_GIT_HTTP_BASIC,
         RECOVERY_INTERRUPTION_KIND_SYSTEM,
         DEFAULT_HOST_NATIVE_RUNNER_TYPE,
         MIGRATIONS,
         PROJECT_VERSION_FILE_PATH, TRIGGER_SOURCE_MANUAL,
+        TRIGGER_SOURCE_POLL,
         BUILD_RUN_QUEUE_NAME, PUBLISH_RUN_QUEUE_NAME, RELEASE_RUN_QUEUE_NAME,
         SQLITE_BUSY_TIMEOUT_MILLIS,
     };
@@ -7164,6 +7648,150 @@ mod tests {
         drop(connection);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn create_repository_project_persists_repository_credentials_and_targets() {
+        let root = test_root("create-repository-project");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let created = LocalCoordinator::new(&layout)
+            .create_repository_project(CreateRepositoryProjectInput {
+                name: String::from("Red Horizon"),
+                repo_url: String::from("https://example.com/red-horizon.git"),
+                credentials: Some(CreateRepositoryProjectCredentialInput {
+                    name: String::from("Red Horizon/origin"),
+                    kind: String::from(KIND_GIT_HTTP_BASIC),
+                    config_json: String::from(
+                        r#"{"username":"git","password":"keyring://handy-unity-publisher/credential/red-horizon/origin"}"#,
+                    ),
+                }),
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: Some(String::from("C:/builds/red-horizon")),
+                workspace_root_override: Some(String::from("C:/workspaces/red-horizon")),
+                polling_interval_seconds: 300,
+                enabled: true,
+                build_targets: vec![
+                    CreateRepositoryProjectBuildTargetInput {
+                        name: String::from("Windows"),
+                        platform: String::from("windows"),
+                        runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
+                        build_method: String::from("Builder.PerformWindows"),
+                        output_kind: Some(String::from("archive")),
+                        output_path_template: None,
+                        unity_version_override: None,
+                        timeout_seconds: 3600,
+                        enabled: true,
+                        config_json: String::from(
+                            r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
+                        ),
+                    },
+                    CreateRepositoryProjectBuildTargetInput {
+                        name: String::from("WebGL"),
+                        platform: String::from("webgl"),
+                        runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
+                        build_method: String::from("Builder.PerformWebGL"),
+                        output_kind: Some(String::from("archive")),
+                        output_path_template: None,
+                        unity_version_override: None,
+                        timeout_seconds: 3600,
+                        enabled: true,
+                        config_json: String::from(
+                            r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
+                        ),
+                    },
+                ],
+            })
+            .expect("repository project should persist");
+
+        assert_eq!(
+            created,
+            CreatedRepositoryProjectRecord {
+                repository_id: created.repository_id,
+                repository_name: String::from("Red Horizon"),
+                credentials_id: created.credentials_id,
+                build_target_ids: created.build_target_ids.clone(),
+            }
+        );
+        assert_eq!(created.build_target_ids.len(), 2);
+        assert!(created.credentials_id.is_some());
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repository_row = connection
+            .query_row(
+                "
+                SELECT source_mode,
+                       workspace_strategy,
+                       repo_url,
+                       default_branch,
+                       artifacts_root_override,
+                       workspace_root_override,
+                       polling_interval_seconds,
+                       enabled,
+                       credentials_id
+                FROM repositories
+                WHERE id = ?
+                ",
+                [created.repository_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, Option<i64>>(8)?,
+                    ))
+                },
+            )
+            .expect("repository row should exist");
+        assert_eq!(repository_row.0, "managed_repository");
+        assert_eq!(repository_row.1, "managed_checkout");
+        assert_eq!(repository_row.2, "https://example.com/red-horizon.git");
+        assert_eq!(repository_row.3.as_deref(), Some("main"));
+        assert_eq!(repository_row.4.as_deref(), Some("C:/builds/red-horizon"));
+        assert_eq!(repository_row.5.as_deref(), Some("C:/workspaces/red-horizon"));
+        assert_eq!(repository_row.6, 300);
+        assert_eq!(repository_row.7, 1);
+        assert_eq!(repository_row.8, created.credentials_id);
+
+        let credential_row = connection
+            .query_row(
+                "SELECT name, kind, config_json FROM credentials WHERE id = ?",
+                [created.credentials_id.expect("credentials id should exist")],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .expect("credential row should exist");
+        assert_eq!(credential_row.0, "Red Horizon/origin");
+        assert_eq!(credential_row.1, KIND_GIT_HTTP_BASIC);
+        assert!(credential_row.2.contains("keyring://handy-unity-publisher/"));
+
+        let trigger_rule_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM trigger_rules WHERE repository_id = ? AND source = ?",
+                params![created.repository_id, TRIGGER_SOURCE_POLL],
+                |row| row.get(0),
+            )
+            .expect("poll trigger rule count should load");
+        assert_eq!(trigger_rule_count, 1);
+
+        let build_targets = list_build_target_runtime_settings(&layout)
+            .expect("build targets should load");
+        assert_eq!(build_targets.len(), 2);
+        assert!(build_targets.iter().all(|target| target.repository_id == created.repository_id));
+        assert!(build_targets.iter().all(|target| target.runner_type == DEFAULT_HOST_NATIVE_RUNNER_TYPE));
+        assert!(build_targets.iter().all(|target| target.config_json.contains("unity_executable_path")));
     }
 
     #[test]
@@ -8661,12 +9289,37 @@ mod tests {
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let repo = seed_repository_fixture(&connection, "manual-release-rebuild");
         let release_run_id = seed_manual_release_for_rebuild(&connection, repo.repository_id, "v7.0.0");
+        let workspace_path = root.join("runs").join("build-run-41");
+        let artifact_root_path = root.join("artifacts").join("release-v7.0.0");
+        std::fs::create_dir_all(workspace_path.join("source"))
+            .expect("workspace source directory should create");
+        std::fs::create_dir_all(&artifact_root_path)
+            .expect("artifact root directory should create");
+        std::fs::write(workspace_path.join("source").join("build.txt"), "workspace")
+            .expect("workspace marker should write");
+        std::fs::write(artifact_root_path.join("rebuilt.zip"), "artifact")
+            .expect("artifact marker should write");
         let build_run_id = insert_build_run(
             &connection,
             release_run_id,
             repo.primary_build_target_id,
             BuildStatus::Succeeded.as_str(),
         );
+        connection
+            .execute(
+                "
+                UPDATE build_runs
+                SET workspace_path = ?,
+                    artifact_root_path = ?
+                WHERE id = ?
+                ",
+                params![
+                    workspace_path.display().to_string(),
+                    artifact_root_path.display().to_string(),
+                    build_run_id,
+                ],
+            )
+            .expect("build run paths should update");
         let artifact_id = insert_artifact(&connection, build_run_id, "rebuilt.zip");
         insert_publish_run(
             &connection,
@@ -8718,6 +9371,9 @@ mod tests {
             .expect("rebuild metadata should decode");
         assert_eq!(metadata["requested_via"], "hub");
         drop(connection);
+
+        assert!(!workspace_path.exists());
+        assert!(!artifact_root_path.exists());
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -9502,6 +10158,36 @@ mod tests {
         assert_eq!(repositories[0].id, managed.repository_id);
         assert_eq!(repositories[0].name, "managed-poll");
         assert_eq!(repositories[0].repo_url, "https://example.com/managed-poll.git");
+        assert!(!repositories[0].has_release_history);
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn list_polling_repositories_reports_release_history_presence() {
+        let root = test_root("polling-repositories-history");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let fixture = seed_repository_fixture(&connection, "managed-poll-history");
+        insert_release_run(
+            &connection,
+            fixture.repository_id,
+            "v1.2.0",
+            ReleaseStatus::Queued.as_str(),
+        );
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let repositories = coordinator
+            .list_polling_repositories()
+            .expect("managed polling repositories should load");
+
+        assert_eq!(repositories.len(), 1);
+        assert_eq!(repositories[0].id, fixture.repository_id);
+        assert!(repositories[0].has_release_history);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }

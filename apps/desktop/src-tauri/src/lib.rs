@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use rfd::FileDialog;
 use runtime_config::{
     HostPlatform, RuntimeConfig, PRODUCT_DIRECTORY_NAME, RUNTIME_ROOT_ENV,
 };
@@ -29,11 +30,17 @@ use runtime_runner::{
 };
 use runtime_store::{
     ArtifactInspectionRecord, AutomationSnapshot, BuildHistoryRecord,
+    CreateRepositoryProjectBuildTargetInput,
+    CreateRepositoryProjectCredentialInput,
+    CreateRepositoryProjectInput as StoreCreateRepositoryProjectInput,
+    CreatedRepositoryProjectRecord,
     ProcessFeedPage, ReleaseAutomationStatus, UpsertCredentialRecordInput,
+    delete_host_secret,
     initialize_database, list_artifact_inspection_records,
     list_build_history_records, list_process_feed_page,
     list_build_target_runtime_settings, list_credential_records,
     list_publish_target_runtime_settings, LocalCoordinator, StorageLayout,
+    store_host_secret,
 };
 use runtime_events::start_runtime_event_bridge;
 use serde::{Deserialize, Serialize};
@@ -49,7 +56,8 @@ const RUNTIME_PACKAGE_NAME: &str = "runtime-bin";
 const RUNTIME_BINARY_NAME: &str = "hup-runtime";
 const DEFAULT_RUNTIME_LOG_LINE_LIMIT: usize = 100;
 const MAX_RUNTIME_LOG_LINE_LIMIT: usize = 500;
-const SECRET_STORAGE_MODEL_INLINE_SQLITE: &str = "sqlite-inline-config-json";
+const SECRET_STORAGE_MODEL_INLINE_SQLITE: &str =
+    "sqlite-config-json-and-keyring-references";
 const RUNTIME_STARTUP_PROBE_MILLIS: u64 = 150;
 const RUNTIME_SHUTDOWN_WAIT_POLL_MILLIS: u64 = 100;
 const RUNTIME_SHUTDOWN_WAIT_POLLS: usize = 20;
@@ -61,12 +69,84 @@ const TRAY_MENU_OPEN_ID: &str = "tray-open";
 const TRAY_MENU_QUIT_ID: &str = "tray-quit";
 const POPUP_WINDOW_WIDTH: u32 = 360;
 const POPUP_WINDOW_HEIGHT: u32 = 420;
+const FOCUS_WINDOW_WIDTH: u32 = POPUP_WINDOW_WIDTH + (POPUP_WINDOW_WIDTH / 2);
+const FOCUS_WINDOW_HEIGHT: u32 = POPUP_WINDOW_HEIGHT * 2;
 const POPUP_WINDOW_MIN_WIDTH: u32 = 360;
 const POPUP_WINDOW_MIN_HEIGHT: u32 = 420;
 const POPUP_WINDOW_EDGE_MARGIN: i32 = 16;
+const WINDOW_FOCUS_TRANSITION_MILLIS: u64 = 150;
+const WINDOW_FOCUS_TRANSITION_STEP_MILLIS: u64 = 15;
 const DEFAULT_PROCESS_FEED_PAGE_SIZE: u32 = 6;
 const MAX_PROCESS_FEED_PAGE_SIZE: u32 = 50;
+const DEFAULT_BUILD_TARGET_TIMEOUT_SECONDS: i64 = 3600;
+const MIN_REPOSITORY_POLL_INTERVAL_SECONDS: i64 = 5;
 const LEGACY_PRODUCT_DIRECTORY_NAME: &str = "handy-unity-builder";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowLayoutPreset {
+    width: u32,
+    height: u32,
+}
+
+impl WindowLayoutPreset {
+    const fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowTransitionSettings {
+    main: WindowLayoutPreset,
+    focus: WindowLayoutPreset,
+    duration_millis: u64,
+}
+
+impl WindowTransitionSettings {
+    const fn current() -> Self {
+        Self {
+            main: WindowLayoutPreset::new(
+                POPUP_WINDOW_WIDTH,
+                POPUP_WINDOW_HEIGHT,
+            ),
+            focus: WindowLayoutPreset::new(
+                FOCUS_WINDOW_WIDTH,
+                FOCUS_WINDOW_HEIGHT,
+            ),
+            duration_millis: WINDOW_FOCUS_TRANSITION_MILLIS,
+        }
+    }
+
+    fn animation_steps(self) -> u32 {
+        let steps = self.duration_millis / WINDOW_FOCUS_TRANSITION_STEP_MILLIS;
+        steps.max(1) as u32
+    }
+
+    fn target_layout(self, target: WindowFocusTarget) -> WindowLayoutPreset {
+        match target {
+            WindowFocusTarget::Main => self.main,
+            WindowFocusTarget::Focus => self.focus,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowFocusTarget {
+    Main,
+    Focus,
+}
+
+impl WindowFocusTarget {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "main" => Ok(Self::Main),
+            "focus" => Ok(Self::Focus),
+            other => Err(format!(
+                "unsupported window focus target {:?}; expected \"main\" or \"focus\"",
+                other,
+            )),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeLaunchAction {
@@ -242,6 +322,67 @@ struct UpdatePublishTargetSecretBindingInput {
     credentials_id: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct CreateRepositoryProjectBuildTargetCommandInput {
+    name: String,
+    platform: String,
+    build_method: String,
+    unity_executable_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HostPathSelectionKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct PickHostPathFilterInput {
+    name: String,
+    extensions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct PickHostPathInput {
+    kind: HostPathSelectionKind,
+    title: Option<String>,
+    #[serde(default)]
+    filters: Vec<PickHostPathFilterInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct CreateRepositoryProjectCommandInput {
+    name: String,
+    repository_url: String,
+    personal_access_token: Option<String>,
+    default_branch: Option<String>,
+    artifacts_root_override: Option<String>,
+    workspace_root_override: Option<String>,
+    polling_interval_seconds: i64,
+    build_targets: Vec<CreateRepositoryProjectBuildTargetCommandInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedCreateRepositoryProjectBuildTargetCommandInput {
+    name: String,
+    platform: String,
+    build_method: String,
+    unity_executable_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedCreateRepositoryProjectCommandInput {
+    name: String,
+    repository_url: String,
+    personal_access_token: Option<String>,
+    default_branch: Option<String>,
+    artifacts_root_override: Option<String>,
+    workspace_root_override: Option<String>,
+    polling_interval_seconds: i64,
+    build_targets: Vec<NormalizedCreateRepositoryProjectBuildTargetCommandInput>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 struct ProcessFeedInput {
     page: Option<u32>,
@@ -380,6 +521,7 @@ fn initialize_tray(app: &tauri::App) -> Result<(), String> {
 
 fn configure_main_window(app_handle: &AppHandle) -> Result<(), String> {
     let window = main_window(app_handle)?;
+    let transition = window_transition_settings();
     window
         .set_resizable(false)
         .map_err(|error| error.to_string())?;
@@ -401,29 +543,71 @@ fn configure_main_window(app_handle: &AppHandle) -> Result<(), String> {
             POPUP_WINDOW_MIN_HEIGHT,
         )))
         .map_err(|error| error.to_string())?;
-    pin_main_window_to_primary_monitor(app_handle)
+    apply_main_window_layout(app_handle, transition.main)
 }
 
 fn pin_main_window_to_primary_monitor(app_handle: &AppHandle) -> Result<(), String> {
     let window = main_window(app_handle)?;
+    let outer_size = window.outer_size().map_err(|error| error.to_string())?;
+    position_main_window(
+        &window,
+        WindowLayoutPreset::new(outer_size.width, outer_size.height),
+    )
+}
+
+fn apply_main_window_layout(
+    app_handle: &AppHandle,
+    desired_layout: WindowLayoutPreset,
+) -> Result<(), String> {
+    let window = main_window(app_handle)?;
+    let clamped_layout = clamp_window_layout(&window, desired_layout)?;
+
+    window
+        .set_size(PhysicalSize::new(
+            clamped_layout.width,
+            clamped_layout.height,
+        ))
+        .map_err(|error| error.to_string())?;
+
+    let outer_size = window.outer_size().map_err(|error| error.to_string())?;
+    position_main_window(
+        &window,
+        WindowLayoutPreset::new(outer_size.width, outer_size.height),
+    )
+}
+
+fn clamp_window_layout(
+    window: &WebviewWindow,
+    desired_layout: WindowLayoutPreset,
+) -> Result<WindowLayoutPreset, String> {
     let monitor = window
         .primary_monitor()
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "primary monitor is unavailable".to_string())?;
     let work_area = monitor.work_area();
-    let width = POPUP_WINDOW_WIDTH.min(work_area.size.width);
-    let height = POPUP_WINDOW_HEIGHT.min(work_area.size.height);
 
-    window
-        .set_size(PhysicalSize::new(width, height))
-        .map_err(|error| error.to_string())?;
+    Ok(WindowLayoutPreset::new(
+        desired_layout.width.min(work_area.size.width),
+        desired_layout.height.min(work_area.size.height),
+    ))
+}
 
-    let outer_size = window.outer_size().map_err(|error| error.to_string())?;
+fn position_main_window(
+    window: &WebviewWindow,
+    layout: WindowLayoutPreset,
+) -> Result<(), String> {
+    let monitor = window
+        .primary_monitor()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "primary monitor is unavailable".to_string())?;
+    let work_area = monitor.work_area();
+    let width = layout.width.min(work_area.size.width);
+    let height = layout.height.min(work_area.size.height);
     let x = work_area.position.x + work_area.size.width as i32
-        - outer_size.width as i32
+        - width as i32
         - POPUP_WINDOW_EDGE_MARGIN;
     let y = work_area.position.y + work_area.size.height as i32
-        - outer_size.height as i32
+        - height as i32
         - POPUP_WINDOW_EDGE_MARGIN;
 
     window
@@ -485,6 +669,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             application_version,
             process_feed,
+            transition_window_focus,
+            pick_host_path,
+            pick_unity_executable_path,
+            validate_unity_executable_path,
+            create_repository_project,
             runtime_health,
             runtime_logs,
             runtime_directories,
@@ -569,6 +758,65 @@ fn application_version(app_handle: AppHandle) -> Result<ApplicationVersionInfo, 
 fn process_feed(input: Option<ProcessFeedInput>) -> Result<ProcessFeedPage, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_process_feed(&config, input.unwrap_or_default()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn transition_window_focus(app_handle: AppHandle, target: String) -> Result<(), String> {
+    animate_main_window_focus_transition(&app_handle, WindowFocusTarget::parse(&target)?)
+}
+
+#[tauri::command]
+fn pick_host_path(input: PickHostPathInput) -> Result<Option<String>, String> {
+    let mut dialog = FileDialog::new();
+
+    if let Some(title) = normalize_optional_shell_string(input.title) {
+        dialog = dialog.set_title(&title);
+    }
+
+    if matches!(input.kind, HostPathSelectionKind::File) {
+        for filter in input.filters {
+            let filter_name = filter.name.trim();
+            if filter_name.is_empty() || filter.extensions.is_empty() {
+                continue;
+            }
+
+            let extensions: Vec<&str> =
+                filter.extensions.iter().map(String::as_str).collect();
+            dialog = dialog.add_filter(filter_name, &extensions);
+        }
+    }
+
+    let selected_path = match input.kind {
+        HostPathSelectionKind::File => dialog.pick_file(),
+        HostPathSelectionKind::Directory => dialog.pick_folder(),
+    };
+
+    Ok(selected_path.map(|path| path.display().to_string()))
+}
+
+#[tauri::command]
+fn pick_unity_executable_path() -> Result<Option<String>, String> {
+    pick_host_path(PickHostPathInput {
+        kind: HostPathSelectionKind::File,
+        title: Some("Select Unity Editor executable".to_string()),
+        filters: vec![PickHostPathFilterInput {
+            name: "Unity Editor".to_string(),
+            extensions: vec!["exe".to_string(), "app".to_string()],
+        }],
+    })
+}
+
+#[tauri::command]
+fn validate_unity_executable_path(path: String) -> Result<HostNativeRunnerDiagnostics, String> {
+    Ok(validate_unity_executable_path_diagnostics(&path))
+}
+
+#[tauri::command]
+fn create_repository_project(
+    input: CreateRepositoryProjectCommandInput,
+) -> Result<CreatedRepositoryProjectRecord, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    persist_repository_project(&config, input).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1241,6 +1489,259 @@ fn persist_publish_target_secret_binding(
     )
 }
 
+fn persist_repository_project(
+    config: &RuntimeConfig,
+    input: CreateRepositoryProjectCommandInput,
+) -> io::Result<CreatedRepositoryProjectRecord> {
+    let normalized = normalize_create_repository_project_command_input(input)?;
+    let storage = writable_secret_storage(config)?;
+
+    let mut persisted_secret_ref = None;
+    let credentials = if let Some(personal_access_token) = normalized.personal_access_token.as_deref()
+    {
+        let secret_account = repository_pat_secret_account(&normalized.name);
+        let secret_ref = store_host_secret(&secret_account, personal_access_token)?;
+        persisted_secret_ref = Some(secret_ref.clone());
+        let basic_auth_username = repository_pat_basic_auth_username(
+            &normalized.repository_url,
+        );
+
+        Some(CreateRepositoryProjectCredentialInput {
+            name: format!("{}/origin", normalized.name),
+            kind: String::from(KIND_GIT_HTTP_BASIC),
+            config_json: serde_json::json!({
+                "username": basic_auth_username,
+                "password": secret_ref,
+            })
+            .to_string(),
+        })
+    } else {
+        None
+    };
+
+    let create_result = LocalCoordinator::new(&storage).create_repository_project(
+        StoreCreateRepositoryProjectInput {
+            name: normalized.name,
+            repo_url: normalized.repository_url,
+            credentials,
+            default_branch: normalized.default_branch,
+            artifacts_root_override: normalized.artifacts_root_override,
+            workspace_root_override: normalized.workspace_root_override,
+            polling_interval_seconds: normalized.polling_interval_seconds,
+            enabled: true,
+            build_targets: normalized
+                .build_targets
+                .into_iter()
+                .map(|target| CreateRepositoryProjectBuildTargetInput {
+                    name: target.name,
+                    platform: target.platform,
+                    runner_type: String::from(RunnerFamily::HostNative.label()),
+                    build_method: target.build_method,
+                    output_kind: Some(String::from("archive")),
+                    output_path_template: None,
+                    unity_version_override: None,
+                    timeout_seconds: DEFAULT_BUILD_TARGET_TIMEOUT_SECONDS,
+                    enabled: true,
+                    config_json: serde_json::json!({
+                        "unity_executable_path": target.unity_executable_path,
+                    })
+                    .to_string(),
+                })
+                .collect(),
+        },
+    );
+
+    if let Err(error) = create_result {
+        if let Some(secret_ref) = persisted_secret_ref.as_deref() {
+            let _ = delete_host_secret(secret_ref);
+        }
+
+        return Err(error);
+    }
+
+    create_result
+}
+
+fn normalize_create_repository_project_command_input(
+    input: CreateRepositoryProjectCommandInput,
+) -> io::Result<NormalizedCreateRepositoryProjectCommandInput> {
+    let name = require_shell_non_empty(&input.name, "repository project name")?;
+    let repository_url = require_shell_non_empty(
+        &input.repository_url,
+        "repository project URL",
+    )?;
+    if !(repository_url.starts_with("https://") || repository_url.starts_with("http://")) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository project URL must use http:// or https://",
+        ));
+    }
+    if input.polling_interval_seconds < MIN_REPOSITORY_POLL_INTERVAL_SECONDS {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "repository polling interval must be at least {MIN_REPOSITORY_POLL_INTERVAL_SECONDS} seconds"
+            ),
+        ));
+    }
+    if input.build_targets.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository project must define at least one build target",
+        ));
+    }
+
+    let personal_access_token = normalize_optional_shell_string(input.personal_access_token);
+    if personal_access_token
+        .as_deref()
+        .is_some_and(|token| token.chars().any(char::is_whitespace))
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository personal access token must not contain whitespace",
+        ));
+    }
+
+    let mut build_target_names = std::collections::HashSet::new();
+    let mut build_targets = Vec::with_capacity(input.build_targets.len());
+    for target in input.build_targets {
+        let normalized = normalize_create_repository_project_build_target_command_input(target)?;
+        let duplicate_key = normalized.name.to_ascii_lowercase();
+        if !build_target_names.insert(duplicate_key) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "repository build target names must be unique",
+            ));
+        }
+        build_targets.push(normalized);
+    }
+
+    Ok(NormalizedCreateRepositoryProjectCommandInput {
+        name,
+        repository_url,
+        personal_access_token,
+        default_branch: normalize_optional_shell_string(input.default_branch),
+        artifacts_root_override: normalize_optional_shell_string(input.artifacts_root_override),
+        workspace_root_override: normalize_optional_shell_string(input.workspace_root_override),
+        polling_interval_seconds: input.polling_interval_seconds,
+        build_targets,
+    })
+}
+
+fn normalize_create_repository_project_build_target_command_input(
+    input: CreateRepositoryProjectBuildTargetCommandInput,
+) -> io::Result<NormalizedCreateRepositoryProjectBuildTargetCommandInput> {
+    let unity_executable_path =
+        require_shell_non_empty(&input.unity_executable_path, "build target Unity executable path")?;
+    let diagnostics = validate_unity_executable_path_diagnostics(&unity_executable_path);
+    if diagnostics.status != "ready" {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            diagnostics.message,
+        ));
+    }
+
+    Ok(NormalizedCreateRepositoryProjectBuildTargetCommandInput {
+        name: require_shell_non_empty(&input.name, "build target name")?,
+        platform: require_shell_non_empty(&input.platform, "build target platform")?,
+        build_method: require_shell_non_empty(&input.build_method, "build target method")?,
+        unity_executable_path,
+    })
+}
+
+fn validate_unity_executable_path_diagnostics(path: &str) -> HostNativeRunnerDiagnostics {
+    diagnose_host_native_runner_config(
+        &serde_json::json!({
+            "unity_executable_path": path.trim(),
+        })
+        .to_string(),
+    )
+}
+
+fn require_shell_non_empty(value: &str, label: &str) -> io::Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("{label} must not be empty"),
+        ));
+    }
+
+    Ok(trimmed.to_owned())
+}
+
+fn normalize_optional_shell_string(value: Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn repository_pat_secret_account(repository_name: &str) -> String {
+    let issued_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    format!(
+        "repository/{}/origin-pat/{issued_at}",
+        slugify_shell_token(repository_name)
+    )
+}
+
+fn repository_pat_basic_auth_username(repository_url: &str) -> String {
+    github_repository_owner_from_url(repository_url)
+        .unwrap_or_else(|| String::from("git"))
+}
+
+fn github_repository_owner_from_url(repository_url: &str) -> Option<String> {
+    let repository_url = repository_url.trim();
+    let without_scheme = repository_url
+        .strip_prefix("https://")
+        .or_else(|| repository_url.strip_prefix("http://"))?;
+    let (host, path) = without_scheme.split_once('/')?;
+    if !host.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+
+    let owner = path.split('/').next()?.trim();
+    if owner.is_empty() {
+        return None;
+    }
+
+    Some(owner.to_owned())
+}
+
+fn slugify_shell_token(value: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_was_separator = false;
+
+    for character in value.chars() {
+        let lowered = character.to_ascii_lowercase();
+        if lowered.is_ascii_alphanumeric() {
+            slug.push(lowered);
+            previous_was_separator = false;
+            continue;
+        }
+
+        if !previous_was_separator && !slug.is_empty() {
+            slug.push('-');
+            previous_was_separator = true;
+        }
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    if slug.is_empty() {
+        return String::from("repository");
+    }
+
+    slug
+}
+
 fn credential_binding_references(
     credential_id: i64,
     repository_bindings: &[RepositorySecretBindingSetting],
@@ -1371,13 +1872,13 @@ fn expected_credential_keys(kind: &str) -> Vec<String> {
 fn secret_settings_warnings() -> Vec<String> {
     vec![
         String::from(
-            "credentials are currently stored inline in SQLite credentials.config_json",
+            "credentials.config_json may contain either inline secret material or host keyring references",
         ),
         String::from(
             "manifest sync resolves env and file sources before persistence, so SQLite may already contain materialized secret values",
         ),
         String::from(
-            "OS-native secret storage and durable secret references are not implemented yet",
+            "new repository credentials created through the desktop wizard persist PAT values in the host keyring and store only key references in SQLite",
         ),
     ]
 }
@@ -1565,7 +2066,31 @@ fn runtime_process_is_running(config: &RuntimeConfig) -> io::Result<bool> {
     let system = System::new_all();
     Ok(candidate_pids
         .into_iter()
-        .any(|pid| system.process(Pid::from_u32(pid)).is_some()))
+        .filter_map(|pid| system.process(Pid::from_u32(pid)))
+        .any(process_matches_runtime_identity))
+}
+
+fn process_matches_runtime_identity(process: &sysinfo::Process) -> bool {
+    let process_name = process.name().to_ascii_lowercase();
+    let command_line = process.cmd().join(" ").to_ascii_lowercase();
+
+    process_identity_matches_runtime(&process_name, &command_line)
+}
+
+fn process_identity_matches_runtime(
+    process_name: &str,
+    command_line: &str,
+) -> bool {
+    let normalized_name = process_name.trim().to_ascii_lowercase();
+    let normalized_command_line = command_line.trim().to_ascii_lowercase();
+
+    if normalized_name.contains(RUNTIME_BINARY_NAME) {
+        return true;
+    }
+
+    normalized_name.contains("cargo")
+        && normalized_command_line.contains(RUNTIME_BINARY_NAME)
+        && normalized_command_line.contains("supervise")
 }
 
 fn runtime_process_ids(storage: &StorageLayout) -> io::Result<Vec<u32>> {
@@ -1625,6 +2150,71 @@ fn runtime_crash_recovery_status(
         Some(RuntimeSupervisorStatus::Failed) => String::from("restart_policy_exhausted"),
         None => String::from("not_started"),
     }
+}
+
+fn window_transition_settings() -> WindowTransitionSettings {
+    WindowTransitionSettings::current()
+}
+
+fn animate_main_window_focus_transition(
+    app_handle: &AppHandle,
+    target: WindowFocusTarget,
+) -> Result<(), String> {
+    let transition = window_transition_settings();
+    let window = main_window(app_handle)?;
+    let start_size = window.outer_size().map_err(|error| error.to_string())?;
+    let start_layout = WindowLayoutPreset::new(start_size.width, start_size.height);
+    let target_layout = transition.target_layout(target);
+
+    if start_layout == target_layout {
+        return apply_main_window_layout(app_handle, target_layout);
+    }
+
+    let total_steps = transition.animation_steps();
+    let step_sleep = transition.duration_millis / total_steps as u64;
+    let started_at = Instant::now();
+
+    for step in 1..=total_steps {
+        let next_layout = WindowLayoutPreset::new(
+            interpolate_dimension(
+                start_layout.width,
+                target_layout.width,
+                step,
+                total_steps,
+            ),
+            interpolate_dimension(
+                start_layout.height,
+                target_layout.height,
+                step,
+                total_steps,
+            ),
+        );
+        apply_main_window_layout(app_handle, next_layout)?;
+
+        if step == total_steps || step_sleep == 0 {
+            continue;
+        }
+
+        let elapsed = started_at.elapsed();
+        let scheduled_elapsed = Duration::from_millis(step_sleep * step as u64);
+        if scheduled_elapsed > elapsed {
+            thread::sleep(scheduled_elapsed - elapsed);
+        }
+    }
+
+    Ok(())
+}
+
+fn interpolate_dimension(start: u32, end: u32, step: u32, total_steps: u32) -> u32 {
+    if total_steps == 0 {
+        return end;
+    }
+
+    let start = start as i64;
+    let end = end as i64;
+    let delta = end - start;
+
+    (start + (delta * step as i64) / total_steps as i64) as u32
 }
 
 fn current_runtime_command_plan(action: RuntimeLaunchAction) -> io::Result<RuntimeCommandPlan> {
@@ -1721,17 +2311,22 @@ mod tests {
         development_runtime_command_plan, load_runtime_directory_settings,
         load_runtime_health_report, load_runtime_lifecycle_settings,
         load_runtime_log_lines,
+        persist_repository_project,
         persist_publish_target_secret_binding,
         persist_repository_secret_binding,
         persist_secret_credential,
+        process_identity_matches_runtime,
         purge_build_execution_retention_files,
+        repository_pat_basic_auth_username,
         load_secret_settings,
         resolve_shell_runtime_config,
         load_unity_runner_settings,
         normalize_runtime_log_line_limit, packaged_runtime_command_plan,
         runtime_binary_file_name, RuntimeLaunchAction, RUNTIME_BINARY_NAME,
+        CreateRepositoryProjectBuildTargetCommandInput,
+        CreateRepositoryProjectCommandInput,
         SaveSecretCredentialInput, UpdatePublishTargetSecretBindingInput,
-        UpdateRepositorySecretBindingInput,
+        UpdateRepositorySecretBindingInput, window_transition_settings,
     };
     use runtime_config::RuntimeConfig;
     use runtime_core::{
@@ -1744,6 +2339,46 @@ mod tests {
     };
     use rusqlite::params;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn process_identity_matches_runtime_accepts_runtime_binary_name() {
+        assert!(process_identity_matches_runtime(
+            "hup-runtime.exe",
+            "C:/repo/target/debug/hup-runtime.exe serve"
+        ));
+    }
+
+    #[test]
+    fn repository_pat_basic_auth_username_uses_github_owner() {
+        assert_eq!(
+            repository_pat_basic_auth_username(
+                "https://github.com/indiegabo/revolutions.git",
+            ),
+            "indiegabo"
+        );
+        assert_eq!(
+            repository_pat_basic_auth_username(
+                "https://example.com/indiegabo/revolutions.git",
+            ),
+            "git"
+        );
+    }
+
+    #[test]
+    fn process_identity_matches_runtime_accepts_cargo_supervisor_command() {
+        assert!(process_identity_matches_runtime(
+            "cargo.exe",
+            "cargo run -p runtime-bin --bin hup-runtime -- supervise"
+        ));
+    }
+
+    #[test]
+    fn process_identity_matches_runtime_rejects_unrelated_reused_pid() {
+        assert!(!process_identity_matches_runtime(
+            "cmd.exe",
+            "C:\\Windows\\System32\\cmd.exe"
+        ));
+    }
 
     #[test]
     fn development_runtime_command_plan_uses_workspace_cargo_run() {
@@ -1936,6 +2571,17 @@ mod tests {
         assert_eq!(normalize_runtime_log_line_limit(None), 100);
         assert_eq!(normalize_runtime_log_line_limit(Some(0)), 1);
         assert_eq!(normalize_runtime_log_line_limit(Some(999)), 500);
+    }
+
+    #[test]
+    fn window_transition_settings_expand_focus_mode_from_main_preset() {
+        let settings = window_transition_settings();
+
+        assert_eq!(settings.main.width, 360);
+        assert_eq!(settings.main.height, 420);
+        assert_eq!(settings.focus.width, 540);
+        assert_eq!(settings.focus.height, 840);
+        assert_eq!(settings.duration_millis, 150);
     }
 
     #[test]
@@ -3135,6 +3781,54 @@ mod tests {
             settings.publish_target_bindings[0].credentials_id,
             Some(credentials_id)
         );
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn persist_repository_project_creates_repository_inspection_entry() {
+        let root = std::env::temp_dir().join("desktop-shell-project-create-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let unity_executable_path = std::env::current_exe()
+            .expect("current executable path should resolve")
+            .display()
+            .to_string();
+
+        let created = persist_repository_project(
+            &config,
+            CreateRepositoryProjectCommandInput {
+                name: String::from("Workers"),
+                repository_url: String::from("https://example.com/workers.git"),
+                personal_access_token: None,
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                build_targets: vec![CreateRepositoryProjectBuildTargetCommandInput {
+                    name: String::from("Windows"),
+                    platform: String::from("windows"),
+                    build_method: String::from("Builder.PerformWindows"),
+                    unity_executable_path,
+                }],
+            },
+        )
+        .expect("repository project should persist");
+
+        let inspection = load_repository_inspection(&config)
+            .expect("repository inspection should reflect created project");
+
+        assert_eq!(inspection.repositories.len(), 1);
+        assert_eq!(inspection.repositories[0].repository_id, created.repository_id);
+        assert_eq!(inspection.repositories[0].repository_name, "Workers");
+        assert_eq!(inspection.repositories[0].repo_url, "https://example.com/workers.git");
+        assert_eq!(inspection.repositories[0].polling_interval_seconds, 300);
+        assert_eq!(inspection.repositories[0].build_targets.len(), 1);
+        assert_eq!(inspection.repositories[0].build_targets[0].target_name, "Windows");
+        assert_eq!(inspection.repositories[0].build_targets[0].diagnostic_status, "ready");
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }

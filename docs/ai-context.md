@@ -65,8 +65,20 @@ The product is not a Unity gameplay codebase.
 - Each manifest describes Git access, trigger behavior, build targets, publish
   targets, and build-to-publish bindings.
 - The runtime store mirrors validated manifest state into SQLite.
-- Credentials are currently stored in SQLite configuration JSON and managed
-  through the desktop shell.
+- Repository project creation currently uses Personal Access Tokens as the only
+  first-class interactive credential input.
+- After the operator supplies a PAT, HUP is expected to perform repository
+  polling, workspace synchronization, and build-related Git operations without
+  any additional login prompts.
+- PAT secret material is stored through shell-managed host keyring references,
+  while SQLite stores only the durable credential metadata and references.
+- Future wizard work will let the operator choose between PAT entry and a
+  provider-specific interactive sign-in flow when the host platform and
+  repository provider support it.
+- When that future sign-in flow exists, any authentication window should appear
+  only during project creation or credential refresh, after which HUP should
+  store the required token and resume seamless non-interactive runtime Git
+  operations.
 
 ## Active Operator Surfaces
 

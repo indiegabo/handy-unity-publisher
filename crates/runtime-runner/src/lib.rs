@@ -8,14 +8,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
 use runtime_config::{HostPlatform, RuntimeDirectories};
-use runtime_git::{GitAuthOptions, GitWorkspaceSyncRequest, GitWorkspaceSyncer};
+use runtime_git::{
+    GitAuthOptions, GitProgressReporter, GitWorkspaceSyncRequest,
+    GitWorkspaceSyncer,
+};
 use std::fs;
 use std::io;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const EXECUTION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
@@ -209,6 +212,18 @@ impl ExecutionProgressReporter for NoopExecutionProgressReporter {
     fn heartbeat(&mut self, _progress: ExecutionProgress) {}
 }
 
+struct WorkspacePreparationProgressReporter<'a> {
+    reporter: &'a mut dyn ExecutionProgressReporter,
+}
+
+impl GitProgressReporter for WorkspacePreparationProgressReporter<'_> {
+    fn report(&mut self, message: &str) {
+        self.reporter.heartbeat(ExecutionProgress {
+            message: message.to_owned(),
+        });
+    }
+}
+
 /// Executes one prepared build request and returns combined stdout/stderr output.
 pub trait Executor {
     fn execute(
@@ -253,7 +268,17 @@ where
         &self,
         preparation: &WorkspacePreparationInput,
     ) -> io::Result<PreparedWorkspace> {
-        self.preparer.prepare(preparation)
+        let mut reporter = NoopExecutionProgressReporter;
+        self.prepare_workspace_with_reporter(preparation, &mut reporter)
+    }
+
+    /// Prepares the workspace only, allowing callers to track checkout separately.
+    pub fn prepare_workspace_with_reporter(
+        &self,
+        preparation: &WorkspacePreparationInput,
+        reporter: &mut dyn ExecutionProgressReporter,
+    ) -> io::Result<PreparedWorkspace> {
+        self.preparer.prepare_with_reporter(preparation, reporter)
     }
 
     /// Executes one already-prepared workspace and reports heartbeats while Unity is running.
@@ -397,6 +422,19 @@ pub fn resolve_host_native_execution_plan(
     Ok(resolved)
 }
 
+fn reset_prepared_workspace_root(path: &Path) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let metadata = fs::metadata(path)?;
+    if metadata.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
 /// Allocates deterministic per-run directories and checks out one repository tag into source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspacePreparer {
@@ -422,10 +460,9 @@ impl WorkspacePreparer {
             ));
         }
 
-        let attempt_token = require_non_empty(&input.attempt_token, "attempt token")?;
         let repository_url = require_non_empty(&input.repository_url, "repository url")?;
         let git_tag = require_non_empty(&input.git_tag, "git tag")?;
-        let workspace_name = format!("build-run-{}-{attempt_token}", input.build_run_id);
+        let workspace_name = format!("build-run-{}", input.build_run_id);
         let runs_root_path = self.resolve_runs_root(input)?;
         let artifacts_root_path = self.resolve_artifacts_root(input)?;
 
@@ -454,10 +491,35 @@ impl WorkspacePreparer {
 
     /// Creates isolated directories and checks out the requested repository tag.
     pub fn prepare(&self, input: &WorkspacePreparationInput) -> io::Result<PreparedWorkspace> {
+        let mut reporter = NoopExecutionProgressReporter;
+        self.prepare_with_reporter(input, &mut reporter)
+    }
+
+    /// Creates isolated directories and checks out the requested repository tag.
+    pub fn prepare_with_reporter(
+        &self,
+        input: &WorkspacePreparationInput,
+        reporter: &mut dyn ExecutionProgressReporter,
+    ) -> io::Result<PreparedWorkspace> {
         let repository_url = require_non_empty(&input.repository_url, "repository url")?;
         let git_tag = require_non_empty(&input.git_tag, "git tag")?;
         let planned = self.plan(input)?;
         self.directories.ensure_exists()?;
+
+        reporter.heartbeat(ExecutionProgress {
+            message: format!(
+                "Resetting checkout workspace root at '{}'.",
+                planned.root_path.display(),
+            ),
+        });
+        reset_prepared_workspace_root(&planned.root_path)?;
+
+        reporter.heartbeat(ExecutionProgress {
+            message: format!(
+                "Creating checkout workspace directories under '{}'.",
+                planned.root_path.display(),
+            ),
+        });
 
         for directory in [
             planned.root_path.as_path(),
@@ -470,12 +532,13 @@ impl WorkspacePreparer {
             fs::create_dir_all(directory)?;
         }
 
-        self.syncer.sync_tag(&GitWorkspaceSyncRequest {
+        let mut sync_reporter = WorkspacePreparationProgressReporter { reporter };
+        self.syncer.sync_tag_with_progress(&GitWorkspaceSyncRequest {
             repository_url,
             workspace_path: planned.source_path.clone(),
             git_tag,
             auth: input.git_auth.clone(),
-        })?;
+        }, &mut sync_reporter)?;
 
         Ok(planned)
     }
@@ -499,16 +562,6 @@ impl WorkspacePreparer {
             None => self.directories.artifacts_dir.clone(),
         })
     }
-}
-
-/// Generates one filesystem-safe token for a single build execution attempt.
-pub fn next_workspace_attempt_token() -> io::Result<String> {
-    let issued_at_nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(io::Error::other)?
-        .as_nanos();
-
-    Ok(format!("attempt-{}-{issued_at_nanos}", std::process::id()))
 }
 
 fn require_non_empty(value: &str, label: &str) -> io::Result<String> {
@@ -2273,8 +2326,9 @@ mod tests {
         discover_artifacts, inspect_host_capability_profile_with_input,
         resolve_host_native_execution_plan, selected_host_runner_family,
         CapabilityInspectionInput, DiscoveredUnityEditor, ExecutionPlan,
-        ExecutionProcessor, HostCapabilityProfile, HostNativeUnityExecutor,
-        HostToolCapability, RunnerSelectionDiagnostics, UnityLicenseDiagnostics,
+        ExecutionProcessor, ExecutionProgress, ExecutionProgressReporter,
+        HostCapabilityProfile, HostNativeUnityExecutor, HostToolCapability,
+        RunnerSelectionDiagnostics, UnityLicenseDiagnostics,
         WorkspacePreparationInput, WorkspacePreparer,
     };
     use runtime_config::{HostPlatform, RuntimeDirectories};
@@ -2289,6 +2343,17 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     const PROJECT_VERSION_FILE_PATH: &str = "ProjectSettings/ProjectVersion.txt";
+
+    #[derive(Debug, Default)]
+    struct RecordingExecutionProgressReporter {
+        messages: Vec<String>,
+    }
+
+    impl ExecutionProgressReporter for RecordingExecutionProgressReporter {
+        fn heartbeat(&mut self, progress: ExecutionProgress) {
+            self.messages.push(progress.message);
+        }
+    }
 
     #[test]
     fn workspace_preparer_creates_isolated_run_directories() {
@@ -2317,7 +2382,7 @@ mod tests {
 
         let expected_root = directories
             .runs_dir
-            .join("build-run-42-attempt-42");
+            .join("build-run-42");
         assert_eq!(prepared.root_path, expected_root);
         assert_eq!(prepared.host_root_path, prepared.root_path);
 
@@ -2411,13 +2476,13 @@ mod tests {
             prepared.root_path,
             workspace_root_override
                 .join("runs")
-                .join("build-run-53-attempt-53")
+                .join("build-run-53")
         );
         assert_eq!(
             prepared.log_path,
             workspace_root_override
                 .join("runs")
-                .join("build-run-53-attempt-53")
+                .join("build-run-53")
                 .join("logs")
                 .join("unity-build.log")
         );
@@ -2426,6 +2491,59 @@ mod tests {
             build_output_override.join("revolutions.v5.2.0")
         );
         assert!(prepared.source_path.join(PROJECT_VERSION_FILE_PATH).is_file());
+
+        fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn execution_processor_prepare_workspace_reports_checkout_progress() {
+        let root = test_root("prepare-workspace-progress");
+        let directories = RuntimeDirectories::from_root(&root);
+        directories.ensure_exists().expect("runtime directories should create");
+        let repository_path = create_tagged_unity_repository(
+            &root.join("workspace-progress-source-repo"),
+            "2022.3.14f1",
+            "v5.3.0",
+        );
+        let processor = ExecutionProcessor::new(&directories, HostNativeUnityExecutor::new());
+        let preparation = WorkspacePreparationInput {
+            build_run_id: 54,
+            attempt_token: String::from("attempt-54"),
+            repository_name: String::from("revolutions"),
+            repository_url: repository_path.display().to_string(),
+            git_auth: GitAuthOptions::default(),
+            git_tag: String::from("v5.3.0"),
+            workspace_root_override: None,
+            artifacts_root_override: None,
+        };
+        let mut reporter = RecordingExecutionProgressReporter::default();
+
+        let prepared = processor
+            .prepare_workspace_with_reporter(&preparation, &mut reporter)
+            .expect("workspace preparation should emit progress");
+
+        assert!(prepared
+            .source_path
+            .join(PROJECT_VERSION_FILE_PATH)
+            .is_file());
+        assert!(reporter.messages.iter().any(|message| {
+            message.contains("Resetting checkout workspace root")
+        }));
+        assert!(reporter.messages.iter().any(|message| {
+            message.contains("Creating checkout workspace directories")
+        }));
+        assert!(reporter.messages.iter().any(|message| {
+            message.contains("Cloning repository metadata")
+        }));
+        assert!(reporter.messages.iter().any(|message| {
+            message.contains("Fetching ref 'v5.3.0'")
+        }));
+        assert!(reporter.messages.iter().any(|message| {
+            message.contains("Checking out fetched ref 'v5.3.0'")
+        }));
+        assert!(reporter.messages.iter().any(|message| {
+            message.contains("Repository ref 'v5.3.0' is ready")
+        }));
 
         fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -2727,6 +2845,9 @@ mod tests {
                 artifacts_root_override: None,
             })
             .expect("first workspace should prepare");
+        let stale_path = first.root_path.join("stale-checkout.txt");
+        fs::write(&stale_path, "stale")
+            .expect("stale marker should write into the first workspace");
         let second = preparer
             .prepare(&WorkspacePreparationInput {
                 build_run_id: 7,
@@ -2740,9 +2861,11 @@ mod tests {
             })
             .expect("second workspace should prepare");
 
-        assert_ne!(first.root_path, second.root_path);
+        assert_eq!(first.root_path, second.root_path);
         assert_eq!(first.artifact_root_path, second.artifact_root_path);
-        assert_ne!(first.log_path, second.log_path);
+        assert_eq!(first.log_path, second.log_path);
+        assert!(!stale_path.exists());
+        assert!(second.source_path.join(PROJECT_VERSION_FILE_PATH).is_file());
 
         fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }

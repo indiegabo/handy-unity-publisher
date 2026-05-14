@@ -250,6 +250,10 @@ pub(crate) fn print_status(config: &RuntimeConfig, storage: &StorageLayout) {
     println!("supervisor state: {}", storage.supervisor_state_path.display());
     println!("runtime log: {}", storage.runtime_log_path.display());
     println!(
+        "worker loop interval: {} ms",
+        config.runtime_loop.worker_loop_interval_millis
+    );
+    println!(
         "heartbeat interval: {} ms",
         config.runtime_loop.heartbeat_interval_millis
     );
