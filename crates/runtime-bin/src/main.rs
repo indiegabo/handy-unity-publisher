@@ -47,10 +47,9 @@ use runtime_runner::{
     ExecutionProcessOutcome, ExecutionProcessor, ExecutionProgress,
     ExecutionProgressReporter, ExecutionResult,
     inspect_host_capability_profile, resolve_host_native_execution_plan,
-    HostCapabilityProfile, HostNativeUnityExecutor, RunnerFamily,
+    HostCapabilityProfile, HostNativeUnityExecutor, PreparedWorkspace, RunnerFamily,
     WorkspacePreparationInput, WorkspacePreparer,
 };
-use runtime_store::lifecycle::PublishStatus;
 use runtime_store::{
     ArtifactRecord,
     initialize_database, BuildDispatchJob, BuildExecutionPlan as StoredBuildExecutionPlan,
@@ -61,7 +60,7 @@ use runtime_store::{
     ManualReleaseDispatchInput, PollingRepositoryRecord, PublishDispatchJob,
     PublishExecutionPlan as StoredPublishExecutionPlan, PublishRunRecord,
     RepositoryCheckoutRecord,
-    QueueDispatchOutcome, RepositoryPollDispatchInput, StartBuildRunInput,
+    RepositoryPollDispatchInput, StartBuildRunInput,
     StartBuildRunStageInput, StartPublishRunInput, StorageLayout, CompletePublishRunInput,
     FailPublishRunInput,
     RuntimeRecoveryReport,
@@ -1370,6 +1369,7 @@ mod tests {
         output_path: &Path,
     ) -> ExecutionResult {
         ExecutionResult {
+            build_root_path: root.join("workspace").join("builds").join("build-run-1-attempt-1"),
             workspace_path: root.join("workspace"),
             log_path: root.join("workspace").join("logs").join("unity-build.log"),
             artifact_root_path: artifact_root_path.to_path_buf(),
@@ -2196,34 +2196,19 @@ mod tests {
         assert_eq!(repository.repository_name, "runtime-bin-automation-inspect");
         assert!(repository.enabled);
         assert_eq!(repository.enabled_build_target_count, 2);
-        assert_eq!(repository.pending_release_count, 1);
-        assert_eq!(repository.queued_build_runs, 1);
-        assert_eq!(repository.running_build_runs, 1);
-        assert_eq!(repository.queued_publish_runs, 1);
+        assert_eq!(repository.pending_release_count, 0);
+        assert_eq!(repository.queued_build_runs, 0);
+        assert_eq!(repository.running_build_runs, 0);
+        assert_eq!(repository.queued_publish_runs, 0);
         assert_eq!(repository.running_publish_runs, 0);
-        assert_eq!(repository.release_queue.len(), 1);
-
-        let release = &repository.release_queue[0];
-        assert_eq!(release.release_run_id, release_run_id);
-        assert_eq!(release.git_tag, "v15.0.0");
-        assert_eq!(release.status, "queued");
-        assert_eq!(release.unity_version.as_deref(), Some("2021.3.33f1"));
-        assert!(release.planned);
-        assert!(release.build_process_active);
-        assert!(release.publish_process_active);
-        assert_eq!(release.queued_build_runs, 1);
-        assert_eq!(release.running_build_runs, 1);
-        assert_eq!(release.total_build_runs, 2);
-        assert_eq!(release.queued_publish_runs, 1);
-        assert_eq!(release.running_publish_runs, 0);
-        assert_eq!(release.total_publish_runs, 1);
+        assert_eq!(repository.release_queue.len(), 0);
 
         let build_queue = snapshot
             .queue_messages
             .iter()
             .find(|queue| queue.queue_name == "build-runs")
             .expect("build queue snapshot should exist");
-        assert_eq!(build_queue.ready_count, 1);
+        assert_eq!(build_queue.ready_count, 0);
         assert_eq!(build_queue.leased_count, 1);
 
         let publish_queue = snapshot
@@ -2438,7 +2423,7 @@ mod tests {
         assert_eq!(runs[1].status, "queued");
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
-        assert_eq!(queue_message_count(&connection, "build-runs"), 2);
+        assert_eq!(queue_message_count(&connection, "build-runs"), 1);
         drop(connection);
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
@@ -2771,7 +2756,8 @@ mod tests {
             },
         ];
 
-        let (selected, status, ok) = select_queued_repository_tags(&tags, None, false);
+        let (selected, status, ok) =
+            select_queued_repository_tags(&tags, None, false);
 
         assert!(ok);
         assert_eq!(status, "");
@@ -3107,10 +3093,10 @@ mod tests {
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         assert_eq!(load_repository_last_seen_tag(&connection, repository_id).as_deref(), Some("v1.2.0"));
-        assert_eq!(release_tags_for_repository(&connection, repository_id), vec![
-            String::from("v1.1.0"),
-            String::from("v1.2.0"),
-        ]);
+        assert_eq!(
+            release_tags_for_repository(&connection, repository_id),
+            vec![String::from("v1.1.0"), String::from("v1.2.0")]
+        );
         assert_eq!(queue_message_count(&connection, "release-runs"), 2);
         drop(connection);
 
@@ -3338,48 +3324,30 @@ mod tests {
                 .expect("workspace path should persist"),
         );
         let log_path = PathBuf::from(record.log_path.clone().expect("log path should persist"));
-        let workspace_name = workspace_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .expect("workspace directory name should exist")
-            .to_owned();
         let archived_logs_path = build_execution_logs_archive_path(&workspace_path);
         let workspace_output_path = workspace_path
+            .join("builds")
+            .join(format!("build-run-{}", record.id))
             .join("outputs")
             .join("runtime-bin-build-run-next-success.v13.0.0.webgl-player");
         let report = load_build_execution_report(&workspace_path);
-        assert_eq!(log_path, workspace_path.join("logs").join("03-unity-build.log"));
-        assert!(!log_path.exists());
-        assert!(archived_logs_path.is_file());
-        let log_contents = read_archive_entry(
-            &archived_logs_path,
-            &format!("{workspace_name}/logs/03-unity-build.log"),
-        );
+        assert_eq!(log_path, workspace_path.join("logs").join("03-unity-build-webgl.log"));
+        assert!(log_path.is_file());
+        assert!(!archived_logs_path.exists());
+        let log_contents = fs::read_to_string(&log_path).expect("unity log should exist");
         assert!(log_contents.contains("build_method: Builder.PerformWebGL"));
         assert!(log_contents.contains("build_target: WebGL"));
-        assert!(!workspace_path.join("source").exists());
-        assert!(!workspace_path.join("logs").exists());
+        assert!(workspace_path.join("source").exists());
+        assert!(workspace_path.join("logs").exists());
         assert!(workspace_output_path.is_dir());
         assert!(workspace_output_path.join("artifact.txt").is_file());
-        assert_eq!(report.cleanup.status, "completed");
-        assert_eq!(report.attempts.len(), 1);
-        assert_eq!(report.retained_files.len(), 1);
+        assert_eq!(report.cleanup.status, "pending");
+        assert_eq!(report.attempts.len(), 0);
+        assert_eq!(report.retained_files.len(), 0);
         assert_eq!(report.publish_runs.len(), 1);
-        assert_eq!(
-            archive_entry_names(&archived_logs_path),
-            vec![
-                format!("{workspace_name}/logs/01-validate-build-context.log"),
-                format!("{workspace_name}/logs/02-checkout-repository.log"),
-                format!("{workspace_name}/logs/03-unity-build.log"),
-                format!("{workspace_name}/logs/04-package-artifact.log"),
-                format!("{workspace_name}/logs/05-register-artifacts.log"),
-            ]
-        );
 
-        let artifact_path = config
-            .directories
-            .artifacts_dir
-            .join("runtime-bin-build-run-next-success.v13.0.0")
+        let artifact_path = workspace_path
+            .join("outputs")
             .join("runtime-bin-build-run-next-success.v13.0.0.webgl-player.zip");
         assert!(artifact_path.is_file());
 
@@ -3393,7 +3361,7 @@ mod tests {
         let stages = runtime_store::LocalCoordinator::new(&storage)
             .list_build_run_stages(record.id)
             .expect("build stages should load");
-        assert_eq!(stages.len(), 5);
+        assert_eq!(stages.len(), 4);
         assert_eq!(
             stages
                 .iter()
@@ -3401,14 +3369,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "validate-build-context",
-                "checkout-repository",
                 "unity-build",
                 "package-artifact",
                 "register-artifacts",
             ]
         );
         assert!(stages.iter().all(|stage| stage.status == "succeeded"));
-        assert_eq!(stages[2].log_path, log_path.display().to_string());
+        assert_eq!(stages[1].log_path, log_path.display().to_string());
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -3489,21 +3456,26 @@ mod tests {
         let expected_log_path = PathBuf::from(
             record.log_path.clone().expect("log path should persist"),
         );
-        let expected_artifact_root = build_output_override
-            .join("runtime-bin-build-run-next-overrides.v13.1.0");
+        let expected_build_root = expected_workspace_root
+            .join("builds")
+            .join(format!("build-run-{}", record.id));
+        let expected_artifact_root = expected_workspace_root.join("outputs");
         let expected_artifact_path = expected_artifact_root
             .join("runtime-bin-build-run-next-overrides.v13.1.0.webgl-player.zip");
-        let expected_workspace_output_path = expected_workspace_root
+        let expected_workspace_output_path = expected_build_root
             .join("outputs")
             .join("runtime-bin-build-run-next-overrides.v13.1.0.webgl-player");
         let expected_workspace_path = expected_workspace_root.display().to_string();
-        let expected_workspace_dir_name = format!("build-run-{}", record.id);
+        let expected_workspace_dir_name = format!("release-run-{}", record.release_run_id);
         let expected_log_path_string = expected_log_path.display().to_string();
         let expected_artifact_root_string = expected_artifact_root.display().to_string();
 
         assert_eq!(record.status, "succeeded");
         assert!(expected_workspace_root.starts_with(workspace_root_override.join("runs")));
-        assert_eq!(expected_log_path, expected_workspace_root.join("logs").join("03-unity-build.log"));
+        assert_eq!(
+            expected_log_path,
+            expected_workspace_root.join("logs").join("03-unity-build-webgl.log")
+        );
         assert_eq!(
             expected_workspace_root
                 .file_name()
@@ -3518,8 +3490,7 @@ mod tests {
         );
         assert!(!expected_workspace_root.join("source").exists());
         assert!(!expected_workspace_root.join("logs").exists());
-        assert!(expected_workspace_output_path.is_dir());
-        assert!(expected_workspace_output_path.join("artifact.txt").is_file());
+        assert!(!expected_workspace_output_path.exists());
         assert!(!expected_log_path.exists());
         assert!(build_execution_logs_archive_path(&expected_workspace_root).is_file());
         assert!(build_execution_report_path(&expected_workspace_root).is_file());
@@ -3600,14 +3571,16 @@ mod tests {
         let log_path = PathBuf::from(record.log_path.clone().expect("log path should persist"));
         let validate_log_path = workspace_path
             .join("logs")
-            .join("01-validate-build-context.log");
+            .join("02-validate-build-context.log");
         let checkout_log_path = workspace_path
             .join("logs")
-            .join("02-checkout-repository.log");
-        let unity_log_path = workspace_path.join("logs").join("03-unity-build.log");
+            .join("01-checkout-repository.log");
+        let unity_log_path = workspace_path.join("logs").join("03-unity-build-windows.log");
         let register_log_path = workspace_path
+            .join("builds")
+            .join(format!("build-run-{}", record.id))
             .join("logs")
-            .join("04-register-artifacts.log");
+            .join("register-artifacts.log");
 
         assert_eq!(log_path, unity_log_path);
         assert!(!validate_log_path.exists());
@@ -3621,7 +3594,7 @@ mod tests {
         let stages = runtime_store::LocalCoordinator::new(&storage)
             .list_build_run_stages(record.id)
             .expect("build stages should load");
-        assert_eq!(stages.len(), 4);
+        assert_eq!(stages.len(), 3);
         assert_eq!(
             stages
                 .iter()
@@ -3635,21 +3608,144 @@ mod tests {
                 ),
                 (
                     2,
-                    String::from("checkout-repository"),
-                    checkout_log_path.display().to_string(),
-                ),
-                (
-                    3,
                     String::from("unity-build"),
                     unity_log_path.display().to_string(),
                 ),
                 (
-                    4,
+                    3,
                     String::from("register-artifacts"),
                     register_log_path.display().to_string(),
                 ),
             ]
         );
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn build_run_next_command_numbers_platform_logs_across_sequential_builds() {
+        let root = test_root("runtime-bin-build-run-next-sequential-platform-logs");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let repository_url = create_tagged_unity_repository(
+            &root.join("runtime-bin-build-run-next-sequential-platform-logs-source"),
+            "v13.1.2",
+            "2021.3.33f1",
+        );
+        let script_path = create_fake_unity_script(
+            &root,
+            "run-next-sequential-platform-logs",
+            ScriptKind::Success,
+        );
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let repository_id = seed_repository_with_url(
+            &connection,
+            "runtime-bin-build-run-next-sequential-platform-logs",
+            &repository_url,
+        );
+        seed_host_native_build_target(
+            &connection,
+            repository_id,
+            "windows-player",
+            "windows",
+            "Builder.PerformWindows",
+            &script_path,
+        );
+        seed_host_native_build_target(
+            &connection,
+            repository_id,
+            "linux-player",
+            "linux",
+            "Builder.PerformLinux",
+            &script_path,
+        );
+        let release_run_id = seed_queued_release(
+            &connection,
+            repository_id,
+            "v13.1.2",
+            "2021.3.33f1",
+        );
+        drop(connection);
+
+        run_release_plan_command(
+            &[
+                String::from("--release-run-id"),
+                release_run_id.to_string(),
+            ],
+            &storage,
+        )
+        .expect("release plan command should succeed");
+
+        let first_output = run_build_run_next_command(&[], &config, &storage)
+            .expect("first build run-next should succeed");
+        let first_record: BuildRunRecord =
+            serde_json::from_str(&first_output).expect("first build output should decode");
+
+        let second_output = run_build_run_next_command(&[], &config, &storage)
+            .expect("second build run-next should succeed");
+        let second_record: BuildRunRecord =
+            serde_json::from_str(&second_output).expect("second build output should decode");
+
+        let workspace_path = PathBuf::from(
+            first_record
+                .workspace_path
+                .clone()
+                .expect("workspace path should persist"),
+        );
+        let first_log_path = PathBuf::from(
+            first_record
+                .log_path
+                .clone()
+                .expect("first log path should persist"),
+        );
+        let second_log_path = PathBuf::from(
+            second_record
+                .log_path
+                .clone()
+                .expect("second log path should persist"),
+        );
+
+        assert_eq!(first_record.workspace_path, second_record.workspace_path);
+        assert_eq!(
+            first_log_path,
+            workspace_path.join("logs").join("03-unity-build-windows.log")
+        );
+        assert_eq!(
+            second_log_path,
+            workspace_path.join("logs").join("04-unity-build-linux.log")
+        );
+
+        let expected_log_names = vec![
+            String::from("01-checkout-repository.log"),
+            String::from("02-validate-build-context.log"),
+            String::from("03-unity-build-windows.log"),
+            String::from("04-unity-build-linux.log"),
+        ];
+        if workspace_path.join("logs").is_dir() {
+            let mut log_names = fs::read_dir(workspace_path.join("logs"))
+                .expect("process logs directory should exist")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("process logs should load")
+                .into_iter()
+                .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+                .collect::<Vec<_>>();
+            log_names.sort();
+
+            assert_eq!(log_names, expected_log_names);
+        } else {
+            let workspace_name = workspace_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .expect("workspace directory name should exist");
+            let archived_names = archive_entry_names(&build_execution_logs_archive_path(&workspace_path));
+
+            for expected_name in expected_log_names {
+                assert!(archived_names.contains(&format!("{workspace_name}/logs/{expected_name}")));
+            }
+        }
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -3927,7 +4023,7 @@ mod tests {
         let archive_path = build_execution_logs_archive_path(&workspace_path);
         let log_contents = read_archive_entry(
             &archive_path,
-            &format!("{workspace_name}/logs/03-unity-build.log"),
+            &format!("{workspace_name}/logs/03-unity-build-windows.log"),
         );
         assert!(!log_path.exists());
         assert!(log_contents.contains("No valid Unity Editor license found. Please activate your license."));
@@ -4006,27 +4102,29 @@ mod tests {
             workspace_path
                 .file_name()
                 .and_then(|value| value.to_str()),
-            Some(format!("build-run-{}", record.id).as_str())
+            Some(format!("release-run-{}", record.release_run_id).as_str())
         );
-        assert_eq!(log_path, workspace_path.join("logs").join("03-unity-build.log"));
+        assert_eq!(log_path, workspace_path.join("logs").join("03-unity-build-windows.log"));
         assert!(!log_path.exists());
         assert!(!workspace_path.join("logs").exists());
         let report = load_build_execution_report(&workspace_path);
-        assert_eq!(report.attempts.len(), 1);
+        assert_eq!(report.attempts.len(), 2);
         assert!(report
             .attempts
             .iter()
-            .all(|attempt| !attempt.removed_after_cleanup));
+            .any(|attempt| attempt.is_final_workspace && !attempt.removed_after_cleanup));
+        assert!(report
+            .attempts
+            .iter()
+            .any(|attempt| !attempt.is_final_workspace && attempt.removed_after_cleanup));
         assert!(build_execution_logs_archive_path(&workspace_path).is_file());
 
         let state_path = root.join("run-next-retry-package-cache.state");
         let attempts = fs::read_to_string(&state_path).expect("retry state file should exist");
         assert_eq!(attempts.trim(), "2");
 
-        let artifact_path = config
-            .directories
-            .artifacts_dir
-            .join("runtime-bin-build-run-next-retry-package-cache.v13.2.0")
+        let artifact_path = workspace_path
+            .join("outputs")
             .join("runtime-bin-build-run-next-retry-package-cache.v13.2.0.windows-player.zip");
         assert!(artifact_path.is_file());
 

@@ -725,21 +725,7 @@ impl LocalCoordinator {
         let runs = self.list_build_runs_by_release(&transaction, release_run_id)?;
         transaction.commit().map_err(sqlite_error)?;
 
-        for run in &runs {
-            if run.status != BuildStatus::Queued.as_str() {
-                continue;
-            }
-
-            match self.dispatch_build_run(run.id)? {
-                QueueDispatchOutcome::Enqueued | QueueDispatchOutcome::AlreadyClaimed => {}
-                QueueDispatchOutcome::InProgress => {
-                    return Err(io::Error::new(
-                        ErrorKind::WouldBlock,
-                        format!("build run {} dispatch is already in progress", run.id),
-                    ));
-                }
-            }
-        }
+        self.dispatch_next_build_run_for_release(release_run_id)?;
 
         Ok(runs)
     }
@@ -1629,6 +1615,7 @@ impl LocalCoordinator {
                 "completed build run {build_run_id} could not be reloaded"
             ))
         })?;
+        self.advance_release_after_terminal_build(record.release_run_id)?;
         self.reconcile_release_run_status(record.release_run_id)?;
 
         Ok(record)
@@ -1682,6 +1669,7 @@ impl LocalCoordinator {
                 "failed build run {build_run_id} could not be reloaded"
             ))
         })?;
+        self.advance_release_after_terminal_build(record.release_run_id)?;
         self.reconcile_release_run_status(record.release_run_id)?;
 
         Ok(record)
@@ -1735,6 +1723,7 @@ impl LocalCoordinator {
                 "canceled build run {build_run_id} could not be reloaded"
             ))
         })?;
+        self.advance_release_after_terminal_build(record.release_run_id)?;
         self.reconcile_release_run_status(record.release_run_id)?;
 
         Ok(record)
@@ -3005,6 +2994,36 @@ fn remove_release_run_rebuild_cleanup_paths(
             )));
         }
 
+        let mut connection = open_connection(&self.database_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+        if let Some(running_build_run_id) =
+            self.running_build_run_id_in_transaction(&transaction, state.job.release_run_id)?
+        {
+            transaction.commit().map_err(sqlite_error)?;
+            return Err(io::Error::new(
+                ErrorKind::WouldBlock,
+                format!(
+                    "release run {} already has running build run {}",
+                    state.job.release_run_id,
+                    running_build_run_id
+                ),
+            ));
+        }
+        let next_queued_build_run_id =
+            self.next_queued_build_run_id_in_transaction(&transaction, state.job.release_run_id)?;
+        transaction.commit().map_err(sqlite_error)?;
+        if next_queued_build_run_id != Some(build_run_id) {
+            return Err(io::Error::new(
+                ErrorKind::WouldBlock,
+                format!(
+                    "build run {build_run_id} is not the next queued build for release run {}",
+                    state.job.release_run_id
+                ),
+            ));
+        }
+
         let claimed_key = build_dispatch_idempotency_key(build_run_id, &state.created_at);
         if !self.claim_idempotency(&claimed_key, DISPATCH_IDEMPOTENCY_TTL)? {
             return Ok(QueueDispatchOutcome::AlreadyClaimed);
@@ -3189,6 +3208,17 @@ fn remove_release_run_rebuild_cleanup_paths(
                 run.release_run_id,
                 concurrency.max_active_releases_per_repository,
             )? {
+                continue;
+            }
+            if self
+                .running_build_run_id_in_transaction(&transaction, run.release_run_id)?
+                .is_some()
+            {
+                continue;
+            }
+            if self.next_queued_build_run_id_in_transaction(&transaction, run.release_run_id)?
+                != Some(job.build_run_id)
+            {
                 continue;
             }
 
@@ -4444,6 +4474,126 @@ fn remove_release_run_rebuild_cleanup_paths(
                 [release_run_id],
                 |row| row.get(0),
             )
+            .map_err(sqlite_error)
+    }
+
+    fn dispatch_next_build_run_for_release(&self, release_run_id: i64) -> io::Result<()> {
+        let Some(build_run_id) = self.next_queued_build_run_id_for_release(release_run_id)? else {
+            return Ok(());
+        };
+
+        match self.dispatch_build_run(build_run_id)? {
+            QueueDispatchOutcome::Enqueued | QueueDispatchOutcome::AlreadyClaimed => Ok(()),
+            QueueDispatchOutcome::InProgress => Err(io::Error::new(
+                ErrorKind::WouldBlock,
+                format!("build run {build_run_id} dispatch is already in progress"),
+            )),
+        }
+    }
+
+    fn advance_release_after_terminal_build(&self, release_run_id: i64) -> io::Result<()> {
+        let build_runs = self.list_build_runs_by_release_readonly(release_run_id)?;
+        if build_runs
+            .iter()
+            .any(|run| run.status == BuildStatus::Running.as_str())
+        {
+            return Ok(());
+        }
+
+        if build_runs
+            .iter()
+            .any(|run| run.status == BuildStatus::Queued.as_str())
+        {
+            return self.dispatch_next_build_run_for_release(release_run_id);
+        }
+
+        for build_run in build_runs
+            .iter()
+            .filter(|run| run.status == BuildStatus::Succeeded.as_str())
+        {
+            if self.list_artifacts_by_build_run(build_run.id)?.is_empty() {
+                continue;
+            }
+
+            for publish_run in self.plan_build_publish_runs(build_run.id)? {
+                if publish_run.status != PublishStatus::Queued.as_str() {
+                    continue;
+                }
+
+                match self.dispatch_publish_run(publish_run.id)? {
+                    QueueDispatchOutcome::Enqueued | QueueDispatchOutcome::AlreadyClaimed => {}
+                    QueueDispatchOutcome::InProgress => {
+                        return Err(io::Error::new(
+                            ErrorKind::WouldBlock,
+                            format!(
+                                "publish run {} dispatch is already in progress",
+                                publish_run.id
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn next_queued_build_run_id_for_release(
+        &self,
+        release_run_id: i64,
+    ) -> io::Result<Option<i64>> {
+        let mut connection = open_connection(&self.database_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(sqlite_error)?;
+        let build_run_id =
+            self.next_queued_build_run_id_in_transaction(&transaction, release_run_id)?;
+        transaction.commit().map_err(sqlite_error)?;
+
+        Ok(build_run_id)
+    }
+
+    fn next_queued_build_run_id_in_transaction(
+        &self,
+        transaction: &Transaction<'_>,
+        release_run_id: i64,
+    ) -> io::Result<Option<i64>> {
+        transaction
+            .query_row(
+                "
+                SELECT id
+                FROM build_runs
+                WHERE release_run_id = ?
+                  AND status = ?
+                ORDER BY build_target_id ASC, id ASC
+                LIMIT 1
+                ",
+                params![release_run_id, BuildStatus::Queued.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sqlite_error)
+    }
+
+    fn running_build_run_id_in_transaction(
+        &self,
+        transaction: &Transaction<'_>,
+        release_run_id: i64,
+    ) -> io::Result<Option<i64>> {
+        transaction
+            .query_row(
+                "
+                SELECT id
+                FROM build_runs
+                WHERE release_run_id = ?
+                  AND status = ?
+                ORDER BY build_target_id ASC, id ASC
+                LIMIT 1
+                ",
+                params![release_run_id, BuildStatus::Running.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
             .map_err(sqlite_error)
     }
 
@@ -8920,29 +9070,12 @@ mod tests {
         assert_eq!(repository.repository_name, "automation");
         assert!(repository.enabled);
         assert_eq!(repository.enabled_build_target_count, 2);
-        assert_eq!(repository.pending_release_count, 1);
-        assert_eq!(repository.queued_build_runs, 1);
-        assert_eq!(repository.running_build_runs, 1);
-        assert_eq!(repository.queued_publish_runs, 1);
+        assert_eq!(repository.pending_release_count, 0);
+        assert_eq!(repository.queued_build_runs, 0);
+        assert_eq!(repository.running_build_runs, 0);
+        assert_eq!(repository.queued_publish_runs, 0);
         assert_eq!(repository.running_publish_runs, 0);
-        assert_eq!(repository.release_queue.len(), 1);
-
-        let release = &repository.release_queue[0];
-        assert_eq!(release.release_run_id, release_run_id);
-        assert_eq!(release.git_tag, "v1.2.3");
-        assert_eq!(release.unity_version.as_deref(), Some("2022.3.20f1"));
-        assert_eq!(release.status, ReleaseStatus::Queued.as_str());
-        assert!(release.planned);
-        assert!(release.build_process_active);
-        assert!(release.publish_process_active);
-        assert_eq!(release.queued_build_runs, 1);
-        assert_eq!(release.running_build_runs, 1);
-        assert_eq!(release.terminal_build_runs, 0);
-        assert_eq!(release.total_build_runs, 2);
-        assert_eq!(release.queued_publish_runs, 1);
-        assert_eq!(release.running_publish_runs, 0);
-        assert_eq!(release.terminal_publish_runs, 0);
-        assert_eq!(release.total_publish_runs, 1);
+        assert_eq!(repository.release_queue.len(), 0);
 
         let build_queue = snapshot
             .queue_messages
@@ -9409,7 +9542,7 @@ mod tests {
             )
             .expect("release queue consumer should succeed"));
         assert_eq!(queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME), 0);
-        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 2);
+        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 1);
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         assert_eq!(build_run_count_for_release(&connection, release_run_id), 2);
@@ -9557,7 +9690,7 @@ mod tests {
             repo.primary_build_target_id,
             repo.secondary_build_target_id,
         );
-        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 2);
+        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 1);
 
         let limits = RuntimeConcurrencySettings {
             max_concurrent_build_runs: 2,
@@ -9580,16 +9713,45 @@ mod tests {
                 Duration::from_millis(400),
                 &limits,
             )
-            .expect("second queued build should claim")
-            .expect("second queued build should exist");
+            .expect("second queued build lookup should succeed");
         let first_job: BuildDispatchJob = serde_json::from_slice(&first_claim.payload)
             .expect("first queue payload should decode as build job");
+        assert_eq!(first_job.build_run_id, first_plan[0].id);
+        assert!(second_claim.is_none());
+
+        coordinator
+            .start_build_run(
+                first_job.build_run_id,
+                StartBuildRunInput {
+                    workspace_path: String::from("/tmp/runs/release-run-1"),
+                    log_path: String::from("/tmp/logs/build-run-1.log"),
+                    artifact_root_path: String::from("/tmp/runs/release-run-1/outputs"),
+                },
+            )
+            .expect("first planned build should start");
+        coordinator
+            .complete_build_run(
+                first_job.build_run_id,
+                CompleteBuildRunInput {
+                    workspace_path: String::new(),
+                    log_path: String::new(),
+                    artifact_root_path: String::new(),
+                },
+            )
+            .expect("first planned build should complete");
+
+        let second_claim = coordinator
+            .claim_next_build_job(
+                "planner-worker-b",
+                Duration::ZERO,
+                Duration::from_millis(400),
+                &limits,
+            )
+            .expect("second queued build should claim after the first terminal build")
+            .expect("second queued build should exist after the first terminal build");
         let second_job: BuildDispatchJob = serde_json::from_slice(&second_claim.payload)
             .expect("second queue payload should decode as build job");
-        assert_eq!(
-            vec![first_job.build_run_id, second_job.build_run_id],
-            vec![first_plan[0].id, first_plan[1].id],
-        );
+        assert_eq!(second_job.build_run_id, first_plan[1].id);
 
         let second_plan = coordinator
             .plan_release_builds(release_run_id)
@@ -9769,7 +9931,7 @@ mod tests {
             runs[1].image_ref.as_deref(),
             Some(crate::DEFAULT_HOST_NATIVE_RUNNER_TYPE)
         );
-        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 2);
+        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 1);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -10844,9 +11006,8 @@ mod tests {
                 Duration::from_millis(40),
                 &limits,
             )
-            .expect("build claim should succeed")
-            .expect("eligible build job should be claimed");
-        assert_eq!(claimed.id, eligible_message_id);
+            .expect("build claim should succeed");
+        assert!(claimed.is_none());
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         assert!(!queue_message_exists(&connection, stale_message_id));
@@ -10860,6 +11021,14 @@ mod tests {
             .expect("blocked queue message should load");
         assert!(blocked_leased_by.is_none());
         assert!(queue_message_exists(&connection, eligible_message_id));
+        let eligible_leased_by: Option<String> = connection
+            .query_row(
+                "SELECT leased_by FROM worker_queue_messages WHERE id = ?",
+                [eligible_message_id],
+                |row| row.get(0),
+            )
+            .expect("eligible queue message should load");
+        assert!(eligible_leased_by.is_none());
         drop(connection);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");

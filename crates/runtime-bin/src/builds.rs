@@ -2,6 +2,8 @@
 //! archive packaging for host-native Unity build runs.
 
 use super::*;
+use runtime_store::lifecycle::ReleaseStatus;
+use std::collections::HashMap;
 
 const BUILD_EXECUTION_REPORT_SCHEMA_VERSION: u32 = 2;
 const BUILD_EXECUTION_CLEANUP_POLICY: &str = "retain-zipped-logs-json-report";
@@ -17,6 +19,8 @@ const BUILD_EXECUTION_RETAINED_DIR_NAME: &str = "retained";
 const BUILD_EXECUTION_WORKSPACE_OUTPUTS_DIR_NAME: &str = "outputs";
 const BUILD_EXECUTION_REPORT_FILE_NAME: &str = "execution-report.json";
 const BUILD_EXECUTION_LOG_ARCHIVE_FILE_NAME: &str = "execution-logs.zip";
+const PROCESS_CHECKOUT_LOG_FILE_NAME: &str = "01-checkout-repository.log";
+const PROCESS_VALIDATION_LOG_FILE_NAME: &str = "02-validate-build-context.log";
 const UNITY_NON_SHIPPABLE_ARCHIVE_PATH_SUFFIXES: &[&str] = &[
     "_DoNotShip",
     "_BackUpThisFolder_ButDontShipItWithYourGame",
@@ -30,7 +34,6 @@ const MIN_QUEUE_LEASE_RENEW_INTERVAL: Duration = Duration::from_millis(20);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BuildProcessStage {
     ValidateContext,
-    CheckoutRepository,
     UnityBuild,
     PackageArtifact,
     RegisterArtifacts,
@@ -40,7 +43,6 @@ impl BuildProcessStage {
     const fn key(self) -> &'static str {
         match self {
             Self::ValidateContext => "validate-build-context",
-            Self::CheckoutRepository => "checkout-repository",
             Self::UnityBuild => "unity-build",
             Self::PackageArtifact => "package-artifact",
             Self::RegisterArtifacts => "register-artifacts",
@@ -50,7 +52,6 @@ impl BuildProcessStage {
     const fn label(self) -> &'static str {
         match self {
             Self::ValidateContext => "Validate Build Context",
-            Self::CheckoutRepository => "Checkout Repository",
             Self::UnityBuild => "Execute Unity Build",
             Self::PackageArtifact => "Package Artifact",
             Self::RegisterArtifacts => "Register Artifacts",
@@ -65,6 +66,8 @@ impl BuildProcessStage {
 #[derive(Debug, Default)]
 struct BuildRunStageSequence {
     ordered_stages: Vec<BuildProcessStage>,
+    process_log_paths: HashMap<String, PathBuf>,
+    next_process_log_index: Option<usize>,
 }
 
 impl BuildRunStageSequence {
@@ -80,6 +83,46 @@ impl BuildRunStageSequence {
         self.ordered_stages.push(stage);
         self.ordered_stages.len()
     }
+
+    fn shared_process_log_path(&mut self, logs_dir: &Path, stem: &str) -> io::Result<PathBuf> {
+        let cache_key = format!("shared:{stem}");
+        if let Some(path) = self.process_log_paths.get(&cache_key) {
+            return Ok(path.clone());
+        }
+
+        let path = match find_existing_process_log_path(logs_dir, stem)? {
+            Some(path) => path,
+            None => self.allocate_process_log_path(logs_dir, stem)?,
+        };
+        self.process_log_paths.insert(cache_key, path.clone());
+        Ok(path)
+    }
+
+    fn unique_process_log_path(
+        &mut self,
+        logs_dir: &Path,
+        cache_key: impl Into<String>,
+        stem: &str,
+    ) -> io::Result<PathBuf> {
+        let cache_key = cache_key.into();
+        if let Some(path) = self.process_log_paths.get(&cache_key) {
+            return Ok(path.clone());
+        }
+
+        let path = self.allocate_process_log_path(logs_dir, stem)?;
+        self.process_log_paths.insert(cache_key, path.clone());
+        Ok(path)
+    }
+
+    fn allocate_process_log_path(&mut self, logs_dir: &Path, stem: &str) -> io::Result<PathBuf> {
+        let next_index = match self.next_process_log_index {
+            Some(index) => index + 1,
+            None => max_process_log_index(logs_dir)? + 1,
+        };
+        self.next_process_log_index = Some(next_index);
+
+        Ok(logs_dir.join(format!("{next_index:02}-{stem}.log")))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,40 +131,80 @@ struct BuildRunStageExecution {
     log_path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PreservedStageLog {
-    path: PathBuf,
-    contents: String,
-}
-
-fn capture_stage_log(path: &Path) -> io::Result<Option<PreservedStageLog>> {
-    match fs::read_to_string(path) {
-        Ok(contents) => Ok(Some(PreservedStageLog {
-            path: path.to_path_buf(),
-            contents,
-        })),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-fn restore_stage_log_if_missing(stage_log: &PreservedStageLog) -> io::Result<()> {
-    if stage_log.path.exists() {
-        return Ok(());
-    }
-
-    if let Some(parent) = stage_log.path.parent() {
+fn append_timestamped_log_message(path: &Path, message: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    fs::write(&stage_log.path, &stage_log.contents)
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(
+        file,
+        "[{}] {}",
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        message,
+    )?;
+    Ok(())
+}
+
+struct ProcessCheckoutLogReporter {
+    log_path: PathBuf,
+}
+
+impl ProcessCheckoutLogReporter {
+    fn new(log_path: PathBuf) -> io::Result<Self> {
+        if let Some(parent) = log_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        Ok(Self { log_path })
+    }
+}
+
+impl ExecutionProgressReporter for ProcessCheckoutLogReporter {
+    fn heartbeat(&mut self, progress: ExecutionProgress) {
+        if let Err(error) = append_timestamped_log_message(&self.log_path, &progress.message) {
+            eprintln!(
+                "runtime process checkout could not append '{}' to '{}': {}",
+                progress.message,
+                self.log_path.display(),
+                error,
+            );
+        }
+    }
+}
+
+fn process_checkout_log_path(workspace_path: &Path) -> PathBuf {
+    workspace_path.join("logs").join(PROCESS_CHECKOUT_LOG_FILE_NAME)
+}
+
+fn process_validation_log_path(workspace_path: &Path) -> PathBuf {
+    workspace_path.join("logs").join(PROCESS_VALIDATION_LOG_FILE_NAME)
+}
+
+fn ensure_release_process_checkout(
+    directories: &runtime_config::RuntimeDirectories,
+    preparation: &WorkspacePreparationInput,
+) -> io::Result<PreparedWorkspace> {
+    let preparer = WorkspacePreparer::new(directories);
+    let planned = preparer.plan(preparation)?;
+    if preparer.is_process_prepared(preparation)? {
+        return Ok(planned);
+    }
+
+    let mut reporter = ProcessCheckoutLogReporter::new(process_checkout_log_path(&planned.root_path))?;
+    preparer.prepare_process_with_reporter(preparation, &mut reporter)
 }
 
 struct BuildRunStageTracker<'a> {
     coordinator: &'a LocalCoordinator,
     build_run_id: i64,
     workspace_path: PathBuf,
+    build_root_path: PathBuf,
     artifact_root_path: PathBuf,
+    unity_log_stem: Option<String>,
     stage_sequence: Rc<RefCell<BuildRunStageSequence>>,
 }
 
@@ -130,41 +213,75 @@ impl<'a> BuildRunStageTracker<'a> {
         coordinator: &'a LocalCoordinator,
         build_run_id: i64,
         workspace_path: impl Into<PathBuf>,
+        build_root_path: impl Into<PathBuf>,
         artifact_root_path: impl Into<PathBuf>,
+        unity_log_stem: Option<String>,
         stage_sequence: Rc<RefCell<BuildRunStageSequence>>,
     ) -> io::Result<Self> {
         let tracker = Self {
             coordinator,
             build_run_id,
             workspace_path: workspace_path.into(),
+            build_root_path: build_root_path.into(),
             artifact_root_path: artifact_root_path.into(),
+            unity_log_stem,
             stage_sequence,
         };
-        fs::create_dir_all(tracker.logs_dir())?;
+        fs::create_dir_all(tracker.process_logs_dir())?;
+        fs::create_dir_all(tracker.build_logs_dir())?;
         Ok(tracker)
     }
 
-    fn logs_dir(&self) -> PathBuf {
+    fn process_logs_dir(&self) -> PathBuf {
         self.workspace_path.join("logs")
     }
 
-    fn stage_log_path(&self, stage: BuildProcessStage) -> PathBuf {
-        self.stage_execution(stage).log_path
+    fn build_logs_dir(&self) -> PathBuf {
+        self.build_root_path.join("logs")
     }
 
-    fn stage_execution(&self, stage: BuildProcessStage) -> BuildRunStageExecution {
-        let execution_index = self.stage_sequence.borrow_mut().execution_index(stage);
+    fn stage_log_path(&self, stage: BuildProcessStage) -> io::Result<PathBuf> {
+        Ok(self.stage_execution(stage)?.log_path)
+    }
 
-        BuildRunStageExecution {
+    fn stage_execution(&self, stage: BuildProcessStage) -> io::Result<BuildRunStageExecution> {
+        let execution_index = self.stage_sequence.borrow_mut().execution_index(stage);
+        let log_path = self.resolve_stage_log_path(stage)?;
+
+        Ok(BuildRunStageExecution {
             position: execution_index as i64,
-            log_path: self
-                .logs_dir()
-                .join(format!("{execution_index:02}-{}.log", stage.key())),
+            log_path,
+        })
+    }
+
+    fn resolve_stage_log_path(&self, stage: BuildProcessStage) -> io::Result<PathBuf> {
+        match stage {
+            BuildProcessStage::ValidateContext => self
+                .stage_sequence
+                .borrow_mut()
+                .shared_process_log_path(&self.process_logs_dir(), stage.key()),
+            BuildProcessStage::UnityBuild => {
+                let unity_log_stem = self
+                    .unity_log_stem
+                    .clone()
+                    .unwrap_or_else(|| String::from("unity-build"));
+                self.stage_sequence.borrow_mut().unique_process_log_path(
+                    &self.process_logs_dir(),
+                    format!("unity-build:{}", self.build_run_id),
+                    &unity_log_stem,
+                )
+            }
+            BuildProcessStage::PackageArtifact => {
+                Ok(self.build_logs_dir().join("package-artifact.log"))
+            }
+            BuildProcessStage::RegisterArtifacts => {
+                Ok(self.build_logs_dir().join("register-artifacts.log"))
+            }
         }
     }
 
     fn start_stage(&self, stage: BuildProcessStage, message: &str) -> io::Result<()> {
-        let execution = self.stage_execution(stage);
+        let execution = self.stage_execution(stage)?;
         self.write_stage_message(stage, &execution.log_path, message)?;
         self.coordinator.start_build_run_stage(
             self.build_run_id,
@@ -183,7 +300,7 @@ impl<'a> BuildRunStageTracker<'a> {
     }
 
     fn heartbeat_stage(&self, stage: BuildProcessStage, message: &str) -> io::Result<()> {
-        let execution = self.stage_execution(stage);
+        let execution = self.stage_execution(stage)?;
         self.write_stage_message(stage, &execution.log_path, message)?;
         self.coordinator.heartbeat_build_run_stage(
             self.build_run_id,
@@ -201,7 +318,7 @@ impl<'a> BuildRunStageTracker<'a> {
     }
 
     fn complete_stage(&self, stage: BuildProcessStage, message: &str) -> io::Result<()> {
-        let execution = self.stage_execution(stage);
+        let execution = self.stage_execution(stage)?;
         self.write_stage_message(stage, &execution.log_path, message)?;
         self.coordinator.complete_build_run_stage(
             self.build_run_id,
@@ -219,7 +336,7 @@ impl<'a> BuildRunStageTracker<'a> {
     }
 
     fn fail_stage(&self, stage: BuildProcessStage, error_message: &str) -> io::Result<()> {
-        let execution = self.stage_execution(stage);
+        let execution = self.stage_execution(stage)?;
         self.write_stage_message(stage, &execution.log_path, error_message)?;
         self.coordinator.fail_build_run_stage(
             self.build_run_id,
@@ -246,21 +363,79 @@ impl<'a> BuildRunStageTracker<'a> {
             return Ok(());
         }
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        append_timestamped_log_message(path, message)
+    }
+}
 
-        let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
-        writeln!(
-            file,
-            "[{}] {}",
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            message,
-        )?;
-        Ok(())
+fn max_process_log_index(logs_dir: &Path) -> io::Result<usize> {
+    if !logs_dir.is_dir() {
+        return Ok(0);
+    }
+
+    let mut max_index = 0_usize;
+    for entry in fs::read_dir(logs_dir)? {
+        let entry = entry?;
+        if !entry.path().is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some((prefix, _)) = name.split_once('-') else {
+            continue;
+        };
+        let Ok(index) = prefix.parse::<usize>() else {
+            continue;
+        };
+        max_index = max_index.max(index);
+    }
+
+    Ok(max_index)
+}
+
+fn find_existing_process_log_path(logs_dir: &Path, stem: &str) -> io::Result<Option<PathBuf>> {
+    if !logs_dir.is_dir() {
+        return Ok(None);
+    }
+
+    let suffix = format!("-{stem}.log");
+    let mut matches = fs::read_dir(logs_dir)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = entry.file_name().to_str().map(str::to_owned)?;
+            if path.is_file() && name.ends_with(&suffix) {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+
+    Ok(matches.into_iter().next())
+}
+
+fn build_unity_log_stem(platform: &str) -> String {
+    let platform = platform
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+
+    if platform.is_empty() {
+        String::from("unity-build")
+    } else {
+        format!("unity-build-{platform}")
     }
 }
 
@@ -590,18 +765,7 @@ pub(crate) fn run_build_run_next_command(
             }
         };
 
-        let stage_sequence = Rc::new(RefCell::new(BuildRunStageSequence::default()));
-        let validation_tracker = BuildRunStageTracker::new(
-            &coordinator,
-            resolved.plan.build_run_id,
-            planned.root_path.clone(),
-            planned.artifact_root_path.clone(),
-            stage_sequence.clone(),
-        )?;
-        let validation_log_path =
-            validation_tracker.stage_log_path(BuildProcessStage::ValidateContext);
-        let mut attempt_roots = vec![planned.root_path.clone()];
-
+        let validation_log_path = process_validation_log_path(&planned.root_path);
         coordinator.start_build_run(
             resolved.plan.build_run_id,
             StartBuildRunInput {
@@ -613,6 +777,29 @@ pub(crate) fn run_build_run_next_command(
         if let Err(error) = emit_build_run_started_event(storage, &event_context) {
             log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STARTED, &error);
         }
+        if let Err(error) = ensure_release_process_checkout(&config.directories, &resolved.preparation)
+        {
+            let record = coordinator.fail_build_run(
+                resolved.plan.build_run_id,
+                FailBuildRunInput {
+                    workspace_path: planned.root_path.display().to_string(),
+                    log_path: process_checkout_log_path(&planned.root_path).display().to_string(),
+                    artifact_root_path: planned.artifact_root_path.display().to_string(),
+                    error_message: error.to_string(),
+                },
+            )?;
+            return Ok(record);
+        }
+        let stage_sequence = Rc::new(RefCell::new(BuildRunStageSequence::default()));
+        let validation_tracker = BuildRunStageTracker::new(
+            &coordinator,
+            resolved.plan.build_run_id,
+            planned.root_path.clone(),
+            planned.build_root_path.clone(),
+            planned.artifact_root_path.clone(),
+            None,
+            stage_sequence.clone(),
+        )?;
         let validation_message = format!(
             "Validating build context for repository '{}' tag '{}' target '{}' ({}) using Unity {}.",
             resolved.plan.repository_name,
@@ -632,8 +819,7 @@ pub(crate) fn run_build_run_next_command(
             &validation_message,
         );
 
-        let (runner_plan, preserved_validation_log) =
-            match resolve_runtime_build_execution_plan(config, &resolved.plan) {
+        let runner_plan = match resolve_runtime_build_execution_plan(config, &resolved.plan) {
             Ok(plan) => {
                 validation_tracker.complete_stage(
                     BuildProcessStage::ValidateContext,
@@ -643,8 +829,7 @@ pub(crate) fn run_build_run_next_command(
                         plan.build_method,
                     ),
                 )?;
-                let preserved_validation_log = capture_stage_log(&validation_log_path)?;
-                (plan, preserved_validation_log)
+                plan
             }
             Err(error) => {
                 validation_tracker.fail_stage(
@@ -660,7 +845,6 @@ pub(crate) fn run_build_run_next_command(
                         error_message: error.to_string(),
                     },
                 )?;
-                run_build_cleanup(&coordinator, record.id, &attempt_roots);
                 return Ok(record);
             }
         };
@@ -677,8 +861,7 @@ pub(crate) fn run_build_run_next_command(
             resolved.plan.build_run_id,
             &event_context,
             stage_sequence,
-            preserved_validation_log,
-            &mut attempt_roots,
+            validation_log_path,
         )
         .map_err(|error| Box::new(error) as Box<dyn Error>)
     })();
@@ -695,6 +878,10 @@ pub(crate) fn run_build_run_next_command(
             return Err(error);
         }
     };
+
+    synchronize_build_execution_report(&coordinator, record.id, None, None)?;
+
+    maybe_run_release_cleanup(&coordinator, record.release_run_id, record.id);
 
     let acknowledged = coordinator.acknowledge_message(message.id, &message.lease_token)?;
     let renewer_result = lease_renewer.finish();
@@ -723,14 +910,13 @@ fn stage_claimed_build_job(
     payload: &[u8],
 ) -> io::Result<BuildRunRecord> {
     let resolved = resolve_claimed_build_context(coordinator, payload)?;
-    let preparer = WorkspacePreparer::new(&config.directories);
-    let planned = preparer.plan(&resolved.preparation)?;
+    let planned = WorkspacePreparer::new(&config.directories).plan(&resolved.preparation)?;
     let event_context = build_run_event_context(coordinator, &resolved.plan);
     let started = coordinator.start_build_run(
         resolved.plan.build_run_id,
         StartBuildRunInput {
             workspace_path: planned.root_path.display().to_string(),
-            log_path: planned.log_path.display().to_string(),
+            log_path: process_validation_log_path(&planned.root_path).display().to_string(),
             artifact_root_path: planned.artifact_root_path.display().to_string(),
         },
     )?;
@@ -738,13 +924,13 @@ fn stage_claimed_build_job(
         log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STARTED, &error);
     }
 
-    match preparer.prepare(&resolved.preparation) {
+    match ensure_release_process_checkout(&config.directories, &resolved.preparation) {
         Ok(_) => Ok(started),
         Err(error) => coordinator.fail_build_run(
             resolved.plan.build_run_id,
             FailBuildRunInput {
                 workspace_path: planned.root_path.display().to_string(),
-                log_path: planned.log_path.display().to_string(),
+                log_path: process_checkout_log_path(&planned.root_path).display().to_string(),
                 artifact_root_path: planned.artifact_root_path.display().to_string(),
                 error_message: error.to_string(),
             },
@@ -782,7 +968,7 @@ fn complete_successful_build_run(
     }
 
     let register_message =
-        "Discovering artifacts, registering them, and dispatching publish work.";
+        "Discovering artifacts and registering them for release-wide publish planning.";
     tracker.start_stage(BuildProcessStage::RegisterArtifacts, register_message)?;
     emit_build_stage_started_event(
         storage,
@@ -790,14 +976,14 @@ fn complete_successful_build_run(
         BuildProcessStage::RegisterArtifacts,
         register_message,
     );
-    register_artifacts_and_dispatch_publish_runs(coordinator, build_run_id, &result.artifact_root_path)
+    register_build_artifacts(coordinator, build_run_id, &result.artifact_root_path)
         .map_err(|error| {
             let _ = tracker.fail_stage(BuildProcessStage::RegisterArtifacts, &error.to_string());
             error
         })?;
     tracker.complete_stage(
         BuildProcessStage::RegisterArtifacts,
-        "Artifacts registered and downstream publish work dispatched.",
+        "Artifacts registered for downstream release-wide publish planning.",
     )?;
 
     coordinator.complete_build_run(
@@ -1322,11 +1508,25 @@ fn synchronize_build_execution_report_for_workspace(
     Ok(())
 }
 
-fn run_build_cleanup(
+fn maybe_run_release_cleanup(
     coordinator: &LocalCoordinator,
+    release_run_id: i64,
     build_run_id: i64,
-    attempt_roots: &[PathBuf],
 ) {
+    let release_run = match coordinator.get_release_run_record(release_run_id) {
+        Ok(release_run) => release_run,
+        Err(error) => {
+            eprintln!(
+                "runtime cleanup could not reload release run {}: {}",
+                release_run_id, error
+            );
+            return;
+        }
+    };
+    if !release_status_is_terminal(&release_run.status) {
+        return;
+    }
+
     let build_run = match coordinator.get_build_run_record(build_run_id) {
         Ok(build_run) => build_run,
         Err(error) => {
@@ -1347,18 +1547,22 @@ fn run_build_cleanup(
         return;
     };
 
-    let mut all_attempt_roots = Vec::new();
-    for attempt_root in attempt_roots {
-        push_attempt_root(&mut all_attempt_roots, attempt_root.clone());
-    }
-    push_attempt_root(&mut all_attempt_roots, final_workspace_path.clone());
+    let all_attempt_roots = discover_release_attempt_roots(&final_workspace_path).unwrap_or_else(
+        |error| {
+            eprintln!(
+                "runtime cleanup could not enumerate release workspace roots for {}: {}",
+                release_run_id, error
+            );
+            vec![final_workspace_path.clone()]
+        },
+    );
 
     let workspace_bytes_before = match total_workspace_size_bytes(&all_attempt_roots) {
         Ok(bytes) => bytes,
         Err(error) => {
             eprintln!(
-                "runtime cleanup could not size build run {} before pruning: {}",
-                build_run_id, error
+                "runtime cleanup could not size release run {} before pruning: {}",
+                release_run_id, error
             );
             0
         }
@@ -1368,13 +1572,14 @@ fn run_build_cleanup(
     if let Err(error) = archive_build_run_logs(&all_attempt_roots, &final_workspace_path) {
         append_cleanup_error(&mut cleanup_error, error.to_string());
     }
-    let removed_attempt_count = match prune_build_run_workspaces(&all_attempt_roots, &final_workspace_path) {
-        Ok(count) => count,
-        Err(error) => {
-            append_cleanup_error(&mut cleanup_error, error.to_string());
-            0
-        }
-    };
+    let removed_attempt_count =
+        match prune_build_run_workspaces(&all_attempt_roots, &final_workspace_path) {
+            Ok(count) => count,
+            Err(error) => {
+                append_cleanup_error(&mut cleanup_error, error.to_string());
+                0
+            }
+        };
 
     let workspace_bytes_after = match total_workspace_size_bytes(&all_attempt_roots) {
         Ok(bytes) => bytes,
@@ -1417,6 +1622,31 @@ fn run_build_cleanup(
             build_run_id, error
         );
     }
+}
+
+fn release_status_is_terminal(status: &str) -> bool {
+    status == ReleaseStatus::Succeeded.as_str()
+        || status == ReleaseStatus::Failed.as_str()
+    || status == ReleaseStatus::Canceled.as_str()
+}
+
+fn discover_release_attempt_roots(workspace_path: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut roots = Vec::new();
+    let builds_root = workspace_path.join("builds");
+
+    if builds_root.is_dir() {
+        let mut entries = fs::read_dir(&builds_root)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                push_attempt_root(&mut roots, path);
+            }
+        }
+    }
+
+    push_attempt_root(&mut roots, workspace_path.to_path_buf());
+    Ok(roots)
 }
 
 pub(crate) fn recover_interrupted_build_attempts(
@@ -1534,7 +1764,26 @@ fn discover_build_run_attempt_roots(
     let mut roots = Vec::new();
     let prefix = format!("build-run-{build_run_id}-attempt-");
 
-    if let Some(parent) = workspace_path.parent() {
+    let builds_root = workspace_path.join("builds");
+    if builds_root.is_dir() {
+        let mut entries = fs::read_dir(&builds_root)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if name.starts_with(&prefix) {
+                push_attempt_root(&mut roots, path);
+            }
+        }
+    }
+
+    if roots.is_empty() {
+        if let Some(parent) = workspace_path.parent() {
         if parent.is_dir() {
             let mut entries = fs::read_dir(parent)?.collect::<Result<Vec<_>, _>>()?;
             entries.sort_by_key(|entry| entry.path());
@@ -1546,8 +1795,9 @@ fn discover_build_run_attempt_roots(
                 let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
                     continue;
                 };
-                if name.starts_with(&prefix) {
-                    push_attempt_root(&mut roots, path);
+                    if name.starts_with(&prefix) {
+                        push_attempt_root(&mut roots, path);
+                    }
                 }
             }
         }
@@ -1572,6 +1822,12 @@ pub(crate) fn synchronize_build_execution_report_from_publish(
             publish_run.id, error
         );
     }
+
+    maybe_run_release_cleanup(
+        coordinator,
+        publish_run.release_run_id,
+        publish_run.build_run_id,
+    );
 }
 
 fn process_build_run_with_retry(
@@ -1584,99 +1840,39 @@ fn process_build_run_with_retry(
     build_run_id: i64,
     event_context: &BuildRunEventContext,
     stage_sequence: Rc<RefCell<BuildRunStageSequence>>,
-    preserved_validation_log: Option<PreservedStageLog>,
-    attempt_roots: &mut Vec<PathBuf>,
+    validation_log_path: PathBuf,
 ) -> io::Result<BuildRunRecord> {
     let current_preparation = preparation.clone();
     let mut retry_available = true;
 
     loop {
         let planned = WorkspacePreparer::new(directories).plan(&current_preparation)?;
-        push_attempt_root(attempt_roots, planned.root_path.clone());
-        let tracker = BuildRunStageTracker::new(
-            coordinator,
-            build_run_id,
-            planned.root_path.clone(),
-            planned.artifact_root_path.clone(),
-            stage_sequence.clone(),
-        )?;
-        let checkout_log_path = tracker.stage_log_path(BuildProcessStage::CheckoutRepository);
-
-        let checkout_message = format!(
-            "Checking out repository '{}' at tag '{}' into '{}'.",
-            current_preparation.repository_url,
-            current_preparation.git_tag,
-            planned.source_path.display(),
-        );
-        tracker.start_stage(BuildProcessStage::CheckoutRepository, &checkout_message)?;
-        emit_build_stage_started_event(
-            storage,
-            event_context,
-            BuildProcessStage::CheckoutRepository,
-            &checkout_message,
-        );
-
-        let mut reporter = BuildStageHeartbeatReporter::new(
-            &tracker,
-            storage,
-            event_context,
-            BuildProcessStage::CheckoutRepository,
-        );
-        let workspace_outcome =
-            processor.prepare_workspace_with_reporter(&current_preparation, &mut reporter);
-        if let Some(stage_log) = preserved_validation_log.as_ref() {
-            if let Err(error) = restore_stage_log_if_missing(stage_log) {
-                eprintln!(
-                    "runtime build run {} could not restore validation stage log at '{}': {}",
-                    build_run_id,
-                    stage_log.path.display(),
-                    error
-                );
-            }
-        }
-        if let Some(error) = reporter.take_error() {
-            tracker.fail_stage(BuildProcessStage::CheckoutRepository, &error.to_string())?;
-            let record = coordinator.fail_build_run(
-                build_run_id,
-                FailBuildRunInput {
-                    workspace_path: planned.root_path.display().to_string(),
-                    log_path: checkout_log_path.display().to_string(),
-                    artifact_root_path: planned.artifact_root_path.display().to_string(),
-                    error_message: error.to_string(),
-                },
-            )?;
-            run_build_cleanup(coordinator, record.id, attempt_roots);
-            return Ok(record);
-        }
-
-        let workspace = match workspace_outcome {
-            Ok(workspace) => {
-                tracker.complete_stage(
-                    BuildProcessStage::CheckoutRepository,
-                    &format!(
-                        "Repository checkout completed at '{}'.",
-                        workspace.source_path.display(),
-                    ),
-                )?;
-                workspace
-            }
+        let workspace = match processor.prepare_build_workspace(&current_preparation) {
+            Ok(workspace) => workspace,
             Err(error) => {
-                tracker.fail_stage(BuildProcessStage::CheckoutRepository, &error.to_string())?;
                 let record = coordinator.fail_build_run(
                     build_run_id,
                     FailBuildRunInput {
                         workspace_path: planned.root_path.display().to_string(),
-                        log_path: checkout_log_path.display().to_string(),
+                        log_path: validation_log_path.display().to_string(),
                         artifact_root_path: planned.artifact_root_path.display().to_string(),
                         error_message: error.to_string(),
                     },
                 )?;
-                run_build_cleanup(coordinator, record.id, attempt_roots);
                 return Ok(record);
             }
         };
+        let tracker = BuildRunStageTracker::new(
+            coordinator,
+            build_run_id,
+            planned.root_path.clone(),
+            planned.build_root_path.clone(),
+            planned.artifact_root_path.clone(),
+            Some(build_unity_log_stem(&runner_plan.platform)),
+            stage_sequence.clone(),
+        )?;
 
-        let unity_log_path = tracker.stage_log_path(BuildProcessStage::UnityBuild);
+        let unity_log_path = tracker.stage_log_path(BuildProcessStage::UnityBuild)?;
         let mut workspace = workspace;
         workspace.log_path = unity_log_path.clone();
 
@@ -1711,7 +1907,6 @@ fn process_build_run_with_retry(
                     error_message: error.to_string(),
                 },
             )?;
-            run_build_cleanup(coordinator, record.id, attempt_roots);
             return Ok(record);
         }
 
@@ -1733,7 +1928,6 @@ fn process_build_run_with_retry(
                         &result,
                         &error,
                     )?;
-                    run_build_cleanup(coordinator, record.id, attempt_roots);
                     return Ok(record);
                 }
                 None => {
@@ -1764,7 +1958,6 @@ fn process_build_run_with_retry(
                             },
                         )
                     })?;
-                    run_build_cleanup(coordinator, record.id, attempt_roots);
                     return Ok(record);
                 }
             },
@@ -1787,7 +1980,6 @@ fn process_build_run_with_retry(
                         error_message: error.to_string(),
                     },
                 )?;
-                run_build_cleanup(coordinator, record.id, attempt_roots);
                 return Ok(record);
             }
         }
@@ -1807,7 +1999,7 @@ fn should_retry_in_fresh_workspace(log_path: &Path) -> io::Result<bool> {
         && (normalized.contains("eperm") || normalized.contains("operation not permitted")))
 }
 
-fn register_artifacts_and_dispatch_publish_runs(
+fn register_build_artifacts(
     coordinator: &LocalCoordinator,
     build_run_id: i64,
     artifact_root_path: &Path,
@@ -1824,22 +2016,6 @@ fn register_artifacts_and_dispatch_publish_runs(
         })
         .collect::<Vec<_>>();
     coordinator.replace_build_artifacts(build_run_id, inputs)?;
-
-    for run in coordinator.plan_build_publish_runs(build_run_id)? {
-        if run.status != PublishStatus::Queued.as_str() {
-            continue;
-        }
-
-        match coordinator.dispatch_publish_run(run.id)? {
-            QueueDispatchOutcome::Enqueued | QueueDispatchOutcome::AlreadyClaimed => {}
-            QueueDispatchOutcome::InProgress => {
-                return Err(io::Error::new(
-                    ErrorKind::WouldBlock,
-                    format!("publish run {} dispatch is already in progress", run.id),
-                ));
-            }
-        }
-    }
 
     Ok(())
 }
@@ -1862,6 +2038,7 @@ fn resolve_claimed_build_context(
     Ok(ResolvedBuildContext {
         preparation: WorkspacePreparationInput {
             build_run_id: plan.build_run_id,
+            release_run_id: plan.release_run_id,
             attempt_token: String::new(),
             repository_name: plan.repository_name.clone(),
             repository_url: plan.repository_url.clone(),
