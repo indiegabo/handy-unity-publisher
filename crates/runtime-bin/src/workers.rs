@@ -265,11 +265,23 @@ fn poll_repository(
         repository_url: repository.repo_url.clone(),
         auth: git_auth,
     })?;
-    let (selected_tags, status, ok) = select_queued_repository_tags(
-        &tags,
-        repository.last_seen_tag.as_deref(),
-        repository.has_release_history,
-    );
+    if !repository.has_release_history
+        && repository
+            .last_seen_tag
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+    {
+        return baseline_latest_repository_tag_without_process_history(
+            coordinator,
+            repository,
+            &tags,
+        );
+    }
+
+    let (selected_tags, status, ok) =
+        select_queued_repository_tags(&tags, repository.last_seen_tag.as_deref());
     if !ok {
         return Ok(RepositoryPollResult {
             repository_id: repository.id,
@@ -352,6 +364,52 @@ fn poll_repository(
         last_seen_tag_after,
         discovered_tags,
         queued_release_ids,
+    })
+}
+
+fn baseline_latest_repository_tag_without_process_history(
+    coordinator: &LocalCoordinator,
+    repository: &PollingRepositoryRecord,
+    tags: &[GitTag],
+) -> io::Result<RepositoryPollResult> {
+    let Some(latest_tag) = tags.last().cloned() else {
+        return Ok(RepositoryPollResult {
+            repository_id: repository.id,
+            repository_name: repository.name.clone(),
+            status: POLL_STATUS_NO_TAGS.to_owned(),
+            error: None,
+            last_seen_tag_before: repository.last_seen_tag.clone(),
+            last_seen_tag_after: repository.last_seen_tag.clone(),
+            discovered_tags: Vec::new(),
+            queued_release_ids: Vec::new(),
+        });
+    };
+
+    let normalized_last_seen = repository.last_seen_tag.as_deref().unwrap_or_default().trim();
+    if normalized_last_seen == latest_tag.name {
+        return Ok(RepositoryPollResult {
+            repository_id: repository.id,
+            repository_name: repository.name.clone(),
+            status: POLL_STATUS_UNCHANGED.to_owned(),
+            error: None,
+            last_seen_tag_before: repository.last_seen_tag.clone(),
+            last_seen_tag_after: repository.last_seen_tag.clone(),
+            discovered_tags: Vec::new(),
+            queued_release_ids: Vec::new(),
+        });
+    }
+
+    coordinator.update_repository_last_seen_tag(repository.id, &latest_tag.name)?;
+
+    Ok(RepositoryPollResult {
+        repository_id: repository.id,
+        repository_name: repository.name.clone(),
+        status: POLL_STATUS_ALREADY_SEEN.to_owned(),
+        error: None,
+        last_seen_tag_before: repository.last_seen_tag.clone(),
+        last_seen_tag_after: Some(latest_tag.name.clone()),
+        discovered_tags: vec![latest_tag],
+        queued_release_ids: Vec::new(),
     })
 }
 
@@ -657,7 +715,6 @@ pub(crate) fn read_checked_out_head_commit(source_path: &Path) -> io::Result<Str
 pub(crate) fn select_queued_repository_tags(
     tags: &[GitTag],
     last_seen_tag: Option<&str>,
-    has_release_history: bool,
 ) -> (Vec<GitTag>, &'static str, bool) {
     if tags.is_empty() {
         return (Vec::new(), POLL_STATUS_NO_TAGS, false);
@@ -665,10 +722,6 @@ pub(crate) fn select_queued_repository_tags(
 
     let normalized_last_seen = last_seen_tag.unwrap_or_default().trim();
     if normalized_last_seen.is_empty() {
-        if !has_release_history {
-            return (vec![tags[tags.len() - 1].clone()], "", true);
-        }
-
         return (tags.to_vec(), "", true);
     }
 

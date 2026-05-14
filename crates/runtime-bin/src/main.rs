@@ -2730,8 +2730,7 @@ mod tests {
             },
         ];
 
-        let (selected, status, ok) =
-            select_queued_repository_tags(&tags, Some("v0.9.0"), true);
+        let (selected, status, ok) = select_queued_repository_tags(&tags, Some("v0.9.0"));
 
         assert!(ok);
         assert_eq!(status, "");
@@ -2740,7 +2739,7 @@ mod tests {
     }
 
     #[test]
-    fn select_queued_repository_tags_only_keeps_latest_for_initial_repository_without_history() {
+    fn select_queued_repository_tags_returns_all_tags_when_history_exists_without_baseline() {
         let tags = vec![
             GitTag {
                 name: String::from("v1.0.0"),
@@ -2756,13 +2755,14 @@ mod tests {
             },
         ];
 
-        let (selected, status, ok) =
-            select_queued_repository_tags(&tags, None, false);
+        let (selected, status, ok) = select_queued_repository_tags(&tags, None);
 
         assert!(ok);
         assert_eq!(status, "");
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].name, "v1.2.0");
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected[0].name, "v1.0.0");
+        assert_eq!(selected[1].name, "v1.1.0");
+        assert_eq!(selected[2].name, "v1.2.0");
     }
 
     #[test]
@@ -2852,7 +2852,7 @@ mod tests {
     }
 
     #[test]
-    fn automation_poll_once_command_queues_only_latest_tag_for_repository_without_process_history() {
+    fn automation_poll_once_command_registers_latest_baseline_for_repository_without_process_history() {
         let root = test_root("runtime-bin-automation-poll-once-initial-latest-only");
         let directories = RuntimeDirectories::from_root(&root);
         let storage = StorageLayout::from_directories(&directories);
@@ -2881,10 +2881,10 @@ mod tests {
         assert_eq!(report.repositories.len(), 1);
         let repository = &report.repositories[0];
         assert_eq!(repository.repository_id, repository_id);
-        assert_eq!(repository.status, "queued");
+        assert_eq!(repository.status, "already_seen");
         assert_eq!(repository.last_seen_tag_before, None);
         assert_eq!(repository.last_seen_tag_after.as_deref(), Some("v1.2.0"));
-        assert_eq!(repository.queued_release_ids.len(), 1);
+        assert_eq!(repository.queued_release_ids.len(), 0);
         assert_eq!(repository.discovered_tags.len(), 1);
         assert_eq!(repository.discovered_tags[0].name, "v1.2.0");
 
@@ -2895,9 +2895,66 @@ mod tests {
         );
         assert_eq!(
             release_tags_for_repository(&connection, repository_id),
-            vec![String::from("v1.2.0")]
+            Vec::<String>::new()
         );
-        assert_eq!(queue_message_count(&connection, "release-runs"), 1);
+        assert_eq!(queue_message_count(&connection, "release-runs"), 0);
+        drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn automation_poll_once_command_preserves_latest_baseline_without_process_history() {
+        let root = test_root("runtime-bin-automation-poll-once-reset-baseline");
+        let directories = RuntimeDirectories::from_root(&root);
+        let storage = StorageLayout::from_directories(&directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let repository_url = create_unity_repository_with_tags(
+            &root.join("runtime-bin-automation-poll-once-reset-baseline-source"),
+            "2021.3.33f1",
+            &["v1.0.0", "v1.1.0", "v1.2.0"],
+        );
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let repository_id = seed_repository_with_url(
+            &connection,
+            "runtime-bin-automation-poll-once-reset-baseline",
+            &repository_url,
+        );
+        seed_build_target(&connection, repository_id, "windows-player", "windows");
+        connection
+            .execute(
+                "UPDATE repositories SET last_seen_tag = ? WHERE id = ?",
+                params!["v1.2.0", repository_id],
+            )
+            .expect("repository baseline should update");
+        drop(connection);
+
+        let output = run_automation_poll_once_command(&[], &storage)
+            .expect("automation poll-once command should succeed");
+        let report: AutomationPollReport =
+            serde_json::from_str(&output).expect("poll output should decode");
+
+        assert_eq!(report.repositories.len(), 1);
+        let repository = &report.repositories[0];
+        assert_eq!(repository.repository_id, repository_id);
+        assert_eq!(repository.status, "unchanged");
+        assert_eq!(repository.last_seen_tag_before.as_deref(), Some("v1.2.0"));
+        assert_eq!(repository.last_seen_tag_after.as_deref(), Some("v1.2.0"));
+        assert_eq!(repository.queued_release_ids.len(), 0);
+        assert!(repository.discovered_tags.is_empty());
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        assert_eq!(
+            load_repository_last_seen_tag(&connection, repository_id).as_deref(),
+            Some("v1.2.0")
+        );
+        assert_eq!(
+            release_tags_for_repository(&connection, repository_id),
+            Vec::<String>::new()
+        );
+        assert_eq!(queue_message_count(&connection, "release-runs"), 0);
         drop(connection);
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
@@ -3048,7 +3105,7 @@ mod tests {
     }
 
     #[test]
-    fn automation_poll_once_command_queues_unseen_tags_and_updates_baseline() {
+    fn automation_poll_once_command_queues_newer_tags_after_stale_baseline_without_process_history() {
         let root = test_root("runtime-bin-automation-poll-once-queue");
         let directories = RuntimeDirectories::from_root(&root);
         let storage = StorageLayout::from_directories(&directories);
