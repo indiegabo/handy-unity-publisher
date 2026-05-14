@@ -1,5 +1,6 @@
 import { Badge } from "./Surface";
-import { Icon, type IconName } from "./Icon";
+import type { IconName } from "./Icon";
+import { IconButton } from "./Button";
 import { VerticalAccordion } from "./VerticalAccordion";
 
 export type ProcessFeedRecord = {
@@ -35,51 +36,51 @@ export type ProcessFeedRecord = {
 
 type ProcessFeedItemProps = {
   process: ProcessFeedRecord;
+  onOpenDetail: (process: ProcessFeedRecord) => void;
 };
 
-export function ProcessFeedItem({ process }: ProcessFeedItemProps) {
+export function ProcessFeedItem({
+  process,
+  onOpenDetail,
+}: ProcessFeedItemProps) {
   const normalizedStatus = normalizeDisplayStatus(process.display_status);
   const currentStep = resolveCurrentStepLabel(process, normalizedStatus);
-  const showStatusIcon = shouldShowStatusIcon(normalizedStatus);
 
   return (
     <article>
       <VerticalAccordion
         animatedBorder={normalizedStatus === "running"}
         bodyClassName="process-item__accordion-body"
-        className={joinClassNames("process-item", `process-item--${normalizedStatus}`)}
+        className={joinClassNames(
+          "process-item",
+          `process-item--${normalizedStatus}`,
+        )}
         collapsedToggleLabel={`Expand process #${process.release_run_id}`}
         expandedToggleLabel={`Collapse process #${process.release_run_id}`}
         header={
-          <div
-            className={joinClassNames(
-              "process-item__summary",
-              !showStatusIcon && "process-item__summary--without-status",
-            )}
-          >
-            <h3 className="process-item__title">
-              <span className="process-item__index">#{process.release_run_id}</span>
-              <span className="process-item__project-name">{process.repository_name}</span>
-            </h3>
-
-            {showStatusIcon ? (
-              <div className="process-item__status">
-                <span
-                  className={joinClassNames(
-                    "process-status-icon",
-                    `process-status-icon--${normalizedStatus}`,
-                  )}
-                  aria-label={formatStatusLabel(normalizedStatus)}
-                  title={formatStatusLabel(normalizedStatus)}
-                >
-                  <Icon
-                    className="process-status-icon__glyph"
-                    name={resolveStatusIcon(normalizedStatus)}
-                    size={16}
-                  />
+          <div className="process-item__summary">
+            <div className="process-item__summary-main">
+              <h3 className="process-item__title">
+                <span className="process-item__index">
+                  #{process.release_run_id}
                 </span>
-              </div>
-            ) : null}
+                <span className="process-item__project-name">
+                  {process.repository_name}
+                </span>
+              </h3>
+
+              <IconButton
+                className={joinClassNames(
+                  "process-status-trigger",
+                  `process-status-trigger--${normalizedStatus}`,
+                )}
+                icon={resolveStatusIcon(normalizedStatus)}
+                label={`Abrir detalhe do processo #${process.release_run_id}`}
+                onClick={() => onOpenDetail(process)}
+                size="sm"
+                variant="ghost"
+              />
+            </div>
           </div>
         }
         triggerMode="button"
@@ -147,27 +148,17 @@ function formatBuildCount(totalBuildRuns: number) {
 
 function resolveStatusIcon(status: string): IconName {
   switch (status) {
+    case "queued":
+      return "box";
+    case "running":
+      return "play";
     case "succeeded":
       return "checkCircle";
     case "failed":
     case "canceled":
       return "alertCircle";
     default:
-      return "refresh";
-  }
-}
-
-function formatStatusLabel(status: string) {
-  switch (status) {
-    case "queued":
-      return "Queued";
-    case "succeeded":
-      return "Success";
-    case "failed":
-    case "canceled":
-      return "Error";
-    default:
-      return "Processing";
+      return "box";
   }
 }
 
@@ -182,10 +173,6 @@ function normalizeDisplayStatus(status: string) {
     default:
       return "queued";
   }
-}
-
-function shouldShowStatusIcon(status: string) {
-  return status === "succeeded" || status === "failed" || status === "canceled";
 }
 
 function joinClassNames(...tokens: Array<string | false | null | undefined>) {

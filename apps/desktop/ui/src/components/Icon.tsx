@@ -2,6 +2,7 @@ import type { SVGProps } from "react";
 
 export type IconName =
   | "alertCircle"
+  | "arrowLeft"
   | "arrowUpRight"
   | "box"
   | "checkCircle"
@@ -60,6 +61,13 @@ function renderIcon(name: IconName) {
           <circle cx="12" cy="12" r="8.5" />
           <path d="M12 8v5" />
           <path d="M12 16.5h.01" />
+        </>
+      );
+    case "arrowLeft":
+      return (
+        <>
+          <path d="M18 12H6" />
+          <path d="M10.5 7.5L6 12l4.5 4.5" />
         </>
       );
     case "arrowUpRight":

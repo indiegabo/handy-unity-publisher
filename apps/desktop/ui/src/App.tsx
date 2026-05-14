@@ -12,6 +12,8 @@ import {
   ProcessFeedItem,
   type ProcessFeedRecord,
 } from "./components/ProcessFeedItem";
+import { CreateProjectWizard } from "./components/CreateProjectWizard";
+import { RepositoryProjectDetail } from "./components/RepositoryProjectDetail";
 import {
   subscribeToProcessFeedEvents,
   type ProcessFeedRuntimeEvent,
@@ -33,6 +35,12 @@ type ProcessFeedInput = {
   page_size: number;
 };
 
+type AppScreen =
+  | { kind: "main" }
+  | { kind: "create-project" }
+  | { kind: "project-detail"; repositoryId: number }
+  | { kind: "process-detail"; processId: number };
+
 const PROCESS_FEED_PAGE_SIZE = 5;
 const EMPTY_PROCESS_FEED_PAGE: ProcessFeedPage = {
   generated_at: "",
@@ -47,6 +55,9 @@ const EMPTY_PROCESS_FEED_PAGE: ProcessFeedPage = {
 
 function App() {
   const [page, setPage] = useState(1);
+  const [activeScreen, setActiveScreen] = useState<AppScreen>({ kind: "main" });
+  const [isScreenBlank, setIsScreenBlank] = useState(false);
+  const [transitionError, setTransitionError] = useState<string | null>(null);
   const [processPage, setProcessPage] = useState<ProcessFeedPage>(
     EMPTY_PROCESS_FEED_PAGE,
   );
@@ -54,6 +65,7 @@ function App() {
   const [, setIsRefreshingFeed] = useState(false);
   const [feedError, setFeedError] = useState<string | null>(null);
   const latestRequestIdRef = useRef(0);
+  const isNavigatingRef = useRef(false);
 
   const loadProcessFeed = useEffectEvent(
     async (pageToLoad: number, reason: "page" | "event") => {
@@ -149,91 +161,219 @@ function App() {
     };
   }, []);
 
+  const transitionToScreen = useEffectEvent(async (nextScreen: AppScreen) => {
+    if (isNavigatingRef.current) {
+      return;
+    }
+
+    isNavigatingRef.current = true;
+    setTransitionError(null);
+    setIsScreenBlank(true);
+
+    try {
+      await waitForBlankPaint();
+      await invoke("transition_window_focus", {
+        target: nextScreen.kind === "main" ? "main" : "focus",
+      });
+
+      startTransition(() => {
+        setActiveScreen(nextScreen);
+        setIsScreenBlank(false);
+      });
+    } catch (error) {
+      startTransition(() => {
+        setTransitionError(buildWindowTransitionErrorMessage(error));
+        setIsScreenBlank(false);
+      });
+    } finally {
+      isNavigatingRef.current = false;
+    }
+  });
+
+  const handleOpenProcessDetail = useEffectEvent(
+    (process: ProcessFeedRecord) => {
+      void transitionToScreen({
+        kind: "process-detail",
+        processId: process.release_run_id,
+      });
+    },
+  );
+
+  const handleReturnToMain = useEffectEvent(() => {
+    void transitionToScreen({ kind: "main" });
+  });
+
+  const handleOpenCreateProject = useEffectEvent(() => {
+    void transitionToScreen({ kind: "create-project" });
+  });
+
+  const handleProjectCreated = useEffectEvent((repositoryId: number) => {
+    startTransition(() => {
+      setActiveScreen({
+        kind: "project-detail",
+        repositoryId,
+      });
+    });
+  });
+
   return (
     <main className="app-shell">
-      <div className="home-frame">
-        <section className="action-bar" aria-label="Primary actions">
-          <div className="action-bar__actions">
-            <IconButton
-              icon="layout"
-              label="Projetos"
-              size="sm"
-              variant="secondary"
-            />
-            <IconButton
-              icon="plus"
-              label="Criar novo projeto"
-              size="sm"
-              variant="primary"
-            />
-          </div>
-        </section>
+      {isScreenBlank ? null : activeScreen.kind === "main" ? (
+        <div className="home-frame">
+          <section className="action-bar" aria-label="Primary actions">
+            <div className="action-bar__actions">
+              <IconButton
+                icon="layout"
+                label="Projetos"
+                size="sm"
+                variant="secondary"
+              />
+              <IconButton
+                icon="plus"
+                label="Criar novo projeto"
+                onClick={handleOpenCreateProject}
+                size="sm"
+                variant="primary"
+              />
+            </div>
+          </section>
 
-        <section className="process-feed-shell" aria-label="Process list">
-          {feedError ? (
-            <p className="feed-banner feed-banner--error">{feedError}</p>
-          ) : null}
-
-          {isLoadingFeed && processPage.items.length === 0 ? (
-            <div className="feed-state">
-              <p className="feed-state__title">Loading process feed...</p>
-              <p className="feed-state__copy">
-                The shell is querying the runtime for recent build and publishing activity.
+          <section className="process-feed-shell" aria-label="Process list">
+            {transitionError ? (
+              <p className="feed-banner feed-banner--error">
+                {transitionError}
               </p>
-            </div>
-          ) : null}
+            ) : null}
 
-          {!isLoadingFeed && processPage.items.length === 0 ? (
-            <div className="feed-state">
-              <p className="feed-state__title">No processes recorded yet.</p>
-              <p className="feed-state__copy">
-                New build or publishing runs will appear here as soon as the runtime creates them.
-              </p>
-            </div>
-          ) : null}
+            {feedError ? (
+              <p className="feed-banner feed-banner--error">{feedError}</p>
+            ) : null}
 
-          {processPage.items.length > 0 ? (
-            <div className="process-list" aria-live="polite">
-              {processPage.items.map((process) => (
-                <ProcessFeedItem key={process.release_run_id} process={process} />
-              ))}
-            </div>
-          ) : null}
-
-          {processPage.total_pages > 1 ? (
-            <footer className="pagination-bar">
-              <div className="pagination-bar__actions">
-                <Button
-                  disabled={!processPage.has_previous_page || isLoadingFeed}
-                  onClick={() =>
-                    startTransition(() => {
-                      setPage(processPage.page - 1);
-                    })
-                  }
-                  size="sm"
-                  variant="ghost"
-                >
-                  Previous
-                </Button>
-                <Button
-                  disabled={!processPage.has_next_page || isLoadingFeed}
-                  onClick={() =>
-                    startTransition(() => {
-                      setPage(processPage.page + 1);
-                    })
-                  }
-                  size="sm"
-                  variant="secondary"
-                >
-                  Next
-                </Button>
+            {isLoadingFeed && processPage.items.length === 0 ? (
+              <div className="feed-state">
+                <p className="feed-state__title">Loading process feed...</p>
+                <p className="feed-state__copy">
+                  The shell is querying the runtime for recent build and
+                  publishing activity.
+                </p>
               </div>
-            </footer>
-          ) : null}
-        </section>
-      </div>
+            ) : null}
+
+            {!isLoadingFeed && processPage.items.length === 0 ? (
+              <div className="feed-state">
+                <p className="feed-state__title">No processes recorded yet.</p>
+                <p className="feed-state__copy">
+                  New build or publishing runs will appear here as soon as the
+                  runtime creates them.
+                </p>
+              </div>
+            ) : null}
+
+            {processPage.items.length > 0 ? (
+              <div className="process-list" aria-live="polite">
+                {processPage.items.map((process) => (
+                  <ProcessFeedItem
+                    key={process.release_run_id}
+                    onOpenDetail={handleOpenProcessDetail}
+                    process={process}
+                  />
+                ))}
+              </div>
+            ) : null}
+
+            {processPage.total_pages > 1 ? (
+              <footer className="pagination-bar">
+                <div className="pagination-bar__actions">
+                  <Button
+                    disabled={!processPage.has_previous_page || isLoadingFeed}
+                    onClick={() =>
+                      startTransition(() => {
+                        setPage(processPage.page - 1);
+                      })
+                    }
+                    size="sm"
+                    variant="ghost"
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    disabled={!processPage.has_next_page || isLoadingFeed}
+                    onClick={() =>
+                      startTransition(() => {
+                        setPage(processPage.page + 1);
+                      })
+                    }
+                    size="sm"
+                    variant="secondary"
+                  >
+                    Next
+                  </Button>
+                </div>
+              </footer>
+            ) : null}
+          </section>
+        </div>
+      ) : (
+        <div className="focus-frame">
+          <section
+            className="action-bar action-bar--focus"
+            aria-label="Process detail actions"
+          >
+            <div className="action-bar__actions action-bar__actions--leading">
+              <IconButton
+                icon="arrowLeft"
+                label="Voltar para a tela principal"
+                onClick={handleReturnToMain}
+                size="sm"
+                variant="ghost"
+              />
+            </div>
+          </section>
+
+          <section
+            className={
+              activeScreen.kind === "create-project"
+                ? "focus-screen-shell focus-screen-shell--wizard"
+                : "focus-screen-shell"
+            }
+            aria-label="Focus screen"
+          >
+            {transitionError ? (
+              <p className="feed-banner feed-banner--error">
+                {transitionError}
+              </p>
+            ) : null}
+
+            {activeScreen.kind === "create-project" ? (
+              <CreateProjectWizard onCreated={handleProjectCreated} />
+            ) : null}
+
+            {activeScreen.kind === "project-detail" ? (
+              <RepositoryProjectDetail
+                repositoryId={activeScreen.repositoryId}
+              />
+            ) : null}
+
+            {activeScreen.kind === "process-detail" ? (
+              <p className="focus-screen-shell__title">
+                {`Detalhe do processo #${activeScreen.processId}`}
+              </p>
+            ) : null}
+          </section>
+        </div>
+      )}
     </main>
   );
+}
+
+async function waitForBlankPaint() {
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        resolve();
+      });
+    });
+  });
 }
 
 function buildInvokeErrorMessage(error: unknown): string {
@@ -258,6 +398,18 @@ function buildEventSubscriptionErrorMessage(error: unknown): string {
   }
 
   return "The desktop shell could not subscribe to runtime events.";
+}
+
+function buildWindowTransitionErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  if (typeof error === "string" && error.trim()) {
+    return error.trim();
+  }
+
+  return "The desktop shell could not transition the current window.";
 }
 
 export default App;

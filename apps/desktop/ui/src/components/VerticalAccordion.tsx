@@ -20,6 +20,8 @@ type VerticalAccordionProps = {
   expandedToggleLabel?: string;
   header: ReactNode;
   headerClassName?: string;
+  onOpenChange?: (nextOpen: boolean) => void;
+  open?: boolean;
   triggerMode?: AccordionTriggerMode;
 };
 
@@ -33,14 +35,25 @@ export function VerticalAccordion({
   expandedToggleLabel = "Collapse section",
   header,
   headerClassName,
+  onOpenChange,
+  open,
   triggerMode = "both",
 }: VerticalAccordionProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
+  const [uncontrolledIsOpen, setUncontrolledIsOpen] = useState(defaultOpen);
   const bodyId = useId();
-  const headerIsInteractive = triggerMode === "both" || triggerMode === "header";
+  const headerIsInteractive =
+    triggerMode === "both" || triggerMode === "header";
+  const isControlled = open !== undefined;
+  const isOpen = isControlled ? open : uncontrolledIsOpen;
 
   const toggle = () => {
-    setIsOpen((current) => !current);
+    const nextOpen = !isOpen;
+
+    if (!isControlled) {
+      setUncontrolledIsOpen(nextOpen);
+    }
+
+    onOpenChange?.(nextOpen);
   };
 
   const handleHeaderClick = () => {
