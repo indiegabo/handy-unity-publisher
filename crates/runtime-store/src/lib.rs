@@ -1026,6 +1026,84 @@ impl LocalCoordinator {
         Ok(())
     }
 
+    /// Updates the core configuration stored for one managed repository
+    /// project while preserving credentials and build target registrations.
+    pub fn update_repository_project(
+        &self,
+        input: UpdateRepositoryProjectInput,
+    ) -> io::Result<()> {
+        let normalized = normalize_update_repository_project_input(input)?;
+        let mut connection = open_connection(&self.database_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+
+        let source_mode = transaction
+            .query_row(
+                "SELECT source_mode FROM repositories WHERE id = ?",
+                [normalized.repository_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sqlite_error)?;
+
+        let Some(source_mode) = source_mode else {
+            return Err(not_found_error(format!(
+                "repository {} was not found",
+                normalized.repository_id
+            )));
+        };
+
+        if source_mode != "managed_repository" {
+            return Err(invalid_input_error(format!(
+                "repository {} is not a managed repository project",
+                normalized.repository_id
+            )));
+        }
+
+        reject_duplicate_repository_project_name_for_update(
+            &transaction,
+            normalized.repository_id,
+            &normalized.name,
+        )?;
+        reject_duplicate_repository_project_url_for_update(
+            &transaction,
+            normalized.repository_id,
+            &normalized.repo_url,
+        )?;
+
+        transaction
+            .execute(
+                "
+                UPDATE repositories
+                SET name = ?,
+                    repo_url = ?,
+                    default_branch = ?,
+                    artifacts_root_override = ?,
+                    workspace_root_override = ?,
+                    polling_interval_seconds = ?,
+                    enabled = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                ",
+                params![
+                    normalized.name,
+                    normalized.repo_url,
+                    normalized.default_branch,
+                    normalized.artifacts_root_override,
+                    normalized.workspace_root_override,
+                    normalized.polling_interval_seconds,
+                    normalized.enabled,
+                    normalized.repository_id,
+                ],
+            )
+            .map_err(sqlite_error)?;
+
+        transaction.commit().map_err(sqlite_error)?;
+
+        Ok(())
+    }
+
     /// Updates the credentials binding stored for one publish target row.
     pub fn update_publish_target_credentials_binding(
         &self,
@@ -1069,8 +1147,11 @@ impl LocalCoordinator {
                        r.enabled,
                        r.polling_interval_seconds,
                        r.last_seen_tag,
-                      COUNT(bt.id) AS enabled_build_target_count,
-                      EXISTS(
+                       r.default_branch,
+                       r.artifacts_root_override,
+                       r.workspace_root_override,
+                       COUNT(bt.id) AS enabled_build_target_count,
+                       EXISTS(
                           SELECT 1
                           FROM release_runs rr
                           WHERE rr.repository_id = r.id
@@ -1081,7 +1162,9 @@ impl LocalCoordinator {
                  AND bt.enabled = 1
                                 WHERE r.source_mode = 'managed_repository'
                 GROUP BY r.id, r.name, r.repo_url, r.credentials_id, r.enabled,
-                         r.polling_interval_seconds, r.last_seen_tag
+                                                 r.polling_interval_seconds, r.last_seen_tag,
+                                                 r.default_branch, r.artifacts_root_override,
+                                                 r.workspace_root_override
                 ORDER BY r.id ASC
                 ",
             )
@@ -1096,8 +1179,11 @@ impl LocalCoordinator {
                     enabled: row.get::<_, i64>(4)? != 0,
                     polling_interval_seconds: row.get(5)?,
                     last_seen_tag: normalize_optional_string(row.get(6)?),
-                    enabled_build_target_count: row.get(7)?,
-                    has_release_history: row.get::<_, i64>(8)? != 0,
+                    default_branch: normalize_optional_string(row.get(7)?),
+                    artifacts_root_override: normalize_optional_string(row.get(8)?),
+                    workspace_root_override: normalize_optional_string(row.get(9)?),
+                    enabled_build_target_count: row.get(10)?,
+                    has_release_history: row.get::<_, i64>(11)? != 0,
                 })
             })
             .map_err(sqlite_error)?;
@@ -7299,6 +7385,34 @@ fn normalize_create_repository_project_input(
     })
 }
 
+fn normalize_update_repository_project_input(
+    input: UpdateRepositoryProjectInput,
+) -> io::Result<UpdateRepositoryProjectInput> {
+    require_positive_identifier(input.repository_id, "repository id")?;
+
+    let name = require_non_empty(&input.name, "repository project name")?;
+    let repo_url = require_non_empty(&input.repo_url, "repository project repo_url")?;
+    let default_branch = normalize_optional_input_string(input.default_branch);
+    let artifacts_root_override = normalize_optional_input_string(input.artifacts_root_override);
+    let workspace_root_override = normalize_optional_input_string(input.workspace_root_override);
+    if input.polling_interval_seconds <= 0 {
+        return Err(invalid_input_error(
+            "repository project polling_interval_seconds must be greater than zero",
+        ));
+    }
+
+    Ok(UpdateRepositoryProjectInput {
+        repository_id: input.repository_id,
+        name,
+        repo_url,
+        default_branch,
+        artifacts_root_override,
+        workspace_root_override,
+        polling_interval_seconds: input.polling_interval_seconds,
+        enabled: input.enabled,
+    })
+}
+
 fn normalize_create_repository_project_credentials_input(
     input: CreateRepositoryProjectCredentialInput,
 ) -> io::Result<CreateRepositoryProjectCredentialInput> {
@@ -7387,6 +7501,28 @@ fn reject_duplicate_repository_project_name(
     Ok(())
 }
 
+fn reject_duplicate_repository_project_name_for_update(
+    transaction: &Transaction<'_>,
+    repository_id: i64,
+    repository_name: &str,
+) -> io::Result<()> {
+    let exists: i64 = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM repositories WHERE name = ? AND id <> ?)",
+            params![repository_name, repository_id],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    if exists != 0 {
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!("repository project {:?} already exists", repository_name),
+        ));
+    }
+
+    Ok(())
+}
+
 fn reject_duplicate_repository_project_url(
     transaction: &Transaction<'_>,
     repo_url: &str,
@@ -7395,6 +7531,28 @@ fn reject_duplicate_repository_project_url(
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM repositories WHERE repo_url = ?)",
             [repo_url],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    if exists != 0 {
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!("repository project URL {:?} is already registered", repo_url),
+        ));
+    }
+
+    Ok(())
+}
+
+fn reject_duplicate_repository_project_url_for_update(
+    transaction: &Transaction<'_>,
+    repository_id: i64,
+    repo_url: &str,
+) -> io::Result<()> {
+    let exists: i64 = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM repositories WHERE repo_url = ? AND id <> ?)",
+            params![repo_url, repository_id],
             |row| row.get(0),
         )
         .map_err(sqlite_error)?;
@@ -7552,6 +7710,62 @@ fn unix_timestamp_millis() -> io::Result<i64> {
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
 }
 
+/// Persists one shell-to-runtime control request for the next runtime loop.
+pub fn enqueue_runtime_control_request(
+    storage: &StorageLayout,
+    request: &RuntimeControlRequest,
+) -> io::Result<PathBuf> {
+    fs::create_dir_all(&storage.runtime_control_requests_dir)?;
+
+    let request_path = storage
+        .runtime_control_requests_dir
+        .join(format!("{}.json", next_token("runtime-control")?));
+    let content = serde_json::to_vec_pretty(request).map_err(io::Error::other)?;
+
+    fs::write(&request_path, content)?;
+    Ok(request_path)
+}
+
+/// Loads and removes the queued shell-to-runtime control requests.
+pub fn take_runtime_control_requests(
+    storage: &StorageLayout,
+) -> io::Result<Vec<RuntimeControlRequest>> {
+    let entries = match fs::read_dir(&storage.runtime_control_requests_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+
+    let mut request_paths = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.is_file() {
+            request_paths.push(path);
+        }
+    }
+    request_paths.sort();
+
+    let mut requests = Vec::with_capacity(request_paths.len());
+    for request_path in request_paths {
+        let content = fs::read(&request_path)?;
+        let request: RuntimeControlRequest =
+            serde_json::from_slice(&content).map_err(|error| {
+                io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "failed to decode runtime control request {}: {error}",
+                        request_path.display(),
+                    ),
+                )
+            })?;
+
+        fs::remove_file(&request_path)?;
+        requests.push(request);
+    }
+
+    Ok(requests)
+}
+
 fn next_poll_interval(wait: Duration, elapsed: Duration) -> Duration {
     wait.saturating_sub(elapsed)
         .min(Duration::from_millis(COORDINATION_POLL_INTERVAL_MILLIS))
@@ -7582,6 +7796,7 @@ mod tests {
         CreateRepositoryProjectBuildTargetInput,
         CreateRepositoryProjectCredentialInput,
         CreateRepositoryProjectInput,
+        UpdateRepositoryProjectInput,
         list_credential_records,
         list_publish_target_runtime_settings, open_connection, recover_runtime_state,
         select_orphan_build_process_roots,
@@ -7594,7 +7809,10 @@ mod tests {
         ManualReleaseDispatchInput, PublishDispatchJob, QueueDispatchOutcome,
         PublishTargetRuntimeSettingsRecord, ReleaseDispatchJob,
         ReleaseRunRecord, RuntimeRecoveryReport,
+        RuntimeControlRequest,
         StartBuildRunInput, StartPublishRunInput, StorageLayout,
+        enqueue_runtime_control_request,
+        take_runtime_control_requests,
         UpsertCredentialRecordInput,
         KIND_GIT_HTTP_BASIC,
         RECOVERY_INTERRUPTION_KIND_SYSTEM,
@@ -7641,9 +7859,56 @@ mod tests {
             PathBuf::from("/tmp/runtime/state/runtime-events.cursor.json")
         );
         assert_eq!(
+            layout.runtime_control_requests_dir,
+            PathBuf::from("/tmp/runtime/state/runtime-control")
+        );
+        assert_eq!(
             layout.runtime_log_path,
             PathBuf::from("/tmp/runtime/logs/runtime.jsonl")
         );
+    }
+
+    #[test]
+    fn runtime_control_requests_round_trip_through_request_directory() {
+        let root = std::env::temp_dir().join("runtime-store-control-requests-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root)
+                .expect("existing runtime control test root should be removable");
+        }
+
+        let directories = RuntimeDirectories::from_root(&root);
+        let storage = StorageLayout::from_directories(&directories);
+
+        enqueue_runtime_control_request(
+            &storage,
+            &RuntimeControlRequest::ForceRepositoryPoll { repository_id: 7 },
+        )
+        .expect("first runtime control request should queue");
+        enqueue_runtime_control_request(
+            &storage,
+            &RuntimeControlRequest::ForceRepositoryPoll { repository_id: 11 },
+        )
+        .expect("second runtime control request should queue");
+
+        let requests = take_runtime_control_requests(&storage)
+            .expect("runtime control requests should load");
+
+        assert_eq!(
+            requests,
+            vec![
+                RuntimeControlRequest::ForceRepositoryPoll { repository_id: 7 },
+                RuntimeControlRequest::ForceRepositoryPoll { repository_id: 11 },
+            ]
+        );
+        assert!(
+            std::fs::read_dir(&storage.runtime_control_requests_dir)
+                .expect("runtime control request directory should still exist")
+                .next()
+                .is_none()
+        );
+
+        std::fs::remove_dir_all(&root)
+            .expect("runtime control test root should be removable");
     }
 
     #[test]
@@ -7942,6 +8207,110 @@ mod tests {
         assert!(build_targets.iter().all(|target| target.repository_id == created.repository_id));
         assert!(build_targets.iter().all(|target| target.runner_type == DEFAULT_HOST_NATIVE_RUNNER_TYPE));
         assert!(build_targets.iter().all(|target| target.config_json.contains("unity_executable_path")));
+    }
+
+    #[test]
+    fn update_repository_project_persists_repository_configuration_changes() {
+        let root = test_root("update-repository-project");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let created = LocalCoordinator::new(&layout)
+            .create_repository_project(CreateRepositoryProjectInput {
+                name: String::from("Old Banner"),
+                repo_url: String::from("https://example.com/old-banner.git"),
+                credentials: None,
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: Some(String::from("C:/artifacts/old-banner")),
+                workspace_root_override: Some(String::from("C:/workspaces/old-banner")),
+                polling_interval_seconds: 300,
+                enabled: true,
+                build_targets: vec![CreateRepositoryProjectBuildTargetInput {
+                    name: String::from("Windows"),
+                    platform: String::from("windows"),
+                    runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
+                    build_method: String::from("Builder.PerformWindows"),
+                    output_kind: Some(String::from("archive")),
+                    output_path_template: None,
+                    unity_version_override: None,
+                    timeout_seconds: 3600,
+                    enabled: true,
+                    config_json: String::from(
+                        r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
+                    ),
+                }],
+            })
+            .expect("repository project should persist");
+
+        LocalCoordinator::new(&layout)
+            .update_repository_project(UpdateRepositoryProjectInput {
+                repository_id: created.repository_id,
+                name: String::from("New Banner"),
+                repo_url: String::from("https://example.com/new-banner.git"),
+                default_branch: Some(String::from("release")),
+                artifacts_root_override: None,
+                workspace_root_override: Some(String::from("D:/workspaces/new-banner")),
+                polling_interval_seconds: 30,
+                enabled: false,
+            })
+            .expect("repository project should update");
+
+        let repositories = LocalCoordinator::new(&layout)
+            .list_polling_repositories()
+            .expect("managed polling repositories should load");
+
+        assert_eq!(repositories.len(), 1);
+        assert_eq!(repositories[0].id, created.repository_id);
+        assert_eq!(repositories[0].name, "New Banner");
+        assert_eq!(repositories[0].repo_url, "https://example.com/new-banner.git");
+        assert_eq!(repositories[0].default_branch.as_deref(), Some("release"));
+        assert_eq!(repositories[0].artifacts_root_override, None);
+        assert_eq!(
+            repositories[0].workspace_root_override.as_deref(),
+            Some("D:/workspaces/new-banner")
+        );
+        assert_eq!(repositories[0].polling_interval_seconds, 30);
+        assert!(!repositories[0].enabled);
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repository_row = connection
+            .query_row(
+                "
+                SELECT name,
+                       repo_url,
+                       default_branch,
+                       artifacts_root_override,
+                       workspace_root_override,
+                       polling_interval_seconds,
+                       enabled
+                FROM repositories
+                WHERE id = ?
+                ",
+                [created.repository_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .expect("repository row should reload");
+        assert_eq!(repository_row.0, "New Banner");
+        assert_eq!(repository_row.1, "https://example.com/new-banner.git");
+        assert_eq!(repository_row.2.as_deref(), Some("release"));
+        assert_eq!(repository_row.3, None);
+        assert_eq!(repository_row.4.as_deref(), Some("D:/workspaces/new-banner"));
+        assert_eq!(repository_row.5, 30);
+        assert_eq!(repository_row.6, 0);
+
+        drop(connection);
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
 
     #[test]

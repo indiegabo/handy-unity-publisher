@@ -8,22 +8,20 @@ fn main() -> Result<()> {
     let mut stmt = conn.prepare("SELECT id, name, enabled, polling_interval_seconds, last_seen_tag FROM repositories WHERE name = 'Revolutions'")?;
     let mut rows = stmt.query([])?;
 
-    let mut repo_id: Option<i64> = None;
-
-    if let Some(row) = rows.next()? {
+    let id: i64 = if let Some(row) = rows.next()? {
         let id: i64 = row.get(0)?;
-        repo_id = Some(id);
         let name: String = row.get(1)?;
         let enabled: bool = row.get(2)?;
         let interval: i32 = row.get(3)?;
         let tag: Option<String> = row.get(4)?;
         println!("ID: {}, Name: {}, Enabled: {}, Polling Interval: {}s, Last Seen Tag: {:?}", id, name, enabled, interval, tag);
+        id
     } else {
         println!("Repository 'Revolutions' not found.");
         return Ok(());
-    }
+    };
 
-    if let Some(id) = repo_id {
+    {
         let target_count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM build_targets WHERE repository_id = ? AND enabled = 1",
             [id],

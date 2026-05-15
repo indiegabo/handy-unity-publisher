@@ -18,6 +18,10 @@ pub const KIND_GIT_HTTP_BASIC: &str = "git-http-basic";
 /// Identifies Git credentials backed by HTTP bearer authentication.
 pub const KIND_GIT_HTTP_BEARER: &str = "git-http-bearer";
 
+/// Identifies GitHub credentials delegated to the host Git credential helper.
+pub const KIND_GIT_HTTP_GITHUB_HOST_LOGIN: &str =
+    "git-http-github-host-login";
+
 const GIT_TERMINAL_PROMPT_ENV: &str = "GIT_TERMINAL_PROMPT";
 const GIT_TERMINAL_PROMPT_DISABLED: &str = "0";
 const GCM_INTERACTIVE_ENV: &str = "GCM_INTERACTIVE";
@@ -43,6 +47,8 @@ impl GitTooling {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GitAuthOptions {
     pub extra_headers: Vec<String>,
+    pub credential_helper: Option<String>,
+    pub preserve_credential_helper: bool,
 }
 
 impl GitAuthOptions {
@@ -105,6 +111,8 @@ pub fn git_auth_options_from_credentials(
 
             Ok(GitAuthOptions {
                 extra_headers: vec![format!("Authorization: Basic {token}")],
+                credential_helper: None,
+                preserve_credential_helper: false,
             })
         }
         KIND_GIT_HTTP_BEARER => {
@@ -118,6 +126,32 @@ pub fn git_auth_options_from_credentials(
 
             Ok(GitAuthOptions {
                 extra_headers: vec![format!("Authorization: Bearer {token}")],
+                credential_helper: None,
+                preserve_credential_helper: false,
+            })
+        }
+        KIND_GIT_HTTP_GITHUB_HOST_LOGIN => {
+            #[derive(Deserialize)]
+            struct GithubHostLoginConfig {
+                provider: String,
+            }
+
+            let config: GithubHostLoginConfig = decode_auth_config(config_json)?;
+            let provider =
+                require_non_empty(&config.provider, "GitHub host login provider")?;
+            if !provider.eq_ignore_ascii_case("github") {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "GitHub host login credentials must declare provider \"github\", found {provider:?}"
+                    ),
+                ));
+            }
+
+            Ok(GitAuthOptions {
+                extra_headers: Vec::new(),
+                credential_helper: Some(String::from("manager")),
+                preserve_credential_helper: false,
             })
         }
         _ => Err(io::Error::new(
@@ -181,6 +215,8 @@ impl GitTagLister {
                 "--sort=version:refname",
                 repository_url.as_str(),
             ]),
+            request.auth.credential_helper.as_deref(),
+            request.auth.preserve_credential_helper,
         )?;
 
         parse_git_tags(&output)
@@ -259,6 +295,8 @@ impl GitWorkspaceSyncer {
                     repository_url.as_str(),
                     clone_destination.as_str(),
                 ]),
+                request.auth.credential_helper.as_deref(),
+                request.auth.preserve_credential_helper,
             )
             .map_err(|error| io::Error::other(format!(
                 "clone repository into workspace: {error}"
@@ -276,6 +314,8 @@ impl GitWorkspaceSyncer {
                     String::from("origin"),
                     repository_url,
                 ],
+                None,
+                false,
             )
             .map_err(|error| io::Error::other(format!(
                 "set workspace remote origin: {error}"
@@ -304,6 +344,8 @@ impl GitWorkspaceSyncer {
                 "origin",
                 git_ref.as_str(),
             ]),
+            request.auth.credential_helper.as_deref(),
+            request.auth.preserve_credential_helper,
         )
         .map_err(|error| io::Error::other(format!(
             "fetch repository ref {git_ref:?}: {error}"
@@ -321,6 +363,8 @@ impl GitWorkspaceSyncer {
                 String::from("--force"),
                 String::from("FETCH_HEAD"),
             ],
+            None,
+            false,
         )
         .map_err(|error| io::Error::other(format!(
             "checkout repository ref {git_ref:?}: {error}"
@@ -333,6 +377,8 @@ impl GitWorkspaceSyncer {
         run_git_command(
             Some(&workspace_path),
             vec![String::from("clean"), String::from("-fdx")],
+            None,
+            false,
         )
         .map_err(|error| io::Error::other(format!(
             "clean workspace after checkout: {error}"
@@ -393,15 +439,36 @@ fn reset_workspace_path(workspace_path: &Path) -> io::Result<()> {
     }
 }
 
-fn run_git_command(working_dir: Option<&Path>, args: Vec<String>) -> io::Result<()> {
-    let output = run_git_command_with_output(working_dir, args)?;
+fn run_git_command(
+    working_dir: Option<&Path>,
+    args: Vec<String>,
+    credential_helper: Option<&str>,
+    preserve_credential_helper: bool,
+) -> io::Result<()> {
+    let output = run_git_command_with_output(
+        working_dir,
+        args,
+        credential_helper,
+        preserve_credential_helper,
+    )?;
     let _ = output;
 
     Ok(())
 }
 
-fn run_git_command_with_output(working_dir: Option<&Path>, args: Vec<String>) -> io::Result<String> {
-    let (preview, mut command) = prepare_git_command(working_dir, args);
+fn run_git_command_with_output(
+    working_dir: Option<&Path>,
+    args: Vec<String>,
+    credential_helper: Option<&str>,
+    preserve_credential_helper: bool,
+) -> io::Result<String> {
+    let (preview, mut command) =
+        prepare_git_command(
+            working_dir,
+            args,
+            credential_helper,
+            preserve_credential_helper,
+        );
 
     let output = command.output().map_err(|error| {
         io::Error::other(format!("spawn git {preview}: {error}"))
@@ -419,8 +486,14 @@ fn run_git_command_with_output(working_dir: Option<&Path>, args: Vec<String>) ->
 fn prepare_git_command(
     working_dir: Option<&Path>,
     args: Vec<String>,
+    credential_helper: Option<&str>,
+    preserve_credential_helper: bool,
 ) -> (String, Command) {
-    let args = platform_git_command_args(args);
+    let args = platform_git_command_args(
+        args,
+        credential_helper,
+        preserve_credential_helper,
+    );
     let preview = args.join(" ");
     let mut command = Command::new("git");
     command.args(args.iter().map(String::as_str));
@@ -473,14 +546,24 @@ fn ensure_workspace_long_paths(workspace_path: &Path) -> io::Result<()> {
             String::from("core.longpaths"),
             String::from("true"),
         ],
+        None,
+        false,
     )
 }
 
-fn platform_git_command_args(args: Vec<String>) -> Vec<String> {
-    let mut platform_args = vec![
-        String::from("-c"),
-        String::from(GIT_CREDENTIAL_HELPER_RESET),
-    ];
+fn platform_git_command_args(
+    args: Vec<String>,
+    credential_helper: Option<&str>,
+    preserve_credential_helper: bool,
+) -> Vec<String> {
+    let mut platform_args = Vec::new();
+    if let Some(credential_helper) = credential_helper {
+        platform_args.push(String::from("-c"));
+        platform_args.push(format!("credential.helper={credential_helper}"));
+    } else if !preserve_credential_helper {
+        platform_args.push(String::from("-c"));
+        platform_args.push(String::from(GIT_CREDENTIAL_HELPER_RESET));
+    }
     if cfg!(windows) {
         platform_args.push(String::from("-c"));
         platform_args.push(String::from("core.longpaths=true"));
@@ -535,7 +618,7 @@ mod tests {
         platform_git_command_args, prepare_git_command, GitAuthOptions,
         GitTagListRequest, GitTagLister, GitWorkspaceSyncRefRequest,
         GitWorkspaceSyncRequest, GitWorkspaceSyncer, KIND_GIT_HTTP_BASIC,
-        KIND_GIT_HTTP_BEARER,
+        KIND_GIT_HTTP_BEARER, KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
     };
     use std::ffi::OsStr;
     use std::fs;
@@ -559,6 +642,8 @@ mod tests {
             auth,
             GitAuthOptions {
                 extra_headers: vec![String::from("Authorization: Basic Y29tcmFkZTpzaWNrbGU=")],
+                credential_helper: None,
+                preserve_credential_helper: false,
             }
         );
     }
@@ -575,6 +660,26 @@ mod tests {
             auth,
             GitAuthOptions {
                 extra_headers: vec![String::from("Authorization: Bearer red-banner")],
+                credential_helper: None,
+                preserve_credential_helper: false,
+            }
+        );
+    }
+
+    #[test]
+    fn git_auth_options_from_github_host_login_uses_manager_helper() {
+        let auth = git_auth_options_from_credentials(
+            KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
+            r#"{"provider":"github","login":"worker@collective"}"#,
+        )
+        .expect("GitHub host login credentials should parse");
+
+        assert_eq!(
+            auth,
+            GitAuthOptions {
+                extra_headers: Vec::new(),
+                credential_helper: Some(String::from("manager")),
+                preserve_credential_helper: false,
             }
         );
     }
@@ -830,10 +935,11 @@ mod tests {
 
     #[test]
     fn platform_git_command_args_enable_core_longpaths_on_windows() {
-        let args = platform_git_command_args(vec![
-            String::from("clean"),
-            String::from("-fdx"),
-        ]);
+        let args = platform_git_command_args(
+            vec![String::from("clean"), String::from("-fdx")],
+            None,
+            false,
+        );
 
         assert_eq!(args[0], "-c");
         assert_eq!(args[1], "credential.helper=");
@@ -849,8 +955,32 @@ mod tests {
     }
 
     #[test]
+    fn platform_git_command_args_can_override_credential_helper() {
+        let args = platform_git_command_args(
+            vec![String::from("ls-remote")],
+            Some("manager"),
+            false,
+        );
+
+        assert_eq!(args[0], "-c");
+        assert_eq!(args[1], "credential.helper=manager");
+        if cfg!(windows) {
+            assert_eq!(args[2], "-c");
+            assert_eq!(args[3], "core.longpaths=true");
+            assert_eq!(args[4], "ls-remote");
+        } else {
+            assert_eq!(args[2], "ls-remote");
+        }
+    }
+
+    #[test]
     fn prepare_git_command_disables_interactive_authentication() {
-        let (_, command) = prepare_git_command(None, vec![String::from("ls-remote")]);
+        let (_, command) = prepare_git_command(
+            None,
+            vec![String::from("ls-remote")],
+            None,
+            false,
+        );
 
         assert_eq!(
             command_env_value(&command, "GIT_TERMINAL_PROMPT").as_deref(),
@@ -860,6 +990,23 @@ mod tests {
             command_env_value(&command, "GCM_INTERACTIVE").as_deref(),
             Some("never")
         );
+    }
+
+    #[test]
+    fn prepare_git_command_can_set_manager_helper() {
+        let (_, command) = prepare_git_command(
+            None,
+            vec![String::from("ls-remote")],
+            Some("manager"),
+            false,
+        );
+
+        let helper_override_present = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .any(|argument| argument == "credential.helper=manager");
+
+        assert!(helper_override_present);
     }
 
     fn command_env_value(command: &Command, key: &str) -> Option<String> {

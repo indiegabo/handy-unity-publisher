@@ -12,6 +12,7 @@ pub struct StorageLayout {
     pub supervisor_state_path: PathBuf,
     pub runtime_events_path: PathBuf,
     pub runtime_events_cursor_path: PathBuf,
+    pub runtime_control_requests_dir: PathBuf,
     pub runtime_log_path: PathBuf,
 }
 
@@ -25,9 +26,18 @@ impl StorageLayout {
             supervisor_state_path: directories.state_dir.join("supervisor-state.json"),
             runtime_events_path: directories.state_dir.join("runtime-events.jsonl"),
             runtime_events_cursor_path: directories.state_dir.join("runtime-events.cursor.json"),
+            runtime_control_requests_dir: directories.state_dir.join("runtime-control"),
             runtime_log_path: directories.logs_dir.join("runtime.jsonl"),
         }
     }
+}
+
+/// Records one durable shell-to-runtime control request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuntimeControlRequest {
+    /// Forces one repository poll outside the normal in-memory schedule.
+    ForceRepositoryPoll { repository_id: i64 },
 }
 
 /// Reports the SQLite bootstrap state produced by one runtime startup.
@@ -294,6 +304,9 @@ pub struct PollingRepositoryRecord {
     pub enabled: bool,
     pub polling_interval_seconds: i64,
     pub last_seen_tag: Option<String>,
+    pub default_branch: Option<String>,
+    pub artifacts_root_override: Option<String>,
+    pub workspace_root_override: Option<String>,
     pub enabled_build_target_count: i64,
     pub has_release_history: bool,
 }
@@ -674,6 +687,20 @@ pub struct CreateRepositoryProjectInput {
     pub polling_interval_seconds: i64,
     pub enabled: bool,
     pub build_targets: Vec<CreateRepositoryProjectBuildTargetInput>,
+}
+
+/// Defines the durable payload required to update one managed repository
+/// project without replacing its worker or credentials bindings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateRepositoryProjectInput {
+    pub repository_id: i64,
+    pub name: String,
+    pub repo_url: String,
+    pub default_branch: Option<String>,
+    pub artifacts_root_override: Option<String>,
+    pub workspace_root_override: Option<String>,
+    pub polling_interval_seconds: i64,
+    pub enabled: bool,
 }
 
 /// Reports one repository project created through the operator wizard.

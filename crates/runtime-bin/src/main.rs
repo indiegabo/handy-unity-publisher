@@ -63,6 +63,7 @@ use runtime_store::{
     RepositoryPollDispatchInput, StartBuildRunInput,
     StartBuildRunStageInput, StartPublishRunInput, StorageLayout, CompletePublishRunInput,
     FailPublishRunInput,
+    RuntimeControlRequest, take_runtime_control_requests,
     RuntimeRecoveryReport,
     RECOVERY_INTERRUPTION_KIND_REQUESTED, RECOVERY_INTERRUPTION_KIND_SYSTEM,
     open_connection,
@@ -1287,8 +1288,10 @@ mod tests {
     use runtime_git::GitTag;
     use runtime_manifests::ApplyReport as ManifestApplyReport;
     use runtime_store::{
+        enqueue_runtime_control_request,
         ImportedRepositoryRegistrationReport, InterruptedBuildRecoveryRecord,
-        LocalCoordinator, RuntimeRecoveryReport, RECOVERY_INTERRUPTION_KIND_REQUESTED,
+        LocalCoordinator, RuntimeControlRequest, RuntimeRecoveryReport,
+        RECOVERY_INTERRUPTION_KIND_REQUESTED,
     };
     use runtime_runner::{
         resolve_final_artifact_output_path, DiscoveredUnityEditor,
@@ -2845,6 +2848,88 @@ mod tests {
         assert_eq!(
             release_tags_for_repository(&connection, repository_id),
             Vec::<String>::new()
+        );
+        drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn runtime_worker_iteration_honors_forced_repository_poll_requests() {
+        let root = test_root("runtime-bin-force-poll-request");
+        let directories = RuntimeDirectories::from_root(&root);
+        let storage = StorageLayout::from_directories(&directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let repository_path = root.join("runtime-bin-force-poll-request-source");
+        let repository_url = create_unity_repository_with_tags(
+            &repository_path,
+            "2021.3.33f1",
+            &["v1.0.0"],
+        );
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let repository_id = seed_repository_with_url(
+            &connection,
+            "runtime-bin-force-poll-request",
+            &repository_url,
+        );
+        seed_build_target(&connection, repository_id, "windows-player", "windows");
+        connection
+            .execute(
+                "UPDATE repositories SET last_seen_tag = ? WHERE id = ?",
+                params!["v1.0.0", repository_id],
+            )
+            .expect("repository baseline should update");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&storage);
+        let mut poll_schedule = RepositoryPollSchedule::default();
+
+        let first_report = run_repository_poll_cycle(
+            &coordinator,
+            &storage,
+            Some(&mut poll_schedule),
+        )
+        .expect("first polling cycle should run immediately");
+        assert_eq!(first_report.repositories.len(), 1);
+        assert_eq!(first_report.repositories[0].status, "unchanged");
+
+        let second_report = run_repository_poll_cycle(
+            &coordinator,
+            &storage,
+            Some(&mut poll_schedule),
+        )
+        .expect("second polling cycle should respect the scheduled wait");
+        assert!(second_report.repositories.is_empty());
+
+        std::fs::write(repository_path.join("README.md"), "v1.1.0")
+            .expect("repository file should write");
+        run_git_test_command(&repository_path, &["add", "."]);
+        run_git_test_command(
+            &repository_path,
+            &["commit", "-m", "queue instant-check release"],
+        );
+        run_git_test_command(&repository_path, &["tag", "v1.1.0"]);
+
+        enqueue_runtime_control_request(
+            &storage,
+            &RuntimeControlRequest::ForceRepositoryPoll { repository_id },
+        )
+        .expect("forced repository poll should queue");
+
+        let config = RuntimeConfig::from_root(&root);
+        run_runtime_worker_iteration(&config, &storage, &mut poll_schedule)
+            .expect("runtime worker iteration should honor the forced poll request");
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        assert_eq!(
+            load_repository_last_seen_tag(&connection, repository_id).as_deref(),
+            Some("v1.1.0")
+        );
+        assert_eq!(
+            release_tags_for_repository(&connection, repository_id),
+            vec![String::from("v1.1.0")]
         );
         drop(connection);
 

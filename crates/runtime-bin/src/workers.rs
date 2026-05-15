@@ -95,7 +95,21 @@ pub(crate) fn run_runtime_worker_iteration(
     poll_schedule: &mut RepositoryPollSchedule,
 ) -> Result<(), Box<dyn Error>> {
     let coordinator = LocalCoordinator::new(storage);
-    let _ = run_repository_poll_cycle(&coordinator, storage, Some(poll_schedule))?;
+    let forced_repository_ids = match take_forced_repository_poll_ids(storage) {
+        Ok(repository_ids) => repository_ids,
+        Err(error) => {
+            eprintln!(
+                "failed to consume runtime control requests before polling: {error}"
+            );
+            HashSet::new()
+        }
+    };
+    let _ = run_repository_poll_cycle_with_forced_repositories(
+        &coordinator,
+        storage,
+        Some(poll_schedule),
+        &forced_repository_ids,
+    )?;
     // RetryLater planner messages must not monopolize the serve loop, or
     // queued build work for earlier releases never gets a chance to start.
     let _ = run_release_planner_cycle(storage)?;
@@ -133,10 +147,41 @@ impl RepositoryPollSchedule {
     }
 }
 
+fn take_forced_repository_poll_ids(
+    storage: &StorageLayout,
+) -> io::Result<HashSet<i64>> {
+    let requests = take_runtime_control_requests(storage)?;
+    let mut repository_ids = HashSet::new();
+
+    for request in requests {
+        match request {
+            RuntimeControlRequest::ForceRepositoryPoll { repository_id } => {
+                repository_ids.insert(repository_id);
+            }
+        }
+    }
+
+    Ok(repository_ids)
+}
+
 pub(crate) fn run_repository_poll_cycle(
     coordinator: &LocalCoordinator,
     storage: &StorageLayout,
+    poll_schedule: Option<&mut RepositoryPollSchedule>,
+) -> io::Result<AutomationPollReport> {
+    run_repository_poll_cycle_with_forced_repositories(
+        coordinator,
+        storage,
+        poll_schedule,
+        &HashSet::new(),
+    )
+}
+
+fn run_repository_poll_cycle_with_forced_repositories(
+    coordinator: &LocalCoordinator,
+    storage: &StorageLayout,
     mut poll_schedule: Option<&mut RepositoryPollSchedule>,
+    forced_repository_ids: &HashSet<i64>,
 ) -> io::Result<AutomationPollReport> {
     let repositories = coordinator.list_polling_repositories()?;
     let tag_lister = GitTagLister::default();
@@ -146,6 +191,7 @@ pub(crate) fn run_repository_poll_cycle(
 
     for repository in repositories {
         seen_repositories.insert(repository.id);
+        let force_poll = forced_repository_ids.contains(&repository.id);
 
         if !repository.enabled {
             if let Some(schedule) = poll_schedule.as_deref_mut() {
@@ -169,29 +215,31 @@ pub(crate) fn run_repository_poll_cycle(
             continue;
         }
 
-        match coordinator.advance_repository_release_queue(repository.id) {
-            Ok(true) => {
-                results.push(skipped_poll_result(
-                    &repository,
-                    POLL_STATUS_SKIPPED_ACTIVE_RELEASE_BACKLOG,
-                ));
-                continue;
-            }
-            Ok(false) => {}
-            Err(error) => {
-                log_failed_poll_attempt(
-                    storage,
-                    &repository,
-                    POLL_FAILURE_STAGE_ADVANCE_RELEASE_QUEUE_PRECHECK,
-                    &error,
-                );
-                results.push(error_poll_result(&repository, error));
-                continue;
+        if !force_poll {
+            match coordinator.advance_repository_release_queue(repository.id) {
+                Ok(true) => {
+                    results.push(skipped_poll_result(
+                        &repository,
+                        POLL_STATUS_SKIPPED_ACTIVE_RELEASE_BACKLOG,
+                    ));
+                    continue;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    log_failed_poll_attempt(
+                        storage,
+                        &repository,
+                        POLL_FAILURE_STAGE_ADVANCE_RELEASE_QUEUE_PRECHECK,
+                        &error,
+                    );
+                    results.push(error_poll_result(&repository, error));
+                    continue;
+                }
             }
         }
 
         if let Some(schedule) = poll_schedule.as_deref_mut() {
-            if !schedule.is_due(repository.id, now) {
+            if !force_poll && !schedule.is_due(repository.id, now) {
                 continue;
             }
             schedule.set_next_poll_at(

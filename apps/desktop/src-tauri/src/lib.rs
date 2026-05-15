@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use rfd::FileDialog;
 use runtime_config::{
@@ -22,7 +22,10 @@ use runtime_core::{
     RuntimeHealthReport, RuntimeRestartPolicy, RuntimeSupervisorSnapshot,
     RuntimeStatus, RuntimeSupervisorStatus,
 };
-use runtime_git::{KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER};
+use runtime_git::{
+    KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER,
+    KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
+};
 use runtime_runner::{
     default_unity_discovery_root_paths, diagnose_host_native_runner_config,
     inspect_host_capability_profile, HostCapabilityProfile,
@@ -30,17 +33,18 @@ use runtime_runner::{
 };
 use runtime_store::{
     ArtifactInspectionRecord, AutomationSnapshot, BuildHistoryRecord,
+    CredentialRecord,
     CreateRepositoryProjectBuildTargetInput,
-    CreateRepositoryProjectCredentialInput,
     CreateRepositoryProjectInput as StoreCreateRepositoryProjectInput,
     CreatedRepositoryProjectRecord,
+    UpdateRepositoryProjectInput as StoreUpdateRepositoryProjectInput,
+    RuntimeControlRequest,
     ProcessFeedPage, ReleaseAutomationStatus, UpsertCredentialRecordInput,
-    delete_host_secret,
+    enqueue_runtime_control_request,
     initialize_database, list_artifact_inspection_records,
     list_build_history_records, list_process_feed_page,
     list_build_target_runtime_settings, list_credential_records,
     list_publish_target_runtime_settings, LocalCoordinator, StorageLayout,
-    store_host_secret,
 };
 use runtime_events::start_runtime_event_bridge;
 use serde::{Deserialize, Serialize};
@@ -81,6 +85,15 @@ const MAX_PROCESS_FEED_PAGE_SIZE: u32 = 50;
 const DEFAULT_BUILD_TARGET_TIMEOUT_SECONDS: i64 = 3600;
 const MIN_REPOSITORY_POLL_INTERVAL_SECONDS: i64 = 5;
 const LEGACY_PRODUCT_DIRECTORY_NAME: &str = "handy-unity-builder";
+const GITHUB_AUTH_PROVIDER_ID: &str = "github";
+const GITHUB_AUTH_PROVIDER_LABEL: &str = "GitHub";
+const GITHUB_AUTH_INSTANCE_URL: &str = "https://github.com";
+const GITHUB_AUTH_CREDENTIAL_NAME: &str = "GitHub.com";
+const GITHUB_AUTH_CREDENTIAL_HELPER: &str = "manager";
+const GITHUB_AUTH_MODE_BROWSER: &str = "browser";
+const AUTH_PROVIDER_STATUS_CONNECTED: &str = "connected";
+const AUTH_PROVIDER_STATUS_DISCONNECTED: &str = "disconnected";
+const AUTH_PROVIDER_STATUS_UNAVAILABLE: &str = "unavailable";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WindowLayoutPreset {
@@ -195,6 +208,31 @@ struct RuntimeProcessState {
 #[derive(Default)]
 struct ShellLifecycleState {
     is_quitting: Mutex<bool>,
+    is_main_window_pinned: Mutex<bool>,
+    active_system_dialogs: Mutex<u32>,
+}
+
+struct ActiveSystemDialogGuard<'a> {
+    lifecycle: &'a ShellLifecycleState,
+}
+
+impl<'a> ActiveSystemDialogGuard<'a> {
+    fn acquire(lifecycle: &'a ShellLifecycleState) -> Result<Self, String> {
+        let mut active_system_dialogs = lifecycle
+            .active_system_dialogs
+            .lock()
+            .map_err(|_| "system dialog state is unavailable".to_string())?;
+        *active_system_dialogs = active_system_dialogs.saturating_add(1);
+        Ok(Self { lifecycle })
+    }
+}
+
+impl Drop for ActiveSystemDialogGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut active_system_dialogs) = self.lifecycle.active_system_dialogs.lock() {
+            *active_system_dialogs = active_system_dialogs.saturating_sub(1);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -322,6 +360,18 @@ struct UpdatePublishTargetSecretBindingInput {
     credentials_id: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct AuthProviderStatus {
+    provider_id: String,
+    label: String,
+    status: String,
+    status_message: String,
+    instance_url: String,
+    credential_id: Option<i64>,
+    credential_name: Option<String>,
+    bound_repository_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct CreateRepositoryProjectBuildTargetCommandInput {
     name: String,
@@ -363,6 +413,23 @@ struct CreateRepositoryProjectCommandInput {
     build_targets: Vec<CreateRepositoryProjectBuildTargetCommandInput>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct UpdateRepositoryProjectCommandInput {
+    repository_id: i64,
+    name: String,
+    repository_url: String,
+    default_branch: Option<String>,
+    artifacts_root_override: Option<String>,
+    workspace_root_override: Option<String>,
+    polling_interval_seconds: i64,
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct RepositoryInstantCheckInput {
+    repository_id: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedCreateRepositoryProjectBuildTargetCommandInput {
     name: String,
@@ -375,12 +442,23 @@ struct NormalizedCreateRepositoryProjectBuildTargetCommandInput {
 struct NormalizedCreateRepositoryProjectCommandInput {
     name: String,
     repository_url: String,
-    personal_access_token: Option<String>,
     default_branch: Option<String>,
     artifacts_root_override: Option<String>,
     workspace_root_override: Option<String>,
     polling_interval_seconds: i64,
     build_targets: Vec<NormalizedCreateRepositoryProjectBuildTargetCommandInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedUpdateRepositoryProjectCommandInput {
+    repository_id: i64,
+    name: String,
+    repository_url: String,
+    default_branch: Option<String>,
+    artifacts_root_override: Option<String>,
+    workspace_root_override: Option<String>,
+    polling_interval_seconds: i64,
+    enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -447,6 +525,9 @@ struct RepositoryInspectionEntry {
     repo_url: String,
     enabled: bool,
     polling_interval_seconds: i64,
+    default_branch: Option<String>,
+    artifacts_root_override: Option<String>,
+    workspace_root_override: Option<String>,
     last_seen_tag: Option<String>,
     enabled_build_target_count: i64,
     credentials: Option<RepositoryCredentialReference>,
@@ -494,6 +575,46 @@ fn main_window(app_handle: &AppHandle) -> Result<WebviewWindow, String> {
     app_handle
         .get_webview_window(MAIN_WINDOW_LABEL)
         .ok_or_else(|| "main window handle is unavailable".to_string())
+}
+
+fn is_main_window_pinned(app_handle: &AppHandle) -> bool {
+    let lifecycle = app_handle.state::<ShellLifecycleState>();
+
+    lifecycle
+        .is_main_window_pinned
+        .lock()
+        .map(|is_pinned| *is_pinned)
+        .unwrap_or(false)
+}
+
+fn set_main_window_pinned_state(app_handle: &AppHandle, pinned: bool) -> Result<bool, String> {
+    let lifecycle = app_handle.state::<ShellLifecycleState>();
+    let mut is_pinned = lifecycle
+        .is_main_window_pinned
+        .lock()
+        .map_err(|_| "main window pin state is unavailable".to_string())?;
+    *is_pinned = pinned;
+    Ok(*is_pinned)
+}
+
+fn should_hide_main_window_on_focus_loss(app_handle: &AppHandle) -> bool {
+    if !should_keep_running(app_handle) {
+        return false;
+    }
+
+    let lifecycle = app_handle.state::<ShellLifecycleState>();
+    let is_pinned = lifecycle
+        .is_main_window_pinned
+        .lock()
+        .map(|is_pinned| *is_pinned)
+        .unwrap_or(true);
+    let has_active_system_dialogs = lifecycle
+        .active_system_dialogs
+        .lock()
+        .map(|active_system_dialogs| *active_system_dialogs > 0)
+        .unwrap_or(true);
+
+    !is_pinned && !has_active_system_dialogs
 }
 
 fn initialize_tray(app: &tauri::App) -> Result<(), String> {
@@ -635,13 +756,9 @@ fn show_main_window(app_handle: &AppHandle) {
     }
 }
 
-fn hide_main_window(app_handle: &AppHandle) {
-    match main_window(app_handle) {
-        Ok(window) => {
-            let _ = window.hide();
-        }
-        Err(error) => eprintln!("failed to hide main window: {error}"),
-    }
+fn hide_main_window(app_handle: &AppHandle) -> Result<(), String> {
+    let window = main_window(app_handle)?;
+    window.hide().map_err(|error| error.to_string())
 }
 
 fn request_app_exit(app_handle: &AppHandle) {
@@ -670,10 +787,14 @@ pub fn run() {
             application_version,
             process_feed,
             transition_window_focus,
+            main_window_pin_state,
+            set_main_window_pinned,
+            close_main_window,
             pick_host_path,
             pick_unity_executable_path,
             validate_unity_executable_path,
             create_repository_project,
+            update_repository_project,
             runtime_health,
             runtime_logs,
             runtime_directories,
@@ -684,10 +805,16 @@ pub fn run() {
             artifact_inspection,
             build_execution_report,
             purge_build_execution_retention,
+            auth_providers,
+            login_github_auth,
             secret_settings,
             save_secret_credential,
             update_repository_secret_binding,
             update_publish_target_secret_binding,
+            start_runtime,
+            stop_runtime,
+            restart_runtime,
+            request_repository_instant_check,
             unity_runner_settings,
         ])
         .setup(|app| {
@@ -716,7 +843,19 @@ pub fn run() {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     if should_keep_running(app_handle) {
                         api.prevent_close();
-                        hide_main_window(app_handle);
+                        if let Err(error) = hide_main_window(app_handle) {
+                            eprintln!("failed to hide main window: {error}");
+                        }
+                    }
+                }
+            }
+            RunEvent::WindowEvent { label, event, .. }
+                if label == MAIN_WINDOW_LABEL
+                    && matches!(event, WindowEvent::Focused(false)) =>
+            {
+                if should_hide_main_window_on_focus_loss(app_handle) {
+                    if let Err(error) = hide_main_window(app_handle) {
+                        eprintln!("failed to hide main window after focus loss: {error}");
                     }
                 }
             }
@@ -766,8 +905,30 @@ fn transition_window_focus(app_handle: AppHandle, target: String) -> Result<(), 
 }
 
 #[tauri::command]
-fn pick_host_path(input: PickHostPathInput) -> Result<Option<String>, String> {
+fn main_window_pin_state(app_handle: AppHandle) -> Result<bool, String> {
+    Ok(is_main_window_pinned(&app_handle))
+}
+
+#[tauri::command]
+fn set_main_window_pinned(app_handle: AppHandle, pinned: bool) -> Result<bool, String> {
+    set_main_window_pinned_state(&app_handle, pinned)
+}
+
+#[tauri::command]
+fn close_main_window(app_handle: AppHandle) -> Result<(), String> {
+    if should_keep_running(&app_handle) {
+        return hide_main_window(&app_handle);
+    }
+
+    request_app_exit(&app_handle);
+    Ok(())
+}
+
+#[tauri::command]
+fn pick_host_path(app_handle: AppHandle, input: PickHostPathInput) -> Result<Option<String>, String> {
     let mut dialog = FileDialog::new();
+    let lifecycle = app_handle.state::<ShellLifecycleState>();
+    let _dialog_guard = ActiveSystemDialogGuard::acquire(&lifecycle)?;
 
     if let Some(title) = normalize_optional_shell_string(input.title) {
         dialog = dialog.set_title(&title);
@@ -795,8 +956,8 @@ fn pick_host_path(input: PickHostPathInput) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-fn pick_unity_executable_path() -> Result<Option<String>, String> {
-    pick_host_path(PickHostPathInput {
+fn pick_unity_executable_path(app_handle: AppHandle) -> Result<Option<String>, String> {
+    pick_host_path(app_handle, PickHostPathInput {
         kind: HostPathSelectionKind::File,
         title: Some("Select Unity Editor executable".to_string()),
         filters: vec![PickHostPathFilterInput {
@@ -817,6 +978,14 @@ fn create_repository_project(
 ) -> Result<CreatedRepositoryProjectRecord, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     persist_repository_project(&config, input).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn update_repository_project(
+    input: UpdateRepositoryProjectCommandInput,
+) -> Result<(), String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    persist_repository_project_update(&config, input).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -884,6 +1053,18 @@ fn purge_build_execution_retention(
 }
 
 #[tauri::command]
+fn auth_providers() -> Result<Vec<AuthProviderStatus>, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    load_auth_providers(&config).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn login_github_auth() -> Result<AuthProviderStatus, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    persist_github_auth_login(&config).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn secret_settings() -> Result<SecretSettings, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_secret_settings(&config).map_err(|error| error.to_string())
@@ -914,12 +1095,56 @@ fn update_publish_target_secret_binding(
 }
 
 #[tauri::command]
+fn start_runtime(app_handle: AppHandle) -> Result<(), String> {
+    launch_runtime_process_handle(&app_handle).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn stop_runtime(app_handle: AppHandle) -> Result<(), String> {
+    request_runtime_stop(&app_handle).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn restart_runtime(app_handle: AppHandle) -> Result<(), String> {
+    request_runtime_stop(&app_handle).map_err(|error| error.to_string())?;
+    launch_runtime_process_handle(&app_handle).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn request_repository_instant_check(
+    app_handle: AppHandle,
+    input: RepositoryInstantCheckInput,
+) -> Result<(), String> {
+    if input.repository_id <= 0 {
+        return Err(String::from("repository_id must be a positive integer"));
+    }
+
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    let storage = StorageLayout::from_directories(&config.directories);
+    enqueue_runtime_control_request(
+        &storage,
+        &RuntimeControlRequest::ForceRepositoryPoll {
+            repository_id: input.repository_id,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    launch_runtime_process_handle(&app_handle).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn unity_runner_settings() -> Result<UnityRunnerSettings, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_unity_runner_settings(&config).map_err(|error| error.to_string())
 }
 
 fn launch_runtime_process<R: tauri::Runtime>(app: &tauri::App<R>) -> io::Result<()> {
+    launch_runtime_process_handle(&app.handle())
+}
+
+fn launch_runtime_process_handle<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> io::Result<()> {
     let config = load_shell_runtime_config()?;
     if runtime_process_is_running(&config)? {
         return Ok(());
@@ -937,7 +1162,7 @@ fn launch_runtime_process<R: tauri::Runtime>(app: &tauri::App<R>) -> io::Result<
         )));
     }
 
-    let state = app.state::<RuntimeProcessState>();
+    let state = app_handle.state::<RuntimeProcessState>();
     let mut guard = state
         .child
         .lock()
@@ -947,29 +1172,57 @@ fn launch_runtime_process<R: tauri::Runtime>(app: &tauri::App<R>) -> io::Result<
 }
 
 fn stop_runtime_process<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
+    let _ = request_runtime_stop(app_handle);
+}
+
+fn request_runtime_stop<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> io::Result<()> {
+    let config = load_shell_runtime_config()?;
     let state = app_handle.state::<RuntimeProcessState>();
     let child = match state.child.lock() {
         Ok(mut guard) => guard.take(),
         Err(_) => None,
     };
-    let Some(mut child) = child else {
-        return;
-    };
 
-    let _ = request_runtime_shutdown();
+    if !runtime_process_is_running(&config)? {
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        return Ok(());
+    }
 
-    for _ in 0..RUNTIME_SHUTDOWN_WAIT_POLLS {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Ok(None) => thread::sleep(Duration::from_millis(
-                RUNTIME_SHUTDOWN_WAIT_POLL_MILLIS,
-            )),
-            Err(_) => break,
+    request_runtime_shutdown()?;
+
+    if let Some(mut child) = child {
+        for _ in 0..RUNTIME_SHUTDOWN_WAIT_POLLS {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => thread::sleep(Duration::from_millis(
+                    RUNTIME_SHUTDOWN_WAIT_POLL_MILLIS,
+                )),
+                Err(_) => break,
+            }
+        }
+
+        if child.try_wait()?.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
+    for _ in 0..RUNTIME_SHUTDOWN_WAIT_POLLS {
+        if !runtime_process_is_running(&config)? {
+            return Ok(());
+        }
+
+        thread::sleep(Duration::from_millis(RUNTIME_SHUTDOWN_WAIT_POLL_MILLIS));
+    }
+
+    Err(io::Error::other(
+        "runtime did not stop within the configured grace period",
+    ))
 }
 
 fn request_runtime_shutdown() -> io::Result<()> {
@@ -1159,6 +1412,9 @@ fn load_repository_inspection(
                 repo_url: repository.repo_url,
                 enabled: repository.enabled,
                 polling_interval_seconds: repository.polling_interval_seconds,
+                default_branch: repository.default_branch,
+                artifacts_root_override: repository.artifacts_root_override,
+                workspace_root_override: repository.workspace_root_override,
                 last_seen_tag: repository.last_seen_tag,
                 enabled_build_target_count: repository.enabled_build_target_count,
                 credentials: clone_credential_reference(
@@ -1358,6 +1614,302 @@ fn clone_credential_reference(
     credential_id.and_then(|id| credential_by_id.get(&id).cloned())
 }
 
+fn load_auth_providers(config: &RuntimeConfig) -> io::Result<Vec<AuthProviderStatus>> {
+    Ok(vec![load_github_auth_provider_status(config)?])
+}
+
+fn load_github_auth_provider_status(
+    config: &RuntimeConfig,
+) -> io::Result<AuthProviderStatus> {
+    if !git_credential_manager_available() {
+        return Ok(build_auth_provider_status(
+            AUTH_PROVIDER_STATUS_UNAVAILABLE,
+            String::from(
+                "Git Credential Manager was not found on PATH, so GitHub login cannot start.",
+            ),
+            None,
+            0,
+        ));
+    }
+
+    let storage = writable_secret_storage(config)?;
+    let known_accounts = match load_known_github_accounts() {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            let credential = resolve_github_auth_credential(&storage)?;
+            let bound_repository_count = credential
+                .as_ref()
+                .map(|record| count_repository_bindings(&storage, record.id))
+                .transpose()?
+                .unwrap_or(0);
+
+            return Ok(build_auth_provider_status(
+                AUTH_PROVIDER_STATUS_UNAVAILABLE,
+                format!(
+                    "Git Credential Manager is installed but GitHub account discovery failed: {error}"
+                ),
+                credential.as_ref(),
+                bound_repository_count,
+            ));
+        }
+    };
+
+    if known_accounts.is_empty() {
+        let credential = resolve_github_auth_credential(&storage)?;
+        let bound_repository_count = credential
+            .as_ref()
+            .map(|record| count_repository_bindings(&storage, record.id))
+            .transpose()?
+            .unwrap_or(0);
+
+        return Ok(build_auth_provider_status(
+            AUTH_PROVIDER_STATUS_DISCONNECTED,
+            String::from(
+                "No GitHub login is connected yet. Start the browser flow to authorize GitHub for repository operations.",
+            ),
+            credential.as_ref(),
+            bound_repository_count,
+        ));
+    }
+
+    let credential = ensure_github_auth_credential(&storage)?;
+    let bound_repository_count = count_repository_bindings(&storage, credential.id)?;
+
+    Ok(build_auth_provider_status(
+        AUTH_PROVIDER_STATUS_CONNECTED,
+        format!(
+            "Git Credential Manager has an active GitHub login. {bound_repository_count} repository project(s) currently use it by default."
+        ),
+        Some(&credential),
+        bound_repository_count,
+    ))
+}
+
+fn persist_github_auth_login(config: &RuntimeConfig) -> io::Result<AuthProviderStatus> {
+    ensure_git_credential_manager_available()?;
+    run_github_browser_login_command()?;
+
+    let storage = writable_secret_storage(config)?;
+    let credential = ensure_github_auth_credential(&storage)?;
+    let _ = bind_github_auth_to_repositories(&storage, credential.id)?;
+    let bound_repository_count = count_repository_bindings(&storage, credential.id)?;
+
+    Ok(build_auth_provider_status(
+        AUTH_PROVIDER_STATUS_CONNECTED,
+        format!(
+            "GitHub login connected through Git Credential Manager. {bound_repository_count} repository project(s) now use it by default."
+        ),
+        Some(&credential),
+        bound_repository_count,
+    ))
+}
+
+fn build_auth_provider_status(
+    status: &str,
+    status_message: String,
+    credential: Option<&CredentialRecord>,
+    bound_repository_count: usize,
+) -> AuthProviderStatus {
+    AuthProviderStatus {
+        provider_id: String::from(GITHUB_AUTH_PROVIDER_ID),
+        label: String::from(GITHUB_AUTH_PROVIDER_LABEL),
+        status: String::from(status),
+        status_message,
+        instance_url: String::from(GITHUB_AUTH_INSTANCE_URL),
+        credential_id: credential.map(|record| record.id),
+        credential_name: credential.map(|record| record.name.clone()),
+        bound_repository_count,
+    }
+}
+
+fn ensure_git_credential_manager_available() -> io::Result<()> {
+    if git_credential_manager_available() {
+        return Ok(());
+    }
+
+    Err(io::Error::new(
+        ErrorKind::NotFound,
+        "Git Credential Manager was not found on PATH",
+    ))
+}
+
+fn git_credential_manager_available() -> bool {
+    run_git_credential_manager_command(["--version"]).is_ok()
+}
+
+fn run_github_browser_login_command() -> io::Result<()> {
+    let _ = run_git_credential_manager_command([
+        "github",
+        "login",
+        "--browser",
+        "--url",
+        GITHUB_AUTH_INSTANCE_URL,
+    ])?;
+
+    Ok(())
+}
+
+fn load_known_github_accounts() -> io::Result<Vec<String>> {
+    let output = run_git_credential_manager_command([
+        "github",
+        "list",
+        "--url",
+        GITHUB_AUTH_INSTANCE_URL,
+    ])?;
+
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+fn run_git_credential_manager_command<I, S>(args: I) -> io::Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|value| value.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    let preview = args.join(" ");
+    let mut command = Command::new("git");
+    command.arg("credential-manager");
+    command.args(args.iter().map(String::as_str));
+    command.stdin(Stdio::null());
+
+    let output = command.output().map_err(|error| {
+        io::Error::other(format!(
+            "spawn git credential-manager {preview}: {error}"
+        ))
+    })?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = stderr.trim();
+    let stdout = stdout.trim();
+    let exit_detail = match output.status.code() {
+        Some(code) => format!("exit code {code}"),
+        None => String::from("termination by signal"),
+    };
+    let mut details = format!(
+        "git credential-manager {preview} failed with {exit_detail}"
+    );
+    if !stderr.is_empty() {
+        details.push_str("; stderr: ");
+        details.push_str(stderr);
+    }
+    if !stdout.is_empty() {
+        details.push_str("; stdout: ");
+        details.push_str(stdout);
+    }
+
+    Err(io::Error::other(details))
+}
+
+fn resolve_github_auth_credential(
+    storage: &StorageLayout,
+) -> io::Result<Option<CredentialRecord>> {
+    Ok(list_credential_records(storage)?
+        .into_iter()
+        .find(|credential| credential.kind == KIND_GIT_HTTP_GITHUB_HOST_LOGIN))
+}
+
+fn ensure_github_auth_credential(storage: &StorageLayout) -> io::Result<CredentialRecord> {
+    let existing = resolve_github_auth_credential(storage)?;
+    LocalCoordinator::new(storage).upsert_credential_record(
+        UpsertCredentialRecordInput {
+            credential_id: existing.as_ref().map(|credential| credential.id),
+            name: String::from(GITHUB_AUTH_CREDENTIAL_NAME),
+            kind: String::from(KIND_GIT_HTTP_GITHUB_HOST_LOGIN),
+            config_json: github_auth_credential_config_json(),
+        },
+    )
+}
+
+fn github_auth_credential_config_json() -> String {
+    serde_json::json!({
+        "provider": GITHUB_AUTH_PROVIDER_ID,
+        "instance_url": GITHUB_AUTH_INSTANCE_URL,
+        "credential_helper": GITHUB_AUTH_CREDENTIAL_HELPER,
+        "auth_mode": GITHUB_AUTH_MODE_BROWSER,
+    })
+    .to_string()
+}
+
+fn bind_github_auth_to_repositories(
+    storage: &StorageLayout,
+    credential_id: i64,
+) -> io::Result<usize> {
+    let coordinator = LocalCoordinator::new(storage);
+    let repositories = coordinator.list_polling_repositories()?;
+    let mut updated_bindings = 0;
+
+    for repository in repositories {
+        if !is_github_repository_url(&repository.repo_url) {
+            continue;
+        }
+        if repository.credentials_id == Some(credential_id) {
+            continue;
+        }
+
+        coordinator.update_repository_credentials_binding(
+            repository.id,
+            Some(credential_id),
+        )?;
+        updated_bindings += 1;
+    }
+
+    Ok(updated_bindings)
+}
+
+fn count_repository_bindings(
+    storage: &StorageLayout,
+    credential_id: i64,
+) -> io::Result<usize> {
+    Ok(LocalCoordinator::new(storage)
+        .list_polling_repositories()?
+        .into_iter()
+        .filter(|repository| repository.credentials_id == Some(credential_id))
+        .count())
+}
+
+fn resolve_default_github_auth_credential(
+    storage: &StorageLayout,
+    repository_url: &str,
+) -> io::Result<Option<CredentialRecord>> {
+    if !is_github_repository_url(repository_url) {
+        return Ok(None);
+    }
+
+    if let Some(credential) = resolve_github_auth_credential(storage)? {
+        return Ok(Some(credential));
+    }
+
+    if !git_credential_manager_available() {
+        return Ok(None);
+    }
+
+    let known_accounts = match load_known_github_accounts() {
+        Ok(accounts) => accounts,
+        Err(_) => return Ok(None),
+    };
+    if known_accounts.is_empty() {
+        return Ok(None);
+    }
+
+    ensure_github_auth_credential(storage).map(Some)
+}
+
+fn is_github_repository_url(repository_url: &str) -> bool {
+    github_repository_owner_from_url(repository_url).is_some()
+}
+
 fn writable_secret_storage(config: &RuntimeConfig) -> io::Result<StorageLayout> {
     config.directories.ensure_exists()?;
     let storage = StorageLayout::from_directories(&config.directories);
@@ -1495,35 +2047,16 @@ fn persist_repository_project(
 ) -> io::Result<CreatedRepositoryProjectRecord> {
     let normalized = normalize_create_repository_project_command_input(input)?;
     let storage = writable_secret_storage(config)?;
+    let default_github_auth = resolve_default_github_auth_credential(
+        &storage,
+        &normalized.repository_url,
+    )?;
 
-    let mut persisted_secret_ref = None;
-    let credentials = if let Some(personal_access_token) = normalized.personal_access_token.as_deref()
-    {
-        let secret_account = repository_pat_secret_account(&normalized.name);
-        let secret_ref = store_host_secret(&secret_account, personal_access_token)?;
-        persisted_secret_ref = Some(secret_ref.clone());
-        let basic_auth_username = repository_pat_basic_auth_username(
-            &normalized.repository_url,
-        );
-
-        Some(CreateRepositoryProjectCredentialInput {
-            name: format!("{}/origin", normalized.name),
-            kind: String::from(KIND_GIT_HTTP_BASIC),
-            config_json: serde_json::json!({
-                "username": basic_auth_username,
-                "password": secret_ref,
-            })
-            .to_string(),
-        })
-    } else {
-        None
-    };
-
-    let create_result = LocalCoordinator::new(&storage).create_repository_project(
+    let mut create_result = LocalCoordinator::new(&storage).create_repository_project(
         StoreCreateRepositoryProjectInput {
             name: normalized.name,
             repo_url: normalized.repository_url,
-            credentials,
+            credentials: None,
             default_branch: normalized.default_branch,
             artifacts_root_override: normalized.artifacts_root_override,
             workspace_root_override: normalized.workspace_root_override,
@@ -1549,17 +2082,38 @@ fn persist_repository_project(
                 })
                 .collect(),
         },
-    );
+    )?;
 
-    if let Err(error) = create_result {
-        if let Some(secret_ref) = persisted_secret_ref.as_deref() {
-            let _ = delete_host_secret(secret_ref);
-        }
-
-        return Err(error);
+    if let Some(credential) = default_github_auth {
+        LocalCoordinator::new(&storage).update_repository_credentials_binding(
+            create_result.repository_id,
+            Some(credential.id),
+        )?;
+        create_result.credentials_id = Some(credential.id);
     }
 
-    create_result
+    Ok(create_result)
+}
+
+fn persist_repository_project_update(
+    config: &RuntimeConfig,
+    input: UpdateRepositoryProjectCommandInput,
+) -> io::Result<()> {
+    let normalized = normalize_update_repository_project_command_input(input)?;
+    let storage = writable_secret_storage(config)?;
+
+    LocalCoordinator::new(&storage).update_repository_project(
+        StoreUpdateRepositoryProjectInput {
+            repository_id: normalized.repository_id,
+            name: normalized.name,
+            repo_url: normalized.repository_url,
+            default_branch: normalized.default_branch,
+            artifacts_root_override: normalized.artifacts_root_override,
+            workspace_root_override: normalized.workspace_root_override,
+            polling_interval_seconds: normalized.polling_interval_seconds,
+            enabled: normalized.enabled,
+        },
+    )
 }
 
 fn normalize_create_repository_project_command_input(
@@ -1591,14 +2145,10 @@ fn normalize_create_repository_project_command_input(
         ));
     }
 
-    let personal_access_token = normalize_optional_shell_string(input.personal_access_token);
-    if personal_access_token
-        .as_deref()
-        .is_some_and(|token| token.chars().any(char::is_whitespace))
-    {
+    if normalize_optional_shell_string(input.personal_access_token).is_some() {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
-            "repository personal access token must not contain whitespace",
+            "repository personal access token is no longer supported; use the GitHub login flow",
         ));
     }
 
@@ -1619,12 +2169,53 @@ fn normalize_create_repository_project_command_input(
     Ok(NormalizedCreateRepositoryProjectCommandInput {
         name,
         repository_url,
-        personal_access_token,
         default_branch: normalize_optional_shell_string(input.default_branch),
         artifacts_root_override: normalize_optional_shell_string(input.artifacts_root_override),
         workspace_root_override: normalize_optional_shell_string(input.workspace_root_override),
         polling_interval_seconds: input.polling_interval_seconds,
         build_targets,
+    })
+}
+
+fn normalize_update_repository_project_command_input(
+    input: UpdateRepositoryProjectCommandInput,
+) -> io::Result<NormalizedUpdateRepositoryProjectCommandInput> {
+    if input.repository_id <= 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository_id must be a positive integer",
+        ));
+    }
+
+    let name = require_shell_non_empty(&input.name, "repository project name")?;
+    let repository_url = require_shell_non_empty(
+        &input.repository_url,
+        "repository project URL",
+    )?;
+    if !(repository_url.starts_with("https://") || repository_url.starts_with("http://")) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository project URL must use http:// or https://",
+        ));
+    }
+    if input.polling_interval_seconds < MIN_REPOSITORY_POLL_INTERVAL_SECONDS {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "repository polling interval must be at least {MIN_REPOSITORY_POLL_INTERVAL_SECONDS} seconds"
+            ),
+        ));
+    }
+
+    Ok(NormalizedUpdateRepositoryProjectCommandInput {
+        repository_id: input.repository_id,
+        name,
+        repository_url,
+        default_branch: normalize_optional_shell_string(input.default_branch),
+        artifacts_root_override: normalize_optional_shell_string(input.artifacts_root_override),
+        workspace_root_override: normalize_optional_shell_string(input.workspace_root_override),
+        polling_interval_seconds: input.polling_interval_seconds,
+        enabled: input.enabled,
     })
 }
 
@@ -1678,23 +2269,6 @@ fn normalize_optional_shell_string(value: Option<String>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn repository_pat_secret_account(repository_name: &str) -> String {
-    let issued_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-
-    format!(
-        "repository/{}/origin-pat/{issued_at}",
-        slugify_shell_token(repository_name)
-    )
-}
-
-fn repository_pat_basic_auth_username(repository_url: &str) -> String {
-    github_repository_owner_from_url(repository_url)
-        .unwrap_or_else(|| String::from("git"))
-}
-
 fn github_repository_owner_from_url(repository_url: &str) -> Option<String> {
     let repository_url = repository_url.trim();
     let without_scheme = repository_url
@@ -1711,35 +2285,6 @@ fn github_repository_owner_from_url(repository_url: &str) -> Option<String> {
     }
 
     Some(owner.to_owned())
-}
-
-fn slugify_shell_token(value: &str) -> String {
-    let mut slug = String::new();
-    let mut previous_was_separator = false;
-
-    for character in value.chars() {
-        let lowered = character.to_ascii_lowercase();
-        if lowered.is_ascii_alphanumeric() {
-            slug.push(lowered);
-            previous_was_separator = false;
-            continue;
-        }
-
-        if !previous_was_separator && !slug.is_empty() {
-            slug.push('-');
-            previous_was_separator = true;
-        }
-    }
-
-    while slug.ends_with('-') {
-        slug.pop();
-    }
-
-    if slug.is_empty() {
-        return String::from("repository");
-    }
-
-    slug
 }
 
 fn credential_binding_references(
@@ -1854,17 +2399,29 @@ fn supported_credential_kinds() -> Vec<String> {
     vec![
         String::from(KIND_GIT_HTTP_BASIC),
         String::from(KIND_GIT_HTTP_BEARER),
+        String::from(KIND_GIT_HTTP_GITHUB_HOST_LOGIN),
     ]
 }
 
 fn credential_kind_supported(kind: &str) -> bool {
-    matches!(kind.trim(), KIND_GIT_HTTP_BASIC | KIND_GIT_HTTP_BEARER)
+    matches!(
+        kind.trim(),
+        KIND_GIT_HTTP_BASIC
+            | KIND_GIT_HTTP_BEARER
+            | KIND_GIT_HTTP_GITHUB_HOST_LOGIN
+    )
 }
 
 fn expected_credential_keys(kind: &str) -> Vec<String> {
     match kind.trim() {
         KIND_GIT_HTTP_BASIC => vec![String::from("password"), String::from("username")],
         KIND_GIT_HTTP_BEARER => vec![String::from("token")],
+        KIND_GIT_HTTP_GITHUB_HOST_LOGIN => vec![
+            String::from("auth_mode"),
+            String::from("credential_helper"),
+            String::from("instance_url"),
+            String::from("provider"),
+        ],
         _ => Vec::new(),
     }
 }
@@ -1878,7 +2435,7 @@ fn secret_settings_warnings() -> Vec<String> {
             "manifest sync resolves env and file sources before persistence, so SQLite may already contain materialized secret values",
         ),
         String::from(
-            "new repository credentials created through the desktop wizard persist PAT values in the host keyring and store only key references in SQLite",
+            "GitHub login credentials created through the desktop shell delegate secret storage to Git Credential Manager and store only runtime metadata in SQLite",
         ),
     ]
 }
@@ -2312,12 +2869,12 @@ mod tests {
         load_runtime_health_report, load_runtime_lifecycle_settings,
         load_runtime_log_lines,
         persist_repository_project,
+        persist_repository_project_update,
         persist_publish_target_secret_binding,
         persist_repository_secret_binding,
         persist_secret_credential,
         process_identity_matches_runtime,
         purge_build_execution_retention_files,
-        repository_pat_basic_auth_username,
         load_secret_settings,
         resolve_shell_runtime_config,
         load_unity_runner_settings,
@@ -2325,6 +2882,7 @@ mod tests {
         runtime_binary_file_name, RuntimeLaunchAction, RUNTIME_BINARY_NAME,
         CreateRepositoryProjectBuildTargetCommandInput,
         CreateRepositoryProjectCommandInput,
+        UpdateRepositoryProjectCommandInput,
         SaveSecretCredentialInput, UpdatePublishTargetSecretBindingInput,
         UpdateRepositorySecretBindingInput, window_transition_settings,
     };
@@ -2346,22 +2904,6 @@ mod tests {
             "hup-runtime.exe",
             "C:/repo/target/debug/hup-runtime.exe serve"
         ));
-    }
-
-    #[test]
-    fn repository_pat_basic_auth_username_uses_github_owner() {
-        assert_eq!(
-            repository_pat_basic_auth_username(
-                "https://github.com/indiegabo/revolutions.git",
-            ),
-            "indiegabo"
-        );
-        assert_eq!(
-            repository_pat_basic_auth_username(
-                "https://example.com/indiegabo/revolutions.git",
-            ),
-            "git"
-        );
     }
 
     #[test]
@@ -3638,10 +4180,17 @@ mod tests {
         let settings = load_secret_settings(&config)
             .expect("secret settings should load");
 
-        assert_eq!(settings.storage_model, "sqlite-inline-config-json");
+        assert_eq!(
+            settings.storage_model,
+            "sqlite-config-json-and-keyring-references"
+        );
         assert_eq!(
             settings.supported_credential_kinds,
-            vec!["git-http-basic", "git-http-bearer"]
+            vec![
+                "git-http-basic",
+                "git-http-bearer",
+                "git-http-github-host-login",
+            ]
         );
         assert_eq!(settings.credentials.len(), 2);
         assert_eq!(settings.repository_bindings.len(), 2);
@@ -3829,6 +4378,183 @@ mod tests {
         assert_eq!(inspection.repositories[0].build_targets.len(), 1);
         assert_eq!(inspection.repositories[0].build_targets[0].target_name, "Windows");
         assert_eq!(inspection.repositories[0].build_targets[0].diagnostic_status, "ready");
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn persist_repository_project_binds_default_github_auth_credential() {
+        let root = std::env::temp_dir().join("desktop-shell-project-github-auth-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO credentials (name, kind, config_json) VALUES (?, ?, ?)",
+                params![
+                    "GitHub.com",
+                    "git-http-github-host-login",
+                    r#"{"provider":"github","instance_url":"https://github.com","credential_helper":"manager","auth_mode":"browser"}"#,
+                ],
+            )
+            .expect("GitHub auth credential should insert");
+        let github_credentials_id = connection.last_insert_rowid();
+        drop(connection);
+
+        let unity_executable_path = std::env::current_exe()
+            .expect("current executable path should resolve")
+            .display()
+            .to_string();
+
+        let created = persist_repository_project(
+            &config,
+            CreateRepositoryProjectCommandInput {
+                name: String::from("Workers"),
+                repository_url: String::from("https://github.com/indiegabo/workers.git"),
+                personal_access_token: None,
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                build_targets: vec![CreateRepositoryProjectBuildTargetCommandInput {
+                    name: String::from("Windows"),
+                    platform: String::from("windows"),
+                    build_method: String::from("Builder.PerformWindows"),
+                    unity_executable_path,
+                }],
+            },
+        )
+        .expect("repository project should persist");
+
+        assert_eq!(created.credentials_id, Some(github_credentials_id));
+
+        let inspection = load_repository_inspection(&config)
+            .expect("repository inspection should reflect created project");
+
+        assert_eq!(inspection.repositories.len(), 1);
+        let repository = &inspection.repositories[0];
+        let credentials = repository
+            .credentials
+            .as_ref()
+            .expect("GitHub auth credential should be bound by default");
+        assert_eq!(credentials.credential_id, github_credentials_id);
+        assert_eq!(credentials.kind, "git-http-github-host-login");
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn persist_repository_project_rejects_personal_access_tokens() {
+        let root = std::env::temp_dir().join("desktop-shell-project-pat-rejection-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let unity_executable_path = std::env::current_exe()
+            .expect("current executable path should resolve")
+            .display()
+            .to_string();
+
+        let error = persist_repository_project(
+            &config,
+            CreateRepositoryProjectCommandInput {
+                name: String::from("Workers"),
+                repository_url: String::from("https://github.com/indiegabo/workers.git"),
+                personal_access_token: Some(String::from("ghp-legacy-token")),
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                build_targets: vec![CreateRepositoryProjectBuildTargetCommandInput {
+                    name: String::from("Windows"),
+                    platform: String::from("windows"),
+                    build_method: String::from("Builder.PerformWindows"),
+                    unity_executable_path,
+                }],
+            },
+        )
+        .expect_err("PAT-based repository auth should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("personal access token is no longer supported")
+        );
+    }
+
+    #[test]
+    fn persist_repository_project_update_refreshes_repository_inspection_entry() {
+        let root = std::env::temp_dir().join("desktop-shell-project-update-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let unity_executable_path = std::env::current_exe()
+            .expect("current executable path should resolve")
+            .display()
+            .to_string();
+
+        let created = persist_repository_project(
+            &config,
+            CreateRepositoryProjectCommandInput {
+                name: String::from("Workers"),
+                repository_url: String::from("https://example.com/workers.git"),
+                personal_access_token: None,
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: Some(String::from("C:/artifacts/workers")),
+                workspace_root_override: Some(String::from("C:/workspaces/workers")),
+                polling_interval_seconds: 300,
+                build_targets: vec![CreateRepositoryProjectBuildTargetCommandInput {
+                    name: String::from("Windows"),
+                    platform: String::from("windows"),
+                    build_method: String::from("Builder.PerformWindows"),
+                    unity_executable_path,
+                }],
+            },
+        )
+        .expect("repository project should persist");
+
+        persist_repository_project_update(
+            &config,
+            UpdateRepositoryProjectCommandInput {
+                repository_id: created.repository_id,
+                name: String::from("Workers Updated"),
+                repository_url: String::from("https://example.com/workers-updated.git"),
+                default_branch: Some(String::from("release")),
+                artifacts_root_override: None,
+                workspace_root_override: Some(String::from("D:/workspaces/workers")),
+                polling_interval_seconds: 45,
+                enabled: false,
+            },
+        )
+        .expect("repository project update should persist");
+
+        let inspection = load_repository_inspection(&config)
+            .expect("repository inspection should reflect updated project");
+
+        assert_eq!(inspection.repositories.len(), 1);
+        assert_eq!(inspection.repositories[0].repository_id, created.repository_id);
+        assert_eq!(inspection.repositories[0].repository_name, "Workers Updated");
+        assert_eq!(
+            inspection.repositories[0].repo_url,
+            "https://example.com/workers-updated.git"
+        );
+        assert_eq!(inspection.repositories[0].default_branch.as_deref(), Some("release"));
+        assert_eq!(inspection.repositories[0].artifacts_root_override, None);
+        assert_eq!(
+            inspection.repositories[0].workspace_root_override.as_deref(),
+            Some("D:/workspaces/workers")
+        );
+        assert_eq!(inspection.repositories[0].polling_interval_seconds, 45);
+        assert!(!inspection.repositories[0].enabled);
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }
