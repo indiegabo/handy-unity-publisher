@@ -65,6 +65,9 @@ export type RepositoryInspectionEntry = {
     repo_url: string;
     enabled: boolean;
     polling_interval_seconds: number;
+    default_branch: string | null;
+    artifacts_root_override: string | null;
+    workspace_root_override: string | null;
     last_seen_tag: string | null;
     enabled_build_target_count: number;
     credentials: RepositoryCredentialReference | null;
@@ -106,7 +109,6 @@ export type CreateRepositoryProjectBuildTargetInput = {
 export type CreateRepositoryProjectInput = {
     name: string;
     repository_url: string;
-    personal_access_token?: string | null;
     default_branch?: string | null;
     artifacts_root_override?: string | null;
     workspace_root_override?: string | null;
@@ -119,6 +121,17 @@ export type CreatedRepositoryProjectRecord = {
     repository_name: string;
     credentials_id: number | null;
     build_target_ids: number[];
+};
+
+export type UpdateRepositoryProjectInput = {
+    repository_id: number;
+    name: string;
+    repository_url: string;
+    default_branch?: string | null;
+    artifacts_root_override?: string | null;
+    workspace_root_override?: string | null;
+    polling_interval_seconds: number;
+    enabled: boolean;
 };
 
 export async function loadRepositoryInspection(): Promise<RepositoryInspectionSettings> {
@@ -149,6 +162,14 @@ export async function createRepositoryProject(
     input: CreateRepositoryProjectInput,
 ): Promise<CreatedRepositoryProjectRecord> {
     return invoke<CreatedRepositoryProjectRecord>("create_repository_project", {
+        input,
+    });
+}
+
+export async function updateRepositoryProject(
+    input: UpdateRepositoryProjectInput,
+): Promise<void> {
+    return invoke<void>("update_repository_project", {
         input,
     });
 }

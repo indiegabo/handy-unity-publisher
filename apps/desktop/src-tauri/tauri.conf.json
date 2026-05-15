@@ -15,6 +15,7 @@
             {
                 "label": "main",
                 "title": "Handy Unity Publisher",
+                "decorations": false,
                 "width": 360,
                 "height": 420,
                 "resizable": false,

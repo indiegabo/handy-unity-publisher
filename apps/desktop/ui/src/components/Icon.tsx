@@ -6,10 +6,14 @@ export type IconName =
   | "arrowUpRight"
   | "box"
   | "checkCircle"
+  | "close"
   | "chevronDown"
   | "queue"
   | "folder"
+  | "key"
   | "layout"
+  | "pin"
+  | "unpin"
   | "play"
   | "plus"
   | "refresh"
@@ -92,6 +96,13 @@ function renderIcon(name: IconName) {
           <path d="M8.5 12.5l2.2 2.2 4.8-5" />
         </>
       );
+    case "close":
+      return (
+        <>
+          <path d="M6.5 6.5l11 11" />
+          <path d="M17.5 6.5l-11 11" />
+        </>
+      );
     case "chevronDown":
       return <path d="M6 9l6 6 6-6" />;
     case "queue":
@@ -110,12 +121,44 @@ function renderIcon(name: IconName) {
           <path d="M3.5 10.5h17" />
         </>
       );
+    case "key":
+      return (
+        <>
+          <circle cx="8.5" cy="12" r="3.5" />
+          <path d="M12 12h8" />
+          <path d="M17 12v2.5" />
+          <path d="M19.5 12v1.5" />
+        </>
+      );
     case "layout":
       return (
         <>
           <rect height="16" rx="2.5" width="18" x="3" y="4" />
           <path d="M9 4v16" />
           <path d="M9 10h12" />
+        </>
+      );
+    case "pin":
+      return (
+        <>
+          <path d="M9 4.5h6" />
+          <path d="M8.5 4.5l1 5.5" />
+          <path d="M15.5 4.5l-1 5.5" />
+          <path d="M7 10h10" />
+          <path d="M12 10v9.5" />
+          <path d="M9.5 13.5L12 10l2.5 3.5" />
+        </>
+      );
+    case "unpin":
+      return (
+        <>
+          <path d="M9 4.5h6" />
+          <path d="M8.5 4.5l1 5.5" />
+          <path d="M15.5 4.5l-1 5.5" />
+          <path d="M7 10h10" />
+          <path d="M12 10v9.5" />
+          <path d="M9.5 13.5L12 10l2.5 3.5" />
+          <path d="M6 6l12 12" />
         </>
       );
     case "play":

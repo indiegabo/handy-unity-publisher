@@ -19,6 +19,7 @@ import {
   type RepositoryInspectionEntry,
   type UnityExecutableValidation,
 } from "../services/projects";
+import { loadAuthProviders, type AuthProviderStatus } from "../services/auth";
 
 type BuildTargetDraft = {
   id: string;
@@ -32,7 +33,6 @@ type ProjectDraft = {
   projectKind: "repository" | "local";
   name: string;
   repositoryUrl: string;
-  personalAccessToken: string;
   defaultBranch: string;
   pollingIntervalSeconds: string;
   artifactsRootOverride: string;
@@ -63,6 +63,7 @@ type ProjectPathFieldName = "artifactsRootOverride" | "workspaceRootOverride";
 
 type CreateProjectWizardProps = {
   onCreated: (repositoryId: number) => void;
+  onManageAuth?: () => void;
 };
 
 type ValidationTimerMap = Record<string, number | undefined>;
@@ -127,12 +128,14 @@ const EMPTY_VALIDATION_ATTEMPTS: Record<WizardStepKey, boolean> = {
   review: false,
 };
 
-export function CreateProjectWizard({ onCreated }: CreateProjectWizardProps) {
+export function CreateProjectWizard({
+  onCreated,
+  onManageAuth,
+}: CreateProjectWizardProps) {
   const [draft, setDraft] = useState<ProjectDraft>(() => ({
     projectKind: "repository",
     name: "",
     repositoryUrl: "",
-    personalAccessToken: "",
     defaultBranch: "main",
     pollingIntervalSeconds: "300",
     artifactsRootOverride: "",
@@ -152,6 +155,12 @@ export function CreateProjectWizard({ onCreated }: CreateProjectWizardProps) {
   const [isLoadingRepositoryInventory, setIsLoadingRepositoryInventory] =
     useState(true);
   const [inventoryError, setInventoryError] = useState<string | null>(null);
+  const [githubAuthProvider, setGithubAuthProvider] =
+    useState<AuthProviderStatus | null>(null);
+  const [isLoadingAuthProviders, setIsLoadingAuthProviders] = useState(true);
+  const [authProviderError, setAuthProviderError] = useState<string | null>(
+    null,
+  );
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pathDiagnostics, setPathDiagnostics] = useState<
@@ -173,7 +182,11 @@ export function CreateProjectWizard({ onCreated }: CreateProjectWizardProps) {
   const showPreviousAction = currentStepIndex > 0;
   const showNextAction = currentStep.key !== "review";
   const identityErrors = validateIdentityStep(draft, repositoryInventory);
-  const accessErrors = validateAccessStep(draft, repositoryInventory);
+  const accessErrors = validateAccessStep(draft, repositoryInventory, {
+    githubAuthProvider,
+    isLoadingAuthProviders,
+    authProviderError,
+  });
   const targetErrors = validateTargetsStep(
     draft,
     pathDiagnostics,
@@ -200,8 +213,30 @@ export function CreateProjectWizard({ onCreated }: CreateProjectWizardProps) {
     }
   });
 
+  const loadAuthProvidersEffect = useEffectEvent(async () => {
+    setIsLoadingAuthProviders(true);
+
+    try {
+      const providers = await loadAuthProviders();
+      const githubProvider =
+        providers.find((provider) => provider.provider_id === "github") ?? null;
+
+      startTransition(() => {
+        setGithubAuthProvider(githubProvider);
+        setAuthProviderError(null);
+        setIsLoadingAuthProviders(false);
+      });
+    } catch (error) {
+      startTransition(() => {
+        setAuthProviderError(buildProjectErrorMessage(error));
+        setIsLoadingAuthProviders(false);
+      });
+    }
+  });
+
   useEffect(() => {
     void loadRepositoryInventoryEffect();
+    void loadAuthProvidersEffect();
 
     return () => {
       for (const timerId of Object.values(validationTimersRef.current)) {
@@ -649,7 +684,10 @@ export function CreateProjectWizard({ onCreated }: CreateProjectWizardProps) {
               hint="Use the HTTPS remote that HUP will poll and clone."
               label="Repository URL"
               leadingIcon="server"
-              onBlur={() => markFieldTouched("repositoryUrl")}
+              onBlur={() => {
+                markFieldTouched("repositoryUrl");
+                markFieldTouched("githubAuth");
+              }}
               onChange={(event) => {
                 const nextValue = event.currentTarget.value;
                 startTransition(() => {
@@ -659,6 +697,7 @@ export function CreateProjectWizard({ onCreated }: CreateProjectWizardProps) {
                   }));
                 });
                 markFieldTouched("repositoryUrl");
+                markFieldTouched("githubAuth");
               }}
               placeholder="https://github.com/org/project.git"
               value={draft.repositoryUrl}
@@ -717,33 +756,63 @@ export function CreateProjectWizard({ onCreated }: CreateProjectWizardProps) {
               type="number"
               value={draft.pollingIntervalSeconds}
             />
-            <TextField
-              error={
-                shouldShowFieldError(
-                  attemptedSteps.access,
-                  touchedFields,
-                  "personalAccessToken",
-                )
-                  ? accessErrors.personalAccessToken
-                  : undefined
-              }
-              hint="Optional for public repositories. When set, the token is written to the host keyring and only a reference stays in SQLite."
-              label="Personal access token"
-              onBlur={() => markFieldTouched("personalAccessToken")}
-              onChange={(event) => {
-                const nextValue = event.currentTarget.value;
-                startTransition(() => {
-                  setDraft((current) => ({
-                    ...current,
-                    personalAccessToken: nextValue,
-                  }));
-                });
-                markFieldTouched("personalAccessToken");
-              }}
-              placeholder="Leave blank for public repositories"
-              type="password"
-              value={draft.personalAccessToken}
-            />
+
+            <div className="wizard-callout wizard-callout--compact wizard-callout--auth">
+              <div className="wizard-callout__header">
+                <div>
+                  <p className="wizard-callout__title">GitHub login</p>
+                  <p className="wizard-callout__copy">
+                    {resolveGithubAuthProviderCopy(
+                      githubAuthProvider,
+                      isLoadingAuthProviders,
+                      authProviderError,
+                    )}
+                  </p>
+                </div>
+
+                <div className="wizard-callout__badges">
+                  <Badge
+                    tone={resolveGithubAuthProviderBadgeTone(
+                      githubAuthProvider,
+                      isLoadingAuthProviders,
+                    )}
+                  >
+                    {formatGithubAuthProviderStatus(
+                      githubAuthProvider,
+                      isLoadingAuthProviders,
+                    )}
+                  </Badge>
+                  {githubAuthProvider ? (
+                    <Badge tone="muted">
+                      {formatBoundRepositoryCount(
+                        githubAuthProvider.bound_repository_count,
+                      )}
+                    </Badge>
+                  ) : null}
+                </div>
+              </div>
+
+              {shouldShowFieldError(
+                attemptedSteps.access,
+                touchedFields,
+                "githubAuth",
+              ) && accessErrors.githubAuth ? (
+                <p className="ui-field__error">{accessErrors.githubAuth}</p>
+              ) : null}
+
+              {onManageAuth ? (
+                <div className="wizard-callout__actions">
+                  <Button
+                    leadingIcon="key"
+                    onClick={onManageAuth}
+                    size="sm"
+                    variant="secondary"
+                  >
+                    Open logins
+                  </Button>
+                </div>
+              ) : null}
+            </div>
           </div>
         ) : null}
 
@@ -1029,9 +1098,11 @@ export function CreateProjectWizard({ onCreated }: CreateProjectWizardProps) {
                   Poll every {draft.pollingIntervalSeconds.trim() || "0"}s
                 </Badge>
                 <Badge tone="muted">
-                  {draft.personalAccessToken.trim()
-                    ? "PAT will be stored in host keyring"
-                    : "Public repository mode"}
+                  {isGitHubRepositoryUrl(draft.repositoryUrl)
+                    ? githubAuthProvider?.status === "connected"
+                      ? "GitHub login connected"
+                      : "GitHub login required"
+                    : "External host authentication"}
                 </Badge>
                 <Badge tone="muted">
                   {draft.buildTargets.length} target
@@ -1184,12 +1255,17 @@ function validateIdentityStep(
 function validateAccessStep(
   draft: ProjectDraft,
   repositoryInventory: RepositoryInspectionEntry[],
+  authState: {
+    githubAuthProvider: AuthProviderStatus | null;
+    isLoadingAuthProviders: boolean;
+    authProviderError: string | null;
+  },
 ) {
   const errors: {
     repositoryUrl?: string;
     defaultBranch?: string;
     pollingIntervalSeconds?: string;
-    personalAccessToken?: string;
+    githubAuth?: string;
   } = {};
   const normalizedUrl = draft.repositoryUrl.trim();
   if (!normalizedUrl) {
@@ -1224,10 +1300,16 @@ function validateAccessStep(
       "Polling interval must be at least 5 seconds.";
   }
 
-  const personalAccessToken = draft.personalAccessToken.trim();
-  if (personalAccessToken && /\s/.test(personalAccessToken)) {
-    errors.personalAccessToken =
-      "Personal access token must not contain whitespace.";
+  if (isGitHubRepositoryUrl(normalizedUrl)) {
+    if (authState.isLoadingAuthProviders) {
+      errors.githubAuth = "GitHub login status is still loading.";
+    } else if (authState.authProviderError) {
+      errors.githubAuth =
+        "GitHub login status could not be loaded from the desktop shell.";
+    } else if (authState.githubAuthProvider?.status !== "connected") {
+      errors.githubAuth =
+        "Connect the GitHub login in Logins before registering a GitHub repository.";
+    }
   }
 
   return errors;
@@ -1323,7 +1405,7 @@ function hasAccessErrors(errors: ReturnType<typeof validateAccessStep>) {
     errors.repositoryUrl ||
     errors.defaultBranch ||
     errors.pollingIntervalSeconds ||
-    errors.personalAccessToken,
+    errors.githubAuth,
   );
 }
 
@@ -1406,7 +1488,6 @@ function buildCreateProjectInput(
   return {
     name: draft.name.trim(),
     repository_url: draft.repositoryUrl.trim(),
-    personal_access_token: optionalTrimmedString(draft.personalAccessToken),
     default_branch: optionalTrimmedString(draft.defaultBranch),
     artifacts_root_override: optionalTrimmedString(draft.artifactsRootOverride),
     workspace_root_override: optionalTrimmedString(draft.workspaceRootOverride),
@@ -1469,6 +1550,88 @@ function formatDiagnosticStatus(status: string) {
     default:
       return status.replace(/_/g, " ");
   }
+}
+
+function isGitHubRepositoryUrl(value: string) {
+  const normalizedValue = value.trim();
+  if (!normalizedValue) {
+    return false;
+  }
+
+  try {
+    const url = new URL(normalizedValue);
+    return url.hostname.toLocaleLowerCase() === "github.com";
+  } catch {
+    return false;
+  }
+}
+
+function resolveGithubAuthProviderBadgeTone(
+  provider: AuthProviderStatus | null,
+  isLoadingAuthProviders: boolean,
+): "strong" | "neutral" | "muted" {
+  if (isLoadingAuthProviders) {
+    return "muted";
+  }
+
+  if (provider?.status === "connected") {
+    return "strong";
+  }
+
+  if (provider?.status === "disconnected") {
+    return "neutral";
+  }
+
+  return "muted";
+}
+
+function formatGithubAuthProviderStatus(
+  provider: AuthProviderStatus | null,
+  isLoadingAuthProviders: boolean,
+) {
+  if (isLoadingAuthProviders) {
+    return "loading";
+  }
+
+  if (!provider) {
+    return "unavailable";
+  }
+
+  if (provider.status === "connected") {
+    return "connected";
+  }
+
+  if (provider.status === "disconnected") {
+    return "ready to connect";
+  }
+
+  return "unavailable";
+}
+
+function resolveGithubAuthProviderCopy(
+  provider: AuthProviderStatus | null,
+  isLoadingAuthProviders: boolean,
+  authProviderError: string | null,
+) {
+  if (isLoadingAuthProviders) {
+    return "HUP is checking whether the host GitHub login is already available.";
+  }
+
+  if (authProviderError) {
+    return authProviderError;
+  }
+
+  if (provider) {
+    return provider.status_message;
+  }
+
+  return "GitHub host login is not available on this machine yet.";
+}
+
+function formatBoundRepositoryCount(boundRepositoryCount: number) {
+  return `${boundRepositoryCount} repository project${
+    boundRepositoryCount === 1 ? "" : "s"
+  }`;
 }
 
 function buildProjectErrorMessage(error: unknown): string {
