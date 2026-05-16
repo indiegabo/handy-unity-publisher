@@ -10,12 +10,14 @@ import {
 import { Button } from "./Button";
 import { SelectField, TextField } from "./Field";
 import { PathPickerField } from "./PathPickerField";
+import { RepositoryEngineField } from "./RepositoryEngineField";
 import { Badge } from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
 import {
   loadRepositoryInspection,
   updateRepositoryProject,
   validateUnityExecutablePath,
+  type RepositoryEngineKind,
   type RepositoryInspectionEntry,
   type UnityExecutableValidation,
   type UpdateRepositoryProjectInput,
@@ -29,12 +31,13 @@ type RepositoryProjectBuildTargetDraft = {
   id: string;
   buildTargetId: number | null;
   name: string;
-  platform: string;
+  targetPlatform: string;
   buildMethod: string;
   unityExecutablePath: string;
 };
 
 type RepositoryProjectDraft = {
+  engineKind: RepositoryEngineKind;
   name: string;
   repositoryUrl: string;
   defaultBranch: string;
@@ -47,12 +50,13 @@ type RepositoryProjectDraft = {
 
 type RepositoryProjectBuildTargetValidationErrors = {
   name?: string;
-  platform?: string;
+  targetPlatform?: string;
   buildMethod?: string;
   unityExecutablePath?: string;
 };
 
 type RepositoryProjectValidationErrors = {
+  engineKind?: string;
   name?: string;
   repositoryUrl?: string;
   pollingIntervalSeconds?: string;
@@ -82,12 +86,12 @@ const PROJECT_STATUS_OPTIONS = [
   { label: "Disabled", value: "disabled" },
 ] as const;
 const PLATFORM_OPTIONS = [
-  { label: "Select a platform", value: "" },
-  { label: "Windows", value: "windows" },
-  { label: "Linux", value: "linux" },
-  { label: "macOS", value: "macos" },
-  { label: "WebGL", value: "webgl" },
-  { label: "Android", value: "android" },
+  { label: "Select a Unity target", value: "" },
+  { label: "Windows", value: "StandaloneWindows64" },
+  { label: "Linux", value: "StandaloneLinux64" },
+  { label: "macOS", value: "StandaloneOSX" },
+  { label: "WebGL", value: "WebGL" },
+  { label: "Android", value: "Android" },
 ] as const;
 const DEFAULT_SECTION_OPEN_STATE: Record<ProjectDetailSectionKey, boolean> = {
   project: true,
@@ -558,6 +562,7 @@ export function RepositoryProjectDetail({
           <Badge tone={draft?.enabled === "enabled" ? "strong" : "muted"}>
             {draft?.enabled === "enabled" ? "enabled" : "disabled"}
           </Badge>
+          <Badge tone="neutral">engine: {draft?.engineKind ?? "unity"}</Badge>
           <Badge tone="neutral">
             Poll every {pollingIntervalLabel}s
           </Badge>
@@ -592,6 +597,17 @@ export function RepositoryProjectDetail({
                 }
                 placeholder="https://example.com/repository.git"
                 value={draft.repositoryUrl}
+              />
+
+              <RepositoryEngineField
+                error={validationErrors.engineKind}
+                onChange={(event) =>
+                  handleDraftFieldChange(
+                    "engineKind",
+                    event.target.value as RepositoryProjectDraft["engineKind"],
+                  )
+                }
+                value={draft.engineKind}
               />
 
               <TextField
@@ -742,7 +758,7 @@ export function RepositoryProjectDetail({
 
                       <div className="wizard-target-card__actions">
                         <Badge tone="neutral">
-                          {target.platform.trim() || "no platform"}
+                          {target.targetPlatform.trim() || "no Unity target"}
                         </Badge>
                         {diagnostics ? (
                           <Badge
@@ -787,21 +803,25 @@ export function RepositoryProjectDetail({
                       value={target.name}
                     />
                     <SelectField
-                      error={fieldErrors.platform}
-                      hint="The runtime maps this directly to Unity BuildTarget semantics."
-                      label="Platform"
+                      error={fieldErrors.targetPlatform}
+                      hint="This writes the Unity targetPlatform contract field directly."
+                      label="Unity target platform"
                       onChange={(event) => {
                         updateBuildTarget(target.id, {
-                          platform: event.currentTarget.value,
+                          targetPlatform: normalizeUnityTargetPlatformValue(
+                            event.currentTarget.value,
+                          ),
                         });
                       }}
                       options={PLATFORM_OPTIONS}
-                      value={target.platform}
+                      value={normalizeUnityTargetPlatformValue(
+                        target.targetPlatform,
+                      )}
                     />
                     <TextField
                       error={fieldErrors.buildMethod}
                       hint="Point this at a real static Unity method, for example Builder.PerformWindows."
-                      label="Build method"
+                      label="Unity build method"
                       onChange={(event) => {
                         updateBuildTarget(target.id, {
                           buildMethod: event.currentTarget.value,
@@ -984,7 +1004,7 @@ function createEmptyBuildTargetDraft(
     id: `target-${index}`,
     buildTargetId: null,
     name: "",
-    platform: "",
+    targetPlatform: "",
     buildMethod: "",
     unityExecutablePath: "",
   };
@@ -995,6 +1015,7 @@ function buildRepositoryProjectDraft(
   buildTargets: RepositoryProjectBuildTargetDraft[],
 ): RepositoryProjectDraft {
   return {
+    engineKind: normalizeRepositoryEngineKind(repository.engine_kind),
     name: repository.repository_name,
     repositoryUrl: repository.repo_url,
     defaultBranch: repository.default_branch ?? "",
@@ -1021,8 +1042,10 @@ function buildRepositoryProjectTargetEditorState(
       id: targetId,
       buildTargetId: target.build_target_id,
       name: target.target_name,
-      platform: target.platform,
-      buildMethod: target.build_method ?? "",
+      targetPlatform: normalizeUnityTargetPlatformValue(
+        target.unity_target_platform,
+      ),
+      buildMethod: target.unity_build_method ?? "",
       unityExecutablePath:
         target.host_native_diagnostics?.unity_executable_path ?? "",
     });
@@ -1044,6 +1067,11 @@ function validateRepositoryProjectDraft(
   validatingTargets: Record<string, boolean>,
 ): RepositoryProjectValidationErrors {
   const errors = createEmptyValidationErrors();
+
+  if (draft.engineKind !== "unity") {
+    errors.engineKind =
+      "Only Unity is currently supported even though future engines are listed.";
+  }
 
   if (!draft.name.trim()) {
     errors.name = "Project name is required.";
@@ -1086,8 +1114,8 @@ function validateRepositoryProjectDraft(
       seenNames.add(duplicateKey);
     }
 
-    if (!target.platform.trim()) {
-      fieldErrors.platform = "Platform selection is required.";
+    if (!target.targetPlatform.trim()) {
+      fieldErrors.targetPlatform = "Unity target platform is required.";
     }
 
     if (!target.buildMethod.trim()) {
@@ -1119,7 +1147,8 @@ function validateRepositoryProjectDraft(
 
 function hasValidationErrors(errors: RepositoryProjectValidationErrors) {
   return Boolean(
-    errors.name ||
+    errors.engineKind ||
+      errors.name ||
       errors.repositoryUrl ||
       errors.pollingIntervalSeconds ||
       errors.buildTargetsRoot ||
@@ -1134,7 +1163,7 @@ function hasBuildTargetFieldErrors(
 ) {
   return Boolean(
     errors.name ||
-      errors.platform ||
+      errors.targetPlatform ||
       errors.buildMethod ||
       errors.unityExecutablePath,
   );
@@ -1169,6 +1198,7 @@ function buildRepositoryProjectUpdateInput(
   return {
     repository_id: repositoryId,
     name: draft.name.trim(),
+    engine_kind: draft.engineKind,
     repository_url: draft.repositoryUrl.trim(),
     default_branch: normalizeOptionalDraftValue(draft.defaultBranch),
     artifacts_root_override: normalizeOptionalDraftValue(
@@ -1182,8 +1212,14 @@ function buildRepositoryProjectUpdateInput(
     build_targets: draft.buildTargets.map((target) => ({
       build_target_id: target.buildTargetId,
       name: target.name.trim(),
-      platform: target.platform.trim(),
-      build_method: target.buildMethod.trim(),
+      contract: {
+        unity: {
+          target_platform: normalizeUnityTargetPlatformValue(
+            target.targetPlatform,
+          ),
+          build_method: target.buildMethod.trim(),
+        },
+      },
       unity_executable_path: target.unityExecutablePath.trim(),
     })),
   };
@@ -1229,7 +1265,7 @@ function areBuildTargetDraftsEqual(
     return (
       target.buildTargetId === candidate.buildTargetId &&
       target.name.trim() === candidate.name.trim() &&
-      target.platform.trim() === candidate.platform.trim() &&
+      target.targetPlatform.trim() === candidate.targetPlatform.trim() &&
       target.buildMethod.trim() === candidate.buildMethod.trim() &&
       target.unityExecutablePath.trim() ===
         candidate.unityExecutablePath.trim()
@@ -1244,6 +1280,29 @@ function formatDiagnosticStatus(status: string) {
 function normalizeOptionalDraftValue(value: string) {
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function normalizeRepositoryEngineKind(value: string): RepositoryEngineKind {
+  return value === "unity" ? "unity" : "unity";
+}
+
+function normalizeUnityTargetPlatformValue(value: string) {
+  switch (value.trim().toLocaleLowerCase()) {
+    case "windows":
+      return "StandaloneWindows64";
+    case "linux":
+      return "StandaloneLinux64";
+    case "macos":
+    case "mac":
+    case "osx":
+      return "StandaloneOSX";
+    case "webgl":
+      return "WebGL";
+    case "android":
+      return "Android";
+    default:
+      return value.trim();
+  }
 }
 
 function joinClassNames(...tokens: Array<string | false | null | undefined>) {

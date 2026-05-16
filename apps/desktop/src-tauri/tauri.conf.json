@@ -1,8 +1,8 @@
 {
-    "productName": "HUP",
+    "productName": "HGP",
     "version": "0.1.0",
-    "identifier": "com.indiegabo.handyunitypublisher",
-    "mainBinaryName": "HUP",
+    "identifier": "com.indiegabo.handygamespublisher",
+    "mainBinaryName": "HGP",
     "build": {
         "beforeDevCommand": "node ../../../scripts/sync-app-version.mjs && node ../../../scripts/start-desktop-ui-dev-server.mjs",
         "beforeBuildCommand": "node ../../../scripts/sync-app-version.mjs && npm run build --prefix ../ui",
@@ -14,7 +14,7 @@
         "windows": [
             {
                 "label": "main",
-                "title": "Handy Unity Publisher",
+                "title": "Handy Games Publisher",
                 "decorations": false,
                 "width": 360,
                 "height": 420,

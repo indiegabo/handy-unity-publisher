@@ -9,7 +9,7 @@ export type BuildTargetEntry = {
   diagnosticMessage: string;
   diagnosticStatus: string;
   name: string;
-  platform: string;
+  unityTargetPlatform: string;
 };
 
 export type ProjectWorkerEntry = {
@@ -187,7 +187,7 @@ export function ProjectWorkersFocusScreen({
                             {buildTarget.name}
                           </p>
                           <p className="project-workers-focus-build-target-chip__copy">
-                            {buildTarget.platform}
+                            {buildTarget.unityTargetPlatform}
                           </p>
                         </div>
 

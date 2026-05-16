@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use rfd::FileDialog;
 use runtime_config::{
-    HostPlatform, RuntimeConfig, PRODUCT_DIRECTORY_NAME, RUNTIME_ROOT_ENV,
+    HostPlatform, RuntimeConfig, RUNTIME_ROOT_ENV,
 };
 use runtime_core::{
     read_health_report, read_supervision_contract, read_supervisor_snapshot,
@@ -27,9 +27,13 @@ use runtime_git::{
     KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
 };
 use runtime_runner::{
-    default_unity_discovery_root_paths, diagnose_host_native_runner_config,
-    inspect_host_capability_profile, HostCapabilityProfile,
-    HostNativeRunnerDiagnostics, RunnerFamily,
+    RunnerFamily,
+    unity::{
+        default_unity_discovery_root_paths,
+        diagnose_host_native_runner_config,
+        inspect_host_capability_profile, HostCapabilityProfile,
+        HostNativeRunnerDiagnostics,
+    },
 };
 use runtime_store::{
     ArtifactInspectionRecord, AutomationSnapshot, BuildHistoryRecord,
@@ -58,7 +62,7 @@ use tauri::{
 };
 
 const RUNTIME_PACKAGE_NAME: &str = "runtime-bin";
-const RUNTIME_BINARY_NAME: &str = "hup-runtime";
+const RUNTIME_BINARY_NAME: &str = "hgp-runtime";
 const DEFAULT_RUNTIME_LOG_LINE_LIMIT: usize = 100;
 const MAX_RUNTIME_LOG_LINE_LIMIT: usize = 500;
 const SECRET_STORAGE_MODEL_INLINE_SQLITE: &str =
@@ -69,7 +73,7 @@ const RUNTIME_SHUTDOWN_WAIT_POLLS: usize = 20;
 const BUILD_EXECUTION_RETAINED_DIR_NAME: &str = "retained";
 const BUILD_EXECUTION_REPORT_FILE_NAME: &str = "execution-report.json";
 const MAIN_WINDOW_LABEL: &str = "main";
-const TRAY_ICON_ID: &str = "hup-tray";
+const TRAY_ICON_ID: &str = "hgp-tray";
 const TRAY_MENU_OPEN_ID: &str = "tray-open";
 const TRAY_MENU_QUIT_ID: &str = "tray-quit";
 const POPUP_WINDOW_WIDTH: u32 = 360;
@@ -86,7 +90,7 @@ const MAX_PROCESS_FEED_PAGE_SIZE: u32 = 50;
 const DEFAULT_HOST_NATIVE_RUNNER_TYPE: &str = "host-native";
 const DEFAULT_BUILD_TARGET_TIMEOUT_SECONDS: i64 = 3600;
 const MIN_REPOSITORY_POLL_INTERVAL_SECONDS: i64 = 5;
-const LEGACY_PRODUCT_DIRECTORY_NAME: &str = "handy-unity-builder";
+const SUPPORTED_REPOSITORY_ENGINE_KIND_UNITY: &str = "unity";
 const GITHUB_AUTH_PROVIDER_ID: &str = "github";
 const GITHUB_AUTH_PROVIDER_LABEL: &str = "GitHub";
 const GITHUB_AUTH_INSTANCE_URL: &str = "https://github.com";
@@ -260,14 +264,14 @@ struct UnityDiscoveryRootSetting {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct UnityBuildTargetRunnerSettings {
+struct UnityAdapterBuildTargetSettings {
     build_target_id: i64,
     repository_id: i64,
     repository_name: String,
     target_name: String,
-    platform: String,
+    unity_target_platform: String,
     runner_type: String,
-    build_method: Option<String>,
+    unity_build_method: Option<String>,
     enabled: bool,
     diagnostic_status: String,
     diagnostic_message: String,
@@ -275,12 +279,12 @@ struct UnityBuildTargetRunnerSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct UnityRunnerSettings {
+struct UnityAdapterSettings {
     platform: String,
     supported_runner_families: Vec<String>,
     discovery_roots: Vec<UnityDiscoveryRootSetting>,
     capability_profile: HostCapabilityProfile,
-    build_targets: Vec<UnityBuildTargetRunnerSettings>,
+    build_targets: Vec<UnityAdapterBuildTargetSettings>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -375,10 +379,20 @@ struct AuthProviderStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct UnityBuildContractCommandInput {
+    target_platform: String,
+    build_method: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct BuildContractCommandInput {
+    unity: Option<UnityBuildContractCommandInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct CreateRepositoryProjectBuildTargetCommandInput {
     name: String,
-    platform: String,
-    build_method: String,
+    contract: BuildContractCommandInput,
     unity_executable_path: String,
 }
 
@@ -406,6 +420,7 @@ struct PickHostPathInput {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct CreateRepositoryProjectCommandInput {
     name: String,
+    engine_kind: String,
     repository_url: String,
     personal_access_token: Option<String>,
     default_branch: Option<String>,
@@ -419,8 +434,7 @@ struct CreateRepositoryProjectCommandInput {
 struct UpdateRepositoryProjectBuildTargetCommandInput {
     build_target_id: Option<i64>,
     name: String,
-    platform: String,
-    build_method: String,
+    contract: BuildContractCommandInput,
     unity_executable_path: String,
 }
 
@@ -428,6 +442,7 @@ struct UpdateRepositoryProjectBuildTargetCommandInput {
 struct UpdateRepositoryProjectCommandInput {
     repository_id: i64,
     name: String,
+    engine_kind: String,
     repository_url: String,
     default_branch: Option<String>,
     artifacts_root_override: Option<String>,
@@ -445,7 +460,7 @@ struct RepositoryInstantCheckInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedCreateRepositoryProjectBuildTargetCommandInput {
     name: String,
-    platform: String,
+    target_platform: String,
     build_method: String,
     unity_executable_path: String,
 }
@@ -453,6 +468,7 @@ struct NormalizedCreateRepositoryProjectBuildTargetCommandInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedCreateRepositoryProjectCommandInput {
     name: String,
+    engine_kind: String,
     repository_url: String,
     default_branch: Option<String>,
     artifacts_root_override: Option<String>,
@@ -465,7 +481,7 @@ struct NormalizedCreateRepositoryProjectCommandInput {
 struct NormalizedUpdateRepositoryProjectBuildTargetCommandInput {
     build_target_id: Option<i64>,
     name: String,
-    platform: String,
+    target_platform: String,
     build_method: String,
     unity_executable_path: String,
 }
@@ -474,6 +490,7 @@ struct NormalizedUpdateRepositoryProjectBuildTargetCommandInput {
 struct NormalizedUpdateRepositoryProjectCommandInput {
     repository_id: i64,
     name: String,
+    engine_kind: String,
     repository_url: String,
     default_branch: Option<String>,
     artifacts_root_override: Option<String>,
@@ -545,6 +562,7 @@ struct RepositoryInspectionEntry {
     repository_id: i64,
     repository_name: String,
     repo_url: String,
+    engine_kind: String,
     enabled: bool,
     polling_interval_seconds: i64,
     default_branch: Option<String>,
@@ -553,7 +571,7 @@ struct RepositoryInspectionEntry {
     last_seen_tag: Option<String>,
     enabled_build_target_count: i64,
     credentials: Option<RepositoryCredentialReference>,
-    build_targets: Vec<UnityBuildTargetRunnerSettings>,
+    build_targets: Vec<UnityAdapterBuildTargetSettings>,
     publish_targets: Vec<RepositoryPublishTargetInspection>,
     pending_release_count: i64,
     queued_build_runs: i64,
@@ -641,7 +659,7 @@ fn should_hide_main_window_on_focus_loss(app_handle: &AppHandle) -> bool {
 
 fn initialize_tray(app: &tauri::App) -> Result<(), String> {
     let menu = MenuBuilder::new(app)
-        .text(TRAY_MENU_OPEN_ID, "Open HUP")
+        .text(TRAY_MENU_OPEN_ID, "Open HGP")
         .separator()
         .text(TRAY_MENU_QUIT_ID, "Quit")
         .build()
@@ -653,7 +671,7 @@ fn initialize_tray(app: &tauri::App) -> Result<(), String> {
 
     TrayIconBuilder::with_id(TRAY_ICON_ID)
         .icon(icon)
-        .tooltip("HUP")
+        .tooltip("HGP")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .build(app)
@@ -837,7 +855,7 @@ pub fn run() {
             stop_runtime,
             restart_runtime,
             request_repository_instant_check,
-            unity_runner_settings,
+            unity_adapter_settings,
         ])
         .setup(|app| {
             launch_runtime_process(app)
@@ -1155,9 +1173,9 @@ fn request_repository_instant_check(
 }
 
 #[tauri::command]
-fn unity_runner_settings() -> Result<UnityRunnerSettings, String> {
+fn unity_adapter_settings() -> Result<UnityAdapterSettings, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    load_unity_runner_settings(&config).map_err(|error| error.to_string())
+    load_unity_adapter_settings(&config).map_err(|error| error.to_string())
 }
 
 fn launch_runtime_process<R: tauri::Runtime>(app: &tauri::App<R>) -> io::Result<()> {
@@ -1369,7 +1387,7 @@ fn load_repository_inspection(
     }
 
     let release_status = load_release_status(config)?;
-    let unity_settings = load_unity_runner_settings(config)?;
+    let unity_adapter_settings = load_unity_adapter_settings(config)?;
     let secret_settings = load_secret_settings(config)?;
     let generated_at = release_status.generated_at.clone();
     let release_status_by_repository = release_status
@@ -1395,9 +1413,9 @@ fn load_repository_inspection(
         .collect::<HashMap<_, _>>();
     let mut build_targets_by_repository = HashMap::<
         i64,
-        Vec<UnityBuildTargetRunnerSettings>,
+        Vec<UnityAdapterBuildTargetSettings>,
     >::new();
-    for target in unity_settings.build_targets {
+    for target in unity_adapter_settings.build_targets {
         build_targets_by_repository
             .entry(target.repository_id)
             .or_default()
@@ -1432,6 +1450,7 @@ fn load_repository_inspection(
                 repository_id: repository.id,
                 repository_name: repository.name,
                 repo_url: repository.repo_url,
+                engine_kind: repository.engine_kind,
                 enabled: repository.enabled,
                 polling_interval_seconds: repository.polling_interval_seconds,
                 default_branch: repository.default_branch,
@@ -2077,6 +2096,7 @@ fn persist_repository_project(
     let mut create_result = LocalCoordinator::new(&storage).create_repository_project(
         StoreCreateRepositoryProjectInput {
             name: normalized.name,
+            engine_kind: normalized.engine_kind,
             repo_url: normalized.repository_url,
             credentials: None,
             default_branch: normalized.default_branch,
@@ -2089,18 +2109,19 @@ fn persist_repository_project(
                 .into_iter()
                 .map(|target| CreateRepositoryProjectBuildTargetInput {
                     name: target.name,
-                    platform: target.platform,
+                    build_kind: String::from("player"),
                     runner_type: String::from(RunnerFamily::HostNative.label()),
-                    build_method: target.build_method,
                     output_kind: Some(String::from("archive")),
                     output_path_template: None,
-                    unity_version_override: None,
                     timeout_seconds: DEFAULT_BUILD_TARGET_TIMEOUT_SECONDS,
                     enabled: true,
-                    config_json: serde_json::json!({
-                        "unity_executable_path": target.unity_executable_path,
-                    })
-                    .to_string(),
+                    contract_json: unity_contract_json(
+                        &target.target_platform,
+                        &target.build_method,
+                    ),
+                    runner_config_json: unity_runner_config_json(
+                        &target.unity_executable_path,
+                    ),
                 })
                 .collect(),
         },
@@ -2128,6 +2149,7 @@ fn persist_repository_project_update(
         StoreUpdateRepositoryProjectInput {
             repository_id: normalized.repository_id,
             name: normalized.name,
+            engine_kind: normalized.engine_kind,
             repo_url: normalized.repository_url,
             default_branch: normalized.default_branch,
             artifacts_root_override: normalized.artifacts_root_override,
@@ -2140,18 +2162,19 @@ fn persist_repository_project_update(
                 .map(|target| StoreUpdateRepositoryProjectBuildTargetInput {
                     build_target_id: target.build_target_id,
                     name: target.name,
-                    platform: target.platform,
+                    build_kind: String::from("player"),
                     runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
-                    build_method: target.build_method,
                     output_kind: Some(String::from("archive")),
                     output_path_template: None,
-                    unity_version_override: None,
                     timeout_seconds: DEFAULT_BUILD_TARGET_TIMEOUT_SECONDS,
                     enabled: true,
-                    config_json: serde_json::json!({
-                        "unity_executable_path": target.unity_executable_path,
-                    })
-                    .to_string(),
+                    contract_json: unity_contract_json(
+                        &target.target_platform,
+                        &target.build_method,
+                    ),
+                    runner_config_json: unity_runner_config_json(
+                        &target.unity_executable_path,
+                    ),
                 })
                 .collect(),
         },
@@ -2161,6 +2184,7 @@ fn persist_repository_project_update(
 fn normalize_create_repository_project_command_input(
     input: CreateRepositoryProjectCommandInput,
 ) -> io::Result<NormalizedCreateRepositoryProjectCommandInput> {
+    let engine_kind = normalize_repository_project_engine_kind(&input.engine_kind)?;
     let name = require_shell_non_empty(&input.name, "repository project name")?;
     let repository_url = require_shell_non_empty(
         &input.repository_url,
@@ -2210,6 +2234,7 @@ fn normalize_create_repository_project_command_input(
 
     Ok(NormalizedCreateRepositoryProjectCommandInput {
         name,
+        engine_kind,
         repository_url,
         default_branch: normalize_optional_shell_string(input.default_branch),
         artifacts_root_override: normalize_optional_shell_string(input.artifacts_root_override),
@@ -2229,6 +2254,7 @@ fn normalize_update_repository_project_command_input(
         ));
     }
 
+    let engine_kind = normalize_repository_project_engine_kind(&input.engine_kind)?;
     let name = require_shell_non_empty(&input.name, "repository project name")?;
     let repository_url = require_shell_non_empty(
         &input.repository_url,
@@ -2286,6 +2312,7 @@ fn normalize_update_repository_project_command_input(
     Ok(NormalizedUpdateRepositoryProjectCommandInput {
         repository_id: input.repository_id,
         name,
+        engine_kind,
         repository_url,
         default_branch: normalize_optional_shell_string(input.default_branch),
         artifacts_root_override: normalize_optional_shell_string(input.artifacts_root_override),
@@ -2299,6 +2326,12 @@ fn normalize_update_repository_project_command_input(
 fn normalize_create_repository_project_build_target_command_input(
     input: CreateRepositoryProjectBuildTargetCommandInput,
 ) -> io::Result<NormalizedCreateRepositoryProjectBuildTargetCommandInput> {
+    let unity_contract = input.contract.unity.ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            "build target contract.unity is required while Unity is the only supported engine",
+        )
+    })?;
     let unity_executable_path =
         require_shell_non_empty(&input.unity_executable_path, "build target Unity executable path")?;
     let diagnostics = validate_unity_executable_path_diagnostics(&unity_executable_path);
@@ -2311,8 +2344,14 @@ fn normalize_create_repository_project_build_target_command_input(
 
     Ok(NormalizedCreateRepositoryProjectBuildTargetCommandInput {
         name: require_shell_non_empty(&input.name, "build target name")?,
-        platform: require_shell_non_empty(&input.platform, "build target platform")?,
-        build_method: require_shell_non_empty(&input.build_method, "build target method")?,
+        target_platform: require_shell_non_empty(
+            &unity_contract.target_platform,
+            "build target contract.unity.target_platform",
+        )?,
+        build_method: require_shell_non_empty(
+            &unity_contract.build_method,
+            "build target contract.unity.build_method",
+        )?,
         unity_executable_path,
     })
 }
@@ -2332,8 +2371,7 @@ fn normalize_update_repository_project_build_target_command_input(
     let normalized = normalize_create_repository_project_build_target_command_input(
         CreateRepositoryProjectBuildTargetCommandInput {
             name: input.name,
-            platform: input.platform,
-            build_method: input.build_method,
+            contract: input.contract,
             unity_executable_path: input.unity_executable_path,
         },
     )?;
@@ -2341,10 +2379,43 @@ fn normalize_update_repository_project_build_target_command_input(
     Ok(NormalizedUpdateRepositoryProjectBuildTargetCommandInput {
         build_target_id: input.build_target_id,
         name: normalized.name,
-        platform: normalized.platform,
+        target_platform: normalized.target_platform,
         build_method: normalized.build_method,
         unity_executable_path: normalized.unity_executable_path,
     })
+}
+
+fn normalize_repository_project_engine_kind(engine_kind: &str) -> io::Result<String> {
+    let normalized = require_shell_non_empty(engine_kind, "repository project engine kind")?
+        .to_ascii_lowercase();
+    if normalized != SUPPORTED_REPOSITORY_ENGINE_KIND_UNITY {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "repository engine {:?} is not supported yet; only \"unity\" is currently allowed",
+                normalized,
+            ),
+        ));
+    }
+
+    Ok(normalized)
+}
+
+fn unity_contract_json(target_platform: &str, build_method: &str) -> String {
+    serde_json::json!({
+        "unity": {
+            "targetPlatform": target_platform.trim(),
+            "buildMethod": build_method.trim(),
+        }
+    })
+    .to_string()
+}
+
+fn unity_runner_config_json(unity_executable_path: &str) -> String {
+    serde_json::json!({
+        "unity_executable_path": unity_executable_path.trim(),
+    })
+    .to_string()
 }
 
 fn validate_unity_executable_path_diagnostics(path: &str) -> HostNativeRunnerDiagnostics {
@@ -2547,7 +2618,7 @@ fn secret_settings_warnings() -> Vec<String> {
     ]
 }
 
-fn load_unity_runner_settings(config: &RuntimeConfig) -> io::Result<UnityRunnerSettings> {
+fn load_unity_adapter_settings(config: &RuntimeConfig) -> io::Result<UnityAdapterSettings> {
     config.directories.ensure_exists()?;
     let storage = StorageLayout::from_directories(&config.directories);
     let build_targets = if storage.database_path.is_file() {
@@ -2570,7 +2641,7 @@ fn load_unity_runner_settings(config: &RuntimeConfig) -> io::Result<UnityRunnerS
         }
     }
 
-    Ok(UnityRunnerSettings {
+    Ok(UnityAdapterSettings {
         platform: String::from(config.platform.as_str()),
         supported_runner_families,
         discovery_roots: default_unity_discovery_roots(config.platform),
@@ -2593,7 +2664,7 @@ fn default_unity_discovery_roots(
 
 fn map_build_target_runner_settings(
     target: runtime_store::BuildTargetRuntimeSettingsRecord,
-) -> UnityBuildTargetRunnerSettings {
+) -> UnityAdapterBuildTargetSettings {
     let diagnostic = if target.runner_type == RunnerFamily::HostNative.label() {
         Some(diagnose_host_native_runner_config(&target.config_json))
     } else {
@@ -2613,14 +2684,14 @@ fn map_build_target_runner_settings(
         ),
     };
 
-    UnityBuildTargetRunnerSettings {
+    UnityAdapterBuildTargetSettings {
         build_target_id: target.id,
         repository_id: target.repository_id,
         repository_name: target.repository_name,
         target_name: target.name,
-        platform: target.platform,
+        unity_target_platform: target.unity_target_platform,
         runner_type: target.runner_type,
-        build_method: target.build_method,
+        unity_build_method: target.unity_build_method,
         enabled: target.enabled,
         diagnostic_status,
         diagnostic_message,
@@ -2652,72 +2723,7 @@ fn load_runtime_restart_policy(
 }
 
 fn load_shell_runtime_config() -> io::Result<RuntimeConfig> {
-    let config = RuntimeConfig::load()?;
-    if std::env::var_os(RUNTIME_ROOT_ENV).is_some() {
-        return Ok(config);
-    }
-
-    resolve_shell_runtime_config(config)
-}
-
-fn resolve_shell_runtime_config(config: RuntimeConfig) -> io::Result<RuntimeConfig> {
-    let Some(legacy_root) = legacy_runtime_root(&config.directories.data_dir) else {
-        return Ok(config);
-    };
-    if !legacy_root.is_dir() {
-        return Ok(config);
-    }
-
-    let current_storage = StorageLayout::from_directories(&config.directories);
-    if runtime_storage_has_operator_state(&current_storage)? {
-        return Ok(config);
-    }
-
-    let legacy_config = RuntimeConfig::from_root(&legacy_root);
-    let legacy_storage = StorageLayout::from_directories(&legacy_config.directories);
-    if runtime_storage_has_operator_state(&legacy_storage)? {
-        return Ok(legacy_config);
-    }
-
-    Ok(config)
-}
-
-fn legacy_runtime_root(current_root: &Path) -> Option<PathBuf> {
-    if current_root.file_name()? != "runtime" {
-        return None;
-    }
-
-    let product_dir = current_root.parent()?;
-    if product_dir.file_name()? != PRODUCT_DIRECTORY_NAME {
-        return None;
-    }
-
-    Some(
-        product_dir
-            .parent()?
-            .join(LEGACY_PRODUCT_DIRECTORY_NAME)
-            .join("runtime"),
-    )
-}
-
-fn runtime_storage_has_operator_state(storage: &StorageLayout) -> io::Result<bool> {
-    if !storage.database_path.is_file() {
-        return Ok(false);
-    }
-
-    let process_feed = list_process_feed_page(storage, 1, 1)?;
-    if process_feed.total_items > 0 {
-        return Ok(true);
-    }
-
-    let snapshot = LocalCoordinator::new(storage).automation_snapshot()?;
-    Ok(
-        !snapshot.repositories.is_empty()
-            || snapshot
-                .queue_messages
-                .iter()
-                .any(|queue| queue.ready_count > 0 || queue.leased_count > 0),
-    )
+    RuntimeConfig::load()
 }
 
 fn runtime_process_is_running(config: &RuntimeConfig) -> io::Result<bool> {
@@ -2970,6 +2976,7 @@ mod tests {
         load_artifact_inspection,
         load_build_execution_report,
         load_build_history,
+        load_process_feed,
         load_repository_inspection,
         load_release_status,
         development_runtime_command_plan, load_runtime_directory_settings,
@@ -2983,16 +2990,18 @@ mod tests {
         process_identity_matches_runtime,
         purge_build_execution_retention_files,
         load_secret_settings,
-        resolve_shell_runtime_config,
-        load_unity_runner_settings,
+        load_unity_adapter_settings,
         normalize_runtime_log_line_limit, packaged_runtime_command_plan,
         runtime_binary_file_name, RuntimeLaunchAction, RUNTIME_BINARY_NAME,
+        BuildContractCommandInput,
         CreateRepositoryProjectBuildTargetCommandInput,
         CreateRepositoryProjectCommandInput,
+        ProcessFeedInput,
         UpdateRepositoryProjectBuildTargetCommandInput,
         UpdateRepositoryProjectCommandInput,
         SaveSecretCredentialInput, UpdatePublishTargetSecretBindingInput,
-        UpdateRepositorySecretBindingInput, window_transition_settings,
+        UnityBuildContractCommandInput, UpdateRepositorySecretBindingInput,
+        window_transition_settings,
     };
     use runtime_config::RuntimeConfig;
     use runtime_core::{
@@ -3009,8 +3018,8 @@ mod tests {
     #[test]
     fn process_identity_matches_runtime_accepts_runtime_binary_name() {
         assert!(process_identity_matches_runtime(
-            "hup-runtime.exe",
-            "C:/repo/target/debug/hup-runtime.exe serve"
+            "hgp-runtime.exe",
+            "C:/repo/target/debug/hgp-runtime.exe serve"
         ));
     }
 
@@ -3018,7 +3027,7 @@ mod tests {
     fn process_identity_matches_runtime_accepts_cargo_supervisor_command() {
         assert!(process_identity_matches_runtime(
             "cargo.exe",
-            "cargo run -p runtime-bin --bin hup-runtime -- supervise"
+            "cargo run -p runtime-bin --bin hgp-runtime -- supervise"
         ));
     }
 
@@ -3047,7 +3056,7 @@ mod tests {
                 "-p",
                 "runtime-bin",
                 "--bin",
-                "hup-runtime",
+                "hgp-runtime",
                 "--",
                 "supervise",
             ]
@@ -3063,7 +3072,7 @@ mod tests {
         }
         std::fs::create_dir_all(&root).expect("temp directory should create");
 
-        let desktop_path = root.join(format!("HUP{}", std::env::consts::EXE_SUFFIX));
+        let desktop_path = root.join(format!("HGP{}", std::env::consts::EXE_SUFFIX));
         let runtime_path = root.join(runtime_binary_file_name());
         std::fs::write(&desktop_path, b"desktop").expect("desktop binary placeholder should write");
         std::fs::write(&runtime_path, b"runtime").expect("runtime binary placeholder should write");
@@ -3075,92 +3084,9 @@ mod tests {
         assert_eq!(plan.args, vec!["shutdown"]);
         assert!(!plan.inherit_stdio);
 
-        std::fs::remove_dir_all(root).expect("temp directory should be removable");
-    }
-
-    #[test]
-    fn resolve_shell_runtime_config_prefers_legacy_root_with_process_feed_activity() {
-        let base = std::env::temp_dir().join("desktop-shell-runtime-root-fallback-test");
-        if base.exists() {
-            std::fs::remove_dir_all(&base)
-                .expect("existing temp directory should be removable");
+        if root.exists() {
+            std::fs::remove_dir_all(root).expect("temp directory should be removable");
         }
-
-        let current_root = base.join("handy-unity-publisher").join("runtime");
-        let legacy_root = base.join("handy-unity-builder").join("runtime");
-        let current_config = RuntimeConfig::from_root(&current_root);
-        let legacy_config = RuntimeConfig::from_root(&legacy_root);
-        let current_storage = StorageLayout::from_directories(&current_config.directories);
-        let legacy_storage = StorageLayout::from_directories(&legacy_config.directories);
-        initialize_database(&current_storage).expect("current database should initialize");
-        initialize_database(&legacy_storage).expect("legacy database should initialize");
-        seed_process_feed_release(&legacy_storage, "legacy-repo", "v1.0.4");
-
-        let resolved =
-            resolve_shell_runtime_config(current_config).expect("runtime config should resolve");
-
-        assert_eq!(resolved.directories.data_dir, legacy_root);
-
-        std::fs::remove_dir_all(base).expect("temp directory should be removable");
-    }
-
-    #[test]
-    fn resolve_shell_runtime_config_keeps_current_root_when_current_has_activity() {
-        let base = std::env::temp_dir().join("desktop-shell-runtime-root-current-test");
-        if base.exists() {
-            std::fs::remove_dir_all(&base)
-                .expect("existing temp directory should be removable");
-        }
-
-        let current_root = base.join("handy-unity-publisher").join("runtime");
-        let legacy_root = base.join("handy-unity-builder").join("runtime");
-        let current_config = RuntimeConfig::from_root(&current_root);
-        let legacy_config = RuntimeConfig::from_root(&legacy_root);
-        let current_storage = StorageLayout::from_directories(&current_config.directories);
-        let legacy_storage = StorageLayout::from_directories(&legacy_config.directories);
-        initialize_database(&current_storage).expect("current database should initialize");
-        initialize_database(&legacy_storage).expect("legacy database should initialize");
-        seed_process_feed_release(&current_storage, "current-repo", "v2.0.0");
-        seed_process_feed_release(&legacy_storage, "legacy-repo", "v1.0.4");
-
-        let resolved = resolve_shell_runtime_config(current_config.clone())
-            .expect("runtime config should resolve");
-
-        assert_eq!(resolved.directories.data_dir, current_config.directories.data_dir);
-
-        std::fs::remove_dir_all(base).expect("temp directory should be removable");
-    }
-
-    fn seed_process_feed_release(storage: &StorageLayout, repository_name: &str, git_tag: &str) {
-        let connection = open_connection(&storage.database_path).expect("connection should open");
-        connection
-            .execute(
-                "INSERT INTO repositories (name, repo_url) VALUES (?, ?)",
-                params![repository_name, format!("https://example.com/{repository_name}.git")],
-            )
-            .expect("repository should insert");
-        let repository_id = connection.last_insert_rowid();
-        connection
-            .execute(
-                "
-                INSERT INTO release_runs (
-                    repository_id,
-                    git_tag,
-                    git_commit,
-                    unity_version,
-                    status
-                )
-                VALUES (?, ?, ?, ?, ?)
-                ",
-                params![
-                    repository_id,
-                    git_tag,
-                    "deadbeef",
-                    "6000.4.3f1",
-                    "queued",
-                ],
-            )
-            .expect("release run should insert");
     }
 
     #[test]
@@ -3186,7 +3112,9 @@ mod tests {
         assert_eq!(report.status, RuntimeStatus::Healthy);
         assert_eq!(report.health_report_path, storage.health_report_path);
 
-        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+        if root.exists() {
+            std::fs::remove_dir_all(root).expect("temp directory should be removable");
+        }
     }
 
     #[test]
@@ -3346,8 +3274,8 @@ mod tests {
         let connection = open_connection(&storage.database_path).expect("connection should open");
         connection
             .execute(
-                "INSERT INTO repositories (name, repo_url) VALUES (?, ?)",
-                params!["release-status-repo", "https://example.com/release-status.git"],
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params!["release-status-repo", "https://example.com/release-status.git", "unity"],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -3357,9 +3285,9 @@ mod tests {
                 INSERT INTO build_targets (
                     repository_id,
                     name,
-                    platform,
+                    build_kind,
                     runner_type,
-                    build_method,
+                    contract_json,
                     config_json
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -3367,9 +3295,9 @@ mod tests {
                 params![
                     repository_id,
                     "windows-player",
-                    "windows",
+                    "player",
                     "host-native",
-                    "CI.Build.Perform",
+                    r#"{"unity":{"targetPlatform":"windows","buildMethod":"CI.Build.Perform","editorVersion":""}}"#,
                     "{}",
                 ],
             )
@@ -3467,9 +3395,9 @@ mod tests {
                 INSERT INTO build_targets (
                     repository_id,
                     name,
-                    platform,
+                    build_kind,
                     runner_type,
-                    build_method,
+                    contract_json,
                     config_json
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -3477,9 +3405,9 @@ mod tests {
                 params![
                     repository_id,
                     "windows-player",
-                    "windows",
+                    "player",
                     "host-native",
-                    "CI.Build.Perform",
+                    r#"{"unity":{"targetPlatform":"windows","buildMethod":"CI.Build.Perform","editorVersion":""}}"#,
                     "{}",
                 ],
             )
@@ -3565,8 +3493,8 @@ mod tests {
         let connection = open_connection(&storage.database_path).expect("connection should open");
         connection
             .execute(
-                "INSERT INTO repositories (name, repo_url) VALUES (?, ?)",
-                params!["build-history-repo", "https://example.com/build-history.git"],
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params!["build-history-repo", "https://example.com/build-history.git", "unity"],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -3576,9 +3504,9 @@ mod tests {
                 INSERT INTO build_targets (
                     repository_id,
                     name,
-                    platform,
+                    build_kind,
                     runner_type,
-                    build_method,
+                    contract_json,
                     config_json
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -3586,9 +3514,9 @@ mod tests {
                 params![
                     repository_id,
                     "windows-player",
-                    "windows",
+                    "player",
                     "host-native",
-                    "CI.Build.Perform",
+                    r#"{"unity":{"targetPlatform":"windows","buildMethod":"CI.Build.Perform","editorVersion":""}}"#,
                     "{}",
                 ],
             )
@@ -3608,7 +3536,7 @@ mod tests {
                     repository_id,
                     git_tag,
                     git_commit,
-                    unity_version,
+                    engine_version,
                     status
                 )
                 VALUES (?, ?, ?, ?, ?)
@@ -3629,7 +3557,7 @@ mod tests {
                 INSERT INTO build_runs (
                     release_run_id,
                     build_target_id,
-                    unity_version,
+                    engine_version,
                     image_ref,
                     status,
                     workspace_path,
@@ -3706,6 +3634,121 @@ mod tests {
     }
 
     #[test]
+    fn load_process_feed_reports_repository_engine_identity() {
+        let root = std::env::temp_dir().join("desktop-shell-process-feed-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO repositories (name, repo_url, engine_kind, polling_interval_seconds) VALUES (?, ?, ?, ?)",
+                params![
+                    "process-feed-repo",
+                    "https://example.com/process-feed.git",
+                    "unity",
+                    300_i64,
+                ],
+            )
+            .expect("repository should insert");
+        let repository_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO build_targets (
+                    repository_id,
+                    name,
+                    build_kind,
+                    runner_type,
+                    contract_json,
+                    config_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ",
+                params![
+                    repository_id,
+                    "windows-player",
+                    "player",
+                    "host-native",
+                    r#"{"unity":{"targetPlatform":"StandaloneWindows64","buildMethod":"CI.Build.Perform","editorVersion":"2022.3.20f1"}}"#,
+                    "{}",
+                ],
+            )
+            .expect("build target should insert");
+        let build_target_id = connection.last_insert_rowid();
+        drop(connection);
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "
+                INSERT INTO release_runs (
+                    repository_id,
+                    git_tag,
+                    git_commit,
+                    engine_version,
+                    status
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ",
+                params![
+                    repository_id,
+                    "v18.0.0",
+                    "deadbeef",
+                    "2022.3.20f1",
+                    "queued",
+                ],
+            )
+            .expect("release run should insert");
+        let release_run_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO build_runs (
+                    release_run_id,
+                    build_target_id,
+                    engine_version,
+                    image_ref,
+                    status
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ",
+                params![
+                    release_run_id,
+                    build_target_id,
+                    "2022.3.20f1",
+                    "host-native",
+                    "queued",
+                ],
+            )
+            .expect("queued build run should insert");
+        drop(connection);
+
+        let feed = load_process_feed(&config, ProcessFeedInput::default())
+            .expect("process feed should load queued build activity");
+
+        assert_eq!(feed.page, 1);
+        assert_eq!(feed.page_size, 6);
+        assert_eq!(feed.total_items, 1);
+        assert_eq!(feed.items.len(), 1);
+        assert_eq!(feed.items[0].repository_id, repository_id);
+        assert_eq!(feed.items[0].repository_name, "process-feed-repo");
+        assert_eq!(feed.items[0].repository_engine_kind, "unity");
+        assert_eq!(feed.items[0].git_tag, "v18.0.0");
+        assert_eq!(feed.items[0].engine_version.as_deref(), Some("2022.3.20f1"));
+        assert_eq!(feed.items[0].display_status, "queued");
+        assert_eq!(feed.items[0].current_step_label, "Queued for build");
+        assert_eq!(feed.items[0].queued_build_runs, 1);
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
     fn load_build_execution_report_reads_retained_json_report() {
         let root = std::env::temp_dir().join("desktop-shell-build-execution-report-test");
         if root.exists() {
@@ -3739,8 +3782,8 @@ mod tests {
         let connection = open_connection(&storage.database_path).expect("connection should open");
         connection
             .execute(
-                "INSERT INTO repositories (name, repo_url) VALUES (?, ?)",
-                params!["report-repo", "https://example.com/report.git"],
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params!["report-repo", "https://example.com/report.git", "unity"],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -3750,9 +3793,9 @@ mod tests {
                 INSERT INTO build_targets (
                     repository_id,
                     name,
-                    platform,
+                    build_kind,
                     runner_type,
-                    build_method,
+                    contract_json,
                     config_json
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -3760,9 +3803,9 @@ mod tests {
                 params![
                     repository_id,
                     "windows-player",
-                    "windows",
+                    "player",
                     "host-native",
-                    "CI.Build.Perform",
+                    r#"{"unity":{"targetPlatform":"windows","buildMethod":"CI.Build.Perform","editorVersion":""}}"#,
                     "{}",
                 ],
             )
@@ -3775,7 +3818,7 @@ mod tests {
                     repository_id,
                     git_tag,
                     git_commit,
-                    unity_version,
+                    engine_version,
                     status
                 )
                 VALUES (?, ?, ?, ?, ?)
@@ -3857,8 +3900,8 @@ mod tests {
         let connection = open_connection(&storage.database_path).expect("connection should open");
         connection
             .execute(
-                "INSERT INTO repositories (name, repo_url) VALUES (?, ?)",
-                params!["purge-repo", "https://example.com/purge.git"],
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params!["purge-repo", "https://example.com/purge.git", "unity"],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -3868,9 +3911,9 @@ mod tests {
                 INSERT INTO build_targets (
                     repository_id,
                     name,
-                    platform,
+                    build_kind,
                     runner_type,
-                    build_method,
+                    contract_json,
                     config_json
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -3878,9 +3921,9 @@ mod tests {
                 params![
                     repository_id,
                     "windows-player",
-                    "windows",
+                    "player",
                     "host-native",
-                    "CI.Build.Perform",
+                    r#"{"unity":{"targetPlatform":"windows","buildMethod":"CI.Build.Perform","editorVersion":""}}"#,
                     "{}",
                 ],
             )
@@ -3893,7 +3936,7 @@ mod tests {
                     repository_id,
                     git_tag,
                     git_commit,
-                    unity_version,
+                    engine_version,
                     status
                 )
                 VALUES (?, ?, ?, ?, ?)
@@ -3966,10 +4009,11 @@ mod tests {
         let connection = open_connection(&storage.database_path).expect("connection should open");
         connection
             .execute(
-                "INSERT INTO repositories (name, repo_url) VALUES (?, ?)",
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
                 params![
                     "artifact-inspection-repo",
-                    "https://example.com/artifact-inspection.git"
+                    "https://example.com/artifact-inspection.git",
+                    "unity"
                 ],
             )
             .expect("repository should insert");
@@ -3980,9 +4024,9 @@ mod tests {
                 INSERT INTO build_targets (
                     repository_id,
                     name,
-                    platform,
+                    build_kind,
                     runner_type,
-                    build_method,
+                    contract_json,
                     config_json
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -3990,9 +4034,9 @@ mod tests {
                 params![
                     repository_id,
                     "windows-player",
-                    "windows",
+                    "player",
                     "host-native",
-                    "CI.Build.Perform",
+                    r#"{"unity":{"targetPlatform":"windows","buildMethod":"CI.Build.Perform","editorVersion":""}}"#,
                     "{}",
                 ],
             )
@@ -4012,7 +4056,7 @@ mod tests {
                     repository_id,
                     git_tag,
                     git_commit,
-                    unity_version,
+                    engine_version,
                     status
                 )
                 VALUES (?, ?, ?, ?, ?)
@@ -4033,7 +4077,7 @@ mod tests {
                 INSERT INTO build_runs (
                     release_run_id,
                     build_target_id,
-                    unity_version,
+                    engine_version,
                     image_ref,
                     status,
                     artifact_root_path
@@ -4122,7 +4166,7 @@ mod tests {
     }
 
     #[test]
-    fn load_unity_runner_settings_reports_discovery_roots_and_target_diagnostics() {
+    fn load_unity_adapter_settings_reports_discovery_roots_and_target_diagnostics() {
         let root = std::env::temp_dir().join("desktop-shell-unity-runner-settings-test");
         if root.exists() {
             std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
@@ -4140,8 +4184,8 @@ mod tests {
         let connection = open_connection(&storage.database_path).expect("connection should open");
         connection
             .execute(
-                "INSERT INTO repositories (name, repo_url) VALUES (?, ?)",
-                params!["unity-settings-repo", "https://example.com/unity-settings.git"],
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params!["unity-settings-repo", "https://example.com/unity-settings.git", "unity"],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -4151,9 +4195,9 @@ mod tests {
                 INSERT INTO build_targets (
                     repository_id,
                     name,
-                    platform,
+                    build_kind,
                     runner_type,
-                    build_method,
+                    contract_json,
                     config_json
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -4161,9 +4205,9 @@ mod tests {
                 params![
                     repository_id,
                     "windows-player",
-                    "windows",
+                    "player",
                     "host-native",
-                    "CI.Build.Perform",
+                    r#"{"unity":{"targetPlatform":"windows","buildMethod":"CI.Build.Perform","editorVersion":""}}"#,
                     serde_json::json!({
                         "unity_executable_path": unity_executable_path.display().to_string(),
                         "additional_arguments": ["-silent-crashes"],
@@ -4178,7 +4222,7 @@ mod tests {
         let build_target_id = connection.last_insert_rowid();
         drop(connection);
 
-        let settings = load_unity_runner_settings(&config)
+        let settings = load_unity_adapter_settings(&config)
             .expect("unity runner settings should load");
 
         assert_eq!(settings.platform, config.platform.as_str());
@@ -4193,10 +4237,10 @@ mod tests {
         assert_eq!(settings.build_targets[0].repository_id, repository_id);
         assert_eq!(settings.build_targets[0].repository_name, "unity-settings-repo");
         assert_eq!(settings.build_targets[0].target_name, "windows-player");
-        assert_eq!(settings.build_targets[0].platform, "windows");
+        assert_eq!(settings.build_targets[0].unity_target_platform, "windows");
         assert_eq!(settings.build_targets[0].runner_type, "host-native");
         assert_eq!(
-            settings.build_targets[0].build_method.as_deref(),
+            settings.build_targets[0].unity_build_method.as_deref(),
             Some("CI.Build.Perform")
         );
         assert_eq!(settings.build_targets[0].diagnostic_status, "ready");
@@ -4253,10 +4297,11 @@ mod tests {
         let publish_credentials_id = connection.last_insert_rowid();
         connection
             .execute(
-                "INSERT INTO repositories (name, repo_url, credentials_id) VALUES (?, ?, ?)",
+                "INSERT INTO repositories (name, repo_url, engine_kind, credentials_id) VALUES (?, ?, ?, ?)",
                 params![
                     "revolutions",
                     "https://example.com/revolutions.git",
+                    "unity",
                     repository_credentials_id,
                 ],
             )
@@ -4264,8 +4309,8 @@ mod tests {
         let bound_repository_id = connection.last_insert_rowid();
         connection
             .execute(
-                "INSERT INTO repositories (name, repo_url) VALUES (?, ?)",
-                params!["workers", "https://example.com/workers.git"],
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params!["workers", "https://example.com/workers.git", "unity"],
             )
             .expect("unbound repository should insert");
         connection
@@ -4397,8 +4442,8 @@ mod tests {
         let credentials_id = connection.last_insert_rowid();
         connection
             .execute(
-                "INSERT INTO repositories (name, repo_url) VALUES (?, ?)",
-                params!["revolutions", "https://example.com/revolutions.git"],
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params!["revolutions", "https://example.com/revolutions.git", "unity"],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -4459,6 +4504,7 @@ mod tests {
             &config,
             CreateRepositoryProjectCommandInput {
                 name: String::from("Workers"),
+                engine_kind: String::from("unity"),
                 repository_url: String::from("https://example.com/workers.git"),
                 personal_access_token: None,
                 default_branch: Some(String::from("main")),
@@ -4467,8 +4513,12 @@ mod tests {
                 polling_interval_seconds: 300,
                 build_targets: vec![CreateRepositoryProjectBuildTargetCommandInput {
                     name: String::from("Windows"),
-                    platform: String::from("windows"),
-                    build_method: String::from("Builder.PerformWindows"),
+                    contract: BuildContractCommandInput {
+                        unity: Some(UnityBuildContractCommandInput {
+                            target_platform: String::from("StandaloneWindows64"),
+                            build_method: String::from("Builder.PerformWindows"),
+                        }),
+                    },
                     unity_executable_path: unity_executable_path.clone(),
                 }],
             },
@@ -4482,6 +4532,7 @@ mod tests {
         assert_eq!(inspection.repositories[0].repository_id, created.repository_id);
         assert_eq!(inspection.repositories[0].repository_name, "Workers");
         assert_eq!(inspection.repositories[0].repo_url, "https://example.com/workers.git");
+        assert_eq!(inspection.repositories[0].engine_kind, "unity");
         assert_eq!(inspection.repositories[0].polling_interval_seconds, 300);
         assert_eq!(inspection.repositories[0].build_targets.len(), 1);
         assert_eq!(inspection.repositories[0].build_targets[0].target_name, "Windows");
@@ -4524,6 +4575,7 @@ mod tests {
             &config,
             CreateRepositoryProjectCommandInput {
                 name: String::from("Workers"),
+                engine_kind: String::from("unity"),
                 repository_url: String::from("https://github.com/indiegabo/workers.git"),
                 personal_access_token: None,
                 default_branch: Some(String::from("main")),
@@ -4532,8 +4584,12 @@ mod tests {
                 polling_interval_seconds: 300,
                 build_targets: vec![CreateRepositoryProjectBuildTargetCommandInput {
                     name: String::from("Windows"),
-                    platform: String::from("windows"),
-                    build_method: String::from("Builder.PerformWindows"),
+                    contract: BuildContractCommandInput {
+                        unity: Some(UnityBuildContractCommandInput {
+                            target_platform: String::from("StandaloneWindows64"),
+                            build_method: String::from("Builder.PerformWindows"),
+                        }),
+                    },
                     unity_executable_path: unity_executable_path.clone(),
                 }],
             },
@@ -4574,6 +4630,7 @@ mod tests {
             &config,
             CreateRepositoryProjectCommandInput {
                 name: String::from("Workers"),
+                engine_kind: String::from("unity"),
                 repository_url: String::from("https://github.com/indiegabo/workers.git"),
                 personal_access_token: Some(String::from("ghp-legacy-token")),
                 default_branch: Some(String::from("main")),
@@ -4582,8 +4639,12 @@ mod tests {
                 polling_interval_seconds: 300,
                 build_targets: vec![CreateRepositoryProjectBuildTargetCommandInput {
                     name: String::from("Windows"),
-                    platform: String::from("windows"),
-                    build_method: String::from("Builder.PerformWindows"),
+                    contract: BuildContractCommandInput {
+                        unity: Some(UnityBuildContractCommandInput {
+                            target_platform: String::from("StandaloneWindows64"),
+                            build_method: String::from("Builder.PerformWindows"),
+                        }),
+                    },
                     unity_executable_path: unity_executable_path.clone(),
                 }],
             },
@@ -4595,6 +4656,57 @@ mod tests {
                 .to_string()
                 .contains("personal access token is no longer supported")
         );
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn persist_repository_project_rejects_unsupported_engine_kind() {
+        let root = std::env::temp_dir().join("desktop-shell-project-engine-rejection-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let unity_executable_path = std::env::current_exe()
+            .expect("current executable path should resolve")
+            .display()
+            .to_string();
+
+        let error = persist_repository_project(
+            &config,
+            CreateRepositoryProjectCommandInput {
+                name: String::from("Workers"),
+                engine_kind: String::from("unreal"),
+                repository_url: String::from("https://example.com/workers.git"),
+                personal_access_token: None,
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                build_targets: vec![CreateRepositoryProjectBuildTargetCommandInput {
+                    name: String::from("Windows"),
+                    contract: BuildContractCommandInput {
+                        unity: Some(UnityBuildContractCommandInput {
+                            target_platform: String::from("StandaloneWindows64"),
+                            build_method: String::from("Builder.PerformWindows"),
+                        }),
+                    },
+                    unity_executable_path,
+                }],
+            },
+        )
+        .expect_err("non-Unity repository engines should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("only \"unity\" is currently allowed")
+        );
+
+        if root.exists() {
+            std::fs::remove_dir_all(root).expect("temp directory should be removable");
+        }
     }
 
     #[test]
@@ -4614,6 +4726,7 @@ mod tests {
             &config,
             CreateRepositoryProjectCommandInput {
                 name: String::from("Workers"),
+                engine_kind: String::from("unity"),
                 repository_url: String::from("https://example.com/workers.git"),
                 personal_access_token: None,
                 default_branch: Some(String::from("main")),
@@ -4622,8 +4735,12 @@ mod tests {
                 polling_interval_seconds: 300,
                 build_targets: vec![CreateRepositoryProjectBuildTargetCommandInput {
                     name: String::from("Windows"),
-                    platform: String::from("windows"),
-                    build_method: String::from("Builder.PerformWindows"),
+                    contract: BuildContractCommandInput {
+                        unity: Some(UnityBuildContractCommandInput {
+                            target_platform: String::from("StandaloneWindows64"),
+                            build_method: String::from("Builder.PerformWindows"),
+                        }),
+                    },
                     unity_executable_path: unity_executable_path.clone(),
                 }],
             },
@@ -4635,6 +4752,7 @@ mod tests {
             UpdateRepositoryProjectCommandInput {
                 repository_id: created.repository_id,
                 name: String::from("Workers Updated"),
+                engine_kind: String::from("unity"),
                 repository_url: String::from("https://example.com/workers-updated.git"),
                 default_branch: Some(String::from("release")),
                 artifacts_root_override: None,
@@ -4645,15 +4763,23 @@ mod tests {
                     UpdateRepositoryProjectBuildTargetCommandInput {
                         build_target_id: Some(created.build_target_ids[0]),
                         name: String::from("Windows Stable"),
-                        platform: String::from("windows"),
-                        build_method: String::from("Builder.PerformWindowsStable"),
+                        contract: BuildContractCommandInput {
+                            unity: Some(UnityBuildContractCommandInput {
+                                target_platform: String::from("StandaloneWindows64"),
+                                build_method: String::from("Builder.PerformWindowsStable"),
+                            }),
+                        },
                         unity_executable_path: unity_executable_path.clone(),
                     },
                     UpdateRepositoryProjectBuildTargetCommandInput {
                         build_target_id: None,
                         name: String::from("WebGL"),
-                        platform: String::from("webgl"),
-                        build_method: String::from("Builder.PerformWebGl"),
+                        contract: BuildContractCommandInput {
+                            unity: Some(UnityBuildContractCommandInput {
+                                target_platform: String::from("WebGL"),
+                                build_method: String::from("Builder.PerformWebGl"),
+                            }),
+                        },
                         unity_executable_path,
                     },
                 ],
@@ -4683,6 +4809,80 @@ mod tests {
         assert_eq!(inspection.repositories[0].build_targets.len(), 2);
         assert_eq!(inspection.repositories[0].build_targets[0].target_name, "Windows Stable");
         assert_eq!(inspection.repositories[0].build_targets[1].target_name, "WebGL");
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn persist_repository_project_update_rejects_unsupported_engine_kind() {
+        let root = std::env::temp_dir().join("desktop-shell-project-update-engine-rejection-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let unity_executable_path = std::env::current_exe()
+            .expect("current executable path should resolve")
+            .display()
+            .to_string();
+
+        let created = persist_repository_project(
+            &config,
+            CreateRepositoryProjectCommandInput {
+                name: String::from("Workers"),
+                engine_kind: String::from("unity"),
+                repository_url: String::from("https://example.com/workers.git"),
+                personal_access_token: None,
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                build_targets: vec![CreateRepositoryProjectBuildTargetCommandInput {
+                    name: String::from("Windows"),
+                    contract: BuildContractCommandInput {
+                        unity: Some(UnityBuildContractCommandInput {
+                            target_platform: String::from("StandaloneWindows64"),
+                            build_method: String::from("Builder.PerformWindows"),
+                        }),
+                    },
+                    unity_executable_path: unity_executable_path.clone(),
+                }],
+            },
+        )
+        .expect("repository project should persist");
+
+        let error = persist_repository_project_update(
+            &config,
+            UpdateRepositoryProjectCommandInput {
+                repository_id: created.repository_id,
+                name: String::from("Workers Updated"),
+                engine_kind: String::from("unreal"),
+                repository_url: String::from("https://example.com/workers-updated.git"),
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                enabled: true,
+                build_targets: vec![UpdateRepositoryProjectBuildTargetCommandInput {
+                    build_target_id: Some(created.build_target_ids[0]),
+                    name: String::from("Windows"),
+                    contract: BuildContractCommandInput {
+                        unity: Some(UnityBuildContractCommandInput {
+                            target_platform: String::from("StandaloneWindows64"),
+                            build_method: String::from("Builder.PerformWindows"),
+                        }),
+                    },
+                    unity_executable_path,
+                }],
+            },
+        )
+        .expect_err("non-Unity repository engines should be rejected on update");
+
+        assert!(
+            error
+                .to_string()
+                .contains("only \"unity\" is currently allowed")
+        );
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }

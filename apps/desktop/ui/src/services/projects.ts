@@ -30,7 +30,7 @@ export type RepositoryPublishTargetInspection = {
 export type ReleaseAutomationStatus = {
     release_run_id: number;
     git_tag: string;
-    unity_version: string | null;
+    engine_version: string | null;
     status: string;
     planned: boolean;
     build_process_active: boolean;
@@ -45,24 +45,42 @@ export type ReleaseAutomationStatus = {
     total_publish_runs: number;
 };
 
-export type UnityBuildTargetRunnerSettings = {
+export type UnityAdapterBuildTargetSettings = {
     build_target_id: number;
     repository_id: number;
     repository_name: string;
     target_name: string;
-    platform: string;
+    unity_target_platform: string;
     runner_type: string;
-    build_method: string | null;
+    unity_build_method: string | null;
     enabled: boolean;
     diagnostic_status: string;
     diagnostic_message: string;
     host_native_diagnostics: UnityExecutableValidation | null;
 };
 
+export type RepositoryEngineKind =
+    | "unity"
+    | "unreal"
+    | "godot"
+    | "gamemaker"
+    | "defold"
+    | "cocos-creator";
+
+export type UnityBuildContractInput = {
+    target_platform: string;
+    build_method: string;
+};
+
+export type BuildContractInput = {
+    unity?: UnityBuildContractInput | null;
+};
+
 export type RepositoryInspectionEntry = {
     repository_id: number;
     repository_name: string;
     repo_url: string;
+    engine_kind: string;
     enabled: boolean;
     polling_interval_seconds: number;
     default_branch: string | null;
@@ -71,7 +89,7 @@ export type RepositoryInspectionEntry = {
     last_seen_tag: string | null;
     enabled_build_target_count: number;
     credentials: RepositoryCredentialReference | null;
-    build_targets: UnityBuildTargetRunnerSettings[];
+    build_targets: UnityAdapterBuildTargetSettings[];
     publish_targets: RepositoryPublishTargetInspection[];
     pending_release_count: number;
     queued_build_runs: number;
@@ -101,13 +119,13 @@ export type PickHostPathInput = {
 
 export type CreateRepositoryProjectBuildTargetInput = {
     name: string;
-    platform: string;
-    build_method: string;
+    contract: BuildContractInput;
     unity_executable_path: string;
 };
 
 export type CreateRepositoryProjectInput = {
     name: string;
+    engine_kind: RepositoryEngineKind;
     repository_url: string;
     default_branch?: string | null;
     artifacts_root_override?: string | null;
@@ -119,8 +137,7 @@ export type CreateRepositoryProjectInput = {
 export type UpdateRepositoryProjectBuildTargetInput = {
     build_target_id?: number | null;
     name: string;
-    platform: string;
-    build_method: string;
+    contract: BuildContractInput;
     unity_executable_path: string;
 };
 
@@ -134,6 +151,7 @@ export type CreatedRepositoryProjectRecord = {
 export type UpdateRepositoryProjectInput = {
     repository_id: number;
     name: string;
+    engine_kind: RepositoryEngineKind;
     repository_url: string;
     default_branch?: string | null;
     artifacts_root_override?: string | null;

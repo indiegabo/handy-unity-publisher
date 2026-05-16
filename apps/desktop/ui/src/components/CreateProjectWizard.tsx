@@ -9,6 +9,7 @@ import {
 import { Button } from "./Button";
 import { SelectField, TextField } from "./Field";
 import { PathPickerField } from "./PathPickerField";
+import { RepositoryEngineField } from "./RepositoryEngineField";
 import { Badge, SurfacePanel } from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
 import {
@@ -16,6 +17,7 @@ import {
   loadRepositoryInspection,
   validateUnityExecutablePath,
   type CreateRepositoryProjectInput,
+  type RepositoryEngineKind,
   type RepositoryInspectionEntry,
   type UnityExecutableValidation,
 } from "../services/projects";
@@ -24,13 +26,14 @@ import { loadAuthProviders, type AuthProviderStatus } from "../services/auth";
 type BuildTargetDraft = {
   id: string;
   name: string;
-  platform: string;
+  targetPlatform: string;
   buildMethod: string;
   unityExecutablePath: string;
 };
 
 type ProjectDraft = {
   projectKind: "repository" | "local";
+  engineKind: RepositoryEngineKind;
   name: string;
   repositoryUrl: string;
   defaultBranch: string;
@@ -44,7 +47,7 @@ type WizardStepKey = "identity" | "access" | "targets" | "paths" | "review";
 
 type TargetFieldErrors = {
   name?: string;
-  platform?: string;
+  targetPlatform?: string;
   buildMethod?: string;
   unityExecutablePath?: string;
 };
@@ -77,7 +80,7 @@ const WIZARD_STEPS: Array<{
     key: "identity",
     label: "Identity",
     description:
-      "Name the project first, then choose how HUP should register it.",
+      "Name the project first, then choose how HGP should register it.",
   },
   {
     key: "access",
@@ -87,7 +90,7 @@ const WIZARD_STEPS: Array<{
   {
     key: "targets",
     label: "Build Targets",
-    description: "Compose the host-native Unity targets that HUP will execute.",
+    description: "Compose the host-native Unity targets that HGP will execute.",
   },
   {
     key: "paths",
@@ -112,12 +115,12 @@ const PROJECT_KIND_OPTIONS = [
 ] as const;
 
 const PLATFORM_OPTIONS = [
-  { label: "Select a platform", value: "" },
-  { label: "Windows", value: "windows" },
-  { label: "Linux", value: "linux" },
-  { label: "macOS", value: "macos" },
-  { label: "WebGL", value: "webgl" },
-  { label: "Android", value: "android" },
+  { label: "Select a Unity target", value: "" },
+  { label: "Windows", value: "StandaloneWindows64" },
+  { label: "Linux", value: "StandaloneLinux64" },
+  { label: "macOS", value: "StandaloneOSX" },
+  { label: "WebGL", value: "WebGL" },
+  { label: "Android", value: "Android" },
 ] as const;
 
 const EMPTY_VALIDATION_ATTEMPTS: Record<WizardStepKey, boolean> = {
@@ -134,6 +137,7 @@ export function CreateProjectWizard({
 }: CreateProjectWizardProps) {
   const [draft, setDraft] = useState<ProjectDraft>(() => ({
     projectKind: "repository",
+    engineKind: "unity",
     name: "",
     repositoryUrl: "",
     defaultBranch: "main",
@@ -657,13 +661,38 @@ export function CreateProjectWizard({
               value={draft.projectKind}
             />
 
+            <RepositoryEngineField
+              error={
+                shouldShowFieldError(
+                  attemptedSteps.identity,
+                  touchedFields,
+                  "engineKind",
+                )
+                  ? identityErrors.engineKind
+                  : undefined
+              }
+              onBlur={() => markFieldTouched("engineKind")}
+              onChange={(event) => {
+                const engineKind = event.currentTarget
+                  .value as ProjectDraft["engineKind"];
+                startTransition(() => {
+                  setDraft((current) => ({
+                    ...current,
+                    engineKind,
+                  }));
+                });
+                markFieldTouched("engineKind");
+              }}
+              value={draft.engineKind}
+            />
+
             <div className="wizard-callout wizard-callout--compact">
               <p className="wizard-callout__copy">
-                Repository projects let HUP poll a remote Git repository on a
-                fixed cadence and queue automation when a new release tag
-                appears. A local workspace project would use files that are
-                already present on this machine and would not depend on
-                repository polling.
+                Repository projects let the runtime poll a remote Git
+                repository on a fixed cadence and queue automation when a new
+                release tag appears. Only Unity is currently supported; the
+                future engines stay visible so the model does not keep lying
+                about the roadmap.
               </p>
             </div>
           </div>
@@ -681,7 +710,7 @@ export function CreateProjectWizard({
                   ? accessErrors.repositoryUrl
                   : undefined
               }
-              hint="Use the HTTPS remote that HUP will poll and clone."
+              hint="Use the HTTPS remote that HGP will poll and clone."
               label="Repository URL"
               leadingIcon="server"
               onBlur={() => {
@@ -712,7 +741,7 @@ export function CreateProjectWizard({
                   ? accessErrors.defaultBranch
                   : undefined
               }
-              hint="Optional. HUP uses this when branch-aware operations need a default ref."
+              hint="Optional. HGP uses this when branch-aware operations need a default ref."
               label="Default branch"
               onBlur={() => markFieldTouched("defaultBranch")}
               onChange={(event) => {
@@ -908,28 +937,32 @@ export function CreateProjectWizard({
                         shouldShowFieldError(
                           attemptedSteps.targets,
                           touchedFields,
-                          buildTargetFieldKey(target.id, "platform"),
+                          buildTargetFieldKey(target.id, "targetPlatform"),
                         )
-                          ? fieldErrors.platform
+                          ? fieldErrors.targetPlatform
                           : undefined
                       }
-                      hint="The runtime maps this directly to Unity BuildTarget semantics."
-                      label="Platform"
+                      hint="This writes the Unity targetPlatform contract field directly."
+                      label="Unity target platform"
                       onBlur={() =>
                         markFieldTouched(
-                          buildTargetFieldKey(target.id, "platform"),
+                          buildTargetFieldKey(target.id, "targetPlatform"),
                         )
                       }
                       onChange={(event) => {
                         updateBuildTarget(target.id, {
-                          platform: event.currentTarget.value,
+                          targetPlatform: normalizeUnityTargetPlatformValue(
+                            event.currentTarget.value,
+                          ),
                         });
                         markFieldTouched(
-                          buildTargetFieldKey(target.id, "platform"),
+                          buildTargetFieldKey(target.id, "targetPlatform"),
                         );
                       }}
                       options={PLATFORM_OPTIONS}
-                      value={target.platform}
+                      value={normalizeUnityTargetPlatformValue(
+                        target.targetPlatform,
+                      )}
                     />
                     <TextField
                       error={
@@ -942,7 +975,7 @@ export function CreateProjectWizard({
                           : undefined
                       }
                       hint="Point this at a real static Unity method, for example Builder.PerformWindows."
-                      label="Build method"
+                      label="Unity build method"
                       onBlur={() =>
                         markFieldTouched(
                           buildTargetFieldKey(target.id, "buildMethod"),
@@ -1094,6 +1127,7 @@ export function CreateProjectWizard({
               </div>
 
               <div className="wizard-summary-panel__stats">
+                <Badge tone="neutral">engine: {draft.engineKind}</Badge>
                 <Badge tone="neutral">
                   Poll every {draft.pollingIntervalSeconds.trim() || "0"}s
                 </Badge>
@@ -1120,11 +1154,11 @@ export function CreateProjectWizard({
                           {target.name.trim() || "Unnamed target"}
                         </strong>
                         <Badge tone="neutral">
-                          {target.platform || "platform pending"}
+                          {target.targetPlatform || "Unity target pending"}
                         </Badge>
                       </div>
                       <p className="wizard-summary-list__copy">
-                        {target.buildMethod.trim() || "Build method pending"}
+                        {target.buildMethod.trim() || "Unity build method pending"}
                       </p>
                       <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
                         {target.unityExecutablePath.trim() ||
@@ -1220,7 +1254,7 @@ function createEmptyBuildTargetDraft(index: number): BuildTargetDraft {
   return {
     id: `target-${index}`,
     name: "",
-    platform: "",
+    targetPlatform: "",
     buildMethod: "",
     unityExecutablePath: "",
   };
@@ -1230,7 +1264,8 @@ function validateIdentityStep(
   draft: ProjectDraft,
   repositoryInventory: RepositoryInspectionEntry[],
 ) {
-  const errors: { name?: string; projectKind?: string } = {};
+  const errors: { name?: string; projectKind?: string; engineKind?: string } =
+    {};
   const normalizedName = draft.name.trim();
   if (!normalizedName) {
     errors.name = "Project name is required.";
@@ -1247,6 +1282,11 @@ function validateIdentityStep(
   if (draft.projectKind !== "repository") {
     errors.projectKind =
       "Only repository projects are available in this release.";
+  }
+
+  if (draft.engineKind !== "unity") {
+    errors.engineKind =
+      "Only Unity is currently supported even though future engines are listed.";
   }
 
   return errors;
@@ -1284,7 +1324,7 @@ function validateAccessStep(
         normalizedUrl.toLocaleLowerCase(),
     )
   ) {
-    errors.repositoryUrl = "This remote is already registered in HUP.";
+    errors.repositoryUrl = "This remote is already registered in HGP.";
   }
 
   const normalizedBranch = draft.defaultBranch.trim();
@@ -1343,8 +1383,8 @@ function validateTargetsStep(
       seenNames.add(duplicateKey);
     }
 
-    if (!target.platform.trim()) {
-      fieldErrors.platform = "Platform selection is required.";
+    if (!target.targetPlatform.trim()) {
+      fieldErrors.targetPlatform = "Unity target platform is required.";
     }
 
     if (!target.buildMethod.trim()) {
@@ -1397,7 +1437,7 @@ function validatePathStep(draft: ProjectDraft): PathStepErrors {
 }
 
 function hasIdentityErrors(errors: ReturnType<typeof validateIdentityStep>) {
-  return Boolean(errors.name || errors.projectKind);
+  return Boolean(errors.name || errors.projectKind || errors.engineKind);
 }
 
 function hasAccessErrors(errors: ReturnType<typeof validateAccessStep>) {
@@ -1421,7 +1461,7 @@ function hasTargetErrors(errors: TargetStepErrors) {
 function hasTargetFieldErrors(errors: TargetFieldErrors) {
   return Boolean(
     errors.name ||
-    errors.platform ||
+    errors.targetPlatform ||
     errors.buildMethod ||
     errors.unityExecutablePath,
   );
@@ -1487,6 +1527,7 @@ function buildCreateProjectInput(
 ): CreateRepositoryProjectInput {
   return {
     name: draft.name.trim(),
+    engine_kind: draft.engineKind,
     repository_url: draft.repositoryUrl.trim(),
     default_branch: optionalTrimmedString(draft.defaultBranch),
     artifacts_root_override: optionalTrimmedString(draft.artifactsRootOverride),
@@ -1494,8 +1535,14 @@ function buildCreateProjectInput(
     polling_interval_seconds: Number(draft.pollingIntervalSeconds.trim()),
     build_targets: draft.buildTargets.map((target) => ({
       name: target.name.trim(),
-      platform: target.platform.trim(),
-      build_method: target.buildMethod.trim(),
+      contract: {
+        unity: {
+          target_platform: normalizeUnityTargetPlatformValue(
+            target.targetPlatform,
+          ),
+          build_method: target.buildMethod.trim(),
+        },
+      },
       unity_executable_path: target.unityExecutablePath.trim(),
     })),
   };
@@ -1518,6 +1565,25 @@ function buildTargetFieldKey(
   fieldName: keyof Omit<BuildTargetDraft, "id">,
 ) {
   return `${targetId}:${fieldName}`;
+}
+
+function normalizeUnityTargetPlatformValue(value: string) {
+  switch (value.trim().toLocaleLowerCase()) {
+    case "windows":
+      return "StandaloneWindows64";
+    case "linux":
+      return "StandaloneLinux64";
+    case "macos":
+    case "mac":
+    case "osx":
+      return "StandaloneOSX";
+    case "webgl":
+      return "WebGL";
+    case "android":
+      return "Android";
+    default:
+      return value.trim();
+  }
 }
 
 function indexOfWizardStep(stepKey: WizardStepKey) {
@@ -1614,7 +1680,7 @@ function resolveGithubAuthProviderCopy(
   authProviderError: string | null,
 ) {
   if (isLoadingAuthProviders) {
-    return "HUP is checking whether the host GitHub login is already available.";
+    return "HGP is checking whether the host GitHub login is already available.";
   }
 
   if (authProviderError) {

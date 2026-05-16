@@ -6,7 +6,7 @@
             "nsis"
         ],
         "externalBin": [
-            "bin/hup-runtime"
+            "bin/hgp-runtime"
         ]
     }
 }

@@ -186,7 +186,7 @@ fn native_notification_content(event: &RuntimeEventRecord) -> (String, String) {
             Some("canceled") | Some("cancelled") => String::from("Automatic build canceled"),
             _ => String::from("Automatic build finished"),
         },
-        _ => String::from("HUP build update"),
+        _ => String::from("HGP build update"),
     };
 
     (title, event.summary.clone())

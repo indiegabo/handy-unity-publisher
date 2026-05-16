@@ -7,7 +7,7 @@ publish.workspace = true
 version.workspace = true
 
 [[bin]]
-name = "HUP"
+name = "HGP"
 path = "src/main.rs"
 
 [build-dependencies]

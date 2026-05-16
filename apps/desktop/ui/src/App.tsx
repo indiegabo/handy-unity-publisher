@@ -86,7 +86,7 @@ type AppScreen =
   | { kind: "process-detail"; processId: number };
 
 const PROCESS_FEED_PAGE_SIZE = 5;
-const PRODUCT_NAME = "Handy Unity Publisher";
+const PRODUCT_NAME = "Handy Games Publisher";
 const WORKER_STATUS_REFRESH_INTERVAL_MILLIS = 5_000;
 const WORKER_TOOLTIP_ID = "worker-status-tooltip";
 const EMPTY_PROCESS_FEED_PAGE: ProcessFeedPage = {
@@ -1021,7 +1021,7 @@ function collectProjectWorkers(
           diagnosticMessage: target.diagnostic_message,
           diagnosticStatus: target.diagnostic_status.trim().toLowerCase(),
           name: target.target_name,
-          platform: target.platform,
+          unityTargetPlatform: target.unity_target_platform,
         })),
     }))
     .filter((projectWorker) => projectWorker.buildTargets.length > 0);

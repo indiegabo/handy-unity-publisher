@@ -153,6 +153,7 @@ export function ProjectsFocusScreen({
                   {repository.repository_id === highlightedRepositoryId ? (
                     <Badge tone="strong">new</Badge>
                   ) : null}
+                  <Badge tone="neutral">engine: {repository.engine_kind}</Badge>
                   <Badge tone={repository.enabled ? "strong" : "muted"}>
                     {repository.enabled ? "enabled" : "disabled"}
                   </Badge>

@@ -8,9 +8,10 @@ export type ProcessFeedRecord = {
   repository_id: number;
   repository_name: string;
   repository_url: string;
+  repository_engine_kind: string;
   git_tag: string;
   git_commit: string | null;
-  unity_version: string | null;
+  engine_version: string | null;
   display_status: string;
   current_step_label: string;
   current_step_status: string;
@@ -93,7 +94,10 @@ export function ProcessFeedItem({
               {process.git_tag}
             </Badge>
             <Badge className="process-item__badge" tone="muted">
-              {formatUnityBadge(process.unity_version)}
+              {formatEngineKindBadge(process.repository_engine_kind)}
+            </Badge>
+            <Badge className="process-item__badge" tone="muted">
+              {formatEngineVersionBadge(process.engine_version)}
             </Badge>
             <Badge className="process-item__badge" tone="muted">
               {formatBuildCount(process.total_build_runs)}
@@ -130,12 +134,21 @@ function buildFallbackStep(status: string) {
   }
 }
 
-function formatUnityBadge(unityVersion: string | null) {
-  if (unityVersion?.trim()) {
-    return `Unity ${unityVersion.trim()}`;
+function formatEngineVersionBadge(engineVersion: string | null) {
+  if (engineVersion?.trim()) {
+    return `Engine ${engineVersion.trim()}`;
   }
 
-  return "Unity pending";
+  return "Engine pending";
+}
+
+function formatEngineKindBadge(engineKind: string) {
+  const normalized = engineKind.trim();
+  if (!normalized) {
+    return "engine: unknown";
+  }
+
+  return `engine: ${normalized}`;
 }
 
 function formatBuildCount(totalBuildRuns: number) {
