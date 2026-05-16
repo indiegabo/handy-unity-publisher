@@ -3076,6 +3076,9 @@ mod tests {
             enabled: true,
             polling_interval_seconds: 300,
             last_seen_tag: Some(String::from("v1.0.0")),
+            default_branch: None,
+            artifacts_root_override: None,
+            workspace_root_override: None,
             enabled_build_target_count: 2,
             has_release_history: true,
         };

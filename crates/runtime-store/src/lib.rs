@@ -106,6 +106,11 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0009_build_target_runner_model_cleanup.sql"),
         transactional: false,
     },
+    Migration {
+        name: "0010_engine_contract_model.sql",
+        sql: include_str!("../migrations/0010_engine_contract_model.sql"),
+        transactional: true,
+    },
 ];
 
 #[allow(unused_imports)]
@@ -1098,6 +1103,12 @@ impl LocalCoordinator {
                 ],
             )
             .map_err(sqlite_error)?;
+
+        sync_repository_project_build_targets(
+            &transaction,
+            normalized.repository_id,
+            normalized.build_targets,
+        )?;
 
         transaction.commit().map_err(sqlite_error)?;
 
@@ -4845,6 +4856,319 @@ fn remove_release_run_rebuild_cleanup_paths(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExistingRepositoryProjectBuildTarget {
+    id: i64,
+    name: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannedRepositoryProjectBuildTargetUpdate {
+    existing_target_id: Option<i64>,
+    target: UpdateRepositoryProjectBuildTargetInput,
+}
+
+fn sync_repository_project_build_targets(
+    transaction: &Transaction<'_>,
+    repository_id: i64,
+    build_targets: Vec<UpdateRepositoryProjectBuildTargetInput>,
+) -> io::Result<()> {
+    let existing_targets = list_repository_project_build_targets(transaction, repository_id)?;
+    let existing_by_id = existing_targets
+        .iter()
+        .cloned()
+        .map(|target| (target.id, target))
+        .collect::<HashMap<_, _>>();
+    let existing_by_name = existing_targets
+        .iter()
+        .cloned()
+        .map(|target| (target.name.to_ascii_lowercase(), target))
+        .collect::<HashMap<_, _>>();
+
+    let mut claimed_existing_ids = HashSet::new();
+    let mut planned_targets = Vec::with_capacity(build_targets.len());
+
+    for target in build_targets {
+        let normalized_name = target.name.to_ascii_lowercase();
+        let existing_target_id = if let Some(build_target_id) = target.build_target_id {
+            let Some(existing_target) = existing_by_id.get(&build_target_id) else {
+                return Err(not_found_error(format!(
+                    "build target {build_target_id} was not found for repository {repository_id}"
+                )));
+            };
+
+            if !claimed_existing_ids.insert(build_target_id) {
+                return Err(invalid_input_error(format!(
+                    "build target {build_target_id} was provided more than once"
+                )));
+            }
+
+            if let Some(conflicting_target) = existing_by_name.get(&normalized_name) {
+                if conflicting_target.id != existing_target.id
+                    && !claimed_existing_ids.contains(&conflicting_target.id)
+                {
+                    return Err(invalid_input_error(format!(
+                        "repository project build target name {:?} is already reserved by another target",
+                        target.name
+                    )));
+                }
+            }
+
+            Some(existing_target.id)
+        } else if let Some(existing_target) = existing_by_name.get(&normalized_name) {
+            if claimed_existing_ids.contains(&existing_target.id) {
+                None
+            } else {
+                claimed_existing_ids.insert(existing_target.id);
+                Some(existing_target.id)
+            }
+        } else {
+            None
+        };
+
+        planned_targets.push(PlannedRepositoryProjectBuildTargetUpdate {
+            existing_target_id,
+            target,
+        });
+    }
+
+    let planned_existing_ids = planned_targets
+        .iter()
+        .filter_map(|target| target.existing_target_id)
+        .collect::<HashSet<_>>();
+
+    for planned_target in &planned_targets {
+        let normalized_name = planned_target.target.name.to_ascii_lowercase();
+        if let Some(existing_target_id) = planned_target.existing_target_id {
+            let existing_target = existing_by_id
+                .get(&existing_target_id)
+                .expect("planned target ids must resolve against repository targets");
+
+            if !existing_target
+                .name
+                .eq_ignore_ascii_case(&planned_target.target.name)
+            {
+                rename_repository_project_build_target(
+                    transaction,
+                    existing_target_id,
+                    &temporary_repository_project_build_target_name(existing_target_id),
+                )?;
+            }
+
+            continue;
+        }
+
+        if let Some(conflicting_target) = existing_by_name.get(&normalized_name) {
+            if !planned_existing_ids.contains(&conflicting_target.id) {
+                return Err(invalid_input_error(format!(
+                    "repository project build target name {:?} is already reserved by an inactive target",
+                    planned_target.target.name
+                )));
+            }
+        }
+    }
+
+    let mut retained_target_ids = HashSet::new();
+    for planned_target in planned_targets {
+        let target_id = if let Some(existing_target_id) = planned_target.existing_target_id {
+            update_repository_project_build_target(
+                transaction,
+                existing_target_id,
+                &planned_target.target,
+            )?;
+            existing_target_id
+        } else {
+            create_repository_project_build_target(
+                transaction,
+                repository_id,
+                &planned_target.target,
+            )?
+        };
+
+        retained_target_ids.insert(target_id);
+    }
+
+    for existing_target in existing_targets {
+        if retained_target_ids.contains(&existing_target.id) || !existing_target.enabled {
+            continue;
+        }
+
+        disable_repository_project_build_target(transaction, existing_target.id)?;
+    }
+
+    Ok(())
+}
+
+fn list_repository_project_build_targets(
+    connection: &Connection,
+    repository_id: i64,
+) -> io::Result<Vec<ExistingRepositoryProjectBuildTarget>> {
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT id, name, enabled
+            FROM build_targets
+            WHERE repository_id = ?
+            ORDER BY id
+            ",
+        )
+        .map_err(sqlite_error)?;
+    let rows = statement
+        .query_map([repository_id], |row| {
+            Ok(ExistingRepositoryProjectBuildTarget {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                enabled: row.get::<_, i64>(2)? != 0,
+            })
+        })
+        .map_err(sqlite_error)?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(sqlite_error)
+}
+
+fn temporary_repository_project_build_target_name(build_target_id: i64) -> String {
+    format!("__hup_target_update_{build_target_id}")
+}
+
+fn rename_repository_project_build_target(
+    transaction: &Transaction<'_>,
+    build_target_id: i64,
+    name: &str,
+) -> io::Result<()> {
+    let updated = transaction
+        .execute(
+            "
+            UPDATE build_targets
+            SET name = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ",
+            params![name.trim(), build_target_id],
+        )
+        .map_err(sqlite_error)?;
+    if updated == 0 {
+        return Err(not_found_error(format!(
+            "build target {build_target_id} was not found"
+        )));
+    }
+
+    Ok(())
+}
+
+fn create_repository_project_build_target(
+    transaction: &Transaction<'_>,
+    repository_id: i64,
+    target: &UpdateRepositoryProjectBuildTargetInput,
+) -> io::Result<i64> {
+    transaction
+        .execute(
+            "
+            INSERT INTO build_targets (
+                repository_id,
+                name,
+                platform,
+                runner_type,
+                build_method,
+                output_kind,
+                output_path_template,
+                unity_version_override,
+                timeout_seconds,
+                enabled,
+                config_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ",
+            params![
+                repository_id,
+                target.name.as_str(),
+                target.platform.as_str(),
+                target.runner_type.as_str(),
+                target.build_method.as_str(),
+                target.output_kind.as_deref(),
+                target.output_path_template.as_deref(),
+                target.unity_version_override.as_deref(),
+                target.timeout_seconds,
+                target.enabled,
+                target.config_json.as_str(),
+            ],
+        )
+        .map_err(sqlite_error)?;
+
+    Ok(transaction.last_insert_rowid())
+}
+
+fn update_repository_project_build_target(
+    transaction: &Transaction<'_>,
+    build_target_id: i64,
+    target: &UpdateRepositoryProjectBuildTargetInput,
+) -> io::Result<()> {
+    let updated = transaction
+        .execute(
+            "
+            UPDATE build_targets
+            SET name = ?,
+                platform = ?,
+                runner_type = ?,
+                build_method = ?,
+                output_kind = ?,
+                output_path_template = ?,
+                unity_version_override = ?,
+                timeout_seconds = ?,
+                enabled = ?,
+                config_json = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ",
+            params![
+                target.name.as_str(),
+                target.platform.as_str(),
+                target.runner_type.as_str(),
+                target.build_method.as_str(),
+                target.output_kind.as_deref(),
+                target.output_path_template.as_deref(),
+                target.unity_version_override.as_deref(),
+                target.timeout_seconds,
+                target.enabled,
+                target.config_json.as_str(),
+                build_target_id,
+            ],
+        )
+        .map_err(sqlite_error)?;
+    if updated == 0 {
+        return Err(not_found_error(format!(
+            "build target {build_target_id} was not found"
+        )));
+    }
+
+    Ok(())
+}
+
+fn disable_repository_project_build_target(
+    transaction: &Transaction<'_>,
+    build_target_id: i64,
+) -> io::Result<()> {
+    let updated = transaction
+        .execute(
+            "
+            UPDATE build_targets
+            SET enabled = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ",
+            [build_target_id],
+        )
+        .map_err(sqlite_error)?;
+    if updated == 0 {
+        return Err(not_found_error(format!(
+            "build target {build_target_id} was not found"
+        )));
+    }
+
+    Ok(())
+}
+
 /// Opens SQLite, applies runtime pragmas, and runs pending migrations.
 pub fn initialize_database(storage: &StorageLayout) -> io::Result<DatabaseBootstrapReport> {
     if let Some(parent) = storage.database_path.parent() {
@@ -7401,6 +7725,36 @@ fn normalize_update_repository_project_input(
         ));
     }
 
+    if input.build_targets.is_empty() {
+        return Err(invalid_input_error(
+            "repository project must include at least one build target",
+        ));
+    }
+
+    let mut build_target_ids = HashSet::new();
+    let mut build_target_names = HashSet::new();
+    let mut build_targets = Vec::with_capacity(input.build_targets.len());
+    for target in input.build_targets {
+        let normalized = normalize_update_repository_project_build_target_input(target)?;
+
+        if let Some(build_target_id) = normalized.build_target_id {
+            if !build_target_ids.insert(build_target_id) {
+                return Err(invalid_input_error(format!(
+                    "repository project build target {build_target_id} was provided more than once"
+                )));
+            }
+        }
+
+        let duplicate_key = normalized.name.to_ascii_lowercase();
+        if !build_target_names.insert(duplicate_key) {
+            return Err(invalid_input_error(
+                "repository project build target names must be unique",
+            ));
+        }
+
+        build_targets.push(normalized);
+    }
+
     Ok(UpdateRepositoryProjectInput {
         repository_id: input.repository_id,
         name,
@@ -7410,6 +7764,7 @@ fn normalize_update_repository_project_input(
         workspace_root_override,
         polling_interval_seconds: input.polling_interval_seconds,
         enabled: input.enabled,
+        build_targets,
     })
 }
 
@@ -7452,6 +7807,43 @@ fn normalize_create_repository_project_build_target_input(
         timeout_seconds: input.timeout_seconds,
         enabled: input.enabled,
         config_json: normalize_credential_config_json(&input.config_json)?,
+    })
+}
+
+fn normalize_update_repository_project_build_target_input(
+    input: UpdateRepositoryProjectBuildTargetInput,
+) -> io::Result<UpdateRepositoryProjectBuildTargetInput> {
+    if let Some(build_target_id) = input.build_target_id {
+        require_positive_identifier(build_target_id, "repository project build target id")?;
+    }
+
+    let normalized_target = normalize_create_repository_project_build_target_input(
+        CreateRepositoryProjectBuildTargetInput {
+            name: input.name,
+            platform: input.platform,
+            runner_type: input.runner_type,
+            build_method: input.build_method,
+            output_kind: input.output_kind,
+            output_path_template: input.output_path_template,
+            unity_version_override: input.unity_version_override,
+            timeout_seconds: input.timeout_seconds,
+            enabled: input.enabled,
+            config_json: input.config_json,
+        },
+    )?;
+
+    Ok(UpdateRepositoryProjectBuildTargetInput {
+        build_target_id: input.build_target_id,
+        name: normalized_target.name,
+        platform: normalized_target.platform,
+        runner_type: normalized_target.runner_type,
+        build_method: normalized_target.build_method,
+        output_kind: normalized_target.output_kind,
+        output_path_template: normalized_target.output_path_template,
+        unity_version_override: normalized_target.unity_version_override,
+        timeout_seconds: normalized_target.timeout_seconds,
+        enabled: normalized_target.enabled,
+        config_json: normalized_target.config_json,
     })
 }
 
@@ -7796,6 +8188,7 @@ mod tests {
         CreateRepositoryProjectBuildTargetInput,
         CreateRepositoryProjectCredentialInput,
         CreateRepositoryProjectInput,
+        UpdateRepositoryProjectBuildTargetInput,
         UpdateRepositoryProjectInput,
         list_credential_records,
         list_publish_target_runtime_settings, open_connection, recover_runtime_state,
@@ -7935,6 +8328,7 @@ mod tests {
                 "0007_repository_path_model_cleanup.sql",
                 "0008_build_run_stage_tracking.sql",
                 "0009_build_target_runner_model_cleanup.sql",
+                "0010_engine_contract_model.sql",
             ]
         );
 
@@ -8253,6 +8647,21 @@ mod tests {
                 workspace_root_override: Some(String::from("D:/workspaces/new-banner")),
                 polling_interval_seconds: 30,
                 enabled: false,
+                build_targets: vec![UpdateRepositoryProjectBuildTargetInput {
+                    build_target_id: Some(created.build_target_ids[0]),
+                    name: String::from("Windows"),
+                    platform: String::from("windows"),
+                    runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
+                    build_method: String::from("Builder.PerformWindows"),
+                    output_kind: Some(String::from("archive")),
+                    output_path_template: None,
+                    unity_version_override: None,
+                    timeout_seconds: 3600,
+                    enabled: true,
+                    config_json: String::from(
+                        r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
+                    ),
+                }],
             })
             .expect("repository project should update");
 
@@ -8308,6 +8717,184 @@ mod tests {
         assert_eq!(repository_row.4.as_deref(), Some("D:/workspaces/new-banner"));
         assert_eq!(repository_row.5, 30);
         assert_eq!(repository_row.6, 0);
+
+        drop(connection);
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn update_repository_project_syncs_active_build_targets_without_deleting_history() {
+        let root = test_root("update-repository-project-build-target-sync");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let created = LocalCoordinator::new(&layout)
+            .create_repository_project(CreateRepositoryProjectInput {
+                name: String::from("Target Sync"),
+                repo_url: String::from("https://example.com/target-sync.git"),
+                credentials: None,
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                enabled: true,
+                build_targets: vec![
+                    CreateRepositoryProjectBuildTargetInput {
+                        name: String::from("Windows"),
+                        platform: String::from("windows"),
+                        runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
+                        build_method: String::from("Builder.PerformWindows"),
+                        output_kind: Some(String::from("archive")),
+                        output_path_template: None,
+                        unity_version_override: None,
+                        timeout_seconds: 3600,
+                        enabled: true,
+                        config_json: String::from(
+                            r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
+                        ),
+                    },
+                    CreateRepositoryProjectBuildTargetInput {
+                        name: String::from("Linux"),
+                        platform: String::from("linux"),
+                        runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
+                        build_method: String::from("Builder.PerformLinux"),
+                        output_kind: Some(String::from("archive")),
+                        output_path_template: None,
+                        unity_version_override: None,
+                        timeout_seconds: 3600,
+                        enabled: true,
+                        config_json: String::from(
+                            r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
+                        ),
+                    },
+                ],
+            })
+            .expect("repository project should persist");
+
+        let linux_target_id = created.build_target_ids[1];
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let release_run_id = insert_release_run(
+            &connection,
+            created.repository_id,
+            "v1.0.0",
+            ReleaseStatus::Queued.as_str(),
+        );
+        let build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            linux_target_id,
+            BuildStatus::Queued.as_str(),
+        );
+        drop(connection);
+
+        LocalCoordinator::new(&layout)
+            .update_repository_project(UpdateRepositoryProjectInput {
+                repository_id: created.repository_id,
+                name: String::from("Target Sync"),
+                repo_url: String::from("https://example.com/target-sync.git"),
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                enabled: true,
+                build_targets: vec![
+                    UpdateRepositoryProjectBuildTargetInput {
+                        build_target_id: Some(created.build_target_ids[0]),
+                        name: String::from("Windows Stable"),
+                        platform: String::from("windows"),
+                        runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
+                        build_method: String::from("Builder.PerformWindowsStable"),
+                        output_kind: Some(String::from("archive")),
+                        output_path_template: None,
+                        unity_version_override: None,
+                        timeout_seconds: 3600,
+                        enabled: true,
+                        config_json: String::from(
+                            r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
+                        ),
+                    },
+                    UpdateRepositoryProjectBuildTargetInput {
+                        build_target_id: None,
+                        name: String::from("WebGL"),
+                        platform: String::from("webgl"),
+                        runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
+                        build_method: String::from("Builder.PerformWebGl"),
+                        output_kind: Some(String::from("archive")),
+                        output_path_template: None,
+                        unity_version_override: None,
+                        timeout_seconds: 3600,
+                        enabled: true,
+                        config_json: String::from(
+                            r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
+                        ),
+                    },
+                ],
+            })
+            .expect("repository project should sync build targets");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let build_run_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM build_runs WHERE id = ?",
+                [build_run_id],
+                |row| row.get(0),
+            )
+            .expect("build run count should load");
+        assert_eq!(build_run_count, 1);
+
+        let target_rows = {
+            let mut statement = connection
+                .prepare(
+                    "
+                    SELECT id, name, platform, build_method, enabled
+                    FROM build_targets
+                    WHERE repository_id = ?
+                    ORDER BY id
+                    ",
+                )
+                .expect("build targets query should prepare");
+            statement
+                .query_map([created.repository_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })
+                .expect("build targets should query")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("build targets should collect")
+        };
+
+        assert_eq!(target_rows.len(), 3);
+        assert_eq!(target_rows[0].0, created.build_target_ids[0]);
+        assert_eq!(target_rows[0].1, "Windows Stable");
+        assert_eq!(target_rows[0].2, "windows");
+        assert_eq!(target_rows[0].3.as_deref(), Some("Builder.PerformWindowsStable"));
+        assert_eq!(target_rows[0].4, 1);
+
+        assert_eq!(target_rows[1].0, linux_target_id);
+        assert_eq!(target_rows[1].1, "Linux");
+        assert_eq!(target_rows[1].2, "linux");
+        assert_eq!(target_rows[1].3.as_deref(), Some("Builder.PerformLinux"));
+        assert_eq!(target_rows[1].4, 0);
+
+        assert_eq!(target_rows[2].1, "WebGL");
+        assert_eq!(target_rows[2].2, "webgl");
+        assert_eq!(target_rows[2].3.as_deref(), Some("Builder.PerformWebGl"));
+        assert_eq!(target_rows[2].4, 1);
+
+        let enabled_target_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM build_targets WHERE repository_id = ? AND enabled = 1",
+                [created.repository_id],
+                |row| row.get(0),
+            )
+            .expect("enabled target count should load");
+        assert_eq!(enabled_target_count, 2);
 
         drop(connection);
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
@@ -9060,7 +9647,8 @@ mod tests {
                 "0006_repository_source_configuration.sql",
                 "0007_repository_path_model_cleanup.sql",
                 "0008_build_run_stage_tracking.sql",
-                "0009_build_target_runner_model_cleanup.sql"
+                "0009_build_target_runner_model_cleanup.sql",
+                "0010_engine_contract_model.sql"
             ]
         );
 

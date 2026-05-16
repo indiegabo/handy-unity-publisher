@@ -690,7 +690,25 @@ pub struct CreateRepositoryProjectInput {
 }
 
 /// Defines the durable payload required to update one managed repository
-/// project without replacing its worker or credentials bindings.
+/// project together with its active build target configuration while
+/// preserving repository credentials bindings and historical execution rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateRepositoryProjectBuildTargetInput {
+    pub build_target_id: Option<i64>,
+    pub name: String,
+    pub platform: String,
+    pub runner_type: String,
+    pub build_method: String,
+    pub output_kind: Option<String>,
+    pub output_path_template: Option<String>,
+    pub unity_version_override: Option<String>,
+    pub timeout_seconds: i64,
+    pub enabled: bool,
+    pub config_json: String,
+}
+
+/// Defines the durable payload required to update one managed repository
+/// project together with its active build target configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateRepositoryProjectInput {
     pub repository_id: i64,
@@ -701,6 +719,7 @@ pub struct UpdateRepositoryProjectInput {
     pub workspace_root_override: Option<String>,
     pub polling_interval_seconds: i64,
     pub enabled: bool,
+    pub build_targets: Vec<UpdateRepositoryProjectBuildTargetInput>,
 }
 
 /// Reports one repository project created through the operator wizard.

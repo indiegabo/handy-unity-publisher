@@ -1509,6 +1509,25 @@ button {
   justify-content: flex-end;
 }
 
+.project-detail-section-accordion__header-content,
+.project-detail-section-accordion__actions {
+  display: flex;
+  align-items: center;
+}
+
+.project-detail-section-accordion__header-content {
+  width: 100%;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.project-detail-section-accordion__actions {
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .wizard-unity-executable-row {
   display: flex;
   gap: 8px;

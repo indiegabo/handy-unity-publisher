@@ -3,7 +3,7 @@
 
 mod runtime_events;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::io::ErrorKind;
@@ -37,6 +37,7 @@ use runtime_store::{
     CreateRepositoryProjectBuildTargetInput,
     CreateRepositoryProjectInput as StoreCreateRepositoryProjectInput,
     CreatedRepositoryProjectRecord,
+    UpdateRepositoryProjectBuildTargetInput as StoreUpdateRepositoryProjectBuildTargetInput,
     UpdateRepositoryProjectInput as StoreUpdateRepositoryProjectInput,
     RuntimeControlRequest,
     ProcessFeedPage, ReleaseAutomationStatus, UpsertCredentialRecordInput,
@@ -82,6 +83,7 @@ const WINDOW_FOCUS_TRANSITION_MILLIS: u64 = 150;
 const WINDOW_FOCUS_TRANSITION_STEP_MILLIS: u64 = 15;
 const DEFAULT_PROCESS_FEED_PAGE_SIZE: u32 = 6;
 const MAX_PROCESS_FEED_PAGE_SIZE: u32 = 50;
+const DEFAULT_HOST_NATIVE_RUNNER_TYPE: &str = "host-native";
 const DEFAULT_BUILD_TARGET_TIMEOUT_SECONDS: i64 = 3600;
 const MIN_REPOSITORY_POLL_INTERVAL_SECONDS: i64 = 5;
 const LEGACY_PRODUCT_DIRECTORY_NAME: &str = "handy-unity-builder";
@@ -414,6 +416,15 @@ struct CreateRepositoryProjectCommandInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct UpdateRepositoryProjectBuildTargetCommandInput {
+    build_target_id: Option<i64>,
+    name: String,
+    platform: String,
+    build_method: String,
+    unity_executable_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct UpdateRepositoryProjectCommandInput {
     repository_id: i64,
     name: String,
@@ -423,6 +434,7 @@ struct UpdateRepositoryProjectCommandInput {
     workspace_root_override: Option<String>,
     polling_interval_seconds: i64,
     enabled: bool,
+    build_targets: Vec<UpdateRepositoryProjectBuildTargetCommandInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -450,6 +462,15 @@ struct NormalizedCreateRepositoryProjectCommandInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedUpdateRepositoryProjectBuildTargetCommandInput {
+    build_target_id: Option<i64>,
+    name: String,
+    platform: String,
+    build_method: String,
+    unity_executable_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedUpdateRepositoryProjectCommandInput {
     repository_id: i64,
     name: String,
@@ -459,6 +480,7 @@ struct NormalizedUpdateRepositoryProjectCommandInput {
     workspace_root_override: Option<String>,
     polling_interval_seconds: i64,
     enabled: bool,
+    build_targets: Vec<NormalizedUpdateRepositoryProjectBuildTargetCommandInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -2112,6 +2134,26 @@ fn persist_repository_project_update(
             workspace_root_override: normalized.workspace_root_override,
             polling_interval_seconds: normalized.polling_interval_seconds,
             enabled: normalized.enabled,
+            build_targets: normalized
+                .build_targets
+                .into_iter()
+                .map(|target| StoreUpdateRepositoryProjectBuildTargetInput {
+                    build_target_id: target.build_target_id,
+                    name: target.name,
+                    platform: target.platform,
+                    runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
+                    build_method: target.build_method,
+                    output_kind: Some(String::from("archive")),
+                    output_path_template: None,
+                    unity_version_override: None,
+                    timeout_seconds: DEFAULT_BUILD_TARGET_TIMEOUT_SECONDS,
+                    enabled: true,
+                    config_json: serde_json::json!({
+                        "unity_executable_path": target.unity_executable_path,
+                    })
+                    .to_string(),
+                })
+                .collect(),
         },
     )
 }
@@ -2207,6 +2249,40 @@ fn normalize_update_repository_project_command_input(
         ));
     }
 
+    if input.build_targets.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository project must define at least one build target",
+        ));
+    }
+
+    let mut build_target_ids = HashSet::new();
+    let mut build_target_names = HashSet::new();
+    let mut build_targets = Vec::with_capacity(input.build_targets.len());
+    for target in input.build_targets {
+        let normalized = normalize_update_repository_project_build_target_command_input(target)?;
+        if let Some(build_target_id) = normalized.build_target_id {
+            if !build_target_ids.insert(build_target_id) {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "repository build target {build_target_id} was provided more than once"
+                    ),
+                ));
+            }
+        }
+
+        let duplicate_key = normalized.name.to_ascii_lowercase();
+        if !build_target_names.insert(duplicate_key) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "repository build target names must be unique",
+            ));
+        }
+
+        build_targets.push(normalized);
+    }
+
     Ok(NormalizedUpdateRepositoryProjectCommandInput {
         repository_id: input.repository_id,
         name,
@@ -2216,6 +2292,7 @@ fn normalize_update_repository_project_command_input(
         workspace_root_override: normalize_optional_shell_string(input.workspace_root_override),
         polling_interval_seconds: input.polling_interval_seconds,
         enabled: input.enabled,
+        build_targets,
     })
 }
 
@@ -2237,6 +2314,36 @@ fn normalize_create_repository_project_build_target_command_input(
         platform: require_shell_non_empty(&input.platform, "build target platform")?,
         build_method: require_shell_non_empty(&input.build_method, "build target method")?,
         unity_executable_path,
+    })
+}
+
+fn normalize_update_repository_project_build_target_command_input(
+    input: UpdateRepositoryProjectBuildTargetCommandInput,
+) -> io::Result<NormalizedUpdateRepositoryProjectBuildTargetCommandInput> {
+    if let Some(build_target_id) = input.build_target_id {
+        if build_target_id <= 0 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "build_target_id must be a positive integer",
+            ));
+        }
+    }
+
+    let normalized = normalize_create_repository_project_build_target_command_input(
+        CreateRepositoryProjectBuildTargetCommandInput {
+            name: input.name,
+            platform: input.platform,
+            build_method: input.build_method,
+            unity_executable_path: input.unity_executable_path,
+        },
+    )?;
+
+    Ok(NormalizedUpdateRepositoryProjectBuildTargetCommandInput {
+        build_target_id: input.build_target_id,
+        name: normalized.name,
+        platform: normalized.platform,
+        build_method: normalized.build_method,
+        unity_executable_path: normalized.unity_executable_path,
     })
 }
 
@@ -2882,6 +2989,7 @@ mod tests {
         runtime_binary_file_name, RuntimeLaunchAction, RUNTIME_BINARY_NAME,
         CreateRepositoryProjectBuildTargetCommandInput,
         CreateRepositoryProjectCommandInput,
+        UpdateRepositoryProjectBuildTargetCommandInput,
         UpdateRepositoryProjectCommandInput,
         SaveSecretCredentialInput, UpdatePublishTargetSecretBindingInput,
         UpdateRepositorySecretBindingInput, window_transition_settings,
@@ -4361,7 +4469,7 @@ mod tests {
                     name: String::from("Windows"),
                     platform: String::from("windows"),
                     build_method: String::from("Builder.PerformWindows"),
-                    unity_executable_path,
+                    unity_executable_path: unity_executable_path.clone(),
                 }],
             },
         )
@@ -4426,7 +4534,7 @@ mod tests {
                     name: String::from("Windows"),
                     platform: String::from("windows"),
                     build_method: String::from("Builder.PerformWindows"),
-                    unity_executable_path,
+                    unity_executable_path: unity_executable_path.clone(),
                 }],
             },
         )
@@ -4476,7 +4584,7 @@ mod tests {
                     name: String::from("Windows"),
                     platform: String::from("windows"),
                     build_method: String::from("Builder.PerformWindows"),
-                    unity_executable_path,
+                    unity_executable_path: unity_executable_path.clone(),
                 }],
             },
         )
@@ -4516,7 +4624,7 @@ mod tests {
                     name: String::from("Windows"),
                     platform: String::from("windows"),
                     build_method: String::from("Builder.PerformWindows"),
-                    unity_executable_path,
+                    unity_executable_path: unity_executable_path.clone(),
                 }],
             },
         )
@@ -4533,6 +4641,22 @@ mod tests {
                 workspace_root_override: Some(String::from("D:/workspaces/workers")),
                 polling_interval_seconds: 45,
                 enabled: false,
+                build_targets: vec![
+                    UpdateRepositoryProjectBuildTargetCommandInput {
+                        build_target_id: Some(created.build_target_ids[0]),
+                        name: String::from("Windows Stable"),
+                        platform: String::from("windows"),
+                        build_method: String::from("Builder.PerformWindowsStable"),
+                        unity_executable_path: unity_executable_path.clone(),
+                    },
+                    UpdateRepositoryProjectBuildTargetCommandInput {
+                        build_target_id: None,
+                        name: String::from("WebGL"),
+                        platform: String::from("webgl"),
+                        build_method: String::from("Builder.PerformWebGl"),
+                        unity_executable_path,
+                    },
+                ],
             },
         )
         .expect("repository project update should persist");
@@ -4555,6 +4679,10 @@ mod tests {
         );
         assert_eq!(inspection.repositories[0].polling_interval_seconds, 45);
         assert!(!inspection.repositories[0].enabled);
+        assert_eq!(inspection.repositories[0].enabled_build_target_count, 2);
+        assert_eq!(inspection.repositories[0].build_targets.len(), 2);
+        assert_eq!(inspection.repositories[0].build_targets[0].target_name, "Windows Stable");
+        assert_eq!(inspection.repositories[0].build_targets[1].target_name, "WebGL");
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }

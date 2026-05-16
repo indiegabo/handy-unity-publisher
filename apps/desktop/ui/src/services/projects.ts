@@ -116,6 +116,14 @@ export type CreateRepositoryProjectInput = {
     build_targets: CreateRepositoryProjectBuildTargetInput[];
 };
 
+export type UpdateRepositoryProjectBuildTargetInput = {
+    build_target_id?: number | null;
+    name: string;
+    platform: string;
+    build_method: string;
+    unity_executable_path: string;
+};
+
 export type CreatedRepositoryProjectRecord = {
     repository_id: number;
     repository_name: string;
@@ -132,6 +140,7 @@ export type UpdateRepositoryProjectInput = {
     workspace_root_override?: string | null;
     polling_interval_seconds: number;
     enabled: boolean;
+    build_targets: UpdateRepositoryProjectBuildTargetInput[];
 };
 
 export async function loadRepositoryInspection(): Promise<RepositoryInspectionSettings> {
