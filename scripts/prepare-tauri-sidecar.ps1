@@ -57,7 +57,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $extension = if ($TargetTriple.Contains("windows")) { ".exe" } else { "" }
-$sourcePath = Join-Path $targetDirectory "$TargetTriple/$profileDirectory/hup-runtime$extension"
+$sourcePath = Join-Path $targetDirectory "$TargetTriple/$profileDirectory/hgp-runtime$extension"
 
 if (-not (Test-Path $sourcePath)) {
     throw "built runtime binary was not found at $sourcePath"
@@ -66,7 +66,7 @@ if (-not (Test-Path $sourcePath)) {
 $destinationDir = Join-Path $repoRoot "apps/desktop/src-tauri/bin"
 New-Item -Path $destinationDir -ItemType Directory -Force | Out-Null
 
-$destinationPath = Join-Path $destinationDir "hup-runtime-$TargetTriple$extension"
+$destinationPath = Join-Path $destinationDir "hgp-runtime-$TargetTriple$extension"
 Copy-Item -Path $sourcePath -Destination $destinationPath -Force
 
 Write-Host "Prepared Tauri runtime sidecar at $destinationPath"

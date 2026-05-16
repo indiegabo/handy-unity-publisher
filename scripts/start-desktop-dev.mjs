@@ -16,7 +16,7 @@ const desktopDebugBinaryPath = resolve(
     "cargo-targets",
     "default",
     "debug",
-    "HUP.exe",
+    "HGP.exe",
 );
 const runtimeDebugBinaryPath = resolve(
     repositoryRoot,
@@ -24,7 +24,7 @@ const runtimeDebugBinaryPath = resolve(
     "cargo-targets",
     "default",
     "debug",
-    "hup-runtime.exe",
+    "hgp-runtime.exe",
 );
 const tauriCommand = resolve(
     repositoryRoot,

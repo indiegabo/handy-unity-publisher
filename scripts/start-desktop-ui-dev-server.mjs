@@ -20,11 +20,11 @@ let childProcess;
 
 if (existingServerState === "expected") {
     console.log(
-        `Reusing the existing HUP desktop UI dev server on http://${desktopUiHost}:${desktopUiPort}.`,
+        `Reusing the existing HGP desktop UI dev server on http://${desktopUiHost}:${desktopUiPort}.`,
     );
 } else if (existingServerState === "unexpected") {
     throw new Error(
-        `Port ${desktopUiPort} is already in use by a service that is not the HUP desktop UI dev server.`,
+        `Port ${desktopUiPort} is already in use by a service that is not the HGP desktop UI dev server.`,
     );
 } else {
     childProcess = spawn(npmCommand, ["run", "dev"], {
@@ -48,7 +48,7 @@ if (existingServerState === "expected") {
     if (startedServerState !== "expected") {
         stopChildProcess(childProcess);
         throw new Error(
-            `Expected the HUP desktop UI dev server on ${desktopUiHost}:${desktopUiPort}, but the response did not match the Vite workspace server.`,
+            `Expected the HGP desktop UI dev server on ${desktopUiHost}:${desktopUiPort}, but the response did not match the Vite workspace server.`,
         );
     }
 }

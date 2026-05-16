@@ -5,7 +5,7 @@
       "type": "lldb",
       "request": "launch",
       "name": "Debug desktop shell (Tauri)",
-      "program": "${workspaceFolder}/tmp/cargo-targets/default/debug/HUP.exe",
+      "program": "${workspaceFolder}/tmp/cargo-targets/default/debug/HGP.exe",
       "preLaunchTask": "build desktop shell",
       "cwd": "${workspaceFolder}",
       "args": [],
