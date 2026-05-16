@@ -5,8 +5,8 @@ See the delivery roadmap in
 
 ## Overview
 
-HUP is a self-hosted, local-first desktop orchestration system
-for Unity release pipelines.
+HGP is a self-hosted, local-first desktop orchestration system with an
+engine-aware runtime model whose first and only shipped adapter is Unity.
 
 The active product architecture is:
 
@@ -71,8 +71,31 @@ The runtime is intentionally decomposed into focused crates.
   coordination.
 - `runtime-manifests` validates and synchronizes declarative pipeline manifests.
 - `runtime-git` owns repository access and workspace preparation.
-- `runtime-runner` owns host capability checks and Unity execution planning.
+- `runtime-runner` owns shared workspace/artifact helpers plus the explicit
+  `runtime_runner::unity` adapter surface for host capability checks and Unity
+  execution planning.
 - `runtime-publish` owns artifact publication flows and destination execution.
+
+## Engine And Adapter Model
+
+The persisted repository model is engine-aware even though only Unity is
+currently executable.
+
+- repositories declare `engine_kind`
+- build targets declare `buildKind`
+- engine-specific execution inputs live under engine-scoped contracts such as
+  `contract.unity`
+- `invoke kind` remains internal adapter state chosen by runtime code, not a
+  public manifest field
+
+The current supported-engine matrix is intentionally narrow:
+
+- Unity: supported end to end
+- Unreal: planned only, visible but rejected by backend validation
+- Godot: planned only, visible but rejected by backend validation
+- GameMaker: planned only, visible but rejected by backend validation
+- Defold: planned only, visible but rejected by backend validation
+- Cocos Creator: planned only, visible but rejected by backend validation
 
 ## Durable Data Model
 
@@ -156,7 +179,7 @@ Its current operator-visible behavior is:
   primary monitor
 - the popup stays always-on-top and out of the taskbar
 - window close requests hide the popup to tray instead of terminating the app
-- tray clicks and the `Open HUP` action reopen the popup
+- tray clicks and the `Open HGP` action reopen the popup
 - the `Quit` tray action triggers intentional shell exit and runtime shutdown
 
 The runtime diagnostics, repository inspection, and credential management
@@ -221,6 +244,17 @@ diagnostics.
 
 Build execution should resolve one durable build plan into one host-local Unity
 invocation.
+
+The current boundary is explicit:
+
+- `runtime-bin` owns the build intake path that loads one stored build plan,
+  checks `engine_kind`, and refuses unsupported engines before entering any
+  Unity-specific execution path
+- `runtime_runner::unity` owns the Unity-specific execution plan, host
+  capability inspection, editor discovery, command assembly, execution
+  processor, and failure classification
+- the `runtime-runner` crate root keeps shared workspace preparation and
+  artifact discovery outside the Unity adapter
 
 That boundary is responsible for:
 

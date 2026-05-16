@@ -83,7 +83,7 @@ The bundled runtime manages one data root with this structure:
 `bootstrap` ensures those directories exist, initializes SQLite state, and
 prepares the runtime health snapshot files used by the shell.
 
-Use `HANDY_UNITY_BUILDER_RUNTIME_ROOT` when you need an isolated development
+Use `HANDY_GAMES_PUBLISHER_RUNTIME_ROOT` when you need an isolated development
 sandbox. Normal operation still expects one runtime root owned by the
 application, while per-run workspaces live under `runs/` or repository-specific
 workspace overrides recorded in SQLite.
@@ -331,19 +331,19 @@ cargo run -p runtime-bin -- shutdown
 
 Useful loop overrides for supervision tests:
 
-- `HANDY_UNITY_PUBLISHER_RUNTIME_WORKER_LOOP_INTERVAL_MILLIS`
-- `HANDY_UNITY_PUBLISHER_RUNTIME_HEARTBEAT_INTERVAL_MILLIS`
-- `HANDY_UNITY_PUBLISHER_RUNTIME_MAX_HEARTBEATS`
-- `HANDY_UNITY_PUBLISHER_RUNTIME_CRASH_AFTER_HEARTBEATS`
-- `HANDY_UNITY_PUBLISHER_RUNTIME_CRASH_ATTEMPTS`
-- `HANDY_UNITY_PUBLISHER_RUNTIME_MAX_RESTARTS`
-- `HANDY_UNITY_PUBLISHER_RUNTIME_RESTART_BACKOFF_MILLIS`
+- `HANDY_GAMES_PUBLISHER_RUNTIME_WORKER_LOOP_INTERVAL_MILLIS`
+- `HANDY_GAMES_PUBLISHER_RUNTIME_HEARTBEAT_INTERVAL_MILLIS`
+- `HANDY_GAMES_PUBLISHER_RUNTIME_MAX_HEARTBEATS`
+- `HANDY_GAMES_PUBLISHER_RUNTIME_CRASH_AFTER_HEARTBEATS`
+- `HANDY_GAMES_PUBLISHER_RUNTIME_CRASH_ATTEMPTS`
+- `HANDY_GAMES_PUBLISHER_RUNTIME_MAX_RESTARTS`
+- `HANDY_GAMES_PUBLISHER_RUNTIME_RESTART_BACKOFF_MILLIS`
 
 Useful concurrency overrides for host-local execution:
 
-- `HANDY_UNITY_BUILDER_RUNTIME_MAX_CONCURRENT_BUILD_RUNS`
-- `HANDY_UNITY_BUILDER_RUNTIME_MAX_CONCURRENT_PUBLISH_RUNS`
-- `HANDY_UNITY_BUILDER_RUNTIME_MAX_ACTIVE_RELEASES_PER_REPOSITORY`
+- `HANDY_GAMES_PUBLISHER_RUNTIME_MAX_CONCURRENT_BUILD_RUNS`
+- `HANDY_GAMES_PUBLISHER_RUNTIME_MAX_CONCURRENT_PUBLISH_RUNS`
+- `HANDY_GAMES_PUBLISHER_RUNTIME_MAX_ACTIVE_RELEASES_PER_REPOSITORY`
 
 The current defaults keep the host conservative:
 
@@ -370,12 +370,12 @@ The current tray lifecycle works like this:
 - the popup is always-on-top, skipped from the taskbar, and pinned to the
   lower-right corner of the primary monitor work area
 - closing the popup hides it instead of terminating the app
-- tray left-click and the `Open HUP` tray action restore the popup window
+- tray left-click and the `Open HGP` tray action restore the popup window
 - the `Quit` tray action marks the shell as intentionally exiting and allows
   the normal runtime shutdown path to run
 
 The current visible UI inside the popup is intentionally minimal and only shows
-the `HUP` wordmark while the tray shell behavior settles.
+the `HGP` wordmark while the tray shell behavior settles.
 
 ## Focused Validation
 

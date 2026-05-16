@@ -1,7 +1,7 @@
 # AI Context
 
-Conversation Reference: hup-desktop-active-context
-Project Repository: indiegabo/handy-unity-publisher
+Conversation Reference: hgp-desktop-active-context
+Project Repository: indiegabo/handy-games-publisher
 
 ## Purpose
 
@@ -13,7 +13,7 @@ Any implementation or documentation work should start from that assumption.
 
 ## Product Summary
 
-HUP is a self-hosted, local-first build orchestration product
+HGP is a self-hosted, local-first build orchestration product
 for Unity repositories.
 
 The operator workflow is:
@@ -67,7 +67,7 @@ The product is not a Unity gameplay codebase.
 - The runtime store mirrors validated manifest state into SQLite.
 - Repository project creation currently uses Personal Access Tokens as the only
   first-class interactive credential input.
-- After the operator supplies a PAT, HUP is expected to perform repository
+- After the operator supplies a PAT, HGP is expected to perform repository
   polling, workspace synchronization, and build-related Git operations without
   any additional login prompts.
 - PAT secret material is stored through shell-managed host keyring references,
@@ -76,7 +76,7 @@ The product is not a Unity gameplay codebase.
   provider-specific interactive sign-in flow when the host platform and
   repository provider support it.
 - When that future sign-in flow exists, any authentication window should appear
-  only during project creation or credential refresh, after which HUP should
+  only during project creation or credential refresh, after which HGP should
   store the required token and resume seamless non-interactive runtime Git
   operations.
 
@@ -87,7 +87,7 @@ The desktop shell currently ships as a tray-resident popup:
 - startup shows a compact always-on-top window anchored to the lower-right
   corner of the primary monitor
 - closing the window hides it to tray and keeps the runtime alive
-- tray clicks and the `Open HUP` menu action reopen the popup
+- tray clicks and the `Open HGP` menu action reopen the popup
 - the `Quit` tray action exits the shell and triggers runtime shutdown
 - the visible UI is currently a compact dark showcase of reusable React
   components wired to the Tauri command bridge
@@ -150,8 +150,8 @@ desktop-shell compile check.
 - Read `docs/architecture.md` before broad architectural edits.
 - Read `docs/pipeline-yaml-guide.md` before editing manifests under
   `pipelines/`.
-- Read `docs/unity-build-methods.md` before inventing or changing Unity build
-  method values.
+- Read `docs/unity-adapter-contract.md` before inventing or changing Unity
+  build target contract values or Unity build methods.
 - Read `planning/project-brief.md` and
   `planning/desktop-product-strategy.md` before broad product-direction work.
 - Read `planning/desktop-delivery-roadmap.md` before roadmap or delivery work.

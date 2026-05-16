@@ -1,11 +1,11 @@
 ---
 name: hup-reset-runtime-processes
-description: "Reset all HUP process state so the app behaves like a first execution for releases, builds, publishes, polling baselines, runtime event history, and process workspaces while preserving repository and pipeline definitions."
+description: "Reset all HGP process state so the app behaves like a first execution for releases, builds, publishes, polling baselines, runtime event history, and process workspaces while preserving repository and pipeline definitions."
 argument-hint: "[no arguments]"
 user-invocable: true
 ---
 
-# HUP Reset Runtime Processes
+# HGP Reset Runtime Processes
 
 Use this skill when you need to remove all persisted process state from the
 current local runtime so the app behaves like a fresh first run for anything
@@ -28,31 +28,35 @@ history, and runtime execution traces.
 
 ## Critical Rules
 
-- Resolve the database path from `HANDY_UNITY_PUBLISHER_RUNTIME_ROOT`; on
-  Windows, otherwise use `%LOCALAPPDATA%\handy-unity-publisher\runtime\state\runtime.db`
-- Stop the runtime or shell automation loop first when practical so it does not
-  recreate process state while the reset is running
-- Treat `repositories.last_seen_tag` as process state and reset it to `NULL`
-  for every repository
-- Delete process rows in child-first order:
-  `execution_cleanup_records`, `retained_execution_files`,
-  `build_run_steps`, `publish_runs`, `artifacts`, `build_runs`, and
-  `release_runs`
-- Delete all process queue messages in `release-runs`, `build-runs`, and
-  `publish-runs`
-- Delete all process coordination leases matching `release-run:*`,
-  `release-plan:*`, `build-run:*`, and `publish-run:*`
-- Delete all process idempotency keys matching `release-run:*`,
-  `build-run:*`, and `publish-run:*`
-- Clear process-owned runtime directories such as `runs/` and `artifacts/`
-  after the database transaction succeeds
-- Remove runtime process history files such as `runtime-events.jsonl`,
-  `runtime-events.cursor.json`, `health.json`, `supervisor-state.json`, and
-  `logs/runtime.jsonl`
-- Do not use `crates/runtime-store/examples/reset_repository_processes.rs`
-  for this job; it is repository-scoped and does not clear filesystem process
-  traces
-- Reopen the database and verify the counts again after the transaction
+1. Path resolution: resolve the database path from
+   `HANDY_GAMES_PUBLISHER_RUNTIME_ROOT`; on Windows without that runtime root,
+   use `%LOCALAPPDATA%\HandyGamesPublisher\runtime\state\runtime.db`. If
+   neither rule resolves a database path, stop and report that the runtime
+   root could not be resolved.
+2. Runtime quiescence: stop the runtime or shell automation loop first if it
+   is actively creating, updating, or cleaning process state.
+3. Polling baseline: treat `repositories.last_seen_tag` as process state and
+   reset it to `NULL` for every repository.
+4. Process row deletion order: delete process rows in child-first order:
+   `execution_cleanup_records`, `retained_execution_files`,
+   `build_run_steps`, `publish_runs`, `artifacts`, `build_runs`, and
+   `release_runs`.
+5. Queue cleanup: delete all process queue messages in `release-runs`,
+   `build-runs`, and `publish-runs`.
+6. Lease cleanup: delete all process coordination leases matching
+   `release-run:*`, `release-plan:*`, `build-run:*`, and `publish-run:*`.
+7. Idempotency cleanup: delete all process idempotency keys matching
+   `release-run:*`, `build-run:*`, and `publish-run:*`.
+8. Filesystem cleanup: clear process-owned runtime directories such as
+   `runs/` and `artifacts/` after the database transaction succeeds, then
+   remove runtime process history files such as `runtime-events.jsonl`,
+   `runtime-events.cursor.json`, `health.json`, `supervisor-state.json`, and
+   `logs/runtime.jsonl`.
+9. Scope guard: do not use
+   `crates/runtime-store/examples/reset_repository_processes.rs` for this job;
+   it is repository-scoped and does not clear filesystem process traces.
+10. Verification: reopen the database and verify the counts again after the
+    transaction.
 
 ## Procedure
 

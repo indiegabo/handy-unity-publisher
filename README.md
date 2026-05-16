@@ -1,17 +1,17 @@
-# HUP
+# HGP
 
 > "If your daily workstation can already build and publish your Unity project
 > manually, you should not need a second machine just to automate that same
-> work. HUP exists to run that pipeline for you, on your own
+> work. HGP exists to run that pipeline for you, on your own
 > machine, with repeatability, logs, and operator control."
 
-HUP is a local-first desktop orchestration product for Unity
+HGP is a local-first desktop orchestration product for Unity
 release pipelines. The shipped product model is a Tauri desktop shell with a
 bundled Rust runtime, SQLite-backed workflow state, filesystem-backed runtime
 assets, and host-native Unity execution.
 
-Repository and development surfaces use `handy-unity-publisher`.
-Canonical Git remote: `git@github.com:indiegabo/handy-unity-publisher.git`.
+Repository and development surfaces use `handy-games-publisher`.
+Canonical Git remote: `git@github.com:indiegabo/handy-games-publisher.git`.
 
 ## Product Model
 
@@ -40,7 +40,7 @@ normal document window.
 - the main window is always-on-top, hidden from the taskbar, and sized as a
   compact popup instead of a full dashboard
 - closing the window hides it to the tray and keeps the runtime alive
-- left-clicking the tray icon or using the `Open HUP` tray action restores the
+- left-clicking the tray icon or using the `Open HGP` tray action restores the
   popup window
 - the `Quit` tray action marks the shell as intentionally exiting and then runs
   the normal runtime shutdown path
@@ -169,7 +169,7 @@ repository root.
 - [docs/architecture.md](docs/architecture.md)
 - [docs/tauri-runtime-dev-loop.md](docs/tauri-runtime-dev-loop.md)
 - [docs/pipeline-yaml-guide.md](docs/pipeline-yaml-guide.md)
-- [docs/unity-build-methods.md](docs/unity-build-methods.md)
+- [docs/unity-adapter-contract.md](docs/unity-adapter-contract.md)
 - [planning/project-brief.md](planning/project-brief.md)
 - [planning/desktop-product-strategy.md](planning/desktop-product-strategy.md)
 - [planning/desktop-delivery-roadmap.md](planning/desktop-delivery-roadmap.md)

@@ -2,14 +2,14 @@
 
 ## Project Name
 
-Product name: `HUP`
+Product name: `HGP`
 
-Repository name: `handy-unity-publisher`
+Repository name: `handy-games-publisher`
 
-Canonical Git remote: `git@github.com:indiegabo/handy-unity-publisher.git`
+Canonical Git remote: `git@github.com:indiegabo/handy-games-publisher.git`
 
-Operator-facing product references should use `HUP`. Development and
-repository references should use `handy-unity-publisher`.
+Operator-facing product references should use `HGP`. Development and
+repository references should use `handy-games-publisher`.
 
 ## Vision
 

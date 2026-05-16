@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document captures the active product strategy for HUP as a
+This document captures the active product strategy for HGP as a
 local-first desktop application.
 
 It defines the architectural commitments that should guide implementation,

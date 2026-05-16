@@ -126,11 +126,14 @@ spec:
     targets:
       - name: linux64
         enabled: true
-        platform: StandaloneLinux64
-        buildMethod: Builder.BuildLinux64
+        buildKind: player
+        contract:
+          unity:
+            targetPlatform: StandaloneLinux64
+            buildMethod: Builder.BuildLinux64
+            editorVersion: 2022.3.14f1
         runner:
           type: host-native
-          unityVersion: 2022.3.14f1
           timeoutSeconds: 5400
         output:
           kind: archive
@@ -140,11 +143,14 @@ spec:
 
       - name: webgl
         enabled: true
-        platform: WebGL
-        buildMethod: Builder.BuildWebGL
+        buildKind: player
+        contract:
+          unity:
+            targetPlatform: WebGL
+            buildMethod: Builder.BuildWebGL
+            editorVersion: 2022.3.14f1
         runner:
           type: host-native
-          unityVersion: 2022.3.14f1
           timeoutSeconds: 5400
         output:
           kind: directory
@@ -183,7 +189,7 @@ as `Builds/WebGL` or `Builds/Linux64` instead.
 Use this as the starting point for a new repository pipeline:
 
 ```yaml
-apiVersion: handy.unity.publisher/v1alpha1
+apiVersion: handy.games.publisher/v1alpha1
 kind: Pipeline
 
 metadata:
@@ -210,11 +216,14 @@ spec:
     targets:
       - name: <target-name>
         enabled: true
-        platform: <unity-platform>
-        buildMethod: <static-unity-method>
+        buildKind: player
+        contract:
+          unity:
+            targetPlatform: <unity-target-platform>
+            buildMethod: <static-unity-method>
+            editorVersion: <unity-version-or-empty>
         runner:
           type: host-native
-          unityVersion: <unity-version-or-empty>
           timeoutSeconds: 3600
         output:
           kind: <archive-or-directory>
@@ -268,6 +277,15 @@ Do not set more than one of `value`, `env`, or `file` on the same field.
 
 - `metadata.name` becomes the durable repository name.
 - `spec.repository.credentials` references one entry from `spec.credentials`.
+- `spec.build.targets[].buildKind` defaults to `player` and is currently the
+  only supported build kind for Unity repositories.
+- `spec.build.targets[].contract.unity` is required for Unity repositories.
+- `spec.build.targets[].contract.unity.targetPlatform` maps directly to the
+  Unity `BuildTarget` value used during execution.
+- `spec.build.targets[].contract.unity.buildMethod` must name a real static
+  Unity Editor method committed in the repository.
+- `spec.build.targets[].contract.unity.editorVersion` is optional; when it is
+  omitted, release planning falls back to the repository ProjectVersion data.
 - `spec.build.targets[].runner.type` defaults to `host-native`.
 - `spec.build.targets[].runner.timeoutSeconds` defaults to the runtime build
   timeout when omitted or zero.
@@ -342,16 +360,14 @@ information in this order and only then write the file:
    or an explicit literal value.
 9. Ask for build targets one by one:
    - target name
-   - Unity platform
-   - Unity static build method
+  - Unity targetPlatform
+  - Unity buildMethod
+  - Unity editorVersion override if any
    - output kind
-
-- output path hint or expected extension
-- for archive outputs, ask for a staging path without a `.zip` suffix
-- Unity version override if any
-- image override if any
-- timeout
-- optional config object
+  - output path hint or expected extension
+  - for archive outputs, a staging path without a `.zip` suffix
+  - timeout
+  - optional config object
 
 10. Ask for publish targets one by one.
 11. If the user asks for a publish kind other than `filesystem`, explain that
@@ -360,5 +376,5 @@ information in this order and only then write the file:
 13. Ask where the resulting file should be written under `pipelines/`.
 14. Generate the YAML only after the questionnaire is complete.
 
-The agent should not guess missing `buildMethod`, `platform`, or secret source
-values.
+The agent should not guess missing `buildMethod`, `targetPlatform`,
+`editorVersion`, or secret source values.

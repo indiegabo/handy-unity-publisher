@@ -1,6 +1,6 @@
 # Process Reset Playbook
 
-Use this playbook to clear all persisted process state from the current HUP
+Use this playbook to clear all persisted process state from the current HGP
 runtime so the app behaves like a first execution for releases, builds,
 publishes, polling baselines, retained process artifacts, and runtime event
 history.
@@ -9,8 +9,8 @@ history.
 
 Resolve the database path using the same rules as `runtime-config`:
 
-1. Use `HANDY_UNITY_PUBLISHER_RUNTIME_ROOT` when it is set.
-2. On Windows, otherwise use `%LOCALAPPDATA%\handy-unity-publisher\runtime`.
+1. Use `HANDY_GAMES_PUBLISHER_RUNTIME_ROOT` when it is set.
+2. On Windows, otherwise use `%LOCALAPPDATA%\HandyGamesPublisher\runtime`.
 3. Append `state/runtime.db`.
 
 Stop the runtime or shell automation loop first when practical so it does not
@@ -81,14 +81,14 @@ IDEMPOTENCY_PATTERNS = (
     'publish-run:*',
 )
 
-runtime_root = os.environ.get('HANDY_UNITY_PUBLISHER_RUNTIME_ROOT')
+runtime_root = os.environ.get('HANDY_GAMES_PUBLISHER_RUNTIME_ROOT')
 if runtime_root:
     runtime_root = pathlib.Path(runtime_root)
 else:
     local_app_data = os.environ.get('LOCALAPPDATA') or os.environ.get('APPDATA')
     if not local_app_data:
         raise SystemExit('missing LOCALAPPDATA or APPDATA')
-    runtime_root = pathlib.Path(local_app_data) / 'handy-unity-publisher' / 'runtime'
+    runtime_root = pathlib.Path(local_app_data) / 'HandyGamesPublisher' / 'runtime'
 
 state_dir = runtime_root / 'state'
 logs_dir = runtime_root / 'logs'

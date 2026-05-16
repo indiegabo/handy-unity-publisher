@@ -1,40 +1,23 @@
-# Unity Adapter Contract Guide
+# Unity Build Method Guide
 
-This guide is for human developers and AI agents that create or update Unity
-build targets and the repository-side Editor methods consumed by the explicit
-Unity adapter in HGP.
+This guide is for human developers and AI agents that create or update build
+targets for HGP.
 
 ## Why This Guide Exists
 
-This project executes Unity through the explicit `runtime_runner::unity`
-adapter and a host-native runtime contract.
+This project executes Unity through a host-native runtime contract.
 
-Each repository must declare the Unity contract that the adapter should
-execute for every target.
-
-The manifest-side contract looks like this:
-
-```yaml
-buildKind: player
-contract:
-    unity:
-        targetPlatform: StandaloneWindows64
-        buildMethod: Builder.PerformWindows
-        editorVersion: 2022.3.14f1
-runner:
-    type: host-native
-    timeoutSeconds: 3600
-```
+Each repository must declare the build method that the runtime should execute
+for every target.
 
 The runtime executes Unity like this:
 
 ```text
-unity-editor -batchmode -quit -nographics -buildTarget <target> -executeMethod <unity-build-method>
+unity-editor -batchmode -quit -nographics -buildTarget <target> -executeMethod <build_method>
 ```
 
-That means `contract.unity.targetPlatform` and
-`contract.unity.buildMethod` are required for executable build runs. A build
-target definition with only `buildKind`, `runner`, or `output` is not enough.
+That means `build_method` is required for executable build runs. A build target
+definition with only `platform` is not enough.
 
 AI agents should not guess a method name. They must either:
 
@@ -44,18 +27,15 @@ AI agents should not guess a method name. They must either:
 
 ## Runtime Contract
 
-When one build run starts, the Unity adapter receives the manifest contract,
-materializes a Unity execution plan, and provides these inputs to the Unity
+When one build run starts, the runtime provides these inputs to the Unity
 Editor process:
 
-- `contract.unity.targetPlatform` is converted into the Unity `BuildTarget`
-- `contract.unity.buildMethod` is passed through `-executeMethod`
-- `contract.unity.editorVersion`, when present, guides local editor
-    discovery/resolution before launch
+- `platform` is converted into the Unity `BuildTarget`
+- `build_method` is passed through `-executeMethod`
 - the runtime computes a canonical output path inside the prepared artifact
   root and exposes that path through both `HGB_OUTPUT_PATH` and the
   `-hgbOutputPath` command-line argument
-- `output.path` from repository configuration is only a requested
+- `output_path_template` from repository configuration is only a requested
   build path hint; for `archive` outputs it should be a staging path without a
   `.zip` suffix
 - `output_kind` is exposed through `HGB_OUTPUT_KIND`
@@ -707,22 +687,22 @@ do not hardcode the archive name.
 
 ## Rules For Developers And AI Agents
 
-- Do not leave `contract.unity.buildMethod` empty for executable builds
+- Do not leave `build_method` empty for executable builds
 - Do not invent method names without adding the corresponding Unity Editor code
 - Keep method names stable once referenced by build targets
 - Prefer one small static method per platform instead of one giant method with
   runtime branching across unrelated targets
 - Always verify that the build produces real files under the artifact root
-- Prefer explicit `output.path` values that communicate artifact style
+- Prefer explicit `output_path_template` values that communicate artifact style
   or extension, not the final host-visible release filename
-- Do not end `output.path` with `.zip` when `output.kind=archive`
+- Do not end `output_path_template` with `.zip` when `output_kind=archive`
 
 ## Common Failure Modes
 
-### `contract.unity.buildMethod` is empty
+### `build_method` is empty
 
 The worker fails before Unity starts because the current runtime requires
-`contract.unity.buildMethod` for execution.
+`build_method` for execution.
 
 ### The method exists but writes outside the artifact root
 
@@ -740,16 +720,16 @@ path, the worker will not see the expected artifact.
 The worker still fails. At least one regular file must exist under the build
 artifact root.
 
-### The build target uses `archive` and `output.path` ends with `.zip`
+### The build target uses `archive` and `output_path_template` ends with `.zip`
 
-The runtime rejects that configuration. `output.path` is only the requested
-build-method path and must not try to define the final archive name.
+The runtime rejects that configuration. `output_path_template` is only the
+requested build-method path and must not try to define the final archive name.
 Use a staging path such as `Builds/WebGL` instead.
 
 ### The build target uses `archive` but the script never creates an archive
 
-Set `output.kind=directory` instead, or use a script like the example above
-that zips the build output when `output.kind=archive`.
+Set `output_kind=directory` instead, or use a script like the example above
+that zips the build output when `output_kind=archive`.
 
 ### The archive contains `DoNotShip` or backup directories
 

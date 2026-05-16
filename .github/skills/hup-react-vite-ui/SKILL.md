@@ -1,11 +1,11 @@
 ---
 name: hup-react-vite-ui
-description: "Build or refactor the HUP desktop UI with React, TypeScript, and Vite. Use when editing apps/desktop/ui, extending reusable components, keeping the compact dark theme, or creating operator-facing screens inspired by Yaak and Hoppscotch."
+description: "Build or refactor the HGP desktop UI with React, TypeScript, and Vite. Use when editing apps/desktop/ui or extending shared components. Priorities: reuse shared primitives first, then preserve the compact dark operator-facing style."
 argument-hint: "[surface, component, or UI task]"
 user-invocable: true
 ---
 
-# HUP React Vite UI
+# HGP React Vite UI
 
 Use this skill when working on the desktop shell frontend in `apps/desktop/ui`.
 It is for React + TypeScript + Vite work that must stay aligned with the
@@ -17,15 +17,17 @@ project's reusable component kit and compact operator-facing visual language.
 - Add or extend shared primitives under `apps/desktop/ui/src/components`
 - Rework buttons, icon buttons, icons, fields, selects, badges, or panels
 - Keep the shell dense, dark, compact, and tooling-oriented
-- Preserve the current references taken from Yaak and Hoppscotch
+- Preserve the visual design patterns inspired by Yaak and Hoppscotch
 
 ## Core Rules
 
-- Prefer existing shared primitives before introducing one-off markup
-- Keep the UI compact and operator-facing rather than marketing-driven
-- Preserve the dark monochrome palette and `5px` border radii
-- Keep React state local and explicit unless a broader shared state is needed
-- Keep shell logic thin; runtime orchestration still belongs in Rust crates
+- Priority 1: prefer existing shared primitives before introducing one-off markup
+- Priority 2: keep the UI compact, operator-facing, dark, and limited to the
+  established `5px` radii
+- Priority 3: keep React state local and explicit unless a broader shared
+  state is needed
+- Priority 4: keep shell logic thin; runtime orchestration still belongs in
+  Rust crates
 
 ## Procedure
 
