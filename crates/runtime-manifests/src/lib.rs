@@ -14,12 +14,14 @@ use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-const API_VERSION: &str = "handy.unity.publisher/v1alpha1";
+const API_VERSION: &str = "handy.games.publisher/v1alpha1";
 const MANIFEST_KIND: &str = "Pipeline";
 const SQLITE_BUSY_TIMEOUT_MILLIS: u64 = 5_000;
 const DEFAULT_RUNNER_TYPE: &str = "host-native";
 const DEFAULT_TIMEOUT_SECONDS: i64 = 3_600;
 const DEFAULT_PUBLISH_KIND: &str = "filesystem";
+const DEFAULT_BUILD_KIND: &str = "player";
+const SUPPORTED_ENGINE_UNITY: &str = "unity";
 
 /// Declares how the runtime scaffold interprets repository manifests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +116,8 @@ pub struct Spec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RepositorySpec {
+    #[serde(default)]
+    pub engine: String,
     pub url: String,
     #[serde(rename = "defaultBranch", default)]
     pub default_branch: String,
@@ -174,32 +178,51 @@ pub struct BuildSpec {
     pub targets: Vec<BuildTargetSpec>,
 }
 
-/// Defines one Unity build target.
+/// Defines one engine-aware build target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct BuildTargetSpec {
     pub name: String,
     #[serde(default)]
     pub enabled: Option<bool>,
-    pub platform: String,
-    #[serde(rename = "buildMethod", default)]
-    pub build_method: String,
+    #[serde(rename = "buildKind", default)]
+    pub build_kind: String,
     #[serde(default)]
     pub runner: RunnerSpec,
     #[serde(default)]
     pub output: OutputSpec,
     #[serde(default)]
+    pub contract: BuildContractSpec,
+    #[serde(default)]
     pub config: JsonMap<String, JsonValue>,
 }
 
-/// Describes build runner overrides for one target.
+/// Defines the engine-scoped build contract for one target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct BuildContractSpec {
+    #[serde(default)]
+    pub unity: Option<UnityBuildContractSpec>,
+}
+
+/// Defines the Unity-specific build contract for one target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct UnityBuildContractSpec {
+    #[serde(rename = "targetPlatform", default)]
+    pub target_platform: String,
+    #[serde(rename = "buildMethod", default)]
+    pub build_method: String,
+    #[serde(rename = "editorVersion", default)]
+    pub editor_version: String,
+}
+
+/// Describes runtime runner overrides for one target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerSpec {
     #[serde(default, rename = "type")]
     pub runner_type: String,
-    #[serde(rename = "unityVersion", default)]
-    pub unity_version: String,
     #[serde(rename = "timeoutSeconds", default)]
     pub timeout_seconds: i64,
 }
@@ -262,6 +285,7 @@ struct StoredCredential {
 struct StoredRepository {
     id: i64,
     name: String,
+    engine_kind: String,
     repo_url: String,
     credentials_id: Option<i64>,
     default_branch: Option<String>,
@@ -274,6 +298,7 @@ struct StoredBuildTarget {
     id: i64,
     repository_id: i64,
     name: String,
+    build_kind: String,
     platform: String,
     runner_type: String,
     build_method: Option<String>,
@@ -282,6 +307,7 @@ struct StoredBuildTarget {
     unity_version_override: Option<String>,
     timeout_seconds: i64,
     enabled: bool,
+    contract_json: String,
     config_json: String,
 }
 
@@ -321,6 +347,16 @@ impl Manifest {
         }
         if self.metadata.name.trim().is_empty() {
             return Err(String::from("metadata.name must not be empty"));
+        }
+        if self.spec.repository.engine.trim().is_empty() {
+            return Err(String::from("spec.repository.engine must not be empty"));
+        }
+        let repository_engine = self.spec.repository.engine.trim().to_ascii_lowercase();
+        if repository_engine != SUPPORTED_ENGINE_UNITY {
+            return Err(format!(
+                "spec.repository.engine {:?} is not supported yet; only \"unity\" is accepted",
+                self.spec.repository.engine.trim()
+            ));
         }
         if self.spec.repository.url.trim().is_empty() {
             return Err(String::from("spec.repository.url must not be empty"));
@@ -394,12 +430,31 @@ impl Manifest {
             if !build_targets.insert(name.to_owned()) {
                 return Err(format!("spec.build.targets contains duplicate name {name:?}"));
             }
-            if target.platform.trim().is_empty() {
-                return Err(format!("spec.build.targets[{name:?}].platform must not be empty"));
-            }
-            if target.build_method.trim().is_empty() {
+            let build_kind = if target.build_kind.trim().is_empty() {
+                DEFAULT_BUILD_KIND
+            } else {
+                target.build_kind.trim()
+            };
+            if !build_kind.eq_ignore_ascii_case(DEFAULT_BUILD_KIND) {
                 return Err(format!(
-                    "spec.build.targets[{name:?}].buildMethod must not be empty"
+                    "spec.build.targets[{name:?}].buildKind {:?} is not supported for engine \"unity\"; only \"player\" is accepted",
+                    target.build_kind.trim()
+                ));
+            }
+
+            let Some(unity_contract) = target.contract.unity.as_ref() else {
+                return Err(format!(
+                    "spec.build.targets[{name:?}].contract.unity is required when spec.repository.engine is \"unity\""
+                ));
+            };
+            if unity_contract.target_platform.trim().is_empty() {
+                return Err(format!(
+                    "spec.build.targets[{name:?}].contract.unity.targetPlatform must not be empty"
+                ));
+            }
+            if unity_contract.build_method.trim().is_empty() {
+                return Err(format!(
+                    "spec.build.targets[{name:?}].contract.unity.buildMethod must not be empty"
                 ));
             }
             if target.output.kind.trim().is_empty() {
@@ -799,12 +854,14 @@ fn upsert_repository(
     } else {
         manifest.spec.repository.polling_interval_seconds
     };
+    let engine_kind = manifest.spec.repository.engine.trim().to_ascii_lowercase();
 
     if let Some(existing) = repositories_by_name.get(&manifest.metadata.name).cloned() {
         let updated = update_repository(
             transaction,
             existing.id,
             &manifest.metadata.name,
+            &engine_kind,
             &manifest.spec.repository.url,
             credentials_id,
             &manifest.spec.repository.default_branch,
@@ -819,6 +876,7 @@ fn upsert_repository(
     let created = create_repository(
         transaction,
         &manifest.metadata.name,
+        &engine_kind,
         &manifest.spec.repository.url,
         credentials_id,
         &manifest.spec.repository.default_branch,
@@ -835,6 +893,7 @@ fn sync_build_targets(
     manifest: &Manifest,
     repository: &StoredRepository,
 ) -> Result<HashMap<String, StoredBuildTarget>, String> {
+    let repository_engine = manifest.spec.repository.engine.trim().to_ascii_lowercase();
     let existing_targets = list_build_targets(transaction, repository.id)
         .map_err(|error| format!("list build targets for repository {:?}: {error}", repository.name))?;
     let existing_by_name = existing_targets
@@ -847,23 +906,58 @@ fn sync_build_targets(
     let mut resolved = HashMap::with_capacity(manifest.spec.build.targets.len());
 
     for target_spec in &manifest.spec.build.targets {
+        let build_kind = if target_spec.build_kind.trim().is_empty() {
+            DEFAULT_BUILD_KIND.to_owned()
+        } else {
+            target_spec.build_kind.trim().to_ascii_lowercase()
+        };
+        let contract_json = marshal_contract_json(&target_spec.contract).map_err(|error| {
+            format!(
+                "marshal build target {:?} contract: {error}",
+                target_spec.name
+            )
+        })?;
         let config_json = marshal_json_object(&target_spec.config)
             .map_err(|error| format!("marshal build target {:?} config: {error}", target_spec.name))?;
         let enabled = bool_value(target_spec.enabled, true);
+        let (platform, build_method, engine_version_override) =
+            match repository_engine.as_str() {
+                SUPPORTED_ENGINE_UNITY => {
+                    let unity_contract = target_spec.contract.unity.as_ref().ok_or_else(|| {
+                        format!(
+                            "build target {:?} is missing contract.unity after validation",
+                            target_spec.name
+                        )
+                    })?;
+                    (
+                        unity_contract.target_platform.as_str(),
+                        unity_contract.build_method.as_str(),
+                        unity_contract.editor_version.as_str(),
+                    )
+                }
+                other => {
+                    return Err(format!(
+                        "pipeline {:?} uses unsupported engine {other:?}",
+                        manifest.metadata.name
+                    ));
+                }
+            };
 
         let target = if let Some(existing) = existing_by_name.get(target_spec.name.trim()) {
             update_build_target(
                 transaction,
                 existing.id,
                 &target_spec.name,
-                &target_spec.platform,
+                &build_kind,
+                platform,
                 runner_type(&target_spec.runner.runner_type),
-                &target_spec.build_method,
+                build_method,
                 &target_spec.output.kind,
                 &target_spec.output.path,
-                &target_spec.runner.unity_version,
+                engine_version_override,
                 runner_timeout(target_spec.runner.timeout_seconds),
                 enabled,
+                &contract_json,
                 &config_json,
             )
             .map_err(|error| format!("update build target {:?}: {error}", target_spec.name))?
@@ -872,14 +966,16 @@ fn sync_build_targets(
                 transaction,
                 repository.id,
                 &target_spec.name,
-                &target_spec.platform,
+                &build_kind,
+                platform,
                 runner_type(&target_spec.runner.runner_type),
-                &target_spec.build_method,
+                build_method,
                 &target_spec.output.kind,
                 &target_spec.output.path,
-                &target_spec.runner.unity_version,
+                engine_version_override,
                 runner_timeout(target_spec.runner.timeout_seconds),
                 enabled,
+                &contract_json,
                 &config_json,
             )
             .map_err(|error| format!("create build target {:?}: {error}", target_spec.name))?
@@ -898,6 +994,7 @@ fn sync_build_targets(
             transaction,
             existing.id,
             &existing.name,
+            &existing.build_kind,
             &existing.platform,
             &existing.runner_type,
             existing.build_method.as_deref().unwrap_or_default(),
@@ -906,6 +1003,7 @@ fn sync_build_targets(
             existing.unity_version_override.as_deref().unwrap_or_default(),
             existing.timeout_seconds,
             false,
+            &existing.contract_json,
             &existing.config_json,
         )
         .map_err(|error| format!("disable build target {:?}: {error}", existing.name))?;
@@ -1110,6 +1208,7 @@ fn disable_removed_repositories(
             &transaction,
             existing.id,
             &existing.name,
+            &existing.engine_kind,
             &existing.repo_url,
             existing.credentials_id,
             existing.default_branch.as_deref().unwrap_or_default(),
@@ -1162,7 +1261,7 @@ fn list_repositories(connection: &Connection) -> io::Result<Vec<StoredRepository
     let mut statement = connection
         .prepare(
             "
-            SELECT id, name, repo_url, credentials_id, default_branch,
+            SELECT id, name, engine_kind, repo_url, credentials_id, default_branch,
                    polling_interval_seconds, enabled
             FROM repositories
             ORDER BY id
@@ -1174,11 +1273,12 @@ fn list_repositories(connection: &Connection) -> io::Result<Vec<StoredRepository
             Ok(StoredRepository {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                repo_url: row.get(2)?,
-                credentials_id: row.get(3)?,
-                default_branch: row.get(4)?,
-                polling_interval_seconds: row.get(5)?,
-                enabled: row.get::<_, i64>(6)? != 0,
+                engine_kind: row.get(2)?,
+                repo_url: row.get(3)?,
+                credentials_id: row.get(4)?,
+                default_branch: row.get(5)?,
+                polling_interval_seconds: row.get(6)?,
+                enabled: row.get::<_, i64>(7)? != 0,
             })
         })
         .map_err(sqlite_error)?;
@@ -1193,9 +1293,10 @@ fn list_build_targets(
     let mut statement = connection
         .prepare(
             "
-            SELECT id, repository_id, name, platform, runner_type, build_method,
-                     output_kind, output_path_template, unity_version_override,
-                     timeout_seconds, enabled, config_json
+            SELECT id, repository_id, name, build_kind, platform, runner_type,
+                     build_method, output_kind, output_path_template,
+                     unity_version_override, timeout_seconds, enabled,
+                     contract_json, config_json
             FROM build_targets
             WHERE repository_id = ?
             ORDER BY id
@@ -1208,15 +1309,17 @@ fn list_build_targets(
                 id: row.get(0)?,
                 repository_id: row.get(1)?,
                 name: row.get(2)?,
-                platform: row.get(3)?,
-                runner_type: row.get(4)?,
-                build_method: row.get(5)?,
-                output_kind: row.get(6)?,
-                output_path_template: row.get(7)?,
-                unity_version_override: row.get(8)?,
-                timeout_seconds: row.get(9)?,
-                enabled: row.get::<_, i64>(10)? != 0,
-                config_json: row.get(11)?,
+                build_kind: row.get(3)?,
+                platform: row.get(4)?,
+                runner_type: row.get(5)?,
+                build_method: row.get(6)?,
+                output_kind: row.get(7)?,
+                output_path_template: row.get(8)?,
+                unity_version_override: row.get(9)?,
+                timeout_seconds: row.get(10)?,
+                enabled: row.get::<_, i64>(11)? != 0,
+                contract_json: row.get(12)?,
+                config_json: row.get(13)?,
             })
         })
         .map_err(sqlite_error)?;
@@ -1330,6 +1433,7 @@ fn get_credential(connection: &Connection, id: i64) -> rusqlite::Result<StoredCr
 fn create_repository(
     transaction: &Transaction<'_>,
     name: &str,
+    engine_kind: &str,
     repo_url: &str,
     credentials_id: Option<i64>,
     default_branch: &str,
@@ -1340,16 +1444,18 @@ fn create_repository(
         "
         INSERT INTO repositories (
             name,
+            engine_kind,
             repo_url,
             credentials_id,
             default_branch,
             polling_interval_seconds,
             enabled
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ",
         params![
             name.trim(),
+            engine_kind.trim(),
             repo_url.trim(),
             credentials_id,
             nullable_string(default_branch),
@@ -1364,6 +1470,7 @@ fn update_repository(
     transaction: &Transaction<'_>,
     id: i64,
     name: &str,
+    engine_kind: &str,
     repo_url: &str,
     credentials_id: Option<i64>,
     default_branch: &str,
@@ -1374,6 +1481,7 @@ fn update_repository(
         "
         UPDATE repositories
         SET name = ?,
+            engine_kind = ?,
             repo_url = ?,
             credentials_id = ?,
             default_branch = ?,
@@ -1384,6 +1492,7 @@ fn update_repository(
         ",
         params![
             name.trim(),
+            engine_kind.trim(),
             repo_url.trim(),
             credentials_id,
             nullable_string(default_branch),
@@ -1398,7 +1507,7 @@ fn update_repository(
 fn get_repository(connection: &Connection, id: i64) -> rusqlite::Result<StoredRepository> {
     connection.query_row(
         "
-        SELECT id, name, repo_url, credentials_id, default_branch,
+        SELECT id, name, engine_kind, repo_url, credentials_id, default_branch,
                polling_interval_seconds, enabled
         FROM repositories
         WHERE id = ?
@@ -1408,11 +1517,12 @@ fn get_repository(connection: &Connection, id: i64) -> rusqlite::Result<StoredRe
             Ok(StoredRepository {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                repo_url: row.get(2)?,
-                credentials_id: row.get(3)?,
-                default_branch: row.get(4)?,
-                polling_interval_seconds: row.get(5)?,
-                enabled: row.get::<_, i64>(6)? != 0,
+                engine_kind: row.get(2)?,
+                repo_url: row.get(3)?,
+                credentials_id: row.get(4)?,
+                default_branch: row.get(5)?,
+                polling_interval_seconds: row.get(6)?,
+                enabled: row.get::<_, i64>(7)? != 0,
             })
         },
     )
@@ -1422,6 +1532,7 @@ fn create_build_target(
     transaction: &Transaction<'_>,
     repository_id: i64,
     name: &str,
+    build_kind: &str,
     platform: &str,
     runner_type: &str,
     build_method: &str,
@@ -1430,6 +1541,7 @@ fn create_build_target(
     unity_version_override: &str,
     timeout_seconds: i64,
     enabled: bool,
+    contract_json: &str,
     config_json: &str,
 ) -> rusqlite::Result<StoredBuildTarget> {
     transaction.execute(
@@ -1437,6 +1549,7 @@ fn create_build_target(
         INSERT INTO build_targets (
             repository_id,
             name,
+            build_kind,
             platform,
             runner_type,
             build_method,
@@ -1445,13 +1558,15 @@ fn create_build_target(
             unity_version_override,
             timeout_seconds,
             enabled,
+            contract_json,
             config_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
         params![
             repository_id,
             name.trim(),
+            build_kind.trim(),
             platform.trim(),
             runner_type.trim(),
             nullable_string(build_method),
@@ -1460,6 +1575,7 @@ fn create_build_target(
             nullable_string(unity_version_override),
             timeout_seconds,
             bool_to_int(enabled),
+            contract_json,
             config_json,
         ],
     )?;
@@ -1471,6 +1587,7 @@ fn update_build_target(
     transaction: &Transaction<'_>,
     id: i64,
     name: &str,
+    build_kind: &str,
     platform: &str,
     runner_type: &str,
     build_method: &str,
@@ -1479,12 +1596,14 @@ fn update_build_target(
     unity_version_override: &str,
     timeout_seconds: i64,
     enabled: bool,
+    contract_json: &str,
     config_json: &str,
 ) -> rusqlite::Result<StoredBuildTarget> {
     transaction.execute(
         "
         UPDATE build_targets
         SET name = ?,
+            build_kind = ?,
             platform = ?,
             runner_type = ?,
             build_method = ?,
@@ -1493,12 +1612,14 @@ fn update_build_target(
             unity_version_override = ?,
             timeout_seconds = ?,
             enabled = ?,
+            contract_json = ?,
             config_json = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         ",
         params![
             name.trim(),
+            build_kind.trim(),
             platform.trim(),
             runner_type.trim(),
             nullable_string(build_method),
@@ -1507,6 +1628,7 @@ fn update_build_target(
             nullable_string(unity_version_override),
             timeout_seconds,
             bool_to_int(enabled),
+            contract_json,
             config_json,
             id,
         ],
@@ -1517,9 +1639,10 @@ fn update_build_target(
 fn get_build_target(connection: &Connection, id: i64) -> rusqlite::Result<StoredBuildTarget> {
     connection.query_row(
         "
-        SELECT id, repository_id, name, platform, runner_type, build_method,
-             output_kind, output_path_template, unity_version_override,
-             timeout_seconds, enabled, config_json
+        SELECT id, repository_id, name, build_kind, platform, runner_type,
+             build_method, output_kind, output_path_template,
+             unity_version_override, timeout_seconds, enabled,
+             contract_json, config_json
         FROM build_targets
         WHERE id = ?
         ",
@@ -1529,15 +1652,17 @@ fn get_build_target(connection: &Connection, id: i64) -> rusqlite::Result<Stored
                 id: row.get(0)?,
                 repository_id: row.get(1)?,
                 name: row.get(2)?,
-                platform: row.get(3)?,
-                runner_type: row.get(4)?,
-                build_method: row.get(5)?,
-                output_kind: row.get(6)?,
-                output_path_template: row.get(7)?,
-                unity_version_override: row.get(8)?,
-                timeout_seconds: row.get(9)?,
-                enabled: row.get::<_, i64>(10)? != 0,
-                config_json: row.get(11)?,
+                build_kind: row.get(3)?,
+                platform: row.get(4)?,
+                runner_type: row.get(5)?,
+                build_method: row.get(6)?,
+                output_kind: row.get(7)?,
+                output_path_template: row.get(8)?,
+                unity_version_override: row.get(9)?,
+                timeout_seconds: row.get(10)?,
+                enabled: row.get::<_, i64>(11)? != 0,
+                contract_json: row.get(12)?,
+                config_json: row.get(13)?,
             })
         },
     )
@@ -1728,6 +1853,10 @@ fn marshal_json_object(value: &JsonMap<String, JsonValue>) -> Result<String, Str
     serde_json::to_string(value).map_err(|error| error.to_string())
 }
 
+fn marshal_contract_json(value: &BuildContractSpec) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|error| error.to_string())
+}
+
 fn validate_requested_output_path(output_kind: &str, output_path_template: &str) -> Result<(), String> {
     let trimmed_kind = output_kind.trim();
     let trimmed_path = output_path_template.trim();
@@ -1864,12 +1993,13 @@ mod tests {
         write_manifest(
             &pipelines_dir.join("revolutions.yml"),
             concat!(
-                "apiVersion: handy.unity.publisher/v1alpha1\n",
+                "apiVersion: handy.games.publisher/v1alpha1\n",
                 "kind: Pipeline\n",
                 "metadata:\n",
                 "  name: revolutions\n",
                 "spec:\n",
                 "  repository:\n",
+                "    engine: unity\n",
                 "    url: https://example.com/org/revolutions.git\n",
                 "    defaultBranch: main\n",
                 "    pollingIntervalSeconds: 300\n",
@@ -1885,14 +2015,17 @@ mod tests {
                 "  build:\n",
                 "    targets:\n",
                 "      - name: linux64\n",
-                "        platform: StandaloneLinux64\n",
-                "        buildMethod: Builder.BuildLinux64\n",
+                "        buildKind: player\n",
                 "        runner:\n",
-                "          unityVersion: 2022.3.14f1\n",
                 "          timeoutSeconds: 5400\n",
                 "        output:\n",
                 "          kind: archive\n",
                 "          path: Builds/Linux64\n",
+                "        contract:\n",
+                "          unity:\n",
+                "            targetPlatform: StandaloneLinux64\n",
+                "            buildMethod: Builder.BuildLinux64\n",
+                "            editorVersion: 2022.3.14f1\n",
                 "        config:\n",
                 "          compression: zip\n",
                 "  publish:\n",
@@ -1944,20 +2077,22 @@ mod tests {
             .expect("repository record should exist");
         let repository = connection
             .query_row(
-                "SELECT credentials_id, default_branch, enabled FROM repositories WHERE id = ?",
+                "SELECT engine_kind, credentials_id, default_branch, enabled FROM repositories WHERE id = ?",
                 [repository_id],
                 |row| {
                     Ok((
-                        row.get::<_, Option<i64>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
                     ))
                 },
             )
             .expect("repository fields should load");
-        assert!(repository.0.is_some());
-        assert_eq!(repository.1.as_deref(), Some("main"));
-        assert_eq!(repository.2, 1);
+        assert_eq!(repository.0, "unity");
+        assert!(repository.1.is_some());
+        assert_eq!(repository.2.as_deref(), Some("main"));
+        assert_eq!(repository.3, 1);
 
         let build_target_id = connection
             .query_row(
@@ -1968,20 +2103,33 @@ mod tests {
             .expect("build target should exist");
         let build_target = connection
             .query_row(
-                "SELECT runner_type, timeout_seconds, config_json FROM build_targets WHERE id = ?",
+                "SELECT build_kind, contract_json, platform, build_method, unity_version_override, runner_type, timeout_seconds, config_json FROM build_targets WHERE id = ?",
                 [build_target_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, String>(7)?,
                     ))
                 },
             )
             .expect("build target fields should load");
-        assert_eq!(build_target.0, "host-native");
-        assert_eq!(build_target.1, 5400);
-        assert_eq!(build_target.2, r#"{"compression":"zip"}"#);
+        assert_eq!(build_target.0, "player");
+        assert_eq!(
+            build_target.1,
+            r#"{"unity":{"targetPlatform":"StandaloneLinux64","buildMethod":"Builder.BuildLinux64","editorVersion":"2022.3.14f1"}}"#
+        );
+        assert_eq!(build_target.2, "StandaloneLinux64");
+        assert_eq!(build_target.3.as_deref(), Some("Builder.BuildLinux64"));
+        assert_eq!(build_target.4.as_deref(), Some("2022.3.14f1"));
+        assert_eq!(build_target.5, "host-native");
+        assert_eq!(build_target.6, 5400);
+        assert_eq!(build_target.7, r#"{"compression":"zip"}"#);
 
         let publish_target_id = connection
             .query_row(
@@ -2020,22 +2168,26 @@ mod tests {
         write_manifest(
             &manifest_path,
             concat!(
-                "apiVersion: handy.unity.publisher/v1alpha1\n",
+                "apiVersion: handy.games.publisher/v1alpha1\n",
                 "kind: Pipeline\n",
                 "metadata:\n",
                 "  name: alpha\n",
                 "spec:\n",
                 "  repository:\n",
+                "    engine: unity\n",
                 "    url: https://example.com/org/alpha.git\n",
                 "    pollingIntervalSeconds: 300\n",
                 "  build:\n",
                 "    targets:\n",
                 "      - name: linux64\n",
-                "        platform: StandaloneLinux64\n",
-                "        buildMethod: Builder.BuildLinux64\n",
+                "        buildKind: player\n",
                 "        output:\n",
                 "          kind: archive\n",
                 "          path: Builds/Linux64\n",
+                "        contract:\n",
+                "          unity:\n",
+                "            targetPlatform: StandaloneLinux64\n",
+                "            buildMethod: Builder.BuildLinux64\n",
                 "  publish:\n",
                 "    targets: []\n",
                 "  bindings: []\n"
@@ -2049,12 +2201,13 @@ mod tests {
         write_manifest(
             &manifest_path,
             concat!(
-                "apiVersion: handy.unity.publisher/v1alpha1\n",
+                "apiVersion: handy.games.publisher/v1alpha1\n",
                 "kind: Pipeline\n",
                 "metadata:\n",
                 "  name: alpha\n",
                 "spec:\n",
                 "  repository:\n",
+                "    engine: unity\n",
                 "    url: https://example.com/org/alpha.git\n",
                 "    enabled: false\n",
                 "    pollingIntervalSeconds: 300\n",
@@ -2098,21 +2251,25 @@ mod tests {
         write_manifest(
             &pipelines_dir.join("revolutions.yml"),
             concat!(
-                "apiVersion: handy.unity.publisher/v1alpha1\n",
+                "apiVersion: handy.games.publisher/v1alpha1\n",
                 "kind: Pipeline\n",
                 "metadata:\n",
                 "  name: revolutions\n",
                 "spec:\n",
                 "  repository:\n",
+                "    engine: unity\n",
                 "    url: https://example.com/org/revolutions.git\n",
                 "  build:\n",
                 "    targets:\n",
                 "      - name: webgl\n",
-                "        platform: WebGL\n",
-                "        buildMethod: Builder.PerformWebGL\n",
+                "        buildKind: player\n",
                 "        output:\n",
                 "          kind: archive\n",
                 "          path: Builds/WebGL.zip\n",
+                "        contract:\n",
+                "          unity:\n",
+                "            targetPlatform: WebGL\n",
+                "            buildMethod: Builder.PerformWebGL\n",
                 "  publish:\n",
                 "    targets: []\n",
                 "  bindings: []\n"
@@ -2137,12 +2294,13 @@ mod tests {
             &pipelines_dir.join("alpha.yml"),
             format!(
                 concat!(
-                    "apiVersion: handy.unity.publisher/v1alpha1\n",
+                    "apiVersion: handy.games.publisher/v1alpha1\n",
                     "kind: Pipeline\n",
                     "metadata:\n",
                     "  name: alpha\n",
                     "spec:\n",
                     "  repository:\n",
+                    "    engine: unity\n",
                     "    url: https://example.com/org/alpha.git\n",
                     "  credentials:\n",
                     "    - name: publish-token\n",
@@ -2179,6 +2337,75 @@ mod tests {
             )
             .expect("bearer credential should exist");
         assert_eq!(credential, r#"{"token":"revolution-token"}"#);
+    }
+
+    #[test]
+    fn load_dir_rejects_non_unity_repository_engine() {
+        let root = test_root("unsupported-engine");
+        let pipelines_dir = root.join("pipelines");
+        fs::create_dir_all(&pipelines_dir).expect("pipelines directory should exist");
+        write_manifest(
+            &pipelines_dir.join("alpha.yml"),
+            concat!(
+                "apiVersion: handy.games.publisher/v1alpha1\n",
+                "kind: Pipeline\n",
+                "metadata:\n",
+                "  name: alpha\n",
+                "spec:\n",
+                "  repository:\n",
+                "    engine: unreal\n",
+                "    url: https://example.com/org/alpha.git\n",
+                "  build:\n",
+                "    targets: []\n",
+                "  publish:\n",
+                "    targets: []\n",
+                "  bindings: []\n"
+            ),
+        );
+
+        let load_result = load_dir(&pipelines_dir).expect("manifest load should succeed");
+        assert!(load_result.manifests.is_empty());
+        assert_eq!(load_result.issues.len(), 1);
+        assert!(load_result.issues[0].error.contains("only \"unity\" is accepted"));
+    }
+
+    #[test]
+    fn load_dir_rejects_non_player_unity_build_kind() {
+        let root = test_root("unsupported-build-kind");
+        let pipelines_dir = root.join("pipelines");
+        fs::create_dir_all(&pipelines_dir).expect("pipelines directory should exist");
+        write_manifest(
+            &pipelines_dir.join("alpha.yml"),
+            concat!(
+                "apiVersion: handy.games.publisher/v1alpha1\n",
+                "kind: Pipeline\n",
+                "metadata:\n",
+                "  name: alpha\n",
+                "spec:\n",
+                "  repository:\n",
+                "    engine: unity\n",
+                "    url: https://example.com/org/alpha.git\n",
+                "  build:\n",
+                "    targets:\n",
+                "      - name: dedicated-server\n",
+                "        buildKind: server\n",
+                "        output:\n",
+                "          kind: directory\n",
+                "          path: Builds/Server\n",
+                "        contract:\n",
+                "          unity:\n",
+                "            targetPlatform: StandaloneLinux64\n",
+                "            buildMethod: Builder.PerformServer\n",
+                "  publish:\n",
+                "    targets: []\n",
+                "  bindings: []\n"
+            ),
+        );
+
+        let load_result = load_dir(&pipelines_dir).expect("manifest load should succeed");
+        assert!(load_result.manifests.is_empty());
+        assert_eq!(load_result.issues.len(), 1);
+        assert!(load_result.issues[0].error.contains("only \"player\" is accepted"));
     }
 
     fn initialize_test_database(root: &Path) -> StorageLayout {
