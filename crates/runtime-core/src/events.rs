@@ -251,7 +251,7 @@ mod tests {
     fn test_root(suffix: &str) -> PathBuf {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "hup-runtime-core-events-{}-{}",
+            "hgp-runtime-core-events-{}-{}",
             suffix,
             TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         ));

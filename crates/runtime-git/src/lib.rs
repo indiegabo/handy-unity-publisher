@@ -6,11 +6,13 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 /// Identifies Git credentials backed by HTTP basic authentication.
 pub const KIND_GIT_HTTP_BASIC: &str = "git-http-basic";
@@ -27,6 +29,11 @@ const GIT_TERMINAL_PROMPT_DISABLED: &str = "0";
 const GCM_INTERACTIVE_ENV: &str = "GCM_INTERACTIVE";
 const GCM_INTERACTIVE_NEVER: &str = "never";
 const GIT_CREDENTIAL_HELPER_RESET: &str = "credential.helper=";
+const GIT_CREDENTIAL_MANAGER_HELPER: &str = "manager";
+const DEFAULT_GITHUB_INSTANCE_URL: &str = "https://github.com";
+#[cfg(test)]
+const TEST_GIT_EXECUTABLE_ENV: &str =
+    "HANDY_GAMES_PUBLISHER_TEST_GIT_EXECUTABLE";
 
 /// Lists the Git transport strategy supported by the runtime scaffold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +101,21 @@ pub fn git_auth_options_from_credentials(
     kind: &str,
     config_json: &str,
 ) -> io::Result<GitAuthOptions> {
+    git_auth_options_from_credentials_with_github_header_resolver(
+        kind,
+        config_json,
+        resolve_github_host_login_auth_header,
+    )
+}
+
+fn git_auth_options_from_credentials_with_github_header_resolver<F>(
+    kind: &str,
+    config_json: &str,
+    resolve_github_header: F,
+) -> io::Result<GitAuthOptions>
+where
+    F: Fn(&str, Option<&str>) -> io::Result<String>,
+{
     let kind = require_non_empty(kind, "credentials kind")?;
 
     match kind.as_str() {
@@ -134,6 +156,10 @@ pub fn git_auth_options_from_credentials(
             #[derive(Deserialize)]
             struct GithubHostLoginConfig {
                 provider: String,
+                #[serde(default)]
+                instance_url: Option<String>,
+                #[serde(default)]
+                login: Option<String>,
             }
 
             let config: GithubHostLoginConfig = decode_auth_config(config_json)?;
@@ -148,9 +174,14 @@ pub fn git_auth_options_from_credentials(
                 ));
             }
 
+            let instance_url = normalized_optional_string(config.instance_url.as_deref())
+                .unwrap_or_else(|| String::from(DEFAULT_GITHUB_INSTANCE_URL));
+            let login = normalized_optional_string(config.login.as_deref());
+            let auth_header = resolve_github_header(&instance_url, login.as_deref())?;
+
             Ok(GitAuthOptions {
-                extra_headers: Vec::new(),
-                credential_helper: Some(String::from("manager")),
+                extra_headers: vec![auth_header],
+                credential_helper: None,
                 preserve_credential_helper: false,
             })
         }
@@ -159,6 +190,191 @@ pub fn git_auth_options_from_credentials(
             format!("unsupported credentials kind {kind:?}"),
         )),
     }
+}
+
+fn resolve_github_host_login_auth_header(
+    instance_url: &str,
+    login: Option<&str>,
+) -> io::Result<String> {
+    let instance_url = require_non_empty(
+        instance_url,
+        "GitHub host login instance URL",
+    )?;
+    let login = normalized_optional_string(login);
+    let cache_key = github_host_login_cache_key(&instance_url, login.as_deref());
+
+    {
+        let cache = github_host_login_header_cache()
+            .lock()
+            .map_err(|_| io::Error::other("GitHub host login cache lock was poisoned"))?;
+        if let Some(auth_header) = cache.get(&cache_key) {
+            return Ok(auth_header.clone());
+        }
+    }
+
+    let (username, password) = request_github_host_login_credentials(
+        &instance_url,
+        login.as_deref(),
+    )?;
+    let auth_header = build_basic_authorization_header(&username, &password);
+
+    github_host_login_header_cache()
+        .lock()
+        .map_err(|_| io::Error::other("GitHub host login cache lock was poisoned"))?
+        .insert(cache_key, auth_header.clone());
+
+    Ok(auth_header)
+}
+
+fn github_host_login_header_cache() -> &'static Mutex<HashMap<String, String>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn github_host_login_cache_key(instance_url: &str, login: Option<&str>) -> String {
+    let mut key = instance_url.trim().to_ascii_lowercase();
+    key.push('\n');
+    if let Some(login) = login {
+        key.push_str(&login.trim().to_ascii_lowercase());
+    }
+    key
+}
+
+fn request_github_host_login_credentials(
+    instance_url: &str,
+    login: Option<&str>,
+) -> io::Result<(String, String)> {
+    let (protocol, host) = credential_context_from_instance_url(instance_url)?;
+    let mut command = git_command();
+    let preview = format!(
+        "-c {GIT_CREDENTIAL_HELPER_RESET} -c credential.helper={GIT_CREDENTIAL_MANAGER_HELPER} credential fill"
+    );
+    command
+        .arg("-c")
+        .arg(GIT_CREDENTIAL_HELPER_RESET)
+        .arg("-c")
+        .arg(format!(
+            "credential.helper={GIT_CREDENTIAL_MANAGER_HELPER}"
+        ))
+        .arg("credential")
+        .arg("fill")
+        .env(GIT_TERMINAL_PROMPT_ENV, GIT_TERMINAL_PROMPT_DISABLED)
+        .env_remove(GCM_INTERACTIVE_ENV)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command.spawn().map_err(|error| {
+        io::Error::other(format!("spawn git {preview}: {error}"))
+    })?;
+    let input = git_credential_fill_input(&protocol, &host, login);
+    {
+        use std::io::Write as _;
+
+        let Some(mut stdin) = child.stdin.take() else {
+            return Err(io::Error::other(
+                "git credential fill did not expose stdin for credential input",
+            ));
+        };
+        stdin.write_all(input.as_bytes()).map_err(|error| {
+            io::Error::other(format!(
+                "write git credential fill input for {instance_url:?}: {error}"
+            ))
+        })?;
+    }
+
+    let output = child.wait_with_output().map_err(|error| {
+        io::Error::other(format!("wait for git {preview}: {error}"))
+    })?;
+    if !output.status.success() {
+        return Err(io::Error::other(format_git_command_failure(
+            &preview,
+            &output,
+        )));
+    }
+
+    parse_git_credential_fill_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn credential_context_from_instance_url(instance_url: &str) -> io::Result<(String, String)> {
+    let trimmed = require_non_empty(
+        instance_url,
+        "GitHub host login instance URL",
+    )?;
+    let (protocol, remainder) = if let Some(rest) = trimmed.strip_prefix("https://") {
+        ("https", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        ("http", rest)
+    } else {
+        ("https", trimmed.as_str())
+    };
+    let host = remainder
+        .split('/')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "GitHub host login instance URL {trimmed:?} does not contain a host"
+                ),
+            )
+        })?;
+
+    Ok((String::from(protocol), String::from(host)))
+}
+
+fn git_credential_fill_input(protocol: &str, host: &str, login: Option<&str>) -> String {
+    let mut input = format!("protocol={protocol}\nhost={host}\n");
+    if let Some(login) = login {
+        input.push_str("username=");
+        input.push_str(login);
+        input.push('\n');
+    }
+    input.push('\n');
+    input
+}
+
+fn parse_git_credential_fill_output(output: &str) -> io::Result<(String, String)> {
+    let mut username = None;
+    let mut password = None;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("username=") {
+            username = Some(require_non_empty(value, "Git credential username")?);
+        } else if let Some(value) = trimmed.strip_prefix("password=") {
+            password = Some(require_non_empty(value, "Git credential password")?);
+        }
+    }
+
+    let username = username.ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            "git credential fill output is missing username",
+        )
+    })?;
+    let password = password.ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidData,
+            "git credential fill output is missing password",
+        )
+    })?;
+
+    Ok((username, password))
+}
+
+fn build_basic_authorization_header(username: &str, password: &str) -> String {
+    let token = BASE64_STANDARD.encode(format!("{username}:{password}"));
+    format!("Authorization: Basic {token}")
+}
+
+fn normalized_optional_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 /// Defines the repository snapshot that must be materialized into one local workspace.
@@ -495,7 +711,7 @@ fn prepare_git_command(
         preserve_credential_helper,
     );
     let preview = args.join(" ");
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command.args(args.iter().map(String::as_str));
     configure_non_interactive_git_command(&mut command);
     if let Some(working_dir) = working_dir {
@@ -509,6 +725,15 @@ fn configure_non_interactive_git_command(command: &mut Command) {
     command
         .env(GIT_TERMINAL_PROMPT_ENV, GIT_TERMINAL_PROMPT_DISABLED)
         .env(GCM_INTERACTIVE_ENV, GCM_INTERACTIVE_NEVER);
+}
+
+fn git_command() -> Command {
+    #[cfg(test)]
+    if let Some(path) = std::env::var_os(TEST_GIT_EXECUTABLE_ENV) {
+        return Command::new(path);
+    }
+
+    Command::new("git")
 }
 
 fn format_git_command_failure(preview: &str, output: &Output) -> String {
@@ -615,10 +840,12 @@ fn parse_git_tags(output: &str) -> io::Result<Vec<GitTag>> {
 mod tests {
     use super::{
         format_git_command_failure, git_auth_options_from_credentials,
-        platform_git_command_args, prepare_git_command, GitAuthOptions,
-        GitTagListRequest, GitTagLister, GitWorkspaceSyncRefRequest,
-        GitWorkspaceSyncRequest, GitWorkspaceSyncer, KIND_GIT_HTTP_BASIC,
-        KIND_GIT_HTTP_BEARER, KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
+        git_auth_options_from_credentials_with_github_header_resolver,
+        parse_git_credential_fill_output, platform_git_command_args,
+        prepare_git_command, GitAuthOptions, GitTagListRequest,
+        GitTagLister, GitWorkspaceSyncRefRequest, GitWorkspaceSyncRequest,
+        GitWorkspaceSyncer, KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER,
+        KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
     };
     use std::ffi::OsStr;
     use std::fs;
@@ -667,21 +894,39 @@ mod tests {
     }
 
     #[test]
-    fn git_auth_options_from_github_host_login_uses_manager_helper() {
-        let auth = git_auth_options_from_credentials(
+    fn git_auth_options_from_github_host_login_resolves_authorization_header_once() {
+        let auth = git_auth_options_from_credentials_with_github_header_resolver(
             KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
-            r#"{"provider":"github","login":"worker@collective"}"#,
+            r#"{"provider":"github","instance_url":"https://github.com","login":"worker@collective"}"#,
+            |instance_url, login| {
+                assert_eq!(instance_url, "https://github.com");
+                assert_eq!(login, Some("worker@collective"));
+                Ok(String::from("Authorization: Basic c3RyaWtlOnJlZC1iYW5uZXI="))
+            },
         )
         .expect("GitHub host login credentials should parse");
 
         assert_eq!(
             auth,
             GitAuthOptions {
-                extra_headers: Vec::new(),
-                credential_helper: Some(String::from("manager")),
+                extra_headers: vec![String::from(
+                    "Authorization: Basic c3RyaWtlOnJlZC1iYW5uZXI=",
+                )],
+                credential_helper: None,
                 preserve_credential_helper: false,
             }
         );
+    }
+
+    #[test]
+    fn parse_git_credential_fill_output_reads_username_and_password() {
+        let (username, password) = parse_git_credential_fill_output(
+            "protocol=https\nhost=github.com\nusername=strike\npassword=red-banner\n",
+        )
+        .expect("credential fill output should parse");
+
+        assert_eq!(username, "strike");
+        assert_eq!(password, "red-banner");
     }
 
     #[test]
@@ -1505,7 +1750,7 @@ mod tests {
 
     fn test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "handy-unity-publisher-runtime-git-{label}-{}",
+            "handy-games-publisher-runtime-git-{label}-{}",
             std::process::id()
         ))
     }

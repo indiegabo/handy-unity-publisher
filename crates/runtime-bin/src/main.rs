@@ -43,12 +43,16 @@ use runtime_core::{
     RuntimeStatus, RUNTIME_HEARTBEAT_EVENT,
 };
 use runtime_runner::{
-    discover_artifacts, resolve_final_artifact_output_path, ExecutionPlan,
-    ExecutionProcessOutcome, ExecutionProcessor, ExecutionProgress,
-    ExecutionProgressReporter, ExecutionResult,
-    inspect_host_capability_profile, resolve_host_native_execution_plan,
-    HostCapabilityProfile, HostNativeUnityExecutor, PreparedWorkspace, RunnerFamily,
+    discover_artifacts, ExecutionProgress, ExecutionProgressReporter,
+    PreparedWorkspace, RunnerFamily,
     WorkspacePreparationInput, WorkspacePreparer,
+    unity::{
+        inspect_host_capability_profile,
+        resolve_host_native_unity_execution_plan, HostCapabilityProfile,
+        HostNativeUnityExecutor, UnityBuildExecutionPlan,
+        UnityBuildExecutionProcessOutcome, UnityBuildExecutionProcessor,
+        UnityBuildExecutionResult,
+    },
 };
 use runtime_store::{
     ArtifactRecord,
@@ -90,7 +94,7 @@ const POLL_STATUS_QUEUED: &str = "queued";
 const POLL_STATUS_ALREADY_SEEN: &str = "already_seen";
 const POLL_STATUS_BUILD_IN_PROGRESS: &str = "build_in_progress";
 const POLL_STATUS_ERROR: &str = "error";
-const POLL_OBSERVED_VIA: &str = "hup-runtime";
+const POLL_OBSERVED_VIA: &str = "hgp-runtime";
 const DEFAULT_REVOLUTIONS_PROJECT_PAT_ENV: &str = "REVOLUTIONS_PROJECT_PAT";
 const EVENT_TOPIC_RELEASE_QUEUED: &str = "automation.release_queued";
 const EVENT_TOPIC_POLL_AUTH_FAILED: &str = "automation.poll_auth_failed";
@@ -118,7 +122,7 @@ struct BuildRunEventContext {
     repository_name: String,
     git_tag: String,
     target_name: String,
-    platform: String,
+    unity_target_platform: String,
     user_requested: bool,
 }
 
@@ -147,6 +151,21 @@ fn user_requested_from_trigger_source(trigger_source: &str) -> bool {
     trigger_source.eq_ignore_ascii_case("manual")
 }
 
+fn resolve_build_event_platform(plan: &StoredBuildExecutionPlan) -> String {
+    serde_json::from_str::<serde_json::Value>(plan.contract_json.trim())
+        .ok()
+        .and_then(|contract| {
+            contract
+                .get("unity")
+                .and_then(|unity| unity.get("targetPlatform"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_default()
+}
+
 fn build_run_event_context(
     coordinator: &LocalCoordinator,
     plan: &StoredBuildExecutionPlan,
@@ -163,7 +182,7 @@ fn build_run_event_context(
         repository_name: plan.repository_name.clone(),
         git_tag: plan.git_tag.clone(),
         target_name: plan.target_name.clone(),
-        platform: plan.platform.clone(),
+        unity_target_platform: resolve_build_event_platform(plan),
         user_requested,
     }
 }
@@ -266,7 +285,7 @@ fn emit_build_run_started_event(
                 "repository_name": &context.repository_name,
                 "git_tag": &context.git_tag,
                 "target_name": &context.target_name,
-                "platform": &context.platform,
+                "unity_target_platform": &context.unity_target_platform,
                 "status": "running",
             }),
         },
@@ -303,7 +322,7 @@ fn emit_build_run_finished_event(
                 "repository_name": &context.repository_name,
                 "git_tag": &context.git_tag,
                 "target_name": &context.target_name,
-                "platform": &context.platform,
+                "unity_target_platform": &context.unity_target_platform,
                 "status": &record.status,
                 "error_message": &record.error_message,
             }),
@@ -343,7 +362,7 @@ fn emit_build_run_stage_updated_event(
                 "repository_name": &context.repository_name,
                 "git_tag": &context.git_tag,
                 "target_name": &context.target_name,
-                "platform": &context.platform,
+                "unity_target_platform": &context.unity_target_platform,
                 "stage_key": stage_key,
                 "stage_label": stage_label,
                 "status": "running",
@@ -881,11 +900,7 @@ fn run_registration_checkout_command(
         resolve_registration_checkout_ref(&repository, command.git_ref)?;
     let workspace_root_path = resolve_registration_checkout_workspace_root(config, &repository);
     let checkout_path = workspace_root_path.join("checkout");
-    let git_auth = resolve_repository_git_auth(
-        &coordinator,
-        &repository_url,
-        repository.credentials_id,
-    )?;
+    let git_auth = resolve_repository_git_auth(&coordinator, repository.credentials_id)?;
 
     GitWorkspaceSyncer::new().sync_ref(&GitWorkspaceSyncRefRequest {
         repository_url,
@@ -1266,14 +1281,15 @@ mod tests {
         QueueLeaseRenewer,
         parse_release_plan_command, run_manifest_sync_command,
         run_registrations_command,
-        resolve_runtime_build_execution_plan_with_profile,
+        resolve_build_event_platform,
+        resolve_build_execution_dispatch_plan_with_profile,
         run_build_run_next_command, run_build_stage_next_command,
         run_publish_inspect_command,
         run_manual_release_dispatch_command, run_release_plan_command,
         run_publish_run_next_command, run_release_planner_cycle,
         run_runtime_worker_iteration,
-        failed_poll_attempt_log_path, normalize_repository_git_auth_config,
-        record_failed_poll_attempt, runtime_stop_requested,
+        failed_poll_attempt_log_path, record_failed_poll_attempt,
+        runtime_stop_requested,
         select_queued_repository_tags,
         AutomationPollReport, BuildExecutionReport, BuildRunRecord,
         EVENT_TOPIC_POLL_AUTH_FAILED,
@@ -1285,19 +1301,24 @@ mod tests {
     use rusqlite::{params, Connection};
     use runtime_core::{read_runtime_event_batch, shutdown_runtime};
     use runtime_config::{HostPlatform, RuntimeConfig, RuntimeDirectories};
+    use runtime_contracts::{BuildKind, EngineKind};
     use runtime_git::GitTag;
     use runtime_manifests::ApplyReport as ManifestApplyReport;
     use runtime_store::{
+        CreateRepositoryProjectBuildTargetInput, CreateRepositoryProjectInput,
         enqueue_runtime_control_request,
         ImportedRepositoryRegistrationReport, InterruptedBuildRecoveryRecord,
         LocalCoordinator, RuntimeControlRequest, RuntimeRecoveryReport,
         RECOVERY_INTERRUPTION_KIND_REQUESTED,
     };
     use runtime_runner::{
-        resolve_final_artifact_output_path, DiscoveredUnityEditor,
-        ExecutionPlan as RunnerExecutionPlan, ExecutionResult,
-        HostCapabilityProfile, HostToolCapability, RunnerSelectionDiagnostics,
-        UnityLicenseDiagnostics,
+        unity::{
+            resolve_final_unity_artifact_output_path, DiscoveredUnityEditor,
+            HostCapabilityProfile, HostToolCapability,
+            RunnerSelectionDiagnostics,
+            UnityBuildExecutionPlan as RunnerExecutionPlan,
+            UnityBuildExecutionResult, UnityLicenseDiagnostics,
+        },
     };
     use serde_json::json;
     use std::fs;
@@ -1355,12 +1376,12 @@ mod tests {
             repository_url: String::from("https://example.com/revolutions.git"),
             git_tag: String::from("v1.0.3"),
             target_name: String::from(target_name),
-            platform: String::from(platform),
+            unity_target_platform: String::from(platform),
             runner_type: String::from("host-native"),
-            build_method: String::from("Builder.Perform"),
+            unity_build_method: String::from("Builder.Perform"),
             output_kind: Some(String::from("archive")),
             output_path_template: Some(format!("Builds/{target_name}")),
-            unity_version: String::from("2021.3.33f1"),
+            engine_version: String::from("2021.3.33f1"),
             config_json: String::from("{}"),
             timeout_seconds: 900,
         }
@@ -1370,8 +1391,8 @@ mod tests {
         root: &Path,
         artifact_root_path: &Path,
         output_path: &Path,
-    ) -> ExecutionResult {
-        ExecutionResult {
+    ) -> UnityBuildExecutionResult {
+        UnityBuildExecutionResult {
             build_root_path: root.join("workspace").join("builds").join("build-run-1-attempt-1"),
             workspace_path: root.join("workspace"),
             log_path: root.join("workspace").join("logs").join("unity-build.log"),
@@ -1433,7 +1454,7 @@ mod tests {
 
         package_build_output(&plan, &result).expect("build output should package");
 
-        let archive_path = resolve_final_artifact_output_path(&plan, &artifact_root)
+        let archive_path = resolve_final_unity_artifact_output_path(&plan, &artifact_root)
             .expect("artifact archive path should resolve");
         let names = archive_entry_names(&archive_path);
         assert!(names.iter().any(|name| name == "revolutions.exe"));
@@ -1469,7 +1490,7 @@ mod tests {
 
         package_build_output(&plan, &result).expect("build output should package");
 
-        let archive_path = resolve_final_artifact_output_path(&plan, &artifact_root)
+        let archive_path = resolve_final_unity_artifact_output_path(&plan, &artifact_root)
             .expect("artifact archive path should resolve");
         let names = archive_entry_names(&archive_path);
         assert!(names.iter().any(|name| name == "revolutions.exe"));
@@ -1513,7 +1534,7 @@ mod tests {
 
         package_build_output(&plan, &result).expect("build output should package");
 
-        let archive_path = resolve_final_artifact_output_path(&plan, &artifact_root)
+        let archive_path = resolve_final_unity_artifact_output_path(&plan, &artifact_root)
             .expect("artifact archive path should resolve");
         let names = archive_entry_names(&archive_path);
         assert!(
@@ -1563,7 +1584,7 @@ mod tests {
 
         package_build_output(&plan, &result).expect("build output should package");
 
-        let archive_path = resolve_final_artifact_output_path(&plan, &artifact_root)
+        let archive_path = resolve_final_unity_artifact_output_path(&plan, &artifact_root)
             .expect("artifact archive path should resolve");
         let names = archive_entry_names(&archive_path);
         assert!(names.iter().any(|name| name == "index.html"));
@@ -1709,12 +1730,13 @@ mod tests {
         fs::write(
             pipelines_dir.join("revolutions.yml"),
             concat!(
-                "apiVersion: handy.unity.publisher/v1alpha1\n",
+                "apiVersion: handy.games.publisher/v1alpha1\n",
                 "kind: Pipeline\n",
                 "metadata:\n",
                 "  name: revolutions\n",
                 "spec:\n",
                 "  repository:\n",
+                "    engine: unity\n",
                 "    url: https://example.com/org/revolutions.git\n",
                 "    credentials: origin\n",
                 "  credentials:\n",
@@ -1728,11 +1750,17 @@ mod tests {
                 "  build:\n",
                 "    targets:\n",
                 "      - name: windows64\n",
-                "        platform: StandaloneWindows64\n",
-                "        buildMethod: Builder.BuildWindows64\n",
+                "        buildKind: player\n",
+                "        runner:\n",
+                "          timeoutSeconds: 5400\n",
                 "        output:\n",
                 "          kind: archive\n",
                 "          path: Builds/Windows64\n",
+                "        contract:\n",
+                "          unity:\n",
+                "            targetPlatform: StandaloneWindows64\n",
+                "            buildMethod: Builder.BuildWindows64\n",
+                "            editorVersion: 2022.3.14f1\n",
                 "  publish:\n",
                 "    targets:\n",
                 "      - name: filesystem-release\n",
@@ -2276,7 +2304,7 @@ mod tests {
 
         let metadata: serde_json::Value = serde_json::from_str(&record.source_metadata_json)
             .expect("manual release metadata should decode");
-        assert_eq!(metadata["requested_via"], "hup-runtime");
+        assert_eq!(metadata["requested_via"], "hgp-runtime");
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         assert_eq!(queue_message_count(&connection, "release-runs"), 1);
@@ -2364,7 +2392,7 @@ mod tests {
         assert_eq!(record.id, release_run_id);
         assert_eq!(record.git_commit.as_deref(), Some("feedface"));
         assert_eq!(record.status, "queued");
-        assert!(record.unity_version.is_none());
+        assert!(record.engine_version.is_none());
 
         let metadata: serde_json::Value = serde_json::from_str(&record.source_metadata_json)
             .expect("rebuild metadata should decode");
@@ -2556,21 +2584,21 @@ mod tests {
             serde_json::from_str(&output).expect("release plan output should decode");
 
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].unity_version.as_deref(), Some("2021.3.33f1"));
+        assert_eq!(runs[0].engine_version.as_deref(), Some("2021.3.33f1"));
         assert_eq!(
             runs[0].image_ref.as_deref(),
             Some("host-native"),
         );
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
-        let persisted_unity_version: String = connection
+        let persisted_engine_version: String = connection
             .query_row(
-                "SELECT unity_version FROM release_runs WHERE id = ?",
+                "SELECT engine_version FROM release_runs WHERE id = ?",
                 [release.id],
                 |row| row.get(0),
             )
             .expect("release unity version should load");
-        assert_eq!(persisted_unity_version, "2021.3.33f1");
+        assert_eq!(persisted_engine_version, "2021.3.33f1");
         assert_eq!(queue_message_count(&connection, "release-runs"), 1);
         assert_eq!(queue_message_count(&connection, "build-runs"), 1);
         drop(connection);
@@ -2617,14 +2645,14 @@ mod tests {
             .expect("release planner cycle should process one queued release"));
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
-        let persisted_unity_version: String = connection
+        let persisted_engine_version: String = connection
             .query_row(
-                "SELECT unity_version FROM release_runs WHERE id = ?",
+                "SELECT engine_version FROM release_runs WHERE id = ?",
                 [release.id],
                 |row| row.get(0),
             )
             .expect("release unity version should load");
-        assert_eq!(persisted_unity_version, "2021.3.33f1");
+        assert_eq!(persisted_engine_version, "2021.3.33f1");
         assert_eq!(queue_message_count(&connection, "release-runs"), 0);
         assert_eq!(queue_message_count(&connection, "build-runs"), 1);
         drop(connection);
@@ -3046,21 +3074,6 @@ mod tests {
     }
 
     #[test]
-    fn normalize_repository_git_auth_config_rewrites_legacy_github_placeholder_username() {
-        let normalized = normalize_repository_git_auth_config(
-            "https://github.com/indiegabo/revolutions.git",
-            "git-http-basic",
-            r#"{"username":"git","password":"solidarity"}"#,
-        )
-        .expect("github auth config should normalize");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&normalized).expect("normalized config should decode");
-
-        assert_eq!(parsed["username"], "indiegabo");
-        assert_eq!(parsed["password"], "solidarity");
-    }
-
-    #[test]
     fn record_failed_poll_attempt_writes_repository_scoped_jsonl_log() {
         let root = test_root("runtime-bin-failed-poll-attempt-log");
         let directories = RuntimeDirectories::from_root(&root);
@@ -3072,6 +3085,7 @@ mod tests {
             id: 41,
             name: String::from("Revolutions Main"),
             repo_url: String::from("https://github.com/indiegabo/revolutions.git"),
+            engine_kind: String::from("unity"),
             credentials_id: Some(7),
             enabled: true,
             polling_interval_seconds: 300,
@@ -3526,6 +3540,122 @@ mod tests {
     }
 
     #[test]
+    fn project_creation_smoke_reaches_unity_build_dispatch() {
+        let root = test_root("runtime-bin-project-creation-smoke");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let repository_path = root.join("runtime-bin-project-creation-smoke-source");
+        let repository_url = create_tagged_unity_repository(
+            &repository_path,
+            "v13.1.0",
+            "2021.3.33f1",
+        );
+        let default_branch = current_git_branch_name(&repository_path);
+        let script_path =
+            create_fake_unity_script(&root, "project-creation-smoke", ScriptKind::Success);
+
+        let created = LocalCoordinator::new(&storage)
+            .create_repository_project(CreateRepositoryProjectInput {
+                name: String::from("runtime-bin-project-creation-smoke"),
+                engine_kind: String::from("unity"),
+                repo_url: repository_url,
+                credentials: None,
+                default_branch: Some(default_branch),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                enabled: true,
+                build_targets: vec![CreateRepositoryProjectBuildTargetInput {
+                    name: String::from("webgl-player"),
+                    build_kind: String::from("player"),
+                    runner_type: String::from("host-native"),
+                    output_kind: Some(String::from("archive")),
+                    output_path_template: Some(String::from("Builds/Players")),
+                    timeout_seconds: 900,
+                    enabled: true,
+                    contract_json: json!({
+                        "unity": {
+                            "targetPlatform": "webgl",
+                            "buildMethod": "Builder.PerformWebGL",
+                            "editorVersion": ""
+                        }
+                    })
+                    .to_string(),
+                    runner_config_json: json!({
+                        "unity_executable_path": script_path.display().to_string()
+                    })
+                    .to_string(),
+                }],
+            })
+            .expect("repository project should persist through the public coordinator API");
+
+        let dispatch_output = run_manual_release_dispatch_command(
+            &[
+                String::from("--repository-id"),
+                created.repository_id.to_string(),
+                String::from("--git-tag"),
+                String::from("v13.1.0"),
+            ],
+            &storage,
+        )
+        .expect("manual release dispatch command should succeed for the created project");
+        let release: ReleaseRunRecord = serde_json::from_str(&dispatch_output)
+            .expect("release dispatch output should decode");
+
+        assert!(run_release_planner_cycle(&storage)
+            .expect("release planner cycle should convert the queued release into a build queue message"));
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let planned_engine_version: String = connection
+            .query_row(
+                "SELECT engine_version FROM release_runs WHERE id = ?",
+                [release.id],
+                |row| row.get(0),
+            )
+            .expect("planned release engine version should persist");
+        assert_eq!(planned_engine_version, "2021.3.33f1");
+        assert_eq!(queue_message_count(&connection, "release-runs"), 0);
+        assert_eq!(queue_message_count(&connection, "build-runs"), 1);
+        drop(connection);
+
+        let output = run_build_run_next_command(&[], &config, &storage)
+            .expect("build run-next command should dispatch the created project build");
+        let record: BuildRunRecord =
+            serde_json::from_str(&output).expect("build run-next output should decode");
+
+        assert_eq!(record.release_run_id, release.id);
+        assert_eq!(record.build_target_id, created.build_target_ids[0]);
+        assert_eq!(record.engine_version.as_deref(), Some("2021.3.33f1"));
+        assert_eq!(record.status, "succeeded");
+
+        let workspace_path = PathBuf::from(
+            record
+                .workspace_path
+                .clone()
+                .expect("workspace path should persist"),
+        );
+        let report = load_build_execution_report(&workspace_path);
+
+        assert!(record.log_path.is_some());
+        assert_eq!(report.build_run.id, record.id);
+        assert_eq!(report.build_run.status, "succeeded");
+        assert_eq!(report.cleanup.status, "completed");
+        assert_eq!(report.cleanup.workspace_path, workspace_path.display().to_string());
+        assert!(report
+            .attempts
+            .iter()
+            .any(|attempt| attempt.workspace_path == workspace_path.display().to_string()
+                && attempt.is_final_workspace));
+        assert!(report.build_plan.contract_json.contains("Builder.PerformWebGL"));
+        assert!(report.build_plan.contract_json.contains("webgl"));
+        assert_eq!(report.artifacts.len(), 1);
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
     fn build_run_next_command_uses_repository_workspace_and_artifact_overrides() {
         let root = test_root("runtime-bin-build-run-next-overrides");
         let config = RuntimeConfig::from_root(&root);
@@ -3896,7 +4026,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_runtime_build_execution_plan_with_profile_injects_discovered_editor() {
+    fn resolve_build_execution_dispatch_plan_with_profile_injects_discovered_editor() {
         let root = test_root("runtime-bin-resolve-build-plan");
         fs::create_dir_all(&root).expect("test root should create");
         let script_path = create_fake_unity_script(&root, "resolved-runner", ScriptKind::Success);
@@ -3905,6 +4035,7 @@ mod tests {
             build_run_id: 1,
             release_run_id: 2,
             repository_id: 3,
+            engine_kind: EngineKind::Unity,
             repository_name: String::from("revolutions"),
             repository_credentials_id: None,
             workspace_root_override: None,
@@ -3914,13 +4045,20 @@ mod tests {
             git_tag: String::from("v1.0.0"),
             git_commit: Some(String::from("deadbeef")),
             target_name: String::from("windows-player"),
-            platform: String::from("windows"),
+            build_kind: BuildKind::Player,
+            contract_json: json!({
+                "unity": {
+                    "targetPlatform": "windows",
+                    "buildMethod": "Builder.PerformWindows",
+                    "editorVersion": ""
+                }
+            })
+            .to_string(),
             runner_type: String::from("host-native"),
-            build_method: Some(String::from("Builder.PerformWindows")),
             output_kind: Some(String::from("archive")),
             output_path_template: Some(String::from("Builds/Players")),
             config_json: String::from("{}"),
-            unity_version: String::from("2021.3.33f1"),
+            engine_version: String::from("2021.3.33f1"),
             image_ref: String::new(),
             timeout_seconds: 900,
             status: String::from("queued"),
@@ -3940,11 +4078,12 @@ mod tests {
             }],
         );
 
-        let resolved = resolve_runtime_build_execution_plan_with_profile(
+        let resolved = resolve_build_execution_dispatch_plan_with_profile(
             &plan,
             &capability_profile,
         )
-        .expect("runtime build plan should resolve with discovered editor");
+        .expect("runtime build dispatch plan should resolve with discovered editor")
+        .into_unity_host_native();
 
         assert_eq!(
             resolved.runner_type,
@@ -3960,6 +4099,44 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("test root should be removable");
+    }
+
+    #[test]
+    fn resolve_build_event_platform_prefers_contract_target_platform() {
+        let plan = BuildExecutionPlan {
+            build_run_id: 1,
+            release_run_id: 2,
+            repository_id: 3,
+            engine_kind: EngineKind::Unity,
+            repository_name: String::from("revolutions"),
+            repository_credentials_id: None,
+            workspace_root_override: None,
+            artifacts_root_override: None,
+            build_target_id: 4,
+            repository_url: String::from("https://example.com/revolutions.git"),
+            git_tag: String::from("v1.0.0"),
+            git_commit: Some(String::from("deadbeef")),
+            target_name: String::from("windows-player"),
+            build_kind: BuildKind::Player,
+            contract_json: json!({
+                "unity": {
+                    "targetPlatform": "StandaloneWindows64",
+                    "buildMethod": "Builder.PerformWindows",
+                    "editorVersion": ""
+                }
+            })
+            .to_string(),
+            runner_type: String::from("host-native"),
+            output_kind: Some(String::from("archive")),
+            output_path_template: Some(String::from("Builds/Players")),
+            config_json: String::from("{}"),
+            engine_version: String::from("2021.3.33f1"),
+            image_ref: String::new(),
+            timeout_seconds: 900,
+            status: String::from("queued"),
+        };
+
+        assert_eq!(resolve_build_event_platform(&plan), "StandaloneWindows64");
     }
 
     #[test]
@@ -4287,7 +4464,7 @@ mod tests {
         coordinator
             .enqueue("build-runs", br#"{"build_run_id":1}"#)
             .expect("queue message should enqueue");
-        let lease_ttl = Duration::from_millis(150);
+        let lease_ttl = Duration::from_millis(450);
         let message = coordinator
             .claim_next(
                 "build-runs",
@@ -4305,7 +4482,7 @@ mod tests {
             "test queue message",
         );
 
-        std::thread::sleep(Duration::from_millis(320));
+        std::thread::sleep(Duration::from_millis(800));
 
         assert!(coordinator
             .claim_next(
@@ -4812,8 +4989,8 @@ mod tests {
     ) -> i64 {
         connection
             .execute(
-                "INSERT INTO repositories (name, repo_url, credentials_id) VALUES (?, ?, ?)",
-                params![name, repository_url, credentials_id],
+                "INSERT INTO repositories (name, repo_url, engine_kind, credentials_id) VALUES (?, ?, ?, ?)",
+                params![name, repository_url, "unity", credentials_id],
             )
             .expect("repository should insert");
 
@@ -4844,8 +5021,27 @@ mod tests {
     ) -> i64 {
         connection
             .execute(
-                "INSERT INTO build_targets (repository_id, name, platform) VALUES (?, ?, ?)",
-                params![repository_id, name, platform],
+                "
+                INSERT INTO build_targets (
+                    repository_id,
+                    name,
+                    build_kind,
+                    contract_json
+                ) VALUES (?, ?, ?, ?)
+                ",
+                params![
+                    repository_id,
+                    name,
+                    "player",
+                    json!({
+                        "unity": {
+                            "targetPlatform": platform,
+                            "buildMethod": "Builder.Perform",
+                            "editorVersion": ""
+                        }
+                    })
+                    .to_string(),
+                ],
             )
             .expect("build target should insert");
 
@@ -4886,24 +5082,31 @@ mod tests {
                 INSERT INTO build_targets (
                     repository_id,
                     name,
-                    platform,
+                    build_kind,
                     runner_type,
-                    build_method,
                     output_kind,
                     output_path_template,
                     timeout_seconds,
+                    contract_json,
                     config_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ",
                 params![
                     repository_id,
                     name,
-                    platform,
+                    "player",
                     "host-native",
-                    build_method,
                     output_kind,
                     "Builds/Players",
                     900,
+                    json!({
+                        "unity": {
+                            "targetPlatform": platform,
+                            "buildMethod": build_method,
+                            "editorVersion": ""
+                        }
+                    })
+                    .to_string(),
                     json!({
                         "unity_executable_path": script_path.display().to_string()
                     })
@@ -4930,24 +5133,31 @@ mod tests {
                 INSERT INTO build_targets (
                     repository_id,
                     name,
-                    platform,
+                    build_kind,
                     runner_type,
-                    build_method,
                     output_kind,
                     output_path_template,
                     timeout_seconds,
+                    contract_json,
                     config_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ",
                 params![
                     repository_id,
                     name,
-                    platform,
+                    "player",
                     "host-native",
-                    build_method,
                     "archive",
                     "Builds/Players",
                     timeout_seconds,
+                    json!({
+                        "unity": {
+                            "targetPlatform": platform,
+                            "buildMethod": build_method,
+                            "editorVersion": ""
+                        }
+                    })
+                    .to_string(),
                     json!({
                         "unity_executable_path": script_path.display().to_string()
                     })
@@ -5020,7 +5230,7 @@ mod tests {
         build_target_id: i64,
         artifact_root_path: &Path,
         workspace_path: &Path,
-        unity_version: &str,
+        engine_version: &str,
         image_ref: &str,
     ) -> i64 {
         connection
@@ -5029,7 +5239,7 @@ mod tests {
                 INSERT INTO build_runs (
                     release_run_id,
                     build_target_id,
-                    unity_version,
+                    engine_version,
                     image_ref,
                     status,
                     workspace_path,
@@ -5040,7 +5250,7 @@ mod tests {
                 params![
                     release_run_id,
                     build_target_id,
-                    unity_version,
+                    engine_version,
                     image_ref,
                     "succeeded",
                     workspace_path.display().to_string(),
@@ -5056,7 +5266,7 @@ mod tests {
         connection: &Connection,
         release_run_id: i64,
         build_target_id: i64,
-        unity_version: &str,
+        engine_version: &str,
         image_ref: &str,
         current_stage_key: &str,
         current_stage_label: &str,
@@ -5069,7 +5279,7 @@ mod tests {
                 INSERT INTO build_runs (
                     release_run_id,
                     build_target_id,
-                    unity_version,
+                    engine_version,
                     image_ref,
                     status,
                     current_stage_key,
@@ -5081,7 +5291,7 @@ mod tests {
                 params![
                     release_run_id,
                     build_target_id,
-                    unity_version,
+                    engine_version,
                     image_ref,
                     "queued",
                     current_stage_key,
@@ -5164,7 +5374,7 @@ mod tests {
         connection: &Connection,
         repository_id: i64,
         git_tag: &str,
-        unity_version: &str,
+        engine_version: &str,
     ) -> i64 {
         connection
             .execute(
@@ -5174,7 +5384,7 @@ mod tests {
                     git_tag,
                     trigger_source,
                     source_metadata_json,
-                    unity_version,
+                    engine_version,
                     status
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 ",
@@ -5183,7 +5393,7 @@ mod tests {
                     git_tag,
                     "manual",
                     "{}",
-                    unity_version,
+                    engine_version,
                     "queued",
                 ],
             )
@@ -5196,7 +5406,7 @@ mod tests {
         connection: &Connection,
         repository_id: i64,
         git_tag: &str,
-        unity_version: &str,
+        engine_version: &str,
     ) -> i64 {
         connection
             .execute(
@@ -5207,7 +5417,7 @@ mod tests {
                     git_commit,
                     trigger_source,
                     source_metadata_json,
-                    unity_version,
+                    engine_version,
                     status,
                     started_at,
                     finished_at
@@ -5218,8 +5428,8 @@ mod tests {
                     git_tag,
                     "cafebabe",
                     "manual",
-                    r#"{"requested_via":"hup-runtime"}"#,
-                    unity_version,
+                    r#"{"requested_via":"hgp-runtime"}"#,
+                    engine_version,
                     "succeeded",
                 ],
             )
@@ -5447,7 +5657,7 @@ mod tests {
 
     fn test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "handy-unity-publisher-runtime-bin-{label}-{}",
+            "handy-games-publisher-runtime-bin-{label}-{}",
             std::process::id()
         ))
     }

@@ -7,7 +7,7 @@ publish.workspace = true
 version.workspace = true
 
 [[bin]]
-name = "hup-runtime"
+name = "hgp-runtime"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -15,6 +15,7 @@ winresource = "0.1"
 
 [dependencies]
 runtime-config = { path = "../runtime-config" }
+runtime-contracts = { path = "../runtime-contracts" }
 runtime-core = { path = "../runtime-core" }
 runtime-git = { path = "../runtime-git" }
 runtime-manifests = { path = "../runtime-manifests" }

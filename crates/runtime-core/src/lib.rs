@@ -683,7 +683,7 @@ mod tests {
         let snapshot = bootstrap_runtime(
             &config,
             &storage,
-            Path::new("hup-runtime"),
+            Path::new("hgp-runtime"),
             RuntimeRestartPolicy::from_settings(&config.supervision),
         )
         .expect("bootstrap should succeed");
@@ -700,15 +700,20 @@ mod tests {
                 "0006_repository_source_configuration.sql",
                 "0007_repository_path_model_cleanup.sql",
                 "0008_build_run_stage_tracking.sql",
+                "0009_build_target_runner_model_cleanup.sql",
+                "0010_engine_contract_model.sql",
+                "0011_runtime_engine_version.sql",
             ]
         );
         assert_eq!(snapshot.health_report.status, RuntimeStatus::Healthy);
+        assert_eq!(snapshot.health_report.runtime_name, "handy-games-publisher-runtime");
         assert!(snapshot.recovery_report.is_empty());
         assert_eq!(
             snapshot.supervision_contract.protocol_version,
             SUPERVISION_PROTOCOL_VERSION
         );
         assert_eq!(snapshot.supervision_contract.serve_arguments, vec!["serve"]);
+        assert_eq!(snapshot.supervision_contract.runtime_name, "handy-games-publisher-runtime");
         assert!(storage.health_report_path.exists());
         assert!(storage.supervision_contract_path.exists());
         assert!(storage.runtime_log_path.exists());
@@ -734,7 +739,7 @@ mod tests {
         bootstrap_runtime(
             &config,
             &storage,
-            Path::new("hup-runtime"),
+            Path::new("hgp-runtime"),
             RuntimeRestartPolicy::from_settings(&config.supervision),
         )
         .expect("bootstrap should succeed");
@@ -760,7 +765,7 @@ mod tests {
         bootstrap_runtime(
             &config,
             &storage,
-            Path::new("hup-runtime"),
+            Path::new("hgp-runtime"),
             RuntimeRestartPolicy::from_settings(&config.supervision),
         )
         .expect("bootstrap should succeed");
@@ -839,7 +844,7 @@ mod tests {
             .expect("system time should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "handy-unity-publisher-runtime-core-{label}-{}-{unix_time}",
+            "handy-games-publisher-runtime-core-{label}-{}-{unix_time}",
             std::process::id()
         ))
     }

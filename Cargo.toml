@@ -3,6 +3,7 @@ members = [
     "apps/desktop/src-tauri",
     "crates/runtime-bin",
     "crates/runtime-config",
+    "crates/runtime-contracts",
     "crates/runtime-core",
     "crates/runtime-git",
     "crates/runtime-manifests",

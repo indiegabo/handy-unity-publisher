@@ -1,7 +1,15 @@
-//! Encapsulates build worker execution, retained execution reporting, and
-//! archive packaging for host-native Unity build runs.
+//! Encapsulates build dispatch, retained execution reporting, and archive
+//! packaging for the current Unity adapter-backed build worker.
 
 use super::*;
+use runtime_contracts::BuildKind;
+use runtime_runner::{
+    BuildExecutionAdapter, EngineAdapterRegistry,
+    unity::{
+        package_unity_build_output, resolve_unity_build_stage_identity,
+        UnityBuildStageIdentity,
+    },
+};
 use runtime_store::lifecycle::ReleaseStatus;
 use std::collections::HashMap;
 
@@ -21,45 +29,84 @@ const BUILD_EXECUTION_REPORT_FILE_NAME: &str = "execution-report.json";
 const BUILD_EXECUTION_LOG_ARCHIVE_FILE_NAME: &str = "execution-logs.zip";
 const PROCESS_CHECKOUT_LOG_FILE_NAME: &str = "01-checkout-repository.log";
 const PROCESS_VALIDATION_LOG_FILE_NAME: &str = "02-validate-build-context.log";
-const UNITY_NON_SHIPPABLE_ARCHIVE_PATH_SUFFIXES: &[&str] = &[
-    "_DoNotShip",
-    "_BackUpThisFolder_ButDontShipItWithYourGame",
-];
-const UNITY_MACOS_OPTIONAL_ARCHIVE_PATH_SUFFIXES: &[&str] = &[".dSYM"];
-const UNITY_WINDOWS_OPTIONAL_ARCHIVE_FILE_SUFFIXES: &[&str] = &[".pdb"];
-const UNITY_WEBGL_OPTIONAL_ARCHIVE_FILE_SUFFIXES: &[&str] = &[".symbols.json"];
 const QUEUE_LEASE_RENEWER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MIN_QUEUE_LEASE_RENEW_INTERVAL: Duration = Duration::from_millis(20);
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredBuildTargetContract {
+    #[serde(default)]
+    unity: Option<StoredUnityBuildTargetContract>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredUnityBuildTargetContract {
+    #[serde(rename = "targetPlatform", default)]
+    target_platform: String,
+    #[serde(rename = "buildMethod", default)]
+    build_method: String,
+    #[serde(rename = "editorVersion", default)]
+    editor_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedUnityBuildTargetContract {
+    target_platform: String,
+    build_method: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BuildExecutionDispatchPlan {
+    UnityHostNative(UnityBuildExecutionPlan),
+}
+
+impl BuildExecutionDispatchPlan {
+    #[cfg(test)]
+    pub(crate) fn into_unity_host_native(self) -> UnityBuildExecutionPlan {
+        match self {
+            Self::UnityHostNative(plan) => plan,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BuildProcessStage {
     ValidateContext,
-    UnityBuild,
+    ExecuteBuild,
     PackageArtifact,
     RegisterArtifacts,
 }
 
 impl BuildProcessStage {
-    const fn key(self) -> &'static str {
+    const fn default_key(self) -> &'static str {
         match self {
             Self::ValidateContext => "validate-build-context",
-            Self::UnityBuild => "unity-build",
+            Self::ExecuteBuild => "execute-build",
             Self::PackageArtifact => "package-artifact",
             Self::RegisterArtifacts => "register-artifacts",
         }
     }
 
-    const fn label(self) -> &'static str {
+    const fn default_label(self) -> &'static str {
         match self {
             Self::ValidateContext => "Validate Build Context",
-            Self::UnityBuild => "Execute Unity Build",
+            Self::ExecuteBuild => "Execute Build",
             Self::PackageArtifact => "Package Artifact",
             Self::RegisterArtifacts => "Register Artifacts",
         }
     }
 
     const fn writes_runtime_log(self) -> bool {
-        !matches!(self, Self::UnityBuild)
+        !matches!(self, Self::ExecuteBuild)
+    }
+}
+
+fn generic_execute_build_stage_identity() -> UnityBuildStageIdentity {
+    UnityBuildStageIdentity {
+        step_key: String::from(BuildProcessStage::ExecuteBuild.default_key()),
+        step_label: String::from(BuildProcessStage::ExecuteBuild.default_label()),
+        log_stem: String::from("execute-build"),
     }
 }
 
@@ -204,7 +251,7 @@ struct BuildRunStageTracker<'a> {
     workspace_path: PathBuf,
     build_root_path: PathBuf,
     artifact_root_path: PathBuf,
-    unity_log_stem: Option<String>,
+    execute_build_stage: UnityBuildStageIdentity,
     stage_sequence: Rc<RefCell<BuildRunStageSequence>>,
 }
 
@@ -215,7 +262,7 @@ impl<'a> BuildRunStageTracker<'a> {
         workspace_path: impl Into<PathBuf>,
         build_root_path: impl Into<PathBuf>,
         artifact_root_path: impl Into<PathBuf>,
-        unity_log_stem: Option<String>,
+        execute_build_stage: UnityBuildStageIdentity,
         stage_sequence: Rc<RefCell<BuildRunStageSequence>>,
     ) -> io::Result<Self> {
         let tracker = Self {
@@ -224,7 +271,7 @@ impl<'a> BuildRunStageTracker<'a> {
             workspace_path: workspace_path.into(),
             build_root_path: build_root_path.into(),
             artifact_root_path: artifact_root_path.into(),
-            unity_log_stem,
+            execute_build_stage,
             stage_sequence,
         };
         fs::create_dir_all(tracker.process_logs_dir())?;
@@ -254,21 +301,31 @@ impl<'a> BuildRunStageTracker<'a> {
         })
     }
 
+    fn stage_key(&self, stage: BuildProcessStage) -> &str {
+        match stage {
+            BuildProcessStage::ExecuteBuild => self.execute_build_stage.step_key.as_str(),
+            _ => stage.default_key(),
+        }
+    }
+
+    fn stage_label(&self, stage: BuildProcessStage) -> &str {
+        match stage {
+            BuildProcessStage::ExecuteBuild => self.execute_build_stage.step_label.as_str(),
+            _ => stage.default_label(),
+        }
+    }
+
     fn resolve_stage_log_path(&self, stage: BuildProcessStage) -> io::Result<PathBuf> {
         match stage {
             BuildProcessStage::ValidateContext => self
                 .stage_sequence
                 .borrow_mut()
-                .shared_process_log_path(&self.process_logs_dir(), stage.key()),
-            BuildProcessStage::UnityBuild => {
-                let unity_log_stem = self
-                    .unity_log_stem
-                    .clone()
-                    .unwrap_or_else(|| String::from("unity-build"));
+                .shared_process_log_path(&self.process_logs_dir(), self.stage_key(stage)),
+            BuildProcessStage::ExecuteBuild => {
                 self.stage_sequence.borrow_mut().unique_process_log_path(
                     &self.process_logs_dir(),
-                    format!("unity-build:{}", self.build_run_id),
-                    &unity_log_stem,
+                    format!("{}:{}", self.stage_key(stage), self.build_run_id),
+                    self.execute_build_stage.log_stem.as_str(),
                 )
             }
             BuildProcessStage::PackageArtifact => {
@@ -287,8 +344,8 @@ impl<'a> BuildRunStageTracker<'a> {
             self.build_run_id,
             StartBuildRunStageInput {
                 position: execution.position,
-                step_key: String::from(stage.key()),
-                step_label: String::from(stage.label()),
+                step_key: String::from(self.stage_key(stage)),
+                step_label: String::from(self.stage_label(stage)),
                 step_log_path: execution.log_path.display().to_string(),
                 workspace_path: self.workspace_path.display().to_string(),
                 log_path: execution.log_path.display().to_string(),
@@ -305,8 +362,8 @@ impl<'a> BuildRunStageTracker<'a> {
         self.coordinator.heartbeat_build_run_stage(
             self.build_run_id,
             HeartbeatBuildRunStageInput {
-                step_key: String::from(stage.key()),
-                step_label: String::from(stage.label()),
+                step_key: String::from(self.stage_key(stage)),
+                step_label: String::from(self.stage_label(stage)),
                 step_log_path: execution.log_path.display().to_string(),
                 workspace_path: self.workspace_path.display().to_string(),
                 log_path: execution.log_path.display().to_string(),
@@ -323,8 +380,8 @@ impl<'a> BuildRunStageTracker<'a> {
         self.coordinator.complete_build_run_stage(
             self.build_run_id,
             CompleteBuildRunStageInput {
-                step_key: String::from(stage.key()),
-                step_label: String::from(stage.label()),
+                step_key: String::from(self.stage_key(stage)),
+                step_label: String::from(self.stage_label(stage)),
                 step_log_path: execution.log_path.display().to_string(),
                 workspace_path: self.workspace_path.display().to_string(),
                 log_path: execution.log_path.display().to_string(),
@@ -341,8 +398,8 @@ impl<'a> BuildRunStageTracker<'a> {
         self.coordinator.fail_build_run_stage(
             self.build_run_id,
             FailBuildRunStageInput {
-                step_key: String::from(stage.key()),
-                step_label: String::from(stage.label()),
+                step_key: String::from(self.stage_key(stage)),
+                step_label: String::from(self.stage_label(stage)),
                 step_log_path: execution.log_path.display().to_string(),
                 workspace_path: self.workspace_path.display().to_string(),
                 log_path: execution.log_path.display().to_string(),
@@ -417,28 +474,6 @@ fn find_existing_process_log_path(logs_dir: &Path, stem: &str) -> io::Result<Opt
     Ok(matches.into_iter().next())
 }
 
-fn build_unity_log_stem(platform: &str) -> String {
-    let platform = platform
-        .trim()
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_owned();
-
-    if platform.is_empty() {
-        String::from("unity-build")
-    } else {
-        format!("unity-build-{platform}")
-    }
-}
-
 struct BuildStageHeartbeatReporter<'a, 'b> {
     tracker: &'a BuildRunStageTracker<'b>,
     storage: &'a StorageLayout,
@@ -482,8 +517,8 @@ impl ExecutionProgressReporter for BuildStageHeartbeatReporter<'_, '_> {
         if let Err(error) = emit_build_run_stage_updated_event(
             self.storage,
             self.context,
-            self.stage.key(),
-            self.stage.label(),
+            self.tracker.stage_key(self.stage),
+            self.tracker.stage_label(self.stage),
             &progress.message,
         ) {
             log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED, &error);
@@ -494,14 +529,15 @@ impl ExecutionProgressReporter for BuildStageHeartbeatReporter<'_, '_> {
 fn emit_build_stage_started_event(
     storage: &StorageLayout,
     context: &BuildRunEventContext,
+    tracker: &BuildRunStageTracker<'_>,
     stage: BuildProcessStage,
     message: &str,
 ) {
     if let Err(error) = emit_build_run_stage_updated_event(
         storage,
         context,
-        stage.key(),
-        stage.label(),
+        tracker.stage_key(stage),
+        tracker.stage_label(stage),
         message,
     ) {
         log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED, &error);
@@ -797,16 +833,28 @@ pub(crate) fn run_build_run_next_command(
             planned.root_path.clone(),
             planned.build_root_path.clone(),
             planned.artifact_root_path.clone(),
-            None,
+            generic_execute_build_stage_identity(),
             stage_sequence.clone(),
         )?;
+        let target_platform = if event_context.unity_target_platform.trim().is_empty() {
+            "unknown"
+        } else {
+            event_context.unity_target_platform.as_str()
+        };
+        let repository_engine_kind = resolved.plan.engine_kind.as_str();
+        let engine_version = if resolved.plan.engine_version.trim().is_empty() {
+            "unknown"
+        } else {
+            resolved.plan.engine_version.as_str()
+        };
         let validation_message = format!(
-            "Validating build context for repository '{}' tag '{}' target '{}' ({}) using Unity {}.",
+            "Validating build context for repository '{}' tag '{}' target '{}' ({}) using engine '{}' version '{}'.",
             resolved.plan.repository_name,
             resolved.plan.git_tag,
             resolved.plan.target_name,
-            resolved.plan.platform,
-            resolved.plan.unity_version,
+            target_platform,
+            repository_engine_kind,
+            engine_version,
         );
         validation_tracker.start_stage(
             BuildProcessStage::ValidateContext,
@@ -815,19 +863,16 @@ pub(crate) fn run_build_run_next_command(
         emit_build_stage_started_event(
             storage,
             &event_context,
+            &validation_tracker,
             BuildProcessStage::ValidateContext,
             &validation_message,
         );
 
-        let runner_plan = match resolve_runtime_build_execution_plan(config, &resolved.plan) {
+        let dispatch_plan = match resolve_build_execution_dispatch_plan(config, &resolved.plan) {
             Ok(plan) => {
                 validation_tracker.complete_stage(
                     BuildProcessStage::ValidateContext,
-                    &format!(
-                        "Resolved host-native runner '{}' and build method '{}'.",
-                        plan.runner_type,
-                        plan.build_method,
-                    ),
+                    &build_dispatch_resolution_message(&plan),
                 )?;
                 plan
             }
@@ -849,21 +894,27 @@ pub(crate) fn run_build_run_next_command(
             }
         };
 
-        let processor =
-            ExecutionProcessor::new(&config.directories, HostNativeUnityExecutor::new());
-        process_build_run_with_retry(
-            &coordinator,
-            storage,
-            &config.directories,
-            &processor,
-            &runner_plan,
-            &resolved.preparation,
-            resolved.plan.build_run_id,
-            &event_context,
-            stage_sequence,
-            validation_log_path,
-        )
-        .map_err(|error| Box::new(error) as Box<dyn Error>)
+        match dispatch_plan {
+            BuildExecutionDispatchPlan::UnityHostNative(unity_plan) => {
+                let processor = UnityBuildExecutionProcessor::new(
+                    &config.directories,
+                    HostNativeUnityExecutor::new(),
+                );
+                process_unity_build_run_with_retry(
+                    &coordinator,
+                    storage,
+                    &config.directories,
+                    &processor,
+                    &unity_plan,
+                    &resolved.preparation,
+                    resolved.plan.build_run_id,
+                    &event_context,
+                    stage_sequence,
+                    validation_log_path,
+                )
+                .map_err(|error| Box::new(error) as Box<dyn Error>)
+            }
+        }
     })();
 
     lease_renewer.stop();
@@ -943,8 +994,8 @@ fn complete_successful_build_run(
     storage: &StorageLayout,
     event_context: &BuildRunEventContext,
     build_run_id: i64,
-    runner_plan: &ExecutionPlan,
-    result: &ExecutionResult,
+    runner_plan: &UnityBuildExecutionPlan,
+    result: &UnityBuildExecutionResult,
     tracker: &BuildRunStageTracker<'_>,
 ) -> io::Result<BuildRunRecord> {
     if output_requires_runtime_archive(runner_plan) {
@@ -954,6 +1005,7 @@ fn complete_successful_build_run(
         emit_build_stage_started_event(
             storage,
             event_context,
+            tracker,
             BuildProcessStage::PackageArtifact,
             packaging_message,
         );
@@ -973,6 +1025,7 @@ fn complete_successful_build_run(
     emit_build_stage_started_event(
         storage,
         event_context,
+        tracker,
         BuildProcessStage::RegisterArtifacts,
         register_message,
     );
@@ -996,170 +1049,17 @@ fn complete_successful_build_run(
     )
 }
 
-fn output_requires_runtime_archive(plan: &ExecutionPlan) -> bool {
+fn output_requires_runtime_archive(plan: &UnityBuildExecutionPlan) -> bool {
     plan.output_kind
         .as_deref()
         .is_some_and(|output_kind| output_kind.eq_ignore_ascii_case("archive"))
 }
 
 pub(crate) fn package_build_output(
-    plan: &ExecutionPlan,
-    result: &ExecutionResult,
+    plan: &UnityBuildExecutionPlan,
+    result: &UnityBuildExecutionResult,
 ) -> io::Result<()> {
-    let source_directory = &result.output_path;
-    if !source_directory.is_dir() {
-        return Err(io::Error::new(
-            ErrorKind::NotFound,
-            format!(
-                "expected Unity archive source directory at {:?}",
-                source_directory.display()
-            ),
-        ));
-    }
-
-    let artifact_path = resolve_final_artifact_output_path(plan, &result.artifact_root_path)?;
-    if let Some(parent) = artifact_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if artifact_path.exists() {
-        let metadata = fs::metadata(&artifact_path)?;
-        if metadata.is_dir() {
-            fs::remove_dir_all(&artifact_path)?;
-        } else {
-            fs::remove_file(&artifact_path)?;
-        }
-    }
-
-    let file = fs::File::create(&artifact_path)?;
-    let mut zip = ZipWriter::new(file);
-    let options = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Deflated)
-        .unix_permissions(0o644);
-    add_build_output_directory_to_zip(
-        &mut zip,
-        source_directory,
-        source_directory,
-        options,
-        plan,
-    )?;
-    zip.finish().map_err(io::Error::other)?;
-
-    Ok(())
-}
-
-fn add_build_output_directory_to_zip<W>(
-    zip: &mut ZipWriter<W>,
-    root: &Path,
-    current: &Path,
-    options: SimpleFileOptions,
-    plan: &ExecutionPlan,
-) -> io::Result<()>
-where
-    W: io::Write + io::Seek,
-{
-    add_build_output_directory_to_zip_with_prefix(zip, root, current, options, plan, None)
-}
-
-fn add_build_output_directory_to_zip_with_prefix<W>(
-    zip: &mut ZipWriter<W>,
-    root: &Path,
-    current: &Path,
-    options: SimpleFileOptions,
-    plan: &ExecutionPlan,
-    archive_prefix: Option<&str>,
-) -> io::Result<()>
-where
-    W: io::Write + io::Seek,
-{
-    let mut entries = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        let path = entry.path();
-        let relative_path = path.strip_prefix(root).map_err(io::Error::other)?;
-        if should_exclude_build_output_archive_path(plan, relative_path) {
-            continue;
-        }
-
-        let relative = relative_path.to_string_lossy().replace('\\', "/");
-        let archive_relative = match archive_prefix {
-            Some(prefix) if !relative.is_empty() => format!("{prefix}/{relative}"),
-            Some(prefix) => prefix.to_owned(),
-            None => relative,
-        };
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            if !archive_relative.is_empty() {
-                zip.add_directory(format!("{archive_relative}/"), options)
-                    .map_err(io::Error::other)?;
-            }
-            add_build_output_directory_to_zip_with_prefix(
-                zip,
-                root,
-                &path,
-                options,
-                plan,
-                archive_prefix,
-            )?;
-            continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-
-        zip.start_file(archive_relative, options)
-            .map_err(io::Error::other)?;
-        let mut source = fs::File::open(&path)?;
-        io::copy(&mut source, zip)?;
-    }
-
-    Ok(())
-}
-
-fn should_exclude_build_output_archive_path(plan: &ExecutionPlan, relative_path: &Path) -> bool {
-    if archive_path_has_non_shippable_segment(relative_path) {
-        return true;
-    }
-
-    archive_path_is_optional_debug_symbol(plan, relative_path)
-}
-
-fn archive_path_has_non_shippable_segment(relative_path: &Path) -> bool {
-    relative_path
-        .components()
-        .filter_map(|component| component.as_os_str().to_str())
-        .any(|segment| {
-            has_any_suffix_case_insensitive(segment, UNITY_NON_SHIPPABLE_ARCHIVE_PATH_SUFFIXES)
-        })
-}
-
-fn archive_path_is_optional_debug_symbol(plan: &ExecutionPlan, relative_path: &Path) -> bool {
-    let Some(file_name) = relative_path.file_name().and_then(|value| value.to_str()) else {
-        return false;
-    };
-
-    match plan.platform.trim().to_ascii_lowercase().as_str() {
-        "macos" => has_any_suffix_case_insensitive(
-            file_name,
-            UNITY_MACOS_OPTIONAL_ARCHIVE_PATH_SUFFIXES,
-        ),
-        "windows" => has_any_suffix_case_insensitive(
-            file_name,
-            UNITY_WINDOWS_OPTIONAL_ARCHIVE_FILE_SUFFIXES,
-        ),
-        "webgl" => has_any_suffix_case_insensitive(
-            file_name,
-            UNITY_WEBGL_OPTIONAL_ARCHIVE_FILE_SUFFIXES,
-        ),
-        _ => false,
-    }
-}
-
-fn has_any_suffix_case_insensitive(value: &str, suffixes: &[&str]) -> bool {
-    let normalized = value.to_ascii_lowercase();
-    suffixes
-        .iter()
-        .any(|suffix| normalized.ends_with(&suffix.to_ascii_lowercase()))
+    package_unity_build_output(plan, &result.output_path, &result.artifact_root_path)
 }
 
 fn add_directory_to_zip_with_prefix<W>(
@@ -1830,12 +1730,12 @@ pub(crate) fn synchronize_build_execution_report_from_publish(
     );
 }
 
-fn process_build_run_with_retry(
+fn process_unity_build_run_with_retry(
     coordinator: &LocalCoordinator,
     storage: &StorageLayout,
     directories: &runtime_config::RuntimeDirectories,
-    processor: &ExecutionProcessor<HostNativeUnityExecutor>,
-    runner_plan: &ExecutionPlan,
+    processor: &UnityBuildExecutionProcessor<HostNativeUnityExecutor>,
+    runner_plan: &UnityBuildExecutionPlan,
     preparation: &WorkspacePreparationInput,
     build_run_id: i64,
     event_context: &BuildRunEventContext,
@@ -1868,24 +1768,25 @@ fn process_build_run_with_retry(
             planned.root_path.clone(),
             planned.build_root_path.clone(),
             planned.artifact_root_path.clone(),
-            Some(build_unity_log_stem(&runner_plan.platform)),
+            resolve_unity_build_stage_identity(runner_plan),
             stage_sequence.clone(),
         )?;
 
-        let unity_log_path = tracker.stage_log_path(BuildProcessStage::UnityBuild)?;
+        let unity_log_path = tracker.stage_log_path(BuildProcessStage::ExecuteBuild)?;
         let mut workspace = workspace;
         workspace.log_path = unity_log_path.clone();
 
         let unity_build_message = format!(
             "Launching Unity build method '{}' for target '{}'.",
-            runner_plan.build_method,
-            runner_plan.platform,
+            runner_plan.unity_build_method,
+            runner_plan.unity_target_platform,
         );
-        tracker.start_stage(BuildProcessStage::UnityBuild, &unity_build_message)?;
+        tracker.start_stage(BuildProcessStage::ExecuteBuild, &unity_build_message)?;
         emit_build_stage_started_event(
             storage,
             event_context,
-            BuildProcessStage::UnityBuild,
+            &tracker,
+            BuildProcessStage::ExecuteBuild,
             &unity_build_message,
         );
 
@@ -1893,11 +1794,11 @@ fn process_build_run_with_retry(
             &tracker,
             storage,
             event_context,
-            BuildProcessStage::UnityBuild,
+            BuildProcessStage::ExecuteBuild,
         );
         let execute_outcome = processor.execute_prepared(runner_plan, workspace, &mut reporter);
         if let Some(error) = reporter.take_error() {
-            tracker.fail_stage(BuildProcessStage::UnityBuild, &error.to_string())?;
+            tracker.fail_stage(BuildProcessStage::ExecuteBuild, &error.to_string())?;
             let record = coordinator.fail_build_run(
                 build_run_id,
                 FailBuildRunInput {
@@ -1911,17 +1812,17 @@ fn process_build_run_with_retry(
         }
 
         match execute_outcome {
-            Ok(ExecutionProcessOutcome { result, error }) => match error {
+            Ok(UnityBuildExecutionProcessOutcome { result, error }) => match error {
                 Some(error) if retry_available && should_retry_in_fresh_workspace(&result.log_path)? => {
                     tracker.fail_stage(
-                        BuildProcessStage::UnityBuild,
+                        BuildProcessStage::ExecuteBuild,
                         &format!("{} Retrying once with a fresh workspace.", error),
                     )?;
                     retry_available = false;
                     continue;
                 }
                 Some(error) => {
-                    tracker.fail_stage(BuildProcessStage::UnityBuild, &error.to_string())?;
+                    tracker.fail_stage(BuildProcessStage::ExecuteBuild, &error.to_string())?;
                     let record = persist_host_native_failure(
                         coordinator,
                         build_run_id,
@@ -1932,7 +1833,7 @@ fn process_build_run_with_retry(
                 }
                 None => {
                     tracker.complete_stage(
-                        BuildProcessStage::UnityBuild,
+                        BuildProcessStage::ExecuteBuild,
                         &format!(
                             "Unity build completed with raw output at '{}'.",
                             result.output_path.display(),
@@ -1963,14 +1864,14 @@ fn process_build_run_with_retry(
             },
             Err(error) if retry_available && should_retry_in_fresh_workspace(&unity_log_path)? => {
                 tracker.fail_stage(
-                    BuildProcessStage::UnityBuild,
+                    BuildProcessStage::ExecuteBuild,
                     &format!("{} Retrying once with a fresh workspace.", error),
                 )?;
                 retry_available = false;
                 continue;
             }
             Err(error) => {
-                tracker.fail_stage(BuildProcessStage::UnityBuild, &error.to_string())?;
+                tracker.fail_stage(BuildProcessStage::ExecuteBuild, &error.to_string())?;
                 let record = coordinator.fail_build_run(
                     build_run_id,
                     FailBuildRunInput {
@@ -2051,11 +1952,10 @@ fn resolve_claimed_build_context(
     })
 }
 
-fn runner_execution_plan(plan: &StoredBuildExecutionPlan) -> io::Result<ExecutionPlan> {
-    let build_method = require_cli_value(
-        plan.build_method.as_deref().unwrap_or_default(),
-        "build method",
-    )?;
+fn unity_runner_execution_plan(
+    plan: &StoredBuildExecutionPlan,
+) -> io::Result<UnityBuildExecutionPlan> {
+    let contract = resolve_unity_build_target_contract(plan)?;
     if plan.timeout_seconds <= 0 {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -2066,7 +1966,7 @@ fn runner_execution_plan(plan: &StoredBuildExecutionPlan) -> io::Result<Executio
         ));
     }
 
-    Ok(ExecutionPlan {
+    Ok(UnityBuildExecutionPlan {
         build_run_id: plan.build_run_id,
         release_run_id: plan.release_run_id,
         build_target_id: plan.build_target_id,
@@ -2074,30 +1974,99 @@ fn runner_execution_plan(plan: &StoredBuildExecutionPlan) -> io::Result<Executio
         repository_url: plan.repository_url.clone(),
         git_tag: plan.git_tag.clone(),
         target_name: plan.target_name.clone(),
-        platform: plan.platform.clone(),
+        unity_target_platform: contract.target_platform,
         runner_type: plan.runner_type.clone(),
-        build_method,
+        unity_build_method: contract.build_method,
         output_kind: plan.output_kind.clone(),
         output_path_template: plan.output_path_template.clone(),
-        unity_version: plan.unity_version.clone(),
+        engine_version: plan.engine_version.clone(),
         config_json: plan.config_json.clone(),
         timeout_seconds: plan.timeout_seconds,
     })
 }
 
-fn resolve_runtime_build_execution_plan(
-    config: &RuntimeConfig,
+fn resolve_unity_build_target_contract(
     plan: &StoredBuildExecutionPlan,
-) -> io::Result<ExecutionPlan> {
-    let capability_profile = inspect_host_capability_profile(config.platform);
-    resolve_runtime_build_execution_plan_with_profile(plan, &capability_profile)
+) -> io::Result<ResolvedUnityBuildTargetContract> {
+    if plan.build_kind != BuildKind::Player {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "build run {} uses unsupported Unity build_kind {:?}",
+                plan.build_run_id,
+                plan.build_kind.as_str()
+            ),
+        ));
+    }
+
+    let contract_json = plan.contract_json.trim();
+    if contract_json.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "build run {} is missing build target contract_json",
+                plan.build_run_id
+            ),
+        ));
+    }
+
+    let contract = serde_json::from_str::<StoredBuildTargetContract>(contract_json)
+        .map_err(|error| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "build run {} has invalid build target contract_json: {error}",
+                    plan.build_run_id
+                ),
+            )
+        })?;
+
+    let Some(unity) = contract.unity else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "build run {} is missing a Unity build target contract payload",
+                plan.build_run_id
+            ),
+        ));
+    };
+
+    Ok(ResolvedUnityBuildTargetContract {
+        target_platform: require_cli_value(
+            unity.target_platform.as_str(),
+            "build target contract unity.targetPlatform",
+        )?,
+        build_method: require_cli_value(
+            unity.build_method.as_str(),
+            "build target contract unity.buildMethod",
+        )?,
+    })
 }
 
-pub(crate) fn resolve_runtime_build_execution_plan_with_profile(
+fn resolve_build_execution_dispatch_plan(
+    config: &RuntimeConfig,
+    plan: &StoredBuildExecutionPlan,
+) -> io::Result<BuildExecutionDispatchPlan> {
+    let capability_profile = inspect_host_capability_profile(config.platform);
+    resolve_build_execution_dispatch_plan_with_profile(plan, &capability_profile)
+}
+
+pub(crate) fn resolve_build_execution_dispatch_plan_with_profile(
     plan: &StoredBuildExecutionPlan,
     capability_profile: &HostCapabilityProfile,
-) -> io::Result<ExecutionPlan> {
-    let runner_plan = runner_execution_plan(plan)?;
+) -> io::Result<BuildExecutionDispatchPlan> {
+    match EngineAdapterRegistry::new().resolve_build_execution_adapter(plan.engine_kind)? {
+        BuildExecutionAdapter::Unity => Ok(BuildExecutionDispatchPlan::UnityHostNative(
+            resolve_unity_build_execution_plan_with_profile(plan, capability_profile)?,
+        )),
+    }
+}
+
+fn resolve_unity_build_execution_plan_with_profile(
+    plan: &StoredBuildExecutionPlan,
+    capability_profile: &HostCapabilityProfile,
+) -> io::Result<UnityBuildExecutionPlan> {
+    let runner_plan = unity_runner_execution_plan(plan)?;
     if runner_plan.runner_type.trim() != RunnerFamily::HostNative.label() {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -2108,13 +2077,22 @@ pub(crate) fn resolve_runtime_build_execution_plan_with_profile(
         ));
     }
 
-    resolve_host_native_execution_plan(&runner_plan, capability_profile)
+    resolve_host_native_unity_execution_plan(&runner_plan, capability_profile)
+}
+
+fn build_dispatch_resolution_message(plan: &BuildExecutionDispatchPlan) -> String {
+    match plan {
+        BuildExecutionDispatchPlan::UnityHostNative(plan) => format!(
+            "Resolved build dispatch for engine 'unity' with runner '{}' and Unity method '{}'.",
+            plan.runner_type, plan.unity_build_method
+        ),
+    }
 }
 
 fn persist_host_native_failure(
     coordinator: &LocalCoordinator,
     build_run_id: i64,
-    result: &runtime_runner::ExecutionResult,
+    result: &runtime_runner::unity::UnityBuildExecutionResult,
     error: &io::Error,
 ) -> io::Result<BuildRunRecord> {
     if error.kind() == ErrorKind::TimedOut {
@@ -2160,6 +2138,7 @@ fn release_claimed_build_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtime_contracts::EngineKind;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct TestDir {
@@ -2173,7 +2152,7 @@ mod tests {
                 .unwrap_or_default()
                 .as_nanos();
             let path = std::env::temp_dir().join(format!(
-                "hup-runtime-bin-{label}-{}-{timestamp}",
+                "hgp-runtime-bin-{label}-{}-{timestamp}",
                 std::process::id()
             ));
             fs::create_dir_all(&path)?;
@@ -2189,6 +2168,58 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn resolve_build_execution_dispatch_plan_with_profile_rejects_unsupported_engine_kind() {
+        let error = resolve_build_execution_dispatch_plan_with_profile(
+            &test_stored_build_execution_plan(EngineKind::Godot),
+            &test_host_capability_profile(),
+        )
+        .expect_err("non-Unity engines should be rejected before runner resolution");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported repository engine_kind \"godot\"")
+        );
+    }
+
+    #[test]
+    fn resolve_build_execution_dispatch_plan_with_profile_keeps_unity_on_host_native_path() {
+        let resolved = resolve_build_execution_dispatch_plan_with_profile(
+            &test_stored_build_execution_plan(EngineKind::Unity),
+            &test_host_capability_profile(),
+        )
+        .expect("Unity plans should keep using the host-native path");
+
+        let BuildExecutionDispatchPlan::UnityHostNative(resolved) = resolved;
+
+        assert_eq!(resolved.build_run_id, 41);
+        assert_eq!(resolved.runner_type, RunnerFamily::HostNative.label());
+        assert_eq!(resolved.unity_target_platform, "StandaloneWindows64");
+        assert_eq!(resolved.unity_build_method, "Builder.PerformWindows");
+        assert!(resolved.config_json.contains("unity_executable_path"));
+    }
+
+    #[test]
+    fn resolve_build_execution_dispatch_plan_with_profile_rejects_missing_unity_contract() {
+        let mut plan = test_stored_build_execution_plan(EngineKind::Unity);
+        plan.contract_json = String::from("{}");
+
+        let error = resolve_build_execution_dispatch_plan_with_profile(
+            &plan,
+            &test_host_capability_profile(),
+        )
+        .expect_err("Unity execution should reject build rows without a Unity contract payload");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("missing a Unity build target contract payload")
+        );
     }
 
     #[test]
@@ -2244,5 +2275,68 @@ mod tests {
                 .join(BUILD_EXECUTION_REPORT_FILE_NAME)
                 .exists()
         );
+    }
+
+    fn test_stored_build_execution_plan(engine_kind: EngineKind) -> StoredBuildExecutionPlan {
+        StoredBuildExecutionPlan {
+            build_run_id: 41,
+            release_run_id: 17,
+            repository_id: 9,
+            engine_kind,
+            repository_name: String::from("Revolutions"),
+            repository_credentials_id: None,
+            workspace_root_override: None,
+            artifacts_root_override: None,
+            build_target_id: 23,
+            repository_url: String::from("https://example.com/revolutions.git"),
+            git_tag: String::from("v1.2.3"),
+            git_commit: Some(String::from("deadbeef")),
+            target_name: String::from("Windows"),
+            build_kind: BuildKind::Player,
+            contract_json: String::from(
+                r#"{"unity":{"targetPlatform":"StandaloneWindows64","buildMethod":"Builder.PerformWindows","editorVersion":"2022.3.20f1"}}"#,
+            ),
+            runner_type: String::from(RunnerFamily::HostNative.label()),
+            output_kind: Some(String::from("archive")),
+            output_path_template: Some(String::from("players/game.zip")),
+            config_json: String::from(
+                r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
+            ),
+            engine_version: String::from("2022.3.20f1"),
+            image_ref: String::from("host-native"),
+            timeout_seconds: 900,
+            status: String::from("queued"),
+        }
+    }
+
+    fn test_host_capability_profile() -> HostCapabilityProfile {
+        HostCapabilityProfile {
+            platform: String::from("windows"),
+            architecture: String::from("x86_64"),
+            packaging_mode: String::from("development"),
+            inside_wsl: false,
+            git_tool: runtime_runner::unity::HostToolCapability {
+                name: String::from("Git"),
+                available: true,
+                path: Some(String::from("git")),
+                version: Some(String::from("2.49.0")),
+                status: String::from("ready"),
+                message: String::from("ready"),
+            },
+            unity_license: runtime_runner::unity::UnityLicenseDiagnostics {
+                searched_paths: vec![String::from("C:/ProgramData/Unity/Unity_lic.ulf")],
+                resolved_path: Some(String::from("C:/ProgramData/Unity/Unity_lic.ulf")),
+                exists: true,
+                status: String::from("ready"),
+                message: String::from("ready"),
+            },
+            platform_prerequisites: Vec::new(),
+            discovered_editors: Vec::new(),
+            runner_selection: runtime_runner::unity::RunnerSelectionDiagnostics {
+                selected_runner_family: Some(String::from(RunnerFamily::HostNative.label())),
+                status: String::from("ready"),
+                message: String::from("ready"),
+            },
+        }
     }
 }

@@ -9,6 +9,7 @@ version.workspace = true
 keyring = { workspace = true }
 rusqlite = { workspace = true }
 runtime-config = { path = "../runtime-config" }
+runtime-contracts = { path = "../runtime-contracts" }
 runtime-git = { path = "../runtime-git" }
 serde = { workspace = true }
 serde_json = { workspace = true }

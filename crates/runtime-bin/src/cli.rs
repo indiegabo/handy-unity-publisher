@@ -287,7 +287,7 @@ pub(crate) fn print_status(config: &RuntimeConfig, storage: &StorageLayout) {
 }
 
 pub(crate) fn print_help() {
-    println!("HUP runtime scaffold");
+    println!("HGP runtime scaffold");
     println!();
     println!("Commands:");
     println!("  bootstrap  create app directories and write health + supervision metadata");
@@ -312,7 +312,7 @@ pub(crate) fn parse_manual_release_dispatch_command(
     let mut repository_id = None;
     let mut git_tag = None;
     let mut git_commit = String::new();
-    let mut requested_via = String::from("hup-runtime");
+    let mut requested_via = String::from("hgp-runtime");
     let mut rebuild = false;
     let mut index = 0;
 
@@ -636,77 +636,77 @@ pub(crate) fn cli_usage_error(message: impl Into<String>) -> io::Error {
 }
 
 pub(crate) fn releases_usage() -> &'static str {
-    "HUP runtime releases commands\n\nUsage:\n  releases dispatch manual --repository-id <id> --git-tag <tag> [--git-commit <sha>] [--requested-via <source>] [--rebuild]\n  releases plan --release-run-id <id>\n"
+    "HGP runtime releases commands\n\nUsage:\n  releases dispatch manual --repository-id <id> --git-tag <tag> [--git-commit <sha>] [--requested-via <source>] [--rebuild]\n  releases plan --release-run-id <id>\n"
 }
 
 pub(crate) fn automation_usage() -> &'static str {
-    "HUP runtime automation commands\n\nUsage:\n  automation inspect\n  automation poll-once\n"
+    "HGP runtime automation commands\n\nUsage:\n  automation inspect\n  automation poll-once\n"
 }
 
 pub(crate) fn registrations_usage() -> &'static str {
-    "HUP runtime registrations commands\n\nUsage:\n  registrations checkout --repository-id <id> [--ref <git-ref>]\n  registrations import-runtime-db --source-db <path> --repository-name <name>\n  registrations seed-revolutions [--project-pat-env <env>]\n"
+    "HGP runtime registrations commands\n\nUsage:\n  registrations checkout --repository-id <id> [--ref <git-ref>]\n  registrations import-runtime-db --source-db <path> --repository-name <name>\n  registrations seed-revolutions [--project-pat-env <env>]\n"
 }
 
 pub(crate) fn registrations_checkout_usage() -> &'static str {
-    "HUP runtime registrations checkout\n\nUsage:\n  registrations checkout --repository-id <id> [--ref <git-ref>]\n\nDefaults:\n  --ref defaults to the repository default_branch stored in SQLite\n"
+    "HGP runtime registrations checkout\n\nUsage:\n  registrations checkout --repository-id <id> [--ref <git-ref>]\n\nDefaults:\n  --ref defaults to the repository default_branch stored in SQLite\n"
 }
 
 pub(crate) fn registrations_import_runtime_db_usage() -> &'static str {
-    "HUP runtime registrations import-runtime-db\n\nUsage:\n  registrations import-runtime-db --source-db <path> --repository-name <name>\n\nBehavior:\n  imports repository configuration from another runtime.db into the current app database without copying release, build, or publish runs\n"
+    "HGP runtime registrations import-runtime-db\n\nUsage:\n  registrations import-runtime-db --source-db <path> --repository-name <name>\n\nBehavior:\n  imports repository configuration from another runtime.db into the current app database without copying release, build, or publish runs\n"
 }
 
 pub(crate) fn manifests_usage() -> &'static str {
-    "HUP runtime manifests commands\n\nUsage:\n  manifests sync [--dir <path>]\n"
+    "HGP runtime manifests commands\n\nUsage:\n  manifests sync [--dir <path>]\n"
 }
 
 pub(crate) fn builds_usage() -> &'static str {
-    "HUP runtime builds commands\n\nUsage:\n  builds stage-next\n  builds run-next\n"
+    "HGP runtime builds commands\n\nUsage:\n  builds stage-next\n  builds run-next\n"
 }
 
 pub(crate) fn publishes_usage() -> &'static str {
-    "HUP runtime publishes commands\n\nUsage:\n  publishes run-next\n  publishes inspect (--build-run-id <id> | --publish-run-id <id>)\n"
+    "HGP runtime publishes commands\n\nUsage:\n  publishes run-next\n  publishes inspect (--build-run-id <id> | --publish-run-id <id>)\n"
 }
 
 pub(crate) fn release_dispatch_usage() -> &'static str {
-    "HUP runtime release dispatch commands\n\nUsage:\n  releases dispatch manual --repository-id <id> --git-tag <tag> [--git-commit <sha>] [--requested-via <source>] [--rebuild]\n"
+    "HGP runtime release dispatch commands\n\nUsage:\n  releases dispatch manual --repository-id <id> --git-tag <tag> [--git-commit <sha>] [--requested-via <source>] [--rebuild]\n"
 }
 
 pub(crate) fn manual_release_dispatch_usage() -> &'static str {
-    "HUP runtime releases dispatch manual\n\nUsage:\n  releases dispatch manual --repository-id <id> --git-tag <tag> [--git-commit <sha>] [--requested-via <source>] [--rebuild]\n"
+    "HGP runtime releases dispatch manual\n\nUsage:\n  releases dispatch manual --repository-id <id> --git-tag <tag> [--git-commit <sha>] [--requested-via <source>] [--rebuild]\n"
 }
 
 pub(crate) fn release_plan_usage() -> &'static str {
-    "HUP runtime releases plan\n\nUsage:\n  releases plan --release-run-id <id>\n"
+    "HGP runtime releases plan\n\nUsage:\n  releases plan --release-run-id <id>\n"
 }
 
 pub(crate) fn automation_inspect_usage() -> &'static str {
-    "HUP runtime automation inspect\n\nUsage:\n  automation inspect\n"
+    "HGP runtime automation inspect\n\nUsage:\n  automation inspect\n"
 }
 
 pub(crate) fn automation_poll_once_usage() -> &'static str {
-    "HUP runtime automation poll-once\n\nUsage:\n  automation poll-once\n"
+    "HGP runtime automation poll-once\n\nUsage:\n  automation poll-once\n"
 }
 
 pub(crate) fn registrations_seed_revolutions_usage() -> &'static str {
-    "HUP runtime registrations seed-revolutions\n\nUsage:\n  registrations seed-revolutions [--project-pat-env <env>]\n\nDefaults:\n  --project-pat-env defaults to REVOLUTIONS_PROJECT_PAT\n"
+    "HGP runtime registrations seed-revolutions\n\nUsage:\n  registrations seed-revolutions [--project-pat-env <env>]\n\nDefaults:\n  --project-pat-env defaults to REVOLUTIONS_PROJECT_PAT\n"
 }
 
 pub(crate) fn manifest_sync_usage() -> &'static str {
-    "HUP runtime manifests sync\n\nUsage:\n  manifests sync [--dir <path>]\n\nDefaults:\n  --dir defaults to ./pipelines relative to the current working directory\n"
+    "HGP runtime manifests sync\n\nUsage:\n  manifests sync [--dir <path>]\n\nDefaults:\n  --dir defaults to ./pipelines relative to the current working directory\n"
 }
 
 pub(crate) fn build_stage_next_usage() -> &'static str {
-    "HUP runtime builds stage-next\n\nUsage:\n  builds stage-next\n"
+    "HGP runtime builds stage-next\n\nUsage:\n  builds stage-next\n"
 }
 
 pub(crate) fn build_run_next_usage() -> &'static str {
-    "HUP runtime builds run-next\n\nUsage:\n  builds run-next\n"
+    "HGP runtime builds run-next\n\nUsage:\n  builds run-next\n"
 }
 
 pub(crate) fn publish_run_next_usage() -> &'static str {
-    "HUP runtime publishes run-next\n\nUsage:\n  publishes run-next\n"
+    "HGP runtime publishes run-next\n\nUsage:\n  publishes run-next\n"
 }
 
 pub(crate) fn publish_inspect_usage() -> &'static str {
-    "HUP runtime publishes inspect\n\nUsage:\n  publishes inspect --build-run-id <id>\n  publishes inspect --publish-run-id <id>\n"
+    "HGP runtime publishes inspect\n\nUsage:\n  publishes inspect --build-run-id <id>\n  publishes inspect --publish-run-id <id>\n"
 }

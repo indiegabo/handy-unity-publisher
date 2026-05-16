@@ -304,11 +304,7 @@ fn poll_repository(
     tag_lister: &GitTagLister,
     repository: &PollingRepositoryRecord,
 ) -> io::Result<RepositoryPollResult> {
-    let git_auth = resolve_repository_git_auth(
-        coordinator,
-        &repository.repo_url,
-        repository.credentials_id,
-    )?;
+    let git_auth = resolve_repository_git_auth(coordinator, repository.credentials_id)?;
     let tags = tag_lister.list_tags(&GitTagListRequest {
         repository_url: repository.repo_url.clone(),
         auth: git_auth,
@@ -463,7 +459,6 @@ fn baseline_latest_repository_tag_without_process_history(
 
 pub(crate) fn resolve_repository_git_auth(
     coordinator: &LocalCoordinator,
-    repository_url: &str,
     credentials_id: Option<i64>,
 ) -> io::Result<GitAuthOptions> {
     let Some(credentials_id) = credentials_id else {
@@ -475,62 +470,8 @@ pub(crate) fn resolve_repository_git_auth(
         &credentials.kind,
         &credentials.config_json,
     )?;
-    let normalized_config_json = normalize_repository_git_auth_config(
-        repository_url,
-        &credentials.kind,
-        &resolved_config_json,
-    )?;
 
-    git_auth_options_from_credentials(&credentials.kind, &normalized_config_json)
-}
-
-pub(crate) fn normalize_repository_git_auth_config(
-    repository_url: &str,
-    kind: &str,
-    config_json: &str,
-) -> io::Result<String> {
-    if kind.trim() != "git-http-basic" {
-        return Ok(config_json.to_owned());
-    }
-
-    let Some(owner) = github_repository_owner(repository_url) else {
-        return Ok(config_json.to_owned());
-    };
-    let mut parsed = serde_json::from_str::<serde_json::Value>(config_json)
-        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    let Some(object) = parsed.as_object_mut() else {
-        return Ok(config_json.to_owned());
-    };
-    let Some(username) = object.get("username").and_then(|value| value.as_str()) else {
-        return Ok(config_json.to_owned());
-    };
-    if !username.eq_ignore_ascii_case("git") {
-        return Ok(config_json.to_owned());
-    }
-
-    // Legacy wizard-created GitHub PAT credentials used a placeholder
-    // username. Use the repository owner as a compatibility fallback so
-    // runtime-owned Git operations keep working for personal repositories.
-    object.insert(String::from("username"), serde_json::Value::String(owner));
-    serde_json::to_string(&parsed).map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
-}
-
-fn github_repository_owner(repository_url: &str) -> Option<String> {
-    let repository_url = repository_url.trim();
-    let without_scheme = repository_url
-        .strip_prefix("https://")
-        .or_else(|| repository_url.strip_prefix("http://"))?;
-    let (host, path) = without_scheme.split_once('/')?;
-    if !host.eq_ignore_ascii_case("github.com") {
-        return None;
-    }
-
-    let owner = path.split('/').next()?.trim();
-    if owner.is_empty() {
-        return None;
-    }
-
-    Some(owner.to_owned())
+    git_auth_options_from_credentials(&credentials.kind, &resolved_config_json)
 }
 
 pub(crate) fn failed_poll_attempt_log_path(

@@ -95,37 +95,34 @@ ON CONFLICT(repository_id, name) DO UPDATE SET
 INSERT INTO build_targets (
     repository_id,
     name,
-    platform,
+    build_kind,
     runner_type,
-    build_method,
     output_kind,
     output_path_template,
-    unity_version_override,
     timeout_seconds,
     enabled,
+    contract_json,
     config_json
 ) VALUES (
     (SELECT id FROM repositories WHERE name = 'Revolutions'),
     'windows-player',
-    'windows',
+    'player',
     'host-native',
-    'Builder.PerformWindows',
     'archive',
     'Builds/Players',
-    '6000.4.3f1',
     5400,
     1,
+    '{"unity":{"targetPlatform":"windows","buildMethod":"Builder.PerformWindows","editorVersion":"6000.4.3f1"}}',
     '{"unity_executable_path":"C:\\Program Files\\Unity\\Hub\\Editor\\6000.4.3f1\\Editor\\Unity.exe"}'
 )
 ON CONFLICT(repository_id, name) DO UPDATE SET
-    platform = excluded.platform,
+    build_kind = excluded.build_kind,
     runner_type = excluded.runner_type,
-    build_method = excluded.build_method,
     output_kind = excluded.output_kind,
     output_path_template = excluded.output_path_template,
-    unity_version_override = excluded.unity_version_override,
     timeout_seconds = excluded.timeout_seconds,
     enabled = excluded.enabled,
+    contract_json = excluded.contract_json,
     config_json = excluded.config_json,
     updated_at = CURRENT_TIMESTAMP;
 

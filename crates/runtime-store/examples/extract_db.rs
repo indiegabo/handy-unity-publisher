@@ -1,7 +1,7 @@
 use rusqlite::{Connection, Result};
 
 fn main() -> Result<()> {
-    let db_path = "C:/Users/indie/AppData/Local/handy-unity-publisher/runtime/state/runtime.db";
+    let db_path = "C:/Users/indie/AppData/Local/HandyGamesPublisher/runtime/state/runtime.db";
     let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
 
     println!("--- Repository Info ---");

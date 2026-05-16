@@ -10,6 +10,7 @@ pub use models::*;
 
 use crate::lifecycle::{BuildStatus, PublishStatus, ReleaseStatus};
 use keyring::Entry;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -22,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use runtime_config::{RuntimeConcurrencySettings, RuntimeDirectories};
+use runtime_contracts::{BuildKind, EngineKind};
 use runtime_git::{
     git_auth_options_from_credentials, GitAuthOptions,
     KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER,
@@ -41,8 +43,10 @@ const RELEASE_PLANNING_LOCK_TTL: Duration = Duration::from_secs(30 * 60);
 const DISPATCH_IDEMPOTENCY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const DEFAULT_HOST_NATIVE_RUNNER_TYPE: &str = "host-native";
 const DEFAULT_REPOSITORY_POLL_TRIGGER_RULE_NAME: &str = "poll-release-tags";
-pub const HOST_KEYRING_SERVICE: &str = "handy-unity-publisher";
+pub const HOST_KEYRING_SERVICE: &str = "handy-games-publisher";
 pub const KEYRING_SECRET_REF_PREFIX: &str = "keyring://";
+const SUPPORTED_REPOSITORY_ENGINE_UNITY: &str = "unity";
+const SUPPORTED_REPOSITORY_BUILD_KIND_PLAYER: &str = "player";
 const TRIGGER_SOURCE_MANUAL: &str = "manual";
 const TRIGGER_SOURCE_POLL: &str = "poll";
 const TRIGGER_SOURCE_REPOSITORY_POLL: &str = "repository-poll";
@@ -111,7 +115,93 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0010_engine_contract_model.sql"),
         transactional: true,
     },
+    Migration {
+        name: "0011_runtime_engine_version.sql",
+        sql: include_str!("../migrations/0011_runtime_engine_version.sql"),
+        transactional: true,
+    },
 ];
+
+const MIGRATION_NO_OP_SQL: &str = "SELECT 1;\n";
+
+const LEGACY_BUILD_TARGET_CONTRACT_MIGRATION_SQL: &str = r#"
+PRAGMA foreign_keys = OFF;
+
+CREATE TABLE build_targets_v2 (
+    id INTEGER PRIMARY KEY,
+    repository_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    build_kind TEXT NOT NULL DEFAULT 'player',
+    runner_type TEXT NOT NULL DEFAULT 'host-native',
+    output_kind TEXT,
+    output_path_template TEXT,
+    timeout_seconds INTEGER NOT NULL DEFAULT 3600 CHECK (timeout_seconds > 0),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    contract_json TEXT NOT NULL DEFAULT '{}',
+    config_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (repository_id) REFERENCES repositories (id) ON DELETE CASCADE,
+    UNIQUE (repository_id, name)
+);
+
+INSERT INTO build_targets_v2 (
+    id,
+    repository_id,
+    name,
+    build_kind,
+    runner_type,
+    output_kind,
+    output_path_template,
+    timeout_seconds,
+    enabled,
+    contract_json,
+    config_json,
+    created_at,
+    updated_at
+)
+SELECT id,
+       repository_id,
+       name,
+       'player',
+       runner_type,
+       output_kind,
+       output_path_template,
+       timeout_seconds,
+       enabled,
+       json_object(
+           'unity',
+           json_object(
+               'targetPlatform', platform,
+               'buildMethod', COALESCE(build_method, ''),
+               'editorVersion', COALESCE(unity_version_override, '')
+           )
+       ),
+       config_json,
+       created_at,
+       updated_at
+FROM build_targets;
+
+DROP TABLE build_targets;
+ALTER TABLE build_targets_v2 RENAME TO build_targets;
+
+CREATE INDEX idx_build_targets_repository_id ON build_targets (repository_id);
+
+PRAGMA foreign_keys = ON;
+"#;
+
+const ENGINE_KIND_ONLY_MIGRATION_SQL: &str = r#"
+ALTER TABLE repositories
+ADD COLUMN engine_kind TEXT NOT NULL DEFAULT 'unity';
+"#;
+
+const RENAME_RELEASE_RUN_ENGINE_VERSION_SQL: &str = r#"
+ALTER TABLE release_runs RENAME COLUMN unity_version TO engine_version;
+"#;
+
+const RENAME_BUILD_RUN_ENGINE_VERSION_SQL: &str = r#"
+ALTER TABLE build_runs RENAME COLUMN unity_version TO engine_version;
+"#;
 
 #[allow(unused_imports)]
 use models::{ObservedProcess, OrphanBuildProcessTerminationReport};
@@ -171,18 +261,43 @@ struct PublishRunDispatchState {
 struct ReleaseBuildPlanningState {
     repository_id: i64,
     repository_url: String,
+    engine_kind: EngineKind,
     credentials_id: Option<i64>,
     git_tag: String,
-    unity_version: Option<String>,
+    engine_version: Option<String>,
     status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BuildTargetPlanningState {
     id: i64,
-    platform: String,
+    build_kind: BuildKind,
+    contract_json: String,
     runner_type: String,
-    unity_version_override: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepositoryProjectBuildContractInput {
+    #[serde(default)]
+    unity: Option<UnityRepositoryProjectBuildContractInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnityRepositoryProjectBuildContractInput {
+    #[serde(rename = "targetPlatform", default)]
+    target_platform: String,
+    #[serde(rename = "buildMethod", default)]
+    build_method: String,
+    #[serde(rename = "editorVersion", default)]
+    editor_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildTargetReadModelProjection {
+    unity_target_platform: String,
+    unity_build_method: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -657,7 +772,7 @@ impl LocalCoordinator {
             )));
         }
 
-        let initial_release_unity_version = self.resolve_release_unity_version(
+        let initial_release_engine_version = self.resolve_release_engine_version(
             release_run_id,
             &release,
         )?;
@@ -674,15 +789,15 @@ impl LocalCoordinator {
             )));
         }
 
-        let release_unity_version = release
-            .unity_version
+        let release_engine_version = release
+            .engine_version
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or(initial_release_unity_version.as_str());
-        if release_unity_version.is_empty() {
+            .unwrap_or(initial_release_engine_version.as_str());
+        if release_engine_version.is_empty() {
             return Err(invalid_input_error(format!(
-                "release run {release_run_id} is missing unity version for build planning"
+                "release run {release_run_id} is missing engine version for build planning"
             )));
         }
 
@@ -697,20 +812,24 @@ impl LocalCoordinator {
         }
 
         for target in &targets {
-            let unity_version = resolve_target_unity_version(target, release_unity_version);
-            let image_ref = resolve_build_image_ref(target, &unity_version)?;
+            let engine_version = resolve_target_engine_version(
+                target,
+                release.engine_kind,
+                release_engine_version,
+            )?;
+            let image_ref = resolve_build_image_ref(target, &engine_version)?;
             transaction
                 .execute(
                     "
                     INSERT INTO build_runs (
                         release_run_id,
                         build_target_id,
-                        unity_version,
+                        engine_version,
                         image_ref,
                         status
                     ) VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(release_run_id, build_target_id) DO UPDATE SET
-                        unity_version = excluded.unity_version,
+                        engine_version = excluded.engine_version,
                         image_ref = excluded.image_ref,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE build_runs.status = ?
@@ -718,7 +837,7 @@ impl LocalCoordinator {
                     params![
                         release_run_id,
                         target.id,
-                        unity_version,
+                        engine_version,
                         image_ref,
                         BuildStatus::Queued.as_str(),
                         BuildStatus::Queued.as_str(),
@@ -746,6 +865,7 @@ impl LocalCoordinator {
                 SELECT br.id,
                        br.release_run_id,
                        rr.repository_id,
+                      r.engine_kind,
                        r.name,
                        r.credentials_id,
                       r.workspace_root_override,
@@ -755,13 +875,13 @@ impl LocalCoordinator {
                        rr.git_tag,
                        rr.git_commit,
                        bt.name,
-                       bt.platform,
+                      COALESCE(bt.build_kind, ''),
+                      COALESCE(bt.contract_json, ''),
                        bt.runner_type,
-                       bt.build_method,
                        bt.output_kind,
                        bt.output_path_template,
                        bt.config_json,
-                       br.unity_version,
+                      br.engine_version,
                        br.image_ref,
                        bt.timeout_seconds,
                        br.status
@@ -915,9 +1035,10 @@ impl LocalCoordinator {
                     workspace_root_override,
                     polling_interval_seconds,
                     last_seen_tag,
+                    engine_kind,
                     enabled
                 )
-                VALUES (?, 'managed_repository', 'managed_checkout', ?, NULL, ?, ?, ?, ?, ?, NULL, ?)
+                VALUES (?, 'managed_repository', 'managed_checkout', ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?)
                 ",
                 params![
                     normalized.name,
@@ -927,6 +1048,7 @@ impl LocalCoordinator {
                     normalized.artifacts_root_override,
                     normalized.workspace_root_override,
                     normalized.polling_interval_seconds,
+                    normalized.engine_kind,
                     normalized.enabled,
                 ],
             )
@@ -955,36 +1077,39 @@ impl LocalCoordinator {
 
         let mut build_target_ids = Vec::with_capacity(normalized.build_targets.len());
         for target in normalized.build_targets {
+            project_repository_project_build_target_contract(
+                &normalized.engine_kind,
+                &target.build_kind,
+                &target.contract_json,
+            )?;
             transaction
                 .execute(
                     "
                     INSERT INTO build_targets (
                         repository_id,
                         name,
-                        platform,
+                        build_kind,
                         runner_type,
-                        build_method,
                         output_kind,
                         output_path_template,
-                        unity_version_override,
                         timeout_seconds,
                         enabled,
+                        contract_json,
                         config_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ",
                     params![
                         repository_id,
                         target.name,
-                        target.platform,
+                        target.build_kind,
                         target.runner_type,
-                        target.build_method,
                         target.output_kind,
                         target.output_path_template,
-                        target.unity_version_override,
                         target.timeout_seconds,
                         target.enabled,
-                        target.config_json,
+                        target.contract_json,
+                        target.runner_config_json,
                     ],
                 )
                 .map_err(sqlite_error)?;
@@ -1082,6 +1207,7 @@ impl LocalCoordinator {
                 "
                 UPDATE repositories
                 SET name = ?,
+                    engine_kind = ?,
                     repo_url = ?,
                     default_branch = ?,
                     artifacts_root_override = ?,
@@ -1093,6 +1219,7 @@ impl LocalCoordinator {
                 ",
                 params![
                     normalized.name,
+                    normalized.engine_kind,
                     normalized.repo_url,
                     normalized.default_branch,
                     normalized.artifacts_root_override,
@@ -1107,6 +1234,7 @@ impl LocalCoordinator {
         sync_repository_project_build_targets(
             &transaction,
             normalized.repository_id,
+            &normalized.engine_kind,
             normalized.build_targets,
         )?;
 
@@ -1154,6 +1282,7 @@ impl LocalCoordinator {
                 SELECT r.id,
                        r.name,
                        r.repo_url,
+                      r.engine_kind,
                        r.credentials_id,
                        r.enabled,
                        r.polling_interval_seconds,
@@ -1172,7 +1301,7 @@ impl LocalCoordinator {
                   ON bt.repository_id = r.id
                  AND bt.enabled = 1
                                 WHERE r.source_mode = 'managed_repository'
-                GROUP BY r.id, r.name, r.repo_url, r.credentials_id, r.enabled,
+                GROUP BY r.id, r.name, r.repo_url, r.engine_kind, r.credentials_id, r.enabled,
                                                  r.polling_interval_seconds, r.last_seen_tag,
                                                  r.default_branch, r.artifacts_root_override,
                                                  r.workspace_root_override
@@ -1186,15 +1315,16 @@ impl LocalCoordinator {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     repo_url: row.get(2)?,
-                    credentials_id: row.get(3)?,
-                    enabled: row.get::<_, i64>(4)? != 0,
-                    polling_interval_seconds: row.get(5)?,
-                    last_seen_tag: normalize_optional_string(row.get(6)?),
-                    default_branch: normalize_optional_string(row.get(7)?),
-                    artifacts_root_override: normalize_optional_string(row.get(8)?),
-                    workspace_root_override: normalize_optional_string(row.get(9)?),
-                    enabled_build_target_count: row.get(10)?,
-                    has_release_history: row.get::<_, i64>(11)? != 0,
+                    engine_kind: row.get(3)?,
+                    credentials_id: row.get(4)?,
+                    enabled: row.get::<_, i64>(5)? != 0,
+                    polling_interval_seconds: row.get(6)?,
+                    last_seen_tag: normalize_optional_string(row.get(7)?),
+                    default_branch: normalize_optional_string(row.get(8)?),
+                    artifacts_root_override: normalize_optional_string(row.get(9)?),
+                    workspace_root_override: normalize_optional_string(row.get(10)?),
+                    enabled_build_target_count: row.get(11)?,
+                    has_release_history: row.get::<_, i64>(12)? != 0,
                 })
             })
             .map_err(sqlite_error)?;
@@ -1440,26 +1570,24 @@ impl LocalCoordinator {
                 INSERT INTO build_targets (
                     repository_id,
                     name,
-                    platform,
+                    build_kind,
                     runner_type,
-                    build_method,
                     output_kind,
                     output_path_template,
-                    unity_version_override,
                     timeout_seconds,
                     enabled,
+                    contract_json,
                     config_json
                 )
                 SELECT ?,
                        bt.name,
-                       bt.platform,
+                       bt.build_kind,
                        bt.runner_type,
-                       bt.build_method,
                        bt.output_kind,
                        bt.output_path_template,
-                       bt.unity_version_override,
                        bt.timeout_seconds,
                        bt.enabled,
+                       bt.contract_json,
                        bt.config_json
                 FROM source_db.build_targets bt
                 JOIN source_db.repositories r ON r.id = bt.repository_id
@@ -2757,22 +2885,23 @@ impl LocalCoordinator {
         })
     }
 
-    fn resolve_release_unity_version(
+    fn resolve_release_engine_version(
         &self,
         release_run_id: i64,
         release: &ReleaseBuildPlanningState,
     ) -> io::Result<String> {
-        if let Some(unity_version) = release
-            .unity_version
+        if let Some(engine_version) = release
+            .engine_version
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            return Ok(unity_version.to_owned());
+            return Ok(engine_version.to_owned());
         }
 
         let git_auth = self.resolve_release_git_auth(release.credentials_id)?;
-        let detected_unity_version = detect_release_unity_version(
+        let detected_engine_version = detect_release_engine_version(
+            release.engine_kind,
             &release.repository_url,
             &release.git_tag,
             &git_auth,
@@ -2782,19 +2911,19 @@ impl LocalCoordinator {
             .execute(
                 "
                 UPDATE release_runs
-                SET unity_version = ?,
+                                SET engine_version = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                   AND (
-                    unity_version IS NULL
-                    OR TRIM(unity_version) = ''
+                                        engine_version IS NULL
+                                        OR TRIM(engine_version) = ''
                   )
                 ",
-                params![detected_unity_version, release_run_id],
+                                params![detected_engine_version, release_run_id],
             )
             .map_err(sqlite_error)?;
 
-        Ok(detected_unity_version)
+                Ok(detected_engine_version)
     }
 
     /// Resolves one stored credential binding into Git authentication headers,
@@ -2946,7 +3075,7 @@ impl LocalCoordinator {
                     trigger_source = ?,
                     trigger_rule_id = NULL,
                     source_metadata_json = ?,
-                    unity_version = NULL,
+                    engine_version = NULL,
                     status = ?,
                     started_at = NULL,
                     finished_at = NULL,
@@ -3633,9 +3762,10 @@ fn remove_release_run_rebuild_cleanup_paths(
                 "
                 SELECT rr.repository_id,
                        r.repo_url,
+                      r.engine_kind,
                        r.credentials_id,
                        rr.git_tag,
-                       rr.unity_version,
+                      rr.engine_version,
                        rr.status
                 FROM release_runs rr
                 JOIN repositories r ON r.id = rr.repository_id
@@ -3658,9 +3788,10 @@ fn remove_release_run_rebuild_cleanup_paths(
                 "
                 SELECT rr.repository_id,
                        r.repo_url,
+                      r.engine_kind,
                        r.credentials_id,
                        rr.git_tag,
-                       rr.unity_version,
+                      rr.engine_version,
                        rr.status
                 FROM release_runs rr
                 JOIN repositories r ON r.id = rr.repository_id
@@ -3685,7 +3816,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                        trigger_source,
                        trigger_rule_id,
                        source_metadata_json,
-                       unity_version,
+                      engine_version,
                        status,
                        started_at,
                        finished_at,
@@ -3717,7 +3848,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                        trigger_source,
                        trigger_rule_id,
                        source_metadata_json,
-                       unity_version,
+                      engine_version,
                        status,
                        started_at,
                        finished_at,
@@ -3767,7 +3898,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                 SELECT id,
                        release_run_id,
                        build_target_id,
-                       unity_version,
+                      engine_version,
                        image_ref,
                        status,
                        workspace_path,
@@ -4089,9 +4220,9 @@ fn remove_release_run_rebuild_cleanup_paths(
             .prepare(
                 "
                 SELECT id,
-                       platform,
-                       runner_type,
-                      unity_version_override
+                                             COALESCE(build_kind, ''),
+                                             COALESCE(contract_json, ''),
+                                             runner_type
                 FROM build_targets
                 WHERE repository_id = ?
                   AND enabled = 1
@@ -4103,9 +4234,9 @@ fn remove_release_run_rebuild_cleanup_paths(
             .query_map([repository_id], |row| {
                 Ok(BuildTargetPlanningState {
                     id: row.get(0)?,
-                    platform: row.get(1)?,
-                    runner_type: row.get(2)?,
-                    unity_version_override: normalize_optional_string(row.get(3)?),
+                    build_kind: parse_build_kind_sql(1, row.get::<_, String>(1)?)?,
+                    contract_json: row.get(2)?,
+                    runner_type: row.get(3)?,
                 })
             })
             .map_err(sqlite_error)?;
@@ -4326,7 +4457,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                        trigger_source,
                        trigger_rule_id,
                        source_metadata_json,
-                       unity_version,
+                      engine_version,
                        status,
                        started_at,
                        finished_at,
@@ -4433,7 +4564,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                 SELECT id,
                        release_run_id,
                        build_target_id,
-                       unity_version,
+                      engine_version,
                        image_ref,
                        status,
                        workspace_path,
@@ -4704,7 +4835,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                 "
                 SELECT release_run_id,
                        build_target_id,
-                       unity_version,
+                      engine_version,
                        image_ref,
                        status,
                        created_at
@@ -4713,7 +4844,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                 ",
                 [build_run_id],
                 |row| {
-                    let unity_version = row
+                    let engine_version = row
                         .get::<_, Option<String>>(2)?
                         .unwrap_or_default()
                         .trim()
@@ -4723,7 +4854,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                         .unwrap_or_default()
                         .trim()
                         .to_owned();
-                    if unity_version.is_empty() || image_ref.is_empty() {
+                    if engine_version.is_empty() || image_ref.is_empty() {
                         return Err(rusqlite::Error::FromSqlConversionFailure(
                             0,
                             rusqlite::types::Type::Text,
@@ -4741,7 +4872,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                             build_run_id,
                             release_run_id: row.get(0)?,
                             build_target_id: row.get(1)?,
-                            unity_version,
+                            engine_version,
                             image_ref,
                         },
                         status: row.get(4)?,
@@ -4872,6 +5003,7 @@ struct PlannedRepositoryProjectBuildTargetUpdate {
 fn sync_repository_project_build_targets(
     transaction: &Transaction<'_>,
     repository_id: i64,
+    repository_engine_kind: &str,
     build_targets: Vec<UpdateRepositoryProjectBuildTargetInput>,
 ) -> io::Result<()> {
     let existing_targets = list_repository_project_build_targets(transaction, repository_id)?;
@@ -4975,6 +5107,7 @@ fn sync_repository_project_build_targets(
             update_repository_project_build_target(
                 transaction,
                 existing_target_id,
+                repository_engine_kind,
                 &planned_target.target,
             )?;
             existing_target_id
@@ -4982,6 +5115,7 @@ fn sync_repository_project_build_targets(
             create_repository_project_build_target(
                 transaction,
                 repository_id,
+                repository_engine_kind,
                 &planned_target.target,
             )?
         };
@@ -5029,7 +5163,7 @@ fn list_repository_project_build_targets(
 }
 
 fn temporary_repository_project_build_target_name(build_target_id: i64) -> String {
-    format!("__hup_target_update_{build_target_id}")
+    format!("__hgp_target_update_{build_target_id}")
 }
 
 fn rename_repository_project_build_target(
@@ -5060,38 +5194,43 @@ fn rename_repository_project_build_target(
 fn create_repository_project_build_target(
     transaction: &Transaction<'_>,
     repository_id: i64,
+    repository_engine_kind: &str,
     target: &UpdateRepositoryProjectBuildTargetInput,
 ) -> io::Result<i64> {
+    project_repository_project_build_target_contract(
+        repository_engine_kind,
+        &target.build_kind,
+        &target.contract_json,
+    )?;
+
     transaction
         .execute(
             "
             INSERT INTO build_targets (
                 repository_id,
                 name,
-                platform,
+                build_kind,
                 runner_type,
-                build_method,
                 output_kind,
                 output_path_template,
-                unity_version_override,
                 timeout_seconds,
                 enabled,
+                contract_json,
                 config_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ",
             params![
                 repository_id,
                 target.name.as_str(),
-                target.platform.as_str(),
+                target.build_kind.as_str(),
                 target.runner_type.as_str(),
-                target.build_method.as_str(),
                 target.output_kind.as_deref(),
                 target.output_path_template.as_deref(),
-                target.unity_version_override.as_deref(),
                 target.timeout_seconds,
                 target.enabled,
-                target.config_json.as_str(),
+                target.contract_json.as_str(),
+                target.runner_config_json.as_str(),
             ],
         )
         .map_err(sqlite_error)?;
@@ -5102,36 +5241,41 @@ fn create_repository_project_build_target(
 fn update_repository_project_build_target(
     transaction: &Transaction<'_>,
     build_target_id: i64,
+    repository_engine_kind: &str,
     target: &UpdateRepositoryProjectBuildTargetInput,
 ) -> io::Result<()> {
+    project_repository_project_build_target_contract(
+        repository_engine_kind,
+        &target.build_kind,
+        &target.contract_json,
+    )?;
+
     let updated = transaction
         .execute(
             "
             UPDATE build_targets
             SET name = ?,
-                platform = ?,
+                build_kind = ?,
                 runner_type = ?,
-                build_method = ?,
                 output_kind = ?,
                 output_path_template = ?,
-                unity_version_override = ?,
                 timeout_seconds = ?,
                 enabled = ?,
+                contract_json = ?,
                 config_json = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             ",
             params![
                 target.name.as_str(),
-                target.platform.as_str(),
+                target.build_kind.as_str(),
                 target.runner_type.as_str(),
-                target.build_method.as_str(),
                 target.output_kind.as_deref(),
                 target.output_path_template.as_deref(),
-                target.unity_version_override.as_deref(),
                 target.timeout_seconds,
                 target.enabled,
-                target.config_json.as_str(),
+                target.contract_json.as_str(),
+                target.runner_config_json.as_str(),
                 build_target_id,
             ],
         )
@@ -5617,10 +5761,11 @@ pub fn list_build_history_records(
                    rr.git_commit,
                    br.build_target_id,
                    bt.name,
-                   bt.platform,
+                   r.engine_kind,
+                   COALESCE(bt.build_kind, ''),
+                   COALESCE(bt.contract_json, ''),
                    bt.runner_type,
-                   bt.build_method,
-                   br.unity_version,
+                   br.engine_version,
                    br.image_ref,
                    br.status,
                    br.workspace_path,
@@ -5648,10 +5793,11 @@ pub fn list_build_history_records(
                      rr.git_commit,
                      br.build_target_id,
                      bt.name,
-                     bt.platform,
+                     r.engine_kind,
+                     COALESCE(bt.build_kind, ''),
+                     COALESCE(bt.contract_json, ''),
                      bt.runner_type,
-                     bt.build_method,
-                     br.unity_version,
+                     br.engine_version,
                      br.image_ref,
                      br.status,
                      br.workspace_path,
@@ -5702,7 +5848,9 @@ pub fn list_artifact_inspection_records(
                    rr.git_commit,
                    br.build_target_id,
                    bt.name,
-                   bt.platform,
+                   r.engine_kind,
+                   COALESCE(bt.build_kind, ''),
+                   COALESCE(bt.contract_json, ''),
                    bt.runner_type,
                    br.status,
                    a.name,
@@ -5739,7 +5887,9 @@ pub fn list_artifact_inspection_records(
                      rr.git_commit,
                      br.build_target_id,
                      bt.name,
-                     bt.platform,
+                     r.engine_kind,
+                     COALESCE(bt.build_kind, ''),
+                     COALESCE(bt.contract_json, ''),
                      bt.runner_type,
                      br.status,
                      a.name,
@@ -5778,9 +5928,10 @@ pub fn list_build_target_runtime_settings(
                    bt.repository_id,
                    r.name,
                    bt.name,
-                   bt.platform,
+                     r.engine_kind,
+                     COALESCE(bt.build_kind, ''),
+                     COALESCE(bt.contract_json, ''),
                    bt.runner_type,
-                   bt.build_method,
                    bt.enabled,
                    bt.config_json
             FROM build_targets bt
@@ -5791,16 +5942,32 @@ pub fn list_build_target_runtime_settings(
         .map_err(sqlite_error)?;
     let rows = statement
         .query_map([], |row| {
+            let engine_kind: String = row.get(4)?;
+            let build_kind: String = row.get(5)?;
+            let contract_json: String = row.get(6)?;
+            let projection = resolve_build_target_read_model_projection(
+                engine_kind.trim(),
+                build_kind.trim(),
+                &contract_json,
+            )
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+
             Ok(BuildTargetRuntimeSettingsRecord {
                 id: row.get(0)?,
                 repository_id: row.get(1)?,
                 repository_name: row.get(2)?,
                 name: row.get(3)?,
-                platform: row.get(4)?,
-                runner_type: row.get::<_, String>(5)?.trim().to_owned(),
-                build_method: normalize_optional_string(row.get(6)?),
-                enabled: row.get::<_, i64>(7)? != 0,
-                config_json: row.get(8)?,
+                unity_target_platform: projection.unity_target_platform,
+                runner_type: row.get::<_, String>(7)?.trim().to_owned(),
+                unity_build_method: projection.unity_build_method,
+                enabled: row.get::<_, i64>(8)? != 0,
+                config_json: row.get(9)?,
             })
         })
         .map_err(sqlite_error)?;
@@ -5890,6 +6057,7 @@ struct ProcessFeedReleaseRow {
     release: ReleaseRunRecord,
     repository_name: String,
     repository_url: String,
+    repository_engine_kind: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -5946,9 +6114,13 @@ fn apply_migrations(connection: &mut Connection) -> io::Result<Vec<String>> {
             continue;
         }
 
+        let migration_sql = resolve_migration_sql(connection, migration)?;
+
         if migration.transactional {
             let transaction = connection.transaction().map_err(sqlite_error)?;
-            transaction.execute_batch(migration.sql).map_err(sqlite_error)?;
+            transaction
+                .execute_batch(migration_sql.as_ref())
+                .map_err(sqlite_error)?;
             transaction
                 .execute(
                     "
@@ -5960,7 +6132,7 @@ fn apply_migrations(connection: &mut Connection) -> io::Result<Vec<String>> {
                 .map_err(sqlite_error)?;
             transaction.commit().map_err(sqlite_error)?;
         } else {
-            if let Err(error) = connection.execute_batch(migration.sql) {
+            if let Err(error) = connection.execute_batch(migration_sql.as_ref()) {
                 let _ = connection.execute_batch("PRAGMA foreign_keys = ON;");
                 return Err(sqlite_error(error));
             }
@@ -5991,6 +6163,76 @@ fn migration_applied(connection: &Connection, name: &str) -> io::Result<bool> {
         .map_err(sqlite_error)?;
 
     Ok(count > 0)
+}
+
+fn resolve_migration_sql(
+    connection: &Connection,
+    migration: &Migration,
+) -> io::Result<Cow<'static, str>> {
+    match migration.name {
+        "0009_build_target_runner_model_cleanup.sql" => {
+            if table_has_column(connection, "build_targets", "contract_json")? {
+                Ok(Cow::Borrowed(MIGRATION_NO_OP_SQL))
+            } else {
+                Ok(Cow::Borrowed(LEGACY_BUILD_TARGET_CONTRACT_MIGRATION_SQL))
+            }
+        }
+        "0010_engine_contract_model.sql" => {
+            let build_targets_have_contract =
+                table_has_column(connection, "build_targets", "contract_json")?;
+            let repositories_have_engine_kind =
+                table_has_column(connection, "repositories", "engine_kind")?;
+
+            Ok(match (build_targets_have_contract, repositories_have_engine_kind) {
+                (true, true) => Cow::Borrowed(MIGRATION_NO_OP_SQL),
+                (true, false) => Cow::Borrowed(ENGINE_KIND_ONLY_MIGRATION_SQL),
+                (false, true) => Cow::Borrowed(LEGACY_BUILD_TARGET_CONTRACT_MIGRATION_SQL),
+                (false, false) => Cow::Borrowed(migration.sql),
+            })
+        }
+        "0011_runtime_engine_version.sql" => {
+            let release_runs_have_engine_version =
+                table_has_column(connection, "release_runs", "engine_version")?;
+            let build_runs_have_engine_version =
+                table_has_column(connection, "build_runs", "engine_version")?;
+            let release_runs_have_unity_version =
+                table_has_column(connection, "release_runs", "unity_version")?;
+            let build_runs_have_unity_version =
+                table_has_column(connection, "build_runs", "unity_version")?;
+
+            let mut sql = String::new();
+            if !release_runs_have_engine_version && release_runs_have_unity_version {
+                sql.push_str(RENAME_RELEASE_RUN_ENGINE_VERSION_SQL);
+            }
+            if !build_runs_have_engine_version && build_runs_have_unity_version {
+                sql.push_str(RENAME_BUILD_RUN_ENGINE_VERSION_SQL);
+            }
+
+            if sql.is_empty() {
+                Ok(Cow::Borrowed(MIGRATION_NO_OP_SQL))
+            } else {
+                Ok(Cow::Owned(sql))
+            }
+        }
+        _ => Ok(Cow::Borrowed(migration.sql)),
+    }
+}
+
+fn table_has_column(connection: &Connection, table_name: &str, column_name: &str) -> io::Result<bool> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table_name})"))
+        .map_err(sqlite_error)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(sqlite_error)?;
+
+    for row in rows {
+        if row.map_err(sqlite_error)? == column_name {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn read_pragmas(connection: &Connection) -> io::Result<DatabasePragmas> {
@@ -6060,29 +6302,82 @@ fn dispatch_idempotency_key(prefix: &str, identifier: i64, created_at: &str) -> 
     format!("{prefix}:{identifier}:{created_at_token}:queued")
 }
 
-fn resolve_target_unity_version(
+fn resolve_target_engine_version(
     target: &BuildTargetPlanningState,
-    release_unity_version: &str,
-) -> String {
-    target
-        .unity_version_override
+    repository_engine_kind: EngineKind,
+    release_engine_version: &str,
+) -> io::Result<String> {
+    let contract_engine_version = resolve_target_contract_engine_version(
+        repository_engine_kind,
+        target,
+    )?;
+    Ok(contract_engine_version
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(release_unity_version.trim())
-        .to_owned()
+        .unwrap_or(release_engine_version.trim())
+        .to_owned())
 }
 
-fn resolve_build_image_ref(target: &BuildTargetPlanningState, unity_version: &str) -> io::Result<String> {
+fn resolve_target_contract_engine_version(
+    repository_engine_kind: EngineKind,
+    target: &BuildTargetPlanningState,
+) -> io::Result<Option<String>> {
+    match repository_engine_kind {
+        EngineKind::Unity => resolve_unity_target_contract_engine_version(target),
+        other => Err(invalid_input_error(format!(
+            "repository engine_kind {:?} is not supported for build planning",
+            other.as_str()
+        ))),
+    }
+}
+
+fn resolve_unity_target_contract_engine_version(
+    target: &BuildTargetPlanningState,
+) -> io::Result<Option<String>> {
+    if target.build_kind != BuildKind::Player {
+        return Err(invalid_input_error(format!(
+            "build target {} uses unsupported build_kind {:?} for Unity planning",
+            target.id,
+            target.build_kind.as_str()
+        )));
+    }
+
+    let contract_json = target.contract_json.trim();
+    if contract_json.is_empty() {
+        return Err(invalid_input_error(format!(
+            "build target {} is missing contract_json for Unity planning",
+            target.id
+        )));
+    }
+
+    let contract = serde_json::from_str::<RepositoryProjectBuildContractInput>(contract_json)
+        .map_err(|error| {
+            invalid_input_error(format!(
+                "build target {} has invalid contract_json for planning: {error}",
+                target.id
+            ))
+        })?;
+    let Some(unity) = contract.unity else {
+        return Err(invalid_input_error(format!(
+            "build target {} is missing contract_json.unity for Unity planning",
+            target.id
+        )));
+    };
+
+    Ok(normalize_optional_string(Some(unity.editor_version)))
+}
+
+fn resolve_build_image_ref(target: &BuildTargetPlanningState, engine_version: &str) -> io::Result<String> {
     let runner_type = target.runner_type.trim();
     if runner_type == DEFAULT_HOST_NATIVE_RUNNER_TYPE {
         return Ok(String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE));
     }
 
-    let unity_version = unity_version.trim();
-    if unity_version.is_empty() {
+    let engine_version = engine_version.trim();
+    if engine_version.is_empty() {
         return Err(invalid_input_error(
-            "unity version is required for build planning".to_owned(),
+            "engine version is required for build planning".to_owned(),
         ));
     }
 
@@ -6136,7 +6431,24 @@ fn is_release_planning_noop_error(error: &io::Error) -> bool {
         || message.contains("has no enabled build targets")
 }
 
-fn detect_release_unity_version(
+fn detect_release_engine_version(
+    repository_engine_kind: EngineKind,
+    repository_url: &str,
+    git_tag: &str,
+    git_auth: &GitAuthOptions,
+) -> io::Result<String> {
+    match repository_engine_kind {
+        EngineKind::Unity => {
+            detect_release_unity_engine_version(repository_url, git_tag, git_auth)
+        }
+        other => Err(invalid_input_error(format!(
+            "repository engine_kind {:?} is not supported for release planning",
+            other.as_str()
+        ))),
+    }
+}
+
+fn detect_release_unity_engine_version(
     repository_url: &str,
     git_tag: &str,
     git_auth: &GitAuthOptions,
@@ -6263,7 +6575,7 @@ fn run_git_command(working_dir: Option<&Path>, args: Vec<String>) -> io::Result<
 
 fn git_command() -> Command {
     #[cfg(test)]
-    if let Some(path) = std::env::var_os("HANDY_UNITY_PUBLISHER_TEST_GIT_EXECUTABLE") {
+    if let Some(path) = std::env::var_os("HANDY_GAMES_PUBLISHER_TEST_GIT_EXECUTABLE") {
         return Command::new(path);
     }
 
@@ -6333,7 +6645,7 @@ fn summarize_release_automation_status(
     ReleaseAutomationStatus {
         release_run_id: release.id,
         git_tag: release.git_tag.clone(),
-        unity_version: release.unity_version.clone(),
+        engine_version: release.engine_version.clone(),
         status: release.status.clone(),
         planned: !build_runs.is_empty(),
         build_process_active,
@@ -6470,12 +6782,13 @@ fn list_process_feed_release_rows(
                    rr.repository_id,
                    r.name,
                    r.repo_url,
+                     r.engine_kind,
                    rr.git_tag,
                    rr.git_commit,
                    rr.trigger_source,
                    rr.trigger_rule_id,
                    rr.source_metadata_json,
-                   rr.unity_version,
+                     rr.engine_version,
                    rr.status,
                    rr.started_at,
                    rr.finished_at,
@@ -6511,6 +6824,7 @@ fn summarize_process_feed_record(
         release,
         repository_name,
         repository_url,
+        repository_engine_kind,
     } = row;
     let build_counts = count_run_statuses(build_runs.iter().map(|run| run.status.as_str()));
     let publish_counts =
@@ -6532,9 +6846,10 @@ fn summarize_process_feed_record(
         repository_id: release.repository_id,
         repository_name,
         repository_url,
+        repository_engine_kind,
         git_tag: release.git_tag,
         git_commit: release.git_commit,
-        unity_version: release.unity_version,
+        engine_version: release.engine_version,
         display_status,
         current_step_label,
         current_step_status,
@@ -7030,7 +7345,7 @@ fn scan_release_run_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReleaseR
         trigger_source: row.get::<_, String>(4)?.trim().to_owned(),
         trigger_rule_id: row.get(5)?,
         source_metadata_json: row.get(6)?,
-        unity_version: normalize_optional_string(row.get(7)?),
+        engine_version: normalize_optional_string(row.get(7)?),
         status: row.get(8)?,
         started_at: normalize_optional_string(row.get(9)?),
         finished_at: normalize_optional_string(row.get(10)?),
@@ -7047,21 +7362,22 @@ fn scan_process_feed_release_row(
         release: ReleaseRunRecord {
             id: row.get(0)?,
             repository_id: row.get(1)?,
-            git_tag: row.get::<_, String>(4)?.trim().to_owned(),
-            git_commit: normalize_optional_string(row.get(5)?),
-            trigger_source: row.get::<_, String>(6)?.trim().to_owned(),
-            trigger_rule_id: row.get(7)?,
-            source_metadata_json: row.get(8)?,
-            unity_version: normalize_optional_string(row.get(9)?),
-            status: row.get(10)?,
-            started_at: normalize_optional_string(row.get(11)?),
-            finished_at: normalize_optional_string(row.get(12)?),
-            error_message: normalize_optional_string(row.get(13)?),
-            created_at: row.get(14)?,
-            updated_at: row.get(15)?,
+            git_tag: row.get::<_, String>(5)?.trim().to_owned(),
+            git_commit: normalize_optional_string(row.get(6)?),
+            trigger_source: row.get::<_, String>(7)?.trim().to_owned(),
+            trigger_rule_id: row.get(8)?,
+            source_metadata_json: row.get(9)?,
+            engine_version: normalize_optional_string(row.get(10)?),
+            status: row.get(11)?,
+            started_at: normalize_optional_string(row.get(12)?),
+            finished_at: normalize_optional_string(row.get(13)?),
+            error_message: normalize_optional_string(row.get(14)?),
+            created_at: row.get(15)?,
+            updated_at: row.get(16)?,
         },
         repository_name: row.get(2)?,
         repository_url: row.get::<_, String>(3)?.trim().to_owned(),
+        repository_engine_kind: row.get::<_, String>(4)?.trim().to_owned(),
     })
 }
 
@@ -7070,7 +7386,7 @@ fn scan_build_run_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<BuildRunRe
         id: row.get(0)?,
         release_run_id: row.get(1)?,
         build_target_id: row.get(2)?,
-        unity_version: normalize_optional_string(row.get(3)?),
+        engine_version: normalize_optional_string(row.get(3)?),
         image_ref: normalize_optional_string(row.get(4)?),
         status: row.get(5)?,
         workspace_path: normalize_optional_string(row.get(6)?),
@@ -7113,6 +7429,22 @@ fn scan_build_run_stage_record(
 fn scan_build_history_record(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<BuildHistoryRecord> {
+    let engine_kind: String = row.get(9)?;
+    let build_kind: String = row.get(10)?;
+    let contract_json: String = row.get(11)?;
+    let projection = resolve_build_target_read_model_projection(
+        engine_kind.trim(),
+        build_kind.trim(),
+        &contract_json,
+    )
+    .map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            11,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })?;
+
     Ok(BuildHistoryRecord {
         build_run_id: row.get(0)?,
         release_run_id: row.get(1)?,
@@ -7123,28 +7455,44 @@ fn scan_build_history_record(
         git_commit: normalize_optional_string(row.get(6)?),
         build_target_id: row.get(7)?,
         build_target_name: row.get(8)?,
-        platform: row.get(9)?,
-        runner_type: row.get::<_, String>(10)?.trim().to_owned(),
-        build_method: normalize_optional_string(row.get(11)?),
-        unity_version: normalize_optional_string(row.get(12)?),
-        image_ref: normalize_optional_string(row.get(13)?),
-        status: row.get(14)?,
-        workspace_path: normalize_optional_string(row.get(15)?),
-        log_path: normalize_optional_string(row.get(16)?),
-        artifact_root_path: normalize_optional_string(row.get(17)?),
-        started_at: normalize_optional_string(row.get(18)?),
-        finished_at: normalize_optional_string(row.get(19)?),
-        error_message: normalize_optional_string(row.get(20)?),
-        artifact_count: row.get(21)?,
-        publish_run_count: row.get(22)?,
-        created_at: row.get(23)?,
-        updated_at: row.get(24)?,
+        unity_target_platform: projection.unity_target_platform,
+        runner_type: row.get::<_, String>(12)?.trim().to_owned(),
+        unity_build_method: projection.unity_build_method,
+        engine_version: normalize_optional_string(row.get(13)?),
+        image_ref: normalize_optional_string(row.get(14)?),
+        status: row.get(15)?,
+        workspace_path: normalize_optional_string(row.get(16)?),
+        log_path: normalize_optional_string(row.get(17)?),
+        artifact_root_path: normalize_optional_string(row.get(18)?),
+        started_at: normalize_optional_string(row.get(19)?),
+        finished_at: normalize_optional_string(row.get(20)?),
+        error_message: normalize_optional_string(row.get(21)?),
+        artifact_count: row.get(22)?,
+        publish_run_count: row.get(23)?,
+        created_at: row.get(24)?,
+        updated_at: row.get(25)?,
     })
 }
 
 fn scan_artifact_inspection_record(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<ArtifactInspectionRecord> {
+    let engine_kind: String = row.get(10)?;
+    let build_kind: String = row.get(11)?;
+    let contract_json: String = row.get(12)?;
+    let projection = resolve_build_target_read_model_projection(
+        engine_kind.trim(),
+        build_kind.trim(),
+        &contract_json,
+    )
+    .map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            12,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })?;
+
     Ok(ArtifactInspectionRecord {
         artifact_id: row.get(0)?,
         build_run_id: row.get(1)?,
@@ -7156,22 +7504,22 @@ fn scan_artifact_inspection_record(
         git_commit: normalize_optional_string(row.get(7)?),
         build_target_id: row.get(8)?,
         build_target_name: row.get::<_, String>(9)?.trim().to_owned(),
-        platform: row.get::<_, String>(10)?.trim().to_owned(),
-        runner_type: row.get::<_, String>(11)?.trim().to_owned(),
-        build_status: row.get::<_, String>(12)?.trim().to_owned(),
-        artifact_name: row.get::<_, String>(13)?.trim().to_owned(),
-        artifact_kind: row.get::<_, String>(14)?.trim().to_owned(),
-        artifact_path: row.get::<_, String>(15)?.trim().to_owned(),
-        artifact_root_path: normalize_optional_string(row.get(16)?),
-        size_bytes: row.get(17)?,
-        checksum_sha256: normalize_optional_string(row.get(18)?),
-        publish_run_count: row.get(19)?,
-        queued_publish_runs: row.get(20)?,
-        running_publish_runs: row.get(21)?,
-        succeeded_publish_runs: row.get(22)?,
-        failed_publish_runs: row.get(23)?,
-        canceled_publish_runs: row.get(24)?,
-        created_at: row.get(25)?,
+        unity_target_platform: projection.unity_target_platform,
+        runner_type: row.get::<_, String>(13)?.trim().to_owned(),
+        build_status: row.get::<_, String>(14)?.trim().to_owned(),
+        artifact_name: row.get::<_, String>(15)?.trim().to_owned(),
+        artifact_kind: row.get::<_, String>(16)?.trim().to_owned(),
+        artifact_path: row.get::<_, String>(17)?.trim().to_owned(),
+        artifact_root_path: normalize_optional_string(row.get(18)?),
+        size_bytes: row.get(19)?,
+        checksum_sha256: normalize_optional_string(row.get(20)?),
+        publish_run_count: row.get(21)?,
+        queued_publish_runs: row.get(22)?,
+        running_publish_runs: row.get(23)?,
+        succeeded_publish_runs: row.get(24)?,
+        failed_publish_runs: row.get(25)?,
+        canceled_publish_runs: row.get(26)?,
+        created_at: row.get(27)?,
     })
 }
 
@@ -7524,17 +7872,17 @@ fn normalize_relative_store_artifact_path(path: &str) -> io::Result<String> {
 }
 
 fn scan_build_execution_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<BuildExecutionPlan> {
-    let unity_version = row
-        .get::<_, Option<String>>(18)?
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-    let image_ref = row
+    let engine_version = row
         .get::<_, Option<String>>(19)?
         .unwrap_or_default()
         .trim()
         .to_owned();
-    if unity_version.is_empty() || image_ref.is_empty() {
+    let image_ref = row
+        .get::<_, Option<String>>(20)?
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if engine_version.is_empty() || image_ref.is_empty() {
         return Err(rusqlite::Error::FromSqlConversionFailure(
             0,
             rusqlite::types::Type::Text,
@@ -7552,25 +7900,26 @@ fn scan_build_execution_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<BuildE
         build_run_id: row.get(0)?,
         release_run_id: row.get(1)?,
         repository_id: row.get(2)?,
-        repository_name: row.get::<_, String>(3)?.trim().to_owned(),
-        repository_credentials_id: row.get(4)?,
-        workspace_root_override: normalize_optional_string(row.get(5)?),
-        artifacts_root_override: normalize_optional_string(row.get(6)?),
-        build_target_id: row.get(7)?,
-        repository_url: row.get::<_, String>(8)?.trim().to_owned(),
-        git_tag: row.get::<_, String>(9)?.trim().to_owned(),
-        git_commit: normalize_optional_string(row.get(10)?),
-        target_name: row.get::<_, String>(11)?.trim().to_owned(),
-        platform: row.get::<_, String>(12)?.trim().to_owned(),
-        runner_type: row.get::<_, String>(13)?.trim().to_owned(),
-        build_method: normalize_optional_string(row.get(14)?),
-        output_kind: normalize_optional_string(row.get(15)?),
-        output_path_template: normalize_optional_string(row.get(16)?),
-        config_json: row.get(17)?,
-        unity_version,
+        engine_kind: parse_engine_kind_sql(3, row.get::<_, String>(3)?)?,
+        repository_name: row.get::<_, String>(4)?.trim().to_owned(),
+        repository_credentials_id: row.get(5)?,
+        workspace_root_override: normalize_optional_string(row.get(6)?),
+        artifacts_root_override: normalize_optional_string(row.get(7)?),
+        build_target_id: row.get(8)?,
+        repository_url: row.get::<_, String>(9)?.trim().to_owned(),
+        git_tag: row.get::<_, String>(10)?.trim().to_owned(),
+        git_commit: normalize_optional_string(row.get(11)?),
+        target_name: row.get::<_, String>(12)?.trim().to_owned(),
+        build_kind: parse_build_kind_sql(13, row.get::<_, String>(13)?)?,
+        contract_json: row.get(14)?,
+        runner_type: row.get::<_, String>(15)?.trim().to_owned(),
+        output_kind: normalize_optional_string(row.get(16)?),
+        output_path_template: normalize_optional_string(row.get(17)?),
+        config_json: row.get(18)?,
+        engine_version,
         image_ref,
-        timeout_seconds: row.get(20)?,
-        status: row.get(21)?,
+        timeout_seconds: row.get(21)?,
+        status: row.get(22)?,
     })
 }
 
@@ -7612,10 +7961,11 @@ fn scan_release_build_planning_state(
     Ok(ReleaseBuildPlanningState {
         repository_id: row.get(0)?,
         repository_url: row.get::<_, String>(1)?.trim().to_owned(),
-        credentials_id: row.get(2)?,
-        git_tag: row.get::<_, String>(3)?.trim().to_owned(),
-        unity_version: normalize_optional_string(row.get(4)?),
-        status: row.get(5)?,
+        engine_kind: parse_engine_kind_sql(2, row.get::<_, String>(2)?)?,
+        credentials_id: row.get(3)?,
+        git_tag: row.get::<_, String>(4)?.trim().to_owned(),
+        engine_version: normalize_optional_string(row.get(5)?),
+        status: row.get(6)?,
     })
 }
 
@@ -7664,6 +8014,7 @@ fn normalize_create_repository_project_input(
     input: CreateRepositoryProjectInput,
 ) -> io::Result<CreateRepositoryProjectInput> {
     let name = require_non_empty(&input.name, "repository project name")?;
+    let engine_kind = normalize_repository_project_engine_kind(&input.engine_kind)?;
     let repo_url = require_non_empty(&input.repo_url, "repository project repo_url")?;
     let default_branch = normalize_optional_input_string(input.default_branch);
     let artifacts_root_override = normalize_optional_input_string(input.artifacts_root_override);
@@ -7686,7 +8037,8 @@ fn normalize_create_repository_project_input(
     let mut build_target_names = HashSet::new();
     let mut build_targets = Vec::with_capacity(input.build_targets.len());
     for target in input.build_targets {
-        let normalized = normalize_create_repository_project_build_target_input(target)?;
+        let normalized =
+            normalize_create_repository_project_build_target_input(target, &engine_kind)?;
         let duplicate_key = normalized.name.to_ascii_lowercase();
         if !build_target_names.insert(duplicate_key) {
             return Err(invalid_input_error(
@@ -7698,6 +8050,7 @@ fn normalize_create_repository_project_input(
 
     Ok(CreateRepositoryProjectInput {
         name,
+        engine_kind,
         repo_url,
         credentials,
         default_branch,
@@ -7715,6 +8068,7 @@ fn normalize_update_repository_project_input(
     require_positive_identifier(input.repository_id, "repository id")?;
 
     let name = require_non_empty(&input.name, "repository project name")?;
+    let engine_kind = normalize_repository_project_engine_kind(&input.engine_kind)?;
     let repo_url = require_non_empty(&input.repo_url, "repository project repo_url")?;
     let default_branch = normalize_optional_input_string(input.default_branch);
     let artifacts_root_override = normalize_optional_input_string(input.artifacts_root_override);
@@ -7735,7 +8089,8 @@ fn normalize_update_repository_project_input(
     let mut build_target_names = HashSet::new();
     let mut build_targets = Vec::with_capacity(input.build_targets.len());
     for target in input.build_targets {
-        let normalized = normalize_update_repository_project_build_target_input(target)?;
+        let normalized =
+            normalize_update_repository_project_build_target_input(target, &engine_kind)?;
 
         if let Some(build_target_id) = normalized.build_target_id {
             if !build_target_ids.insert(build_target_id) {
@@ -7758,6 +8113,7 @@ fn normalize_update_repository_project_input(
     Ok(UpdateRepositoryProjectInput {
         repository_id: input.repository_id,
         name,
+        engine_kind,
         repo_url,
         default_branch,
         artifacts_root_override,
@@ -7780,6 +8136,7 @@ fn normalize_create_repository_project_credentials_input(
 
 fn normalize_create_repository_project_build_target_input(
     input: CreateRepositoryProjectBuildTargetInput,
+    engine_kind: &str,
 ) -> io::Result<CreateRepositoryProjectBuildTargetInput> {
     if input.timeout_seconds <= 0 {
         return Err(invalid_input_error(
@@ -7787,31 +8144,40 @@ fn normalize_create_repository_project_build_target_input(
         ));
     }
 
+    let build_kind =
+        normalize_repository_project_build_kind(&input.build_kind, engine_kind)?;
+    let contract_json = normalize_required_object_json_string(
+        &input.contract_json,
+        "repository project build target contract_json",
+    )?;
+    project_repository_project_build_target_contract(
+        engine_kind,
+        &build_kind,
+        &contract_json,
+    )?;
+
     Ok(CreateRepositoryProjectBuildTargetInput {
         name: require_non_empty(&input.name, "repository project build target name")?,
-        platform: require_non_empty(
-            &input.platform,
-            "repository project build target platform",
-        )?,
+        build_kind,
         runner_type: require_non_empty(
             &input.runner_type,
             "repository project build target runner_type",
         )?,
-        build_method: require_non_empty(
-            &input.build_method,
-            "repository project build target build_method",
-        )?,
         output_kind: normalize_optional_input_string(input.output_kind),
         output_path_template: normalize_optional_input_string(input.output_path_template),
-        unity_version_override: normalize_optional_input_string(input.unity_version_override),
         timeout_seconds: input.timeout_seconds,
         enabled: input.enabled,
-        config_json: normalize_credential_config_json(&input.config_json)?,
+        contract_json,
+        runner_config_json: normalize_required_object_json_string(
+            &input.runner_config_json,
+            "repository project build target runner_config_json",
+        )?,
     })
 }
 
 fn normalize_update_repository_project_build_target_input(
     input: UpdateRepositoryProjectBuildTargetInput,
+    engine_kind: &str,
 ) -> io::Result<UpdateRepositoryProjectBuildTargetInput> {
     if let Some(build_target_id) = input.build_target_id {
         require_positive_identifier(build_target_id, "repository project build target id")?;
@@ -7820,30 +8186,29 @@ fn normalize_update_repository_project_build_target_input(
     let normalized_target = normalize_create_repository_project_build_target_input(
         CreateRepositoryProjectBuildTargetInput {
             name: input.name,
-            platform: input.platform,
+            build_kind: input.build_kind,
             runner_type: input.runner_type,
-            build_method: input.build_method,
             output_kind: input.output_kind,
             output_path_template: input.output_path_template,
-            unity_version_override: input.unity_version_override,
             timeout_seconds: input.timeout_seconds,
             enabled: input.enabled,
-            config_json: input.config_json,
+            contract_json: input.contract_json,
+            runner_config_json: input.runner_config_json,
         },
+        engine_kind,
     )?;
 
     Ok(UpdateRepositoryProjectBuildTargetInput {
         build_target_id: input.build_target_id,
         name: normalized_target.name,
-        platform: normalized_target.platform,
+        build_kind: normalized_target.build_kind,
         runner_type: normalized_target.runner_type,
-        build_method: normalized_target.build_method,
         output_kind: normalized_target.output_kind,
         output_path_template: normalized_target.output_path_template,
-        unity_version_override: normalized_target.unity_version_override,
         timeout_seconds: normalized_target.timeout_seconds,
         enabled: normalized_target.enabled,
-        config_json: normalized_target.config_json,
+        contract_json: normalized_target.contract_json,
+        runner_config_json: normalized_target.runner_config_json,
     })
 }
 
@@ -7862,6 +8227,135 @@ fn normalize_credential_config_json(config_json: &str) -> io::Result<String> {
     }
 
     Ok(config_json)
+}
+
+fn normalize_repository_project_engine_kind(engine_kind: &str) -> io::Result<String> {
+    let normalized = EngineKind::parse(&require_non_empty(
+        engine_kind,
+        "repository project engine_kind",
+    )?)
+    .map_err(|error| invalid_input_error(error.to_string()))?;
+    if normalized != EngineKind::Unity {
+        return Err(invalid_input_error(format!(
+            "repository project engine_kind {:?} is not supported; expected \"unity\"",
+            normalized.as_str()
+        )));
+    }
+
+    Ok(String::from(normalized))
+}
+
+fn normalize_repository_project_build_kind(
+    build_kind: &str,
+    engine_kind: &str,
+) -> io::Result<String> {
+    let repository_engine_kind = EngineKind::parse(engine_kind)
+        .map_err(|error| invalid_input_error(error.to_string()))?;
+    let normalized = BuildKind::parse_or_default(build_kind)
+        .map_err(|error| invalid_input_error(error.to_string()))?;
+
+    match repository_engine_kind {
+        EngineKind::Unity if normalized == BuildKind::Player => Ok(String::from(normalized)),
+        EngineKind::Unity => Err(invalid_input_error(format!(
+            "repository project build target build_kind {:?} is not supported for engine {:?}; expected \"player\"",
+            normalized.as_str(),
+            repository_engine_kind.as_str()
+        ))),
+        other => Err(invalid_input_error(format!(
+            "repository project engine_kind {:?} is not supported",
+            other.as_str()
+        ))),
+    }
+}
+
+fn parse_engine_kind_sql(column_index: usize, value: String) -> rusqlite::Result<EngineKind> {
+    EngineKind::parse(&value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column_index,
+            rusqlite::types::Type::Text,
+            Box::new(io::Error::new(ErrorKind::InvalidInput, error.to_string())),
+        )
+    })
+}
+
+fn parse_build_kind_sql(column_index: usize, value: String) -> rusqlite::Result<BuildKind> {
+    BuildKind::parse_or_default(&value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column_index,
+            rusqlite::types::Type::Text,
+            Box::new(io::Error::new(ErrorKind::InvalidInput, error.to_string())),
+        )
+    })
+}
+
+fn normalize_required_object_json_string(value: &str, label: &str) -> io::Result<String> {
+    let value = require_non_empty(value, label)?;
+    let parsed = serde_json::from_str::<serde_json::Value>(&value).map_err(|error| {
+        invalid_input_error(format!("{label} must be valid JSON: {error}"))
+    })?;
+    if !parsed.is_object() {
+        return Err(invalid_input_error(format!(
+            "{label} must decode to a JSON object"
+        )));
+    }
+
+    Ok(value)
+}
+
+fn project_repository_project_build_target_contract(
+    engine_kind: &str,
+    build_kind: &str,
+    contract_json: &str,
+) -> io::Result<BuildTargetReadModelProjection> {
+    match engine_kind {
+        SUPPORTED_REPOSITORY_ENGINE_UNITY => {
+            if build_kind != SUPPORTED_REPOSITORY_BUILD_KIND_PLAYER {
+                return Err(invalid_input_error(format!(
+                    "repository project build target build_kind {:?} is not supported for engine \"unity\"",
+                    build_kind
+                )));
+            }
+
+            let contract = serde_json::from_str::<RepositoryProjectBuildContractInput>(contract_json)
+                .map_err(|error| {
+                    invalid_input_error(format!(
+                        "repository project build target contract_json must match the supported engine contract schema: {error}"
+                    ))
+                })?;
+            let unity = contract.unity.ok_or_else(|| {
+                invalid_input_error(
+                    "repository project build target contract_json must define contract.unity for engine \"unity\"",
+                )
+            })?;
+
+            Ok(BuildTargetReadModelProjection {
+                unity_target_platform: require_non_empty(
+                    &unity.target_platform,
+                    "repository project build target contract.unity.targetPlatform",
+                )?,
+                unity_build_method: Some(require_non_empty(
+                    &unity.build_method,
+                    "repository project build target contract.unity.buildMethod",
+                )?),
+            })
+        }
+        other => Err(invalid_input_error(format!(
+            "repository project engine_kind {:?} is not supported",
+            other
+        ))),
+    }
+}
+
+fn resolve_build_target_read_model_projection(
+    engine_kind: &str,
+    build_kind: &str,
+    contract_json: &str,
+) -> io::Result<BuildTargetReadModelProjection> {
+    project_repository_project_build_target_contract(
+        engine_kind,
+        build_kind,
+        contract_json,
+    )
 }
 
 fn normalize_optional_input_string(value: Option<String>) -> Option<String> {
@@ -8185,6 +8679,7 @@ mod tests {
         list_artifact_inspection_records, list_build_history_records,
         list_process_feed_page,
         list_build_target_runtime_settings,
+        resolve_build_target_read_model_projection,
         CreateRepositoryProjectBuildTargetInput,
         CreateRepositoryProjectCredentialInput,
         CreateRepositoryProjectInput,
@@ -8216,6 +8711,7 @@ mod tests {
         BUILD_RUN_QUEUE_NAME, PUBLISH_RUN_QUEUE_NAME, RELEASE_RUN_QUEUE_NAME,
         SQLITE_BUSY_TIMEOUT_MILLIS,
     };
+    use runtime_contracts::{BuildKind, EngineKind};
     use crate::lifecycle::{BuildStatus, PublishStatus, ReleaseStatus};
     use runtime_config::{RuntimeConcurrencySettings, RuntimeDirectories};
     use rusqlite::{params, Connection};
@@ -8329,6 +8825,7 @@ mod tests {
                 "0008_build_run_stage_tracking.sql",
                 "0009_build_target_runner_model_cleanup.sql",
                 "0010_engine_contract_model.sql",
+                "0011_runtime_engine_version.sql",
             ]
         );
 
@@ -8373,11 +8870,11 @@ mod tests {
             "build_targets",
             &[
                 "repository_id",
+                "build_kind",
                 "runner_type",
-                "build_method",
                 "output_path_template",
-                "unity_version_override",
                 "timeout_seconds",
+                "contract_json",
                 "config_json"
             ]
         ));
@@ -8391,7 +8888,7 @@ mod tests {
                 "trigger_source",
                 "trigger_rule_id",
                 "source_metadata_json",
-                "unity_version",
+                "engine_version",
                 "status"
             ]
         ));
@@ -8401,7 +8898,7 @@ mod tests {
             &[
                 "release_run_id",
                 "build_target_id",
-                "unity_version",
+                "engine_version",
                 "image_ref",
                 "workspace_path",
                 "log_path",
@@ -8469,12 +8966,13 @@ mod tests {
         let created = LocalCoordinator::new(&layout)
             .create_repository_project(CreateRepositoryProjectInput {
                 name: String::from("Red Horizon"),
+                engine_kind: String::from("unity"),
                 repo_url: String::from("https://example.com/red-horizon.git"),
                 credentials: Some(CreateRepositoryProjectCredentialInput {
                     name: String::from("Red Horizon/origin"),
                     kind: String::from(KIND_GIT_HTTP_BASIC),
                     config_json: String::from(
-                        r#"{"username":"git","password":"keyring://handy-unity-publisher/credential/red-horizon/origin"}"#,
+                        r#"{"username":"git","password":"keyring://handy-games-publisher/credential/red-horizon/origin"}"#,
                     ),
                 }),
                 default_branch: Some(String::from("main")),
@@ -8485,29 +8983,39 @@ mod tests {
                 build_targets: vec![
                     CreateRepositoryProjectBuildTargetInput {
                         name: String::from("Windows"),
-                        platform: String::from("windows"),
+                        build_kind: String::from("player"),
                         runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
-                        build_method: String::from("Builder.PerformWindows"),
                         output_kind: Some(String::from("archive")),
                         output_path_template: None,
-                        unity_version_override: None,
                         timeout_seconds: 3600,
                         enabled: true,
-                        config_json: String::from(
+                        contract_json: serde_json::json!({
+                            "unity": {
+                                "targetPlatform": "StandaloneWindows64",
+                                "buildMethod": "Builder.PerformWindows"
+                            }
+                        })
+                        .to_string(),
+                        runner_config_json: String::from(
                             r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
                         ),
                     },
                     CreateRepositoryProjectBuildTargetInput {
                         name: String::from("WebGL"),
-                        platform: String::from("webgl"),
+                        build_kind: String::from("player"),
                         runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
-                        build_method: String::from("Builder.PerformWebGL"),
                         output_kind: Some(String::from("archive")),
                         output_path_template: None,
-                        unity_version_override: None,
                         timeout_seconds: 3600,
                         enabled: true,
-                        config_json: String::from(
+                        contract_json: serde_json::json!({
+                            "unity": {
+                                "targetPlatform": "WebGL",
+                                "buildMethod": "Builder.PerformWebGL"
+                            }
+                        })
+                        .to_string(),
+                        runner_config_json: String::from(
                             r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
                         ),
                     },
@@ -8538,6 +9046,7 @@ mod tests {
                        artifacts_root_override,
                        workspace_root_override,
                        polling_interval_seconds,
+                      engine_kind,
                        enabled,
                        credentials_id
                 FROM repositories
@@ -8553,8 +9062,9 @@ mod tests {
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, Option<String>>(5)?,
                         row.get::<_, i64>(6)?,
-                        row.get::<_, i64>(7)?,
-                        row.get::<_, Option<i64>>(8)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, Option<i64>>(9)?,
                     ))
                 },
             )
@@ -8566,8 +9076,9 @@ mod tests {
         assert_eq!(repository_row.4.as_deref(), Some("C:/builds/red-horizon"));
         assert_eq!(repository_row.5.as_deref(), Some("C:/workspaces/red-horizon"));
         assert_eq!(repository_row.6, 300);
-        assert_eq!(repository_row.7, 1);
-        assert_eq!(repository_row.8, created.credentials_id);
+        assert_eq!(repository_row.7, "unity");
+        assert_eq!(repository_row.8, 1);
+        assert_eq!(repository_row.9, created.credentials_id);
 
         let credential_row = connection
             .query_row(
@@ -8584,7 +9095,7 @@ mod tests {
             .expect("credential row should exist");
         assert_eq!(credential_row.0, "Red Horizon/origin");
         assert_eq!(credential_row.1, KIND_GIT_HTTP_BASIC);
-        assert!(credential_row.2.contains("keyring://handy-unity-publisher/"));
+        assert!(credential_row.2.contains("keyring://handy-games-publisher/"));
 
         let trigger_rule_count: i64 = connection
             .query_row(
@@ -8594,6 +9105,56 @@ mod tests {
             )
             .expect("poll trigger rule count should load");
         assert_eq!(trigger_rule_count, 1);
+
+        let persisted_targets: Vec<(String, String, String)> = {
+            let mut statement = connection
+                .prepare(
+                    "
+                    SELECT name,
+                           build_kind,
+                           contract_json
+                    FROM build_targets
+                    WHERE repository_id = ?
+                    ORDER BY name ASC
+                    ",
+                )
+                .expect("build targets query should prepare");
+            let rows = statement
+                .query_map([created.repository_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .expect("build target rows should map");
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .expect("build target rows should collect")
+        };
+        assert_eq!(persisted_targets.len(), 2);
+        assert!(persisted_targets.iter().all(|target| target.1 == "player"));
+        assert_eq!(persisted_targets[0].0, "WebGL");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&persisted_targets[0].2)
+                .expect("contract_json should decode"),
+            serde_json::json!({
+                "unity": {
+                    "targetPlatform": "WebGL",
+                    "buildMethod": "Builder.PerformWebGL"
+                }
+            })
+        );
+        assert_eq!(persisted_targets[1].0, "Windows");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&persisted_targets[1].2)
+                .expect("contract_json should decode"),
+            serde_json::json!({
+                "unity": {
+                    "targetPlatform": "StandaloneWindows64",
+                    "buildMethod": "Builder.PerformWindows"
+                }
+            })
+        );
 
         let build_targets = list_build_target_runtime_settings(&layout)
             .expect("build targets should load");
@@ -8613,6 +9174,7 @@ mod tests {
         let created = LocalCoordinator::new(&layout)
             .create_repository_project(CreateRepositoryProjectInput {
                 name: String::from("Old Banner"),
+                engine_kind: String::from("unity"),
                 repo_url: String::from("https://example.com/old-banner.git"),
                 credentials: None,
                 default_branch: Some(String::from("main")),
@@ -8622,15 +9184,20 @@ mod tests {
                 enabled: true,
                 build_targets: vec![CreateRepositoryProjectBuildTargetInput {
                     name: String::from("Windows"),
-                    platform: String::from("windows"),
+                    build_kind: String::from("player"),
                     runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
-                    build_method: String::from("Builder.PerformWindows"),
                     output_kind: Some(String::from("archive")),
                     output_path_template: None,
-                    unity_version_override: None,
                     timeout_seconds: 3600,
                     enabled: true,
-                    config_json: String::from(
+                    contract_json: serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "StandaloneWindows64",
+                            "buildMethod": "Builder.PerformWindows"
+                        }
+                    })
+                    .to_string(),
+                    runner_config_json: String::from(
                         r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
                     ),
                 }],
@@ -8641,6 +9208,7 @@ mod tests {
             .update_repository_project(UpdateRepositoryProjectInput {
                 repository_id: created.repository_id,
                 name: String::from("New Banner"),
+                engine_kind: String::from("unity"),
                 repo_url: String::from("https://example.com/new-banner.git"),
                 default_branch: Some(String::from("release")),
                 artifacts_root_override: None,
@@ -8650,15 +9218,21 @@ mod tests {
                 build_targets: vec![UpdateRepositoryProjectBuildTargetInput {
                     build_target_id: Some(created.build_target_ids[0]),
                     name: String::from("Windows"),
-                    platform: String::from("windows"),
+                    build_kind: String::from("player"),
                     runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
-                    build_method: String::from("Builder.PerformWindows"),
                     output_kind: Some(String::from("archive")),
                     output_path_template: None,
-                    unity_version_override: None,
                     timeout_seconds: 3600,
                     enabled: true,
-                    config_json: String::from(
+                    contract_json: serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "StandaloneWindows64",
+                            "buildMethod": "Builder.PerformWindowsStable",
+                            "editorVersion": "2022.3.14f1"
+                        }
+                    })
+                    .to_string(),
+                    runner_config_json: String::from(
                         r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
                     ),
                 }],
@@ -8687,6 +9261,7 @@ mod tests {
             .query_row(
                 "
                 SELECT name,
+                      engine_kind,
                        repo_url,
                        default_branch,
                        artifacts_root_override,
@@ -8701,25 +9276,63 @@ mod tests {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(2)?,
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, Option<String>>(4)?,
-                        row.get::<_, i64>(5)?,
+                        row.get::<_, Option<String>>(5)?,
                         row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
                     ))
                 },
             )
             .expect("repository row should reload");
         assert_eq!(repository_row.0, "New Banner");
-        assert_eq!(repository_row.1, "https://example.com/new-banner.git");
-        assert_eq!(repository_row.2.as_deref(), Some("release"));
-        assert_eq!(repository_row.3, None);
-        assert_eq!(repository_row.4.as_deref(), Some("D:/workspaces/new-banner"));
-        assert_eq!(repository_row.5, 30);
-        assert_eq!(repository_row.6, 0);
+        assert_eq!(repository_row.1, "unity");
+        assert_eq!(repository_row.2, "https://example.com/new-banner.git");
+        assert_eq!(repository_row.3.as_deref(), Some("release"));
+        assert_eq!(repository_row.4, None);
+        assert_eq!(repository_row.5.as_deref(), Some("D:/workspaces/new-banner"));
+        assert_eq!(repository_row.6, 30);
+        assert_eq!(repository_row.7, 0);
+
+        let build_target_row: (String, String, String) =
+            connection
+                .query_row(
+                    "
+                    SELECT build_kind,
+                           contract_json,
+                           config_json
+                    FROM build_targets
+                    WHERE id = ?
+                    ",
+                    [created.build_target_ids[0]],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .expect("updated build target should reload");
+        assert_eq!(build_target_row.0, "player");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&build_target_row.1)
+                .expect("contract_json should decode"),
+            serde_json::json!({
+                "unity": {
+                    "targetPlatform": "StandaloneWindows64",
+                    "buildMethod": "Builder.PerformWindowsStable",
+                    "editorVersion": "2022.3.14f1"
+                }
+            })
+        );
+        assert_eq!(
+            build_target_row.2,
+            r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#
+        );
 
         drop(connection);
-        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
 
     #[test]
@@ -8732,6 +9345,7 @@ mod tests {
         let created = LocalCoordinator::new(&layout)
             .create_repository_project(CreateRepositoryProjectInput {
                 name: String::from("Target Sync"),
+                engine_kind: String::from("unity"),
                 repo_url: String::from("https://example.com/target-sync.git"),
                 credentials: None,
                 default_branch: Some(String::from("main")),
@@ -8742,29 +9356,41 @@ mod tests {
                 build_targets: vec![
                     CreateRepositoryProjectBuildTargetInput {
                         name: String::from("Windows"),
-                        platform: String::from("windows"),
+                        build_kind: String::from("player"),
                         runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
-                        build_method: String::from("Builder.PerformWindows"),
                         output_kind: Some(String::from("archive")),
                         output_path_template: None,
-                        unity_version_override: None,
                         timeout_seconds: 3600,
                         enabled: true,
-                        config_json: String::from(
+                        contract_json: serde_json::json!({
+                            "unity": {
+                                "targetPlatform": "StandaloneWindows64",
+                                "buildMethod": "Builder.PerformWindows",
+                                "editorVersion": "2022.3.14f1"
+                            }
+                        })
+                        .to_string(),
+                        runner_config_json: String::from(
                             r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
                         ),
                     },
                     CreateRepositoryProjectBuildTargetInput {
                         name: String::from("Linux"),
-                        platform: String::from("linux"),
+                        build_kind: String::from("player"),
                         runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
-                        build_method: String::from("Builder.PerformLinux"),
                         output_kind: Some(String::from("archive")),
                         output_path_template: None,
-                        unity_version_override: None,
                         timeout_seconds: 3600,
                         enabled: true,
-                        config_json: String::from(
+                        contract_json: serde_json::json!({
+                            "unity": {
+                                "targetPlatform": "StandaloneLinux64",
+                                "buildMethod": "Builder.PerformLinux",
+                                "editorVersion": "2022.3.14f1"
+                            }
+                        })
+                        .to_string(),
+                        runner_config_json: String::from(
                             r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
                         ),
                     },
@@ -8792,6 +9418,7 @@ mod tests {
             .update_repository_project(UpdateRepositoryProjectInput {
                 repository_id: created.repository_id,
                 name: String::from("Target Sync"),
+                engine_kind: String::from("unity"),
                 repo_url: String::from("https://example.com/target-sync.git"),
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: None,
@@ -8802,30 +9429,41 @@ mod tests {
                     UpdateRepositoryProjectBuildTargetInput {
                         build_target_id: Some(created.build_target_ids[0]),
                         name: String::from("Windows Stable"),
-                        platform: String::from("windows"),
+                        build_kind: String::from("player"),
                         runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
-                        build_method: String::from("Builder.PerformWindowsStable"),
                         output_kind: Some(String::from("archive")),
                         output_path_template: None,
-                        unity_version_override: None,
                         timeout_seconds: 3600,
                         enabled: true,
-                        config_json: String::from(
+                        contract_json: serde_json::json!({
+                            "unity": {
+                                "targetPlatform": "StandaloneWindows64",
+                                "buildMethod": "Builder.PerformWindowsStable",
+                                "editorVersion": "2022.3.14f1"
+                            }
+                        })
+                        .to_string(),
+                        runner_config_json: String::from(
                             r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
                         ),
                     },
                     UpdateRepositoryProjectBuildTargetInput {
                         build_target_id: None,
                         name: String::from("WebGL"),
-                        platform: String::from("webgl"),
+                        build_kind: String::from("player"),
                         runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
-                        build_method: String::from("Builder.PerformWebGl"),
                         output_kind: Some(String::from("archive")),
                         output_path_template: None,
-                        unity_version_override: None,
                         timeout_seconds: 3600,
                         enabled: true,
-                        config_json: String::from(
+                        contract_json: serde_json::json!({
+                            "unity": {
+                                "targetPlatform": "WebGL",
+                                "buildMethod": "Builder.PerformWebGl"
+                            }
+                        })
+                        .to_string(),
+                        runner_config_json: String::from(
                             r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
                         ),
                     },
@@ -8847,45 +9485,70 @@ mod tests {
             let mut statement = connection
                 .prepare(
                     "
-                    SELECT id, name, platform, build_method, enabled
+                    SELECT id, name, contract_json, enabled
                     FROM build_targets
                     WHERE repository_id = ?
                     ORDER BY id
                     ",
                 )
                 .expect("build targets query should prepare");
-            statement
+            let rows = statement
                 .query_map([created.repository_id], |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(3)?,
                     ))
                 })
-                .expect("build targets should query")
-                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("build targets query should execute");
+            rows.collect::<rusqlite::Result<Vec<_>>>()
                 .expect("build targets should collect")
         };
 
         assert_eq!(target_rows.len(), 3);
         assert_eq!(target_rows[0].0, created.build_target_ids[0]);
         assert_eq!(target_rows[0].1, "Windows Stable");
-        assert_eq!(target_rows[0].2, "windows");
-        assert_eq!(target_rows[0].3.as_deref(), Some("Builder.PerformWindowsStable"));
-        assert_eq!(target_rows[0].4, 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&target_rows[0].2)
+                .expect("target contract_json should decode"),
+            serde_json::json!({
+                "unity": {
+                    "targetPlatform": "StandaloneWindows64",
+                    "buildMethod": "Builder.PerformWindowsStable",
+                    "editorVersion": "2022.3.14f1"
+                }
+            })
+        );
+        assert_eq!(target_rows[0].3, 1);
 
         assert_eq!(target_rows[1].0, linux_target_id);
         assert_eq!(target_rows[1].1, "Linux");
-        assert_eq!(target_rows[1].2, "linux");
-        assert_eq!(target_rows[1].3.as_deref(), Some("Builder.PerformLinux"));
-        assert_eq!(target_rows[1].4, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&target_rows[1].2)
+                .expect("target contract_json should decode"),
+            serde_json::json!({
+                "unity": {
+                    "targetPlatform": "StandaloneLinux64",
+                    "buildMethod": "Builder.PerformLinux",
+                    "editorVersion": "2022.3.14f1"
+                }
+            })
+        );
+        assert_eq!(target_rows[1].3, 0);
 
         assert_eq!(target_rows[2].1, "WebGL");
-        assert_eq!(target_rows[2].2, "webgl");
-        assert_eq!(target_rows[2].3.as_deref(), Some("Builder.PerformWebGl"));
-        assert_eq!(target_rows[2].4, 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&target_rows[2].2)
+                .expect("target contract_json should decode"),
+            serde_json::json!({
+                "unity": {
+                    "targetPlatform": "WebGL",
+                    "buildMethod": "Builder.PerformWebGl"
+                }
+            })
+        );
+        assert_eq!(target_rows[2].3, 1);
 
         let enabled_target_count: i64 = connection
             .query_row(
@@ -8901,6 +9564,45 @@ mod tests {
     }
 
     #[test]
+    fn resolve_build_target_read_model_projection_prefers_contract_values() {
+        let projection = resolve_build_target_read_model_projection(
+            "unity",
+            "player",
+            &serde_json::json!({
+                "unity": {
+                    "targetPlatform": "StandaloneWindows64",
+                    "buildMethod": "Builder.PerformWindows",
+                    "editorVersion": ""
+                }
+            })
+            .to_string(),
+        )
+        .expect("contract projection should load");
+
+        assert_eq!(projection.unity_target_platform, "StandaloneWindows64");
+        assert_eq!(
+            projection.unity_build_method.as_deref(),
+            Some("Builder.PerformWindows")
+        );
+    }
+
+    #[test]
+    fn resolve_build_target_read_model_projection_rejects_missing_contract_values() {
+        let error = resolve_build_target_read_model_projection(
+            "unity",
+            "player",
+            "{}",
+        )
+        .expect_err("read model projection should require a Unity contract");
+
+        assert!(
+            error
+                .to_string()
+                .contains("contract_json must define contract.unity")
+        );
+    }
+
+    #[test]
     fn list_build_target_runtime_settings_returns_persisted_target_config() {
         let root = test_root("list-build-target-runtime-settings");
         let directories = RuntimeDirectories::from_root(&root);
@@ -8913,12 +9615,19 @@ mod tests {
             .execute(
                 "
                 UPDATE build_targets
-                SET build_method = ?,
+                SET contract_json = ?,
                     config_json = ?
                 WHERE id = ?
                 ",
                 params![
-                    "CI.Build.Perform",
+                    serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "windows",
+                            "buildMethod": "CI.Build.Perform",
+                            "editorVersion": ""
+                        }
+                    })
+                    .to_string(),
                     r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
                     fixture.primary_build_target_id,
                 ],
@@ -8943,9 +9652,9 @@ mod tests {
                 repository_id: fixture.repository_id,
                 repository_name: String::from("runtime-settings"),
                 name: String::from("runtime-settings-windows"),
-                platform: String::from("windows"),
+                unity_target_platform: String::from("windows"),
                 runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
-                build_method: Some(String::from("CI.Build.Perform")),
+                unity_build_method: Some(String::from("CI.Build.Perform")),
                 enabled: true,
                 config_json: String::from(
                     r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
@@ -8956,9 +9665,12 @@ mod tests {
         assert_eq!(targets[1].repository_id, fixture.repository_id);
         assert_eq!(targets[1].repository_name, "runtime-settings");
         assert_eq!(targets[1].name, "runtime-settings-linux");
-        assert_eq!(targets[1].platform, "linux");
+        assert_eq!(targets[1].unity_target_platform, "linux");
         assert_eq!(targets[1].runner_type, DEFAULT_HOST_NATIVE_RUNNER_TYPE);
-        assert_eq!(targets[1].build_method, None);
+        assert_eq!(
+            targets[1].unity_build_method.as_deref(),
+            Some("Builder.Perform")
+        );
         assert!(!targets[1].enabled);
         assert_eq!(targets[1].config_json, "{}");
 
@@ -8985,7 +9697,7 @@ mod tests {
                 "
                 UPDATE release_runs
                 SET git_commit = ?,
-                    unity_version = ?
+                    engine_version = ?
                 WHERE id = ?
                 ",
                 params!["cafebabe", "2022.3.20f1", release_run_id],
@@ -8995,13 +9707,20 @@ mod tests {
             .execute(
                 "
                 UPDATE build_targets
-                SET runner_type = ?,
-                    build_method = ?
+                SET contract_json = ?,
+                    runner_type = ?
                 WHERE id = ?
                 ",
                 params![
+                    serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "windows",
+                            "buildMethod": "CI.Build.Perform",
+                            "editorVersion": ""
+                        }
+                    })
+                    .to_string(),
                     DEFAULT_HOST_NATIVE_RUNNER_TYPE,
-                    "CI.Build.Perform",
                     fixture.primary_build_target_id,
                 ],
             )
@@ -9064,10 +9783,13 @@ mod tests {
         assert_eq!(record.git_commit.as_deref(), Some("cafebabe"));
         assert_eq!(record.build_target_id, fixture.primary_build_target_id);
         assert_eq!(record.build_target_name, "build-history-windows");
-        assert_eq!(record.platform, "windows");
+        assert_eq!(record.unity_target_platform, "windows");
         assert_eq!(record.runner_type, DEFAULT_HOST_NATIVE_RUNNER_TYPE);
-        assert_eq!(record.build_method.as_deref(), Some("CI.Build.Perform"));
-        assert_eq!(record.unity_version.as_deref(), Some("2022.3.20f1"));
+        assert_eq!(
+            record.unity_build_method.as_deref(),
+            Some("CI.Build.Perform")
+        );
+        assert_eq!(record.engine_version.as_deref(), Some("2022.3.20f1"));
         assert_eq!(record.image_ref.as_deref(), Some(DEFAULT_HOST_NATIVE_RUNNER_TYPE));
         assert_eq!(record.status, BuildStatus::Succeeded.as_str());
         assert_eq!(
@@ -9109,7 +9831,7 @@ mod tests {
                 "
                 UPDATE release_runs
                 SET git_commit = ?,
-                    unity_version = ?,
+                    engine_version = ?,
                     started_at = ?,
                     finished_at = ?
                 WHERE id = ?
@@ -9162,7 +9884,7 @@ mod tests {
                 "
                 UPDATE release_runs
                 SET git_commit = ?,
-                    unity_version = ?,
+                    engine_version = ?,
                     started_at = ?
                 WHERE id = ?
                 ",
@@ -9224,6 +9946,7 @@ mod tests {
         assert_eq!(first_page.items.len(), 1);
         assert_eq!(first_page.items[0].release_run_id, running_release_run_id);
         assert_eq!(first_page.items[0].repository_name, "process-feed");
+        assert_eq!(first_page.items[0].repository_engine_kind, "unity");
         assert_eq!(first_page.items[0].git_tag, "v1.1.0");
         assert_eq!(first_page.items[0].display_status, "running");
         assert_eq!(first_page.items[0].current_step_label, "Build player");
@@ -9272,7 +9995,7 @@ mod tests {
                 "
                 UPDATE release_runs
                 SET git_commit = ?,
-                    unity_version = ?
+                    engine_version = ?
                 WHERE id = ?
                 ",
                 params!["facefeed", "2022.3.20f1", release_run_id],
@@ -9282,13 +10005,20 @@ mod tests {
             .execute(
                 "
                 UPDATE build_targets
-                SET runner_type = ?,
-                    build_method = ?
+                SET contract_json = ?,
+                    runner_type = ?
                 WHERE id = ?
                 ",
                 params![
+                    serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "windows",
+                            "buildMethod": "CI.Build.Perform",
+                            "editorVersion": ""
+                        }
+                    })
+                    .to_string(),
                     DEFAULT_HOST_NATIVE_RUNNER_TYPE,
-                    "CI.Build.Perform",
                     fixture.primary_build_target_id,
                 ],
             )
@@ -9383,7 +10113,7 @@ mod tests {
         assert_eq!(record.git_commit.as_deref(), Some("facefeed"));
         assert_eq!(record.build_target_id, fixture.primary_build_target_id);
         assert_eq!(record.build_target_name, "artifact-inspection-windows");
-        assert_eq!(record.platform, "windows");
+        assert_eq!(record.unity_target_platform, "windows");
         assert_eq!(record.runner_type, DEFAULT_HOST_NATIVE_RUNNER_TYPE);
         assert_eq!(record.build_status, BuildStatus::Succeeded.as_str());
         assert_eq!(record.artifact_name, "artifact-inspection.zip");
@@ -9442,6 +10172,7 @@ mod tests {
 
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].release_run_id, release_run_id);
+        assert_eq!(page.items[0].repository_engine_kind, "unity");
         assert_eq!(page.items[0].display_status, "queued");
         assert_eq!(page.items[0].current_step_label, "Queued for build");
         assert_eq!(page.items[0].current_step_status, "queued");
@@ -9648,7 +10379,8 @@ mod tests {
                 "0007_repository_path_model_cleanup.sql",
                 "0008_build_run_stage_tracking.sql",
                 "0009_build_target_runner_model_cleanup.sql",
-                "0010_engine_contract_model.sql"
+                "0010_engine_contract_model.sql",
+                "0011_runtime_engine_version.sql"
             ]
         );
 
@@ -9874,21 +10606,21 @@ mod tests {
             String,
             Option<String>,
             Option<String>,
-            Option<String>,
             i64,
             i64,
+            String,
             String,
         ) = connection
             .query_row(
                 "
                 SELECT name,
-                       platform,
+                       build_kind,
                        runner_type,
-                       build_method,
                        output_kind,
-                       unity_version_override,
+                       output_path_template,
                        timeout_seconds,
                        enabled,
+                       contract_json,
                        config_json
                 FROM build_targets
                 WHERE repository_id = (SELECT id FROM repositories WHERE name = ?)
@@ -9910,13 +10642,23 @@ mod tests {
             )
             .expect("seeded build target should load");
         assert_eq!(build_target_row.0, "windows-player");
-        assert_eq!(build_target_row.1, "windows");
+        assert_eq!(build_target_row.1, "player");
         assert_eq!(build_target_row.2, DEFAULT_HOST_NATIVE_RUNNER_TYPE);
-        assert_eq!(build_target_row.3.as_deref(), Some("Builder.PerformWindows"));
-        assert_eq!(build_target_row.4.as_deref(), Some("archive"));
-        assert_eq!(build_target_row.5.as_deref(), Some("6000.4.3f1"));
-        assert_eq!(build_target_row.6, 5400);
-        assert_eq!(build_target_row.7, 1);
+        assert_eq!(build_target_row.3.as_deref(), Some("archive"));
+        assert_eq!(build_target_row.4.as_deref(), Some("Builds/Players"));
+        assert_eq!(build_target_row.5, 5400);
+        assert_eq!(build_target_row.6, 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&build_target_row.7)
+                .expect("contract_json should decode"),
+            serde_json::json!({
+                "unity": {
+                    "targetPlatform": "windows",
+                    "buildMethod": "Builder.PerformWindows",
+                    "editorVersion": "6000.4.3f1"
+                }
+            })
+        );
         assert_eq!(
             build_target_row.8,
             r#"{"unity_executable_path":"C:\\Program Files\\Unity\\Hub\\Editor\\6000.4.3f1\\Editor\\Unity.exe"}"#
@@ -9955,7 +10697,7 @@ mod tests {
             "v1.2.3",
             ReleaseStatus::Queued.as_str(),
         );
-        update_release_run_unity_version(&connection, release_run_id, "2022.3.20f1");
+        update_release_run_engine_version(&connection, release_run_id, "2022.3.20f1");
 
         let queued_build_run_id = insert_build_run(
             &connection,
@@ -10275,7 +11017,7 @@ mod tests {
         assert_eq!(decoded["build_run_id"], build_run_id);
         assert_eq!(decoded["release_run_id"], release_run_id);
         assert_eq!(decoded["build_target_id"], repo.primary_build_target_id);
-        assert_eq!(decoded["unity_version"], "2022.3.20f1");
+        assert_eq!(decoded["engine_version"], "2022.3.20f1");
         assert_eq!(decoded["image_ref"], DEFAULT_HOST_NATIVE_RUNNER_TYPE);
 
         let job: BuildDispatchJob =
@@ -10440,7 +11182,7 @@ mod tests {
         assert_eq!(rebuilt.id, release_run_id);
         assert_eq!(rebuilt.status, ReleaseStatus::Queued.as_str());
         assert_eq!(rebuilt.git_commit.as_deref(), Some("feedface"));
-        assert!(rebuilt.unity_version.is_none());
+        assert!(rebuilt.engine_version.is_none());
         assert_eq!(queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME), 1);
         assert!(!coordinator
             .claim_idempotency(
@@ -10456,7 +11198,7 @@ mod tests {
         assert_eq!(persisted.id, release_run_id);
         assert_eq!(persisted.status, ReleaseStatus::Queued.as_str());
         assert_eq!(persisted.git_commit.as_deref(), Some("feedface"));
-        assert!(persisted.unity_version.is_none());
+        assert!(persisted.engine_version.is_none());
         let metadata: Value = serde_json::from_str(&persisted.source_metadata_json)
             .expect("rebuild metadata should decode");
         assert_eq!(metadata["requested_via"], "hub");
@@ -10483,7 +11225,7 @@ mod tests {
             "v7.1.0",
             ReleaseStatus::Detected.as_str(),
         );
-        update_release_run_unity_version(&connection, release_run_id, "2022.3.20f1");
+        update_release_run_engine_version(&connection, release_run_id, "2022.3.20f1");
         drop(connection);
 
         let coordinator = LocalCoordinator::new(&layout);
@@ -10529,7 +11271,7 @@ mod tests {
             "v7.1.1",
             ReleaseStatus::Detected.as_str(),
         );
-        update_release_run_unity_version(&connection, release_run_id, "2022.3.20f1");
+        update_release_run_engine_version(&connection, release_run_id, "2022.3.20f1");
         drop(connection);
 
         let coordinator = LocalCoordinator::new(&layout);
@@ -10571,14 +11313,14 @@ mod tests {
             "v8.0.0",
             ReleaseStatus::Queued.as_str(),
         );
-        update_release_run_unity_version(&connection, first_release_run_id, "2022.3.20f1");
+        update_release_run_engine_version(&connection, first_release_run_id, "2022.3.20f1");
         let second_release_run_id = insert_release_run(
             &connection,
             repo.repository_id,
             "v8.1.0",
             ReleaseStatus::Detected.as_str(),
         );
-        update_release_run_unity_version(&connection, second_release_run_id, "2022.3.20f1");
+        update_release_run_engine_version(&connection, second_release_run_id, "2022.3.20f1");
         drop(connection);
 
         let coordinator = LocalCoordinator::new(&layout);
@@ -10634,7 +11376,7 @@ mod tests {
             "v5.0.0",
             ReleaseStatus::Queued.as_str(),
         );
-        update_release_run_unity_version(&connection, release_run_id, "2022.3.20f1");
+        update_release_run_engine_version(&connection, release_run_id, "2022.3.20f1");
         drop(connection);
 
         let coordinator = LocalCoordinator::new(&layout);
@@ -10757,8 +11499,8 @@ mod tests {
             .plan_release_builds(release_run_id)
             .expect("planning should detect unity version from the repository tag");
         assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0].unity_version.as_deref(), Some("2021.3.33f1"));
-        assert_eq!(runs[1].unity_version.as_deref(), Some("2021.3.33f1"));
+        assert_eq!(runs[0].engine_version.as_deref(), Some("2021.3.33f1"));
+        assert_eq!(runs[1].engine_version.as_deref(), Some("2021.3.33f1"));
         assert_eq!(
             runs[0].image_ref.as_deref(),
             Some(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
@@ -10770,7 +11512,7 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let release = load_release_record(&connection, release_run_id);
-        assert_eq!(release.unity_version.as_deref(), Some("2021.3.33f1"));
+        assert_eq!(release.engine_version.as_deref(), Some("2021.3.33f1"));
         drop(connection);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
@@ -10819,8 +11561,8 @@ mod tests {
             .plan_release_builds(release_run_id)
             .expect("planning should use repository credentials for unity detection");
         assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0].unity_version.as_deref(), Some("2022.3.20f1"));
-        assert_eq!(runs[1].unity_version.as_deref(), Some("2022.3.20f1"));
+        assert_eq!(runs[0].engine_version.as_deref(), Some("2022.3.20f1"));
+        assert_eq!(runs[1].engine_version.as_deref(), Some("2022.3.20f1"));
 
         let git_log = std::fs::read_to_string(fake_git.log_path())
             .expect("fake git log should be readable");
@@ -10834,7 +11576,7 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let release = load_release_record(&connection, release_run_id);
-        assert_eq!(release.unity_version.as_deref(), Some("2022.3.20f1"));
+        assert_eq!(release.engine_version.as_deref(), Some("2022.3.20f1"));
         drop(connection);
 
         drop(fake_git);
@@ -10868,7 +11610,7 @@ mod tests {
         );
         connection
             .execute(
-                "UPDATE release_runs SET unity_version = ? WHERE id = ?",
+                "UPDATE release_runs SET engine_version = ? WHERE id = ?",
                 params!["2022.3.20f1", release_run_id],
             )
             .expect("release unity version should update");
@@ -10889,6 +11631,119 @@ mod tests {
             Some(crate::DEFAULT_HOST_NATIVE_RUNNER_TYPE)
         );
         assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 1);
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn plan_release_builds_prefers_contract_editor_version_over_legacy_override() {
+        let root = test_root("plan-release-builds-contract-editor-version");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repo = seed_repository_fixture(&connection, "planning-repo-contract-editor-version");
+        connection
+            .execute(
+                "
+                UPDATE build_targets
+                SET build_kind = ?,
+                    contract_json = ?
+                WHERE id = ?
+                ",
+                params![
+                    "player",
+                    serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "windows",
+                            "buildMethod": "Builder.Perform",
+                            "editorVersion": "6000.1.5f1"
+                        }
+                    })
+                    .to_string(),
+                    repo.primary_build_target_id,
+                ],
+            )
+            .expect("primary build target contract should update");
+        let release_run_id = insert_release_run(
+            &connection,
+            repo.repository_id,
+            "v5.3.0",
+            ReleaseStatus::Queued.as_str(),
+        );
+        connection
+            .execute(
+                "UPDATE release_runs SET engine_version = ? WHERE id = ?",
+                params!["2022.3.20f1", release_run_id],
+            )
+            .expect("release unity version should update");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let runs = coordinator
+            .plan_release_builds(release_run_id)
+            .expect("planning should prefer contract editorVersion when present");
+
+        let primary = runs
+            .iter()
+            .find(|run| run.build_target_id == repo.primary_build_target_id)
+            .expect("primary build run should exist");
+        let secondary = runs
+            .iter()
+            .find(|run| run.build_target_id == repo.secondary_build_target_id)
+            .expect("secondary build run should exist");
+
+        assert_eq!(primary.engine_version.as_deref(), Some("6000.1.5f1"));
+        assert_eq!(secondary.engine_version.as_deref(), Some("2022.3.20f1"));
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn plan_release_builds_rejects_missing_unity_contract_payload() {
+        let root = test_root("plan-release-builds-missing-unity-contract");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repo = seed_repository_fixture(&connection, "planning-repo-missing-unity-contract");
+        connection
+            .execute(
+                "
+                UPDATE build_targets
+                SET build_kind = ?,
+                    contract_json = ?
+                WHERE id = ?
+                ",
+                params!["player", "{}", repo.primary_build_target_id],
+            )
+            .expect("primary build target contract should update");
+        let release_run_id = insert_release_run(
+            &connection,
+            repo.repository_id,
+            "v5.4.0",
+            ReleaseStatus::Queued.as_str(),
+        );
+        connection
+            .execute(
+                "UPDATE release_runs SET engine_version = ? WHERE id = ?",
+                params!["2022.3.20f1", release_run_id],
+            )
+            .expect("release unity version should update");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let error = coordinator
+            .plan_release_builds(release_run_id)
+            .expect_err("planning should reject build targets without a Unity contract payload");
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing contract_json.unity for Unity planning")
+        );
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -10916,6 +11771,7 @@ mod tests {
                 build_run_id: fixture.build_run_id,
                 release_run_id: fixture.release_run_id,
                 repository_id: fixture.repository_id,
+                engine_kind: EngineKind::Unity,
                 repository_name: String::from("build-execution-plan"),
                 repository_credentials_id: None,
                 workspace_root_override: None,
@@ -10925,13 +11781,20 @@ mod tests {
                 git_tag: String::from("v10.0.0"),
                 git_commit: Some(String::from("deadbeef")),
                 target_name: String::from("build-execution-plan-windows"),
-                platform: String::from("windows"),
+                build_kind: BuildKind::Player,
+                contract_json: serde_json::json!({
+                    "unity": {
+                        "targetPlatform": "windows",
+                        "buildMethod": "CI.Build.Perform",
+                        "editorVersion": ""
+                    }
+                })
+                .to_string(),
                 runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
-                build_method: Some(String::from("CI.Build.Perform")),
                 output_kind: Some(String::from("archive")),
                 output_path_template: Some(String::from("players/game.zip")),
                 config_json: String::from(r#"{"optimize":true}"#),
-                unity_version: String::from("2022.3.20f1"),
+                engine_version: String::from("2022.3.20f1"),
                 image_ref: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
                 timeout_seconds: 900,
                 status: String::from("queued"),
@@ -11465,20 +12328,27 @@ mod tests {
                 INSERT INTO build_targets (
                     repository_id,
                     name,
-                    platform,
+                    build_kind,
                     runner_type,
-                    build_method,
                     enabled,
+                    contract_json,
                     config_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ",
                 params![
                     repository_id,
                     "windows-player",
-                    "windows",
+                    "player",
                     "host-native",
-                    "Builder.BuildWindows",
                     1,
+                    serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "windows",
+                            "buildMethod": "Builder.BuildWindows",
+                            "editorVersion": ""
+                        }
+                    })
+                    .to_string(),
                     "{}",
                 ],
             )
@@ -12442,10 +13312,10 @@ mod tests {
         let interrupted_builds = vec![InterruptedBuildRecoveryRecord {
             build_run_id: 3,
             workspace_path: String::from(
-                r"D:\Users\gabao\RevolutionsHandyUnityPublisherWorkspace\runs\build-run-3-attempt-25496-1778529831533390600",
+                r"D:\Users\gabao\RevolutionsHandyGamesPublisherWorkspace\runs\build-run-3-attempt-25496-1778529831533390600",
             ),
             log_path: Some(String::from(
-                r"D:\Users\gabao\RevolutionsHandyUnityPublisherWorkspace\runs\build-run-3-attempt-25496-1778529831533390600\logs\03-unity-build.log",
+                r"D:\Users\gabao\RevolutionsHandyGamesPublisherWorkspace\runs\build-run-3-attempt-25496-1778529831533390600\logs\03-unity-build.log",
             )),
             interruption_kind: String::from(RECOVERY_INTERRUPTION_KIND_SYSTEM),
             interruption_message: String::from(
@@ -12456,9 +13326,9 @@ mod tests {
             ObservedProcess {
                 pid: 25496,
                 parent_pid: Some(17664),
-                name: String::from("hup-runtime.exe"),
+                name: String::from("hgp-runtime.exe"),
                 command_line: String::from(
-                    r#""C:\Users\gabao\projects\handy-unity-publisher\target\debug\hup-runtime.exe" serve"#,
+                    r#""C:\Users\gabao\projects\handy-games-publisher\target\debug\hgp-runtime.exe" serve"#,
                 ),
             },
             ObservedProcess {
@@ -12466,7 +13336,7 @@ mod tests {
                 parent_pid: Some(25496),
                 name: String::from("Unity.exe"),
                 command_line: String::from(
-                    r#""C:\Program Files\Unity\Hub\Editor\6000.4.3f1\Editor\Unity.exe" -batchmode -quit -nographics -logFile D:\Users\gabao\RevolutionsHandyUnityPublisherWorkspace\runs\build-run-3-attempt-25496-1778529831533390600\logs\03-unity-build.log -projectPath D:\Users\gabao\RevolutionsHandyUnityPublisherWorkspace\runs\build-run-3-attempt-25496-1778529831533390600\source"#,
+                    r#""C:\Program Files\Unity\Hub\Editor\6000.4.3f1\Editor\Unity.exe" -batchmode -quit -nographics -logFile D:\Users\gabao\RevolutionsHandyGamesPublisherWorkspace\runs\build-run-3-attempt-25496-1778529831533390600\logs\03-unity-build.log -projectPath D:\Users\gabao\RevolutionsHandyGamesPublisherWorkspace\runs\build-run-3-attempt-25496-1778529831533390600\source"#,
                 ),
             },
             ObservedProcess {
@@ -12474,7 +13344,7 @@ mod tests {
                 parent_pid: None,
                 name: String::from("powershell.exe"),
                 command_line: String::from(
-                    r#"powershell -NoProfile -Command \"Get-Content -Tail 40 'D:\Users\gabao\RevolutionsHandyUnityPublisherWorkspace\runs\build-run-3-attempt-25496-1778529831533390600\logs\03-unity-build.log'\""#,
+                    r#"powershell -NoProfile -Command \"Get-Content -Tail 40 'D:\Users\gabao\RevolutionsHandyGamesPublisherWorkspace\runs\build-run-3-attempt-25496-1778529831533390600\logs\03-unity-build.log'\""#,
                 ),
             },
         ];
@@ -12584,7 +13454,7 @@ mod tests {
                        trigger_source,
                        trigger_rule_id,
                        source_metadata_json,
-                       unity_version,
+                       engine_version,
                        status,
                        started_at,
                        finished_at,
@@ -12610,7 +13480,7 @@ mod tests {
         assert_eq!(runs[0].release_run_id, release_run_id);
         assert_eq!(runs[0].build_target_id, primary_build_target_id);
         assert_eq!(runs[0].status, BuildStatus::Queued.as_str());
-        assert_eq!(runs[0].unity_version.as_deref(), Some("2022.3.20f1"));
+        assert_eq!(runs[0].engine_version.as_deref(), Some("2022.3.20f1"));
         assert_eq!(
             runs[0].image_ref.as_deref(),
             Some(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
@@ -12618,7 +13488,7 @@ mod tests {
         assert_eq!(runs[1].release_run_id, release_run_id);
         assert_eq!(runs[1].build_target_id, secondary_build_target_id);
         assert_eq!(runs[1].status, BuildStatus::Queued.as_str());
-        assert_eq!(runs[1].unity_version.as_deref(), Some("2022.3.20f1"));
+        assert_eq!(runs[1].engine_version.as_deref(), Some("2022.3.20f1"));
         assert_eq!(
             runs[1].image_ref.as_deref(),
             Some(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
@@ -12669,24 +13539,62 @@ mod tests {
     ) -> RepositoryFixture {
         connection
             .execute(
-                "INSERT INTO repositories (name, repo_url) VALUES (?, ?)",
-                params![name, repository_url],
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params![name, repository_url, "unity"],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
 
         connection
             .execute(
-                "INSERT INTO build_targets (repository_id, name, platform) VALUES (?, ?, ?)",
-                params![repository_id, format!("{name}-windows"), "windows"],
+                "
+                INSERT INTO build_targets (
+                    repository_id,
+                    name,
+                    build_kind,
+                    contract_json
+                ) VALUES (?, ?, ?, ?)
+                ",
+                params![
+                    repository_id,
+                    format!("{name}-windows"),
+                    "player",
+                    serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "windows",
+                            "buildMethod": "Builder.Perform",
+                            "editorVersion": ""
+                        }
+                    })
+                    .to_string(),
+                ],
             )
             .expect("primary build target should insert");
         let primary_build_target_id = connection.last_insert_rowid();
 
         connection
             .execute(
-                "INSERT INTO build_targets (repository_id, name, platform) VALUES (?, ?, ?)",
-                params![repository_id, format!("{name}-linux"), "linux"],
+                "
+                INSERT INTO build_targets (
+                    repository_id,
+                    name,
+                    build_kind,
+                    contract_json
+                ) VALUES (?, ?, ?, ?)
+                ",
+                params![
+                    repository_id,
+                    format!("{name}-linux"),
+                    "player",
+                    serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "linux",
+                            "buildMethod": "Builder.Perform",
+                            "editorVersion": ""
+                        }
+                    })
+                    .to_string(),
+                ],
             )
             .expect("secondary build target should insert");
         let secondary_build_target_id = connection.last_insert_rowid();
@@ -12723,7 +13631,8 @@ mod tests {
             .execute(
                 "
                 UPDATE build_targets
-                SET build_method = ?,
+                SET build_kind = ?,
+                    contract_json = ?,
                     output_kind = ?,
                     output_path_template = ?,
                     config_json = ?,
@@ -12731,7 +13640,15 @@ mod tests {
                 WHERE id = ?
                 ",
                 params![
-                    "CI.Build.Perform",
+                    "player",
+                    serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "windows",
+                            "buildMethod": "CI.Build.Perform",
+                            "editorVersion": ""
+                        }
+                    })
+                    .to_string(),
                     "archive",
                     "players/game.zip",
                     r#"{"optimize":true}"#,
@@ -12752,7 +13669,7 @@ mod tests {
                 "
                 UPDATE release_runs
                 SET git_commit = ?,
-                    unity_version = ?
+                    engine_version = ?
                 WHERE id = ?
                 ",
                 params!["deadbeef", "2022.3.20f1", release_run_id],
@@ -12870,7 +13787,7 @@ mod tests {
 
             let original_path = std::env::var_os("PATH");
             let original_git_executable =
-                std::env::var_os("HANDY_UNITY_PUBLISHER_TEST_GIT_EXECUTABLE");
+                std::env::var_os("HANDY_GAMES_PUBLISHER_TEST_GIT_EXECUTABLE");
             let mut path_value = OsString::from(bin_dir.as_os_str());
             path_value.push(if cfg!(windows) { ";" } else { ":" });
             if let Some(existing_path) = &original_path {
@@ -12878,7 +13795,7 @@ mod tests {
             }
             std::env::set_var("PATH", &path_value);
             std::env::set_var(
-                "HANDY_UNITY_PUBLISHER_TEST_GIT_EXECUTABLE",
+                "HANDY_GAMES_PUBLISHER_TEST_GIT_EXECUTABLE",
                 &script_path,
             );
 
@@ -12898,9 +13815,9 @@ mod tests {
     impl Drop for FakeGitFixture {
         fn drop(&mut self) {
             if let Some(path) = &self.original_git_executable {
-                std::env::set_var("HANDY_UNITY_PUBLISHER_TEST_GIT_EXECUTABLE", path);
+                std::env::set_var("HANDY_GAMES_PUBLISHER_TEST_GIT_EXECUTABLE", path);
             } else {
-                std::env::remove_var("HANDY_UNITY_PUBLISHER_TEST_GIT_EXECUTABLE");
+                std::env::remove_var("HANDY_GAMES_PUBLISHER_TEST_GIT_EXECUTABLE");
             }
 
             if let Some(path) = &self.original_path {
@@ -13041,15 +13958,15 @@ mod tests {
         connection.last_insert_rowid()
     }
 
-    fn update_release_run_unity_version(
+    fn update_release_run_engine_version(
         connection: &Connection,
         release_run_id: i64,
-        unity_version: &str,
+        engine_version: &str,
     ) {
         connection
             .execute(
-                "UPDATE release_runs SET unity_version = ? WHERE id = ?",
-                params![unity_version, release_run_id],
+                "UPDATE release_runs SET engine_version = ? WHERE id = ?",
+                params![engine_version, release_run_id],
             )
             .expect("release unity version should update");
     }
@@ -13068,7 +13985,7 @@ mod tests {
                     git_commit,
                     trigger_source,
                     source_metadata_json,
-                    unity_version,
+                    engine_version,
                     status
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ",
@@ -13106,17 +14023,17 @@ mod tests {
     fn update_build_run_plan(
         connection: &Connection,
         build_run_id: i64,
-        unity_version: &str,
+        engine_version: &str,
         image_ref: &str,
     ) {
         connection
             .execute(
                 "
                 UPDATE build_runs
-                SET unity_version = ?, image_ref = ?
+                SET engine_version = ?, image_ref = ?
                 WHERE id = ?
                 ",
-                params![unity_version, image_ref, build_run_id],
+                params![engine_version, image_ref, build_run_id],
             )
             .expect("build run plan should update");
     }
@@ -13208,10 +14125,10 @@ mod tests {
         connection
             .execute(
                 "
-                INSERT INTO repositories (name, repo_url)
-                VALUES (?, ?)
+                INSERT INTO repositories (name, repo_url, engine_kind)
+                VALUES (?, ?, ?)
                 ",
-                params!["repo", "https://example.com/repo.git"],
+                params!["repo", "https://example.com/repo.git", "unity"],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -13219,10 +14136,27 @@ mod tests {
         connection
             .execute(
                 "
-                INSERT INTO build_targets (repository_id, name, platform)
-                VALUES (?, ?, ?)
+                INSERT INTO build_targets (
+                    repository_id,
+                    name,
+                    build_kind,
+                    contract_json
+                )
+                VALUES (?, ?, ?, ?)
                 ",
-                params![repository_id, "windows-player", "windows"],
+                params![
+                    repository_id,
+                    "windows-player",
+                    "player",
+                    serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "windows",
+                            "buildMethod": "Builder.Perform",
+                            "editorVersion": ""
+                        }
+                    })
+                    .to_string(),
+                ],
             )
             .expect("build target should insert");
         let build_target_id = connection.last_insert_rowid();
@@ -13384,7 +14318,7 @@ mod tests {
 
     fn test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "handy-unity-publisher-runtime-store-{label}-{}",
+            "handy-games-publisher-runtime-store-{label}-{}",
             std::process::id()
         ))
     }

@@ -213,7 +213,11 @@ pub struct UnityBuildContractSpec {
     pub target_platform: String,
     #[serde(rename = "buildMethod", default)]
     pub build_method: String,
-    #[serde(rename = "editorVersion", default)]
+    #[serde(
+        rename = "editorVersion",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub editor_version: String,
 }
 
@@ -299,12 +303,9 @@ struct StoredBuildTarget {
     repository_id: i64,
     name: String,
     build_kind: String,
-    platform: String,
     runner_type: String,
-    build_method: Option<String>,
     output_kind: Option<String>,
     output_path_template: Option<String>,
-    unity_version_override: Option<String>,
     timeout_seconds: i64,
     enabled: bool,
     contract_json: String,
@@ -920,28 +921,11 @@ fn sync_build_targets(
         let config_json = marshal_json_object(&target_spec.config)
             .map_err(|error| format!("marshal build target {:?} config: {error}", target_spec.name))?;
         let enabled = bool_value(target_spec.enabled, true);
-        let (platform, build_method, engine_version_override) =
-            match repository_engine.as_str() {
-                SUPPORTED_ENGINE_UNITY => {
-                    let unity_contract = target_spec.contract.unity.as_ref().ok_or_else(|| {
-                        format!(
-                            "build target {:?} is missing contract.unity after validation",
-                            target_spec.name
-                        )
-                    })?;
-                    (
-                        unity_contract.target_platform.as_str(),
-                        unity_contract.build_method.as_str(),
-                        unity_contract.editor_version.as_str(),
-                    )
-                }
-                other => {
-                    return Err(format!(
-                        "pipeline {:?} uses unsupported engine {other:?}",
-                        manifest.metadata.name
-                    ));
-                }
-            };
+        validate_build_target_contract(
+            repository_engine.as_str(),
+            &build_kind,
+            &contract_json,
+        )?;
 
         let target = if let Some(existing) = existing_by_name.get(target_spec.name.trim()) {
             update_build_target(
@@ -949,12 +933,9 @@ fn sync_build_targets(
                 existing.id,
                 &target_spec.name,
                 &build_kind,
-                platform,
                 runner_type(&target_spec.runner.runner_type),
-                build_method,
                 &target_spec.output.kind,
                 &target_spec.output.path,
-                engine_version_override,
                 runner_timeout(target_spec.runner.timeout_seconds),
                 enabled,
                 &contract_json,
@@ -967,12 +948,9 @@ fn sync_build_targets(
                 repository.id,
                 &target_spec.name,
                 &build_kind,
-                platform,
                 runner_type(&target_spec.runner.runner_type),
-                build_method,
                 &target_spec.output.kind,
                 &target_spec.output.path,
-                engine_version_override,
                 runner_timeout(target_spec.runner.timeout_seconds),
                 enabled,
                 &contract_json,
@@ -995,12 +973,9 @@ fn sync_build_targets(
             existing.id,
             &existing.name,
             &existing.build_kind,
-            &existing.platform,
             &existing.runner_type,
-            existing.build_method.as_deref().unwrap_or_default(),
             existing.output_kind.as_deref().unwrap_or_default(),
             existing.output_path_template.as_deref().unwrap_or_default(),
-            existing.unity_version_override.as_deref().unwrap_or_default(),
             existing.timeout_seconds,
             false,
             &existing.contract_json,
@@ -1293,10 +1268,9 @@ fn list_build_targets(
     let mut statement = connection
         .prepare(
             "
-            SELECT id, repository_id, name, build_kind, platform, runner_type,
-                     build_method, output_kind, output_path_template,
-                     unity_version_override, timeout_seconds, enabled,
-                     contract_json, config_json
+            SELECT id, repository_id, name, build_kind, runner_type,
+                     output_kind, output_path_template, timeout_seconds,
+                     enabled, contract_json, config_json
             FROM build_targets
             WHERE repository_id = ?
             ORDER BY id
@@ -1310,16 +1284,13 @@ fn list_build_targets(
                 repository_id: row.get(1)?,
                 name: row.get(2)?,
                 build_kind: row.get(3)?,
-                platform: row.get(4)?,
-                runner_type: row.get(5)?,
-                build_method: row.get(6)?,
-                output_kind: row.get(7)?,
-                output_path_template: row.get(8)?,
-                unity_version_override: row.get(9)?,
-                timeout_seconds: row.get(10)?,
-                enabled: row.get::<_, i64>(11)? != 0,
-                contract_json: row.get(12)?,
-                config_json: row.get(13)?,
+                runner_type: row.get(4)?,
+                output_kind: row.get(5)?,
+                output_path_template: row.get(6)?,
+                timeout_seconds: row.get(7)?,
+                enabled: row.get::<_, i64>(8)? != 0,
+                contract_json: row.get(9)?,
+                config_json: row.get(10)?,
             })
         })
         .map_err(sqlite_error)?;
@@ -1533,12 +1504,9 @@ fn create_build_target(
     repository_id: i64,
     name: &str,
     build_kind: &str,
-    platform: &str,
     runner_type: &str,
-    build_method: &str,
     output_kind: &str,
     output_path_template: &str,
-    unity_version_override: &str,
     timeout_seconds: i64,
     enabled: bool,
     contract_json: &str,
@@ -1550,29 +1518,23 @@ fn create_build_target(
             repository_id,
             name,
             build_kind,
-            platform,
             runner_type,
-            build_method,
             output_kind,
             output_path_template,
-            unity_version_override,
             timeout_seconds,
             enabled,
             contract_json,
             config_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
         params![
             repository_id,
             name.trim(),
             build_kind.trim(),
-            platform.trim(),
             runner_type.trim(),
-            nullable_string(build_method),
             nullable_string(output_kind),
             nullable_string(output_path_template),
-            nullable_string(unity_version_override),
             timeout_seconds,
             bool_to_int(enabled),
             contract_json,
@@ -1588,12 +1550,9 @@ fn update_build_target(
     id: i64,
     name: &str,
     build_kind: &str,
-    platform: &str,
     runner_type: &str,
-    build_method: &str,
     output_kind: &str,
     output_path_template: &str,
-    unity_version_override: &str,
     timeout_seconds: i64,
     enabled: bool,
     contract_json: &str,
@@ -1604,12 +1563,9 @@ fn update_build_target(
         UPDATE build_targets
         SET name = ?,
             build_kind = ?,
-            platform = ?,
             runner_type = ?,
-            build_method = ?,
             output_kind = ?,
             output_path_template = ?,
-            unity_version_override = ?,
             timeout_seconds = ?,
             enabled = ?,
             contract_json = ?,
@@ -1620,12 +1576,9 @@ fn update_build_target(
         params![
             name.trim(),
             build_kind.trim(),
-            platform.trim(),
             runner_type.trim(),
-            nullable_string(build_method),
             nullable_string(output_kind),
             nullable_string(output_path_template),
-            nullable_string(unity_version_override),
             timeout_seconds,
             bool_to_int(enabled),
             contract_json,
@@ -1639,10 +1592,9 @@ fn update_build_target(
 fn get_build_target(connection: &Connection, id: i64) -> rusqlite::Result<StoredBuildTarget> {
     connection.query_row(
         "
-        SELECT id, repository_id, name, build_kind, platform, runner_type,
-             build_method, output_kind, output_path_template,
-             unity_version_override, timeout_seconds, enabled,
-             contract_json, config_json
+        SELECT id, repository_id, name, build_kind, runner_type,
+             output_kind, output_path_template, timeout_seconds,
+             enabled, contract_json, config_json
         FROM build_targets
         WHERE id = ?
         ",
@@ -1653,16 +1605,13 @@ fn get_build_target(connection: &Connection, id: i64) -> rusqlite::Result<Stored
                 repository_id: row.get(1)?,
                 name: row.get(2)?,
                 build_kind: row.get(3)?,
-                platform: row.get(4)?,
-                runner_type: row.get(5)?,
-                build_method: row.get(6)?,
-                output_kind: row.get(7)?,
-                output_path_template: row.get(8)?,
-                unity_version_override: row.get(9)?,
-                timeout_seconds: row.get(10)?,
-                enabled: row.get::<_, i64>(11)? != 0,
-                contract_json: row.get(12)?,
-                config_json: row.get(13)?,
+                runner_type: row.get(4)?,
+                output_kind: row.get(5)?,
+                output_path_template: row.get(6)?,
+                timeout_seconds: row.get(7)?,
+                enabled: row.get::<_, i64>(8)? != 0,
+                contract_json: row.get(9)?,
+                config_json: row.get(10)?,
             })
         },
     )
@@ -1857,6 +1806,65 @@ fn marshal_contract_json(value: &BuildContractSpec) -> Result<String, String> {
     serde_json::to_string(value).map_err(|error| error.to_string())
 }
 
+fn validate_build_target_contract(
+    repository_engine: &str,
+    build_kind: &str,
+    contract_json: &str,
+) -> Result<(), String> {
+    let normalized_build_kind = if build_kind.trim().is_empty() {
+        DEFAULT_BUILD_KIND.to_owned()
+    } else {
+        build_kind.trim().to_ascii_lowercase()
+    };
+
+    match repository_engine {
+        SUPPORTED_ENGINE_UNITY => {
+            if normalized_build_kind != DEFAULT_BUILD_KIND {
+                return Err(format!(
+                    "build target contract projection does not support buildKind {:?} for engine \"unity\"",
+                    normalized_build_kind
+                ));
+            }
+
+            let trimmed_contract_json = contract_json.trim();
+            if trimmed_contract_json.is_empty() {
+                return Err(String::from(
+                    "build target contract_json must not be empty for engine \"unity\"",
+                ));
+            }
+
+            let contract = serde_json::from_str::<BuildContractSpec>(trimmed_contract_json)
+                .map_err(|error| {
+                    format!(
+                        "build target contract_json must match the supported engine contract schema: {error}"
+                    )
+                })?;
+            let Some(unity) = contract.unity else {
+                return Err(String::from(
+                    "build target contract_json must define contract.unity for engine \"unity\"",
+                ));
+            };
+
+            let platform = unity.target_platform.trim();
+            let Some(_) = normalize_optional_owned_string(&unity.build_method) else {
+                return Err(String::from(
+                    "build target contract_json must define contract.unity.buildMethod for engine \"unity\"",
+                ));
+            };
+            if platform.is_empty() {
+                return Err(String::from(
+                    "build target contract_json must define contract.unity.targetPlatform for engine \"unity\"",
+                ));
+            }
+
+            Ok(())
+        }
+        other => Err(format!(
+            "build target contract projection does not support engine {other:?}"
+        )),
+    }
+}
+
 fn validate_requested_output_path(output_kind: &str, output_path_template: &str) -> Result<(), String> {
     let trimmed_kind = output_kind.trim();
     let trimmed_path = output_path_template.trim();
@@ -1933,6 +1941,15 @@ fn publish_kind(value: &str) -> &str {
 
 fn bool_value(value: Option<bool>, fallback: bool) -> bool {
     value.unwrap_or(fallback)
+}
+
+fn normalize_optional_owned_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
 }
 
 fn nullable_string(value: &str) -> Option<&str> {
@@ -2103,18 +2120,15 @@ mod tests {
             .expect("build target should exist");
         let build_target = connection
             .query_row(
-                "SELECT build_kind, contract_json, platform, build_method, unity_version_override, runner_type, timeout_seconds, config_json FROM build_targets WHERE id = ?",
+                "SELECT build_kind, contract_json, runner_type, timeout_seconds, config_json FROM build_targets WHERE id = ?",
                 [build_target_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, i64>(6)?,
-                        row.get::<_, String>(7)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
                     ))
                 },
             )
@@ -2124,12 +2138,9 @@ mod tests {
             build_target.1,
             r#"{"unity":{"targetPlatform":"StandaloneLinux64","buildMethod":"Builder.BuildLinux64","editorVersion":"2022.3.14f1"}}"#
         );
-        assert_eq!(build_target.2, "StandaloneLinux64");
-        assert_eq!(build_target.3.as_deref(), Some("Builder.BuildLinux64"));
-        assert_eq!(build_target.4.as_deref(), Some("2022.3.14f1"));
-        assert_eq!(build_target.5, "host-native");
-        assert_eq!(build_target.6, 5400);
-        assert_eq!(build_target.7, r#"{"compression":"zip"}"#);
+        assert_eq!(build_target.2, "host-native");
+        assert_eq!(build_target.3, 5400);
+        assert_eq!(build_target.4, r#"{"compression":"zip"}"#);
 
         let publish_target_id = connection
             .query_row(
@@ -2235,12 +2246,21 @@ mod tests {
 
         let build_target = connection
             .query_row(
-                "SELECT enabled FROM build_targets WHERE name = ?",
+                "SELECT enabled, contract_json FROM build_targets WHERE name = ?",
                 ["linux64"],
-                |row| row.get::<_, i64>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                    ))
+                },
             )
             .expect("build target should exist");
-        assert_eq!(build_target, 0);
+        assert_eq!(build_target.0, 0);
+        assert_eq!(
+            build_target.1,
+            r#"{"unity":{"targetPlatform":"StandaloneLinux64","buildMethod":"Builder.BuildLinux64"}}"#
+        );
     }
 
     #[test]

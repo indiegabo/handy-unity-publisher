@@ -376,7 +376,7 @@ mod tests {
 
     fn test_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "handy-unity-publisher-runtime-publish-{label}-{}",
+            "handy-games-publisher-runtime-publish-{label}-{}",
             std::process::id()
         ))
     }

@@ -389,9 +389,9 @@ fn seed_interrupted_build_fixture(root: &Path, case_name: &str) -> InterruptedBu
                 id,
                 repository_id,
                 name,
-                platform,
+                build_kind,
                 runner_type,
-                build_method,
+                contract_json,
                 config_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ",
@@ -399,9 +399,9 @@ fn seed_interrupted_build_fixture(root: &Path, case_name: &str) -> InterruptedBu
                 BUILD_TARGET_ID,
                 REPOSITORY_ID,
                 "windows-player",
-                "windows",
+                "player",
                 "host-native",
-                "Builder.PerformWindows",
+                r#"{"unity":{"targetPlatform":"windows","buildMethod":"Builder.PerformWindows"}}"#,
                 "{}",
             ],
         )
@@ -416,7 +416,7 @@ fn seed_interrupted_build_fixture(root: &Path, case_name: &str) -> InterruptedBu
                 git_commit,
                 trigger_source,
                 source_metadata_json,
-                unity_version,
+                engine_version,
                 status
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ",
@@ -439,7 +439,7 @@ fn seed_interrupted_build_fixture(root: &Path, case_name: &str) -> InterruptedBu
                 id,
                 release_run_id,
                 build_target_id,
-                unity_version,
+                engine_version,
                 image_ref,
                 status,
                 workspace_path,
@@ -524,7 +524,7 @@ fn run_runtime_command(root: &Path, arguments: &[&str], extra_env: &[(&str, &str
 }
 
 fn runtime_bin_path() -> &'static str {
-    env!("CARGO_BIN_EXE_hup-runtime")
+    env!("CARGO_BIN_EXE_hgp-runtime")
 }
 
 fn assert_command_success(label: &str, output: Output) {
@@ -609,7 +609,7 @@ fn test_root(name: &str) -> PathBuf {
         .expect("system clock should be after unix epoch")
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "handy-unity-publisher-runtime-bin-e2e-{name}-{}-{unique_suffix}",
+        "handy-games-publisher-runtime-bin-e2e-{name}-{}-{unique_suffix}",
         process::id()
     ));
     if root.exists() {

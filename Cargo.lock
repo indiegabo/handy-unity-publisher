@@ -3017,6 +3017,7 @@ name = "runtime-bin"
 version = "0.1.0"
 dependencies = [
  "runtime-config",
+ "runtime-contracts",
  "runtime-core",
  "runtime-git",
  "runtime-manifests",
@@ -3033,6 +3034,13 @@ dependencies = [
 [[package]]
 name = "runtime-config"
 version = "0.1.0"
+
+[[package]]
+name = "runtime-contracts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "runtime-core"
@@ -3078,9 +3086,11 @@ name = "runtime-runner"
 version = "0.1.0"
 dependencies = [
  "runtime-config",
+ "runtime-contracts",
  "runtime-git",
  "serde",
  "serde_json",
+ "zip",
 ]
 
 [[package]]
@@ -3089,6 +3099,7 @@ version = "0.1.0"
 dependencies = [
  "keyring",
  "runtime-config",
+ "runtime-contracts",
  "runtime-git",
  "rusqlite",
  "serde",

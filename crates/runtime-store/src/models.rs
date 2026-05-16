@@ -2,6 +2,7 @@
 //! across runtime-store coordination and reporting flows.
 
 use super::*;
+use runtime_contracts::{BuildKind, EngineKind};
 
 /// Defines the durable paths owned by the local runtime store.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,7 +146,7 @@ pub struct RepositoryAutomationStatus {
 pub struct ReleaseAutomationStatus {
     pub release_run_id: i64,
     pub git_tag: String,
-    pub unity_version: Option<String>,
+    pub engine_version: Option<String>,
     pub status: String,
     pub planned: bool,
     pub build_process_active: bool,
@@ -194,7 +195,7 @@ pub struct BuildDispatchJob {
     pub build_run_id: i64,
     pub release_run_id: i64,
     pub build_target_id: i64,
-    pub unity_version: String,
+    pub engine_version: String,
     pub image_ref: String,
 }
 
@@ -225,7 +226,7 @@ pub struct BuildRunRecord {
     pub id: i64,
     pub release_run_id: i64,
     pub build_target_id: i64,
-    pub unity_version: Option<String>,
+    pub engine_version: Option<String>,
     pub image_ref: Option<String>,
     pub status: String,
     pub workspace_path: Option<String>,
@@ -285,7 +286,7 @@ pub struct ReleaseRunRecord {
     pub trigger_source: String,
     pub trigger_rule_id: Option<i64>,
     pub source_metadata_json: String,
-    pub unity_version: Option<String>,
+    pub engine_version: Option<String>,
     pub status: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
@@ -300,6 +301,7 @@ pub struct PollingRepositoryRecord {
     pub id: i64,
     pub name: String,
     pub repo_url: String,
+    pub engine_kind: String,
     pub credentials_id: Option<i64>,
     pub enabled: bool,
     pub polling_interval_seconds: i64,
@@ -394,6 +396,7 @@ pub struct BuildExecutionPlan {
     pub build_run_id: i64,
     pub release_run_id: i64,
     pub repository_id: i64,
+    pub engine_kind: EngineKind,
     pub repository_name: String,
     pub repository_credentials_id: Option<i64>,
     pub workspace_root_override: Option<String>,
@@ -403,13 +406,13 @@ pub struct BuildExecutionPlan {
     pub git_tag: String,
     pub git_commit: Option<String>,
     pub target_name: String,
-    pub platform: String,
+    pub build_kind: BuildKind,
+    pub contract_json: String,
     pub runner_type: String,
-    pub build_method: Option<String>,
     pub output_kind: Option<String>,
     pub output_path_template: Option<String>,
     pub config_json: String,
-    pub unity_version: String,
+    pub engine_version: String,
     pub image_ref: String,
     pub timeout_seconds: i64,
     pub status: String,
@@ -422,9 +425,10 @@ pub struct ProcessFeedRecord {
     pub repository_id: i64,
     pub repository_name: String,
     pub repository_url: String,
+    pub repository_engine_kind: String,
     pub git_tag: String,
     pub git_commit: Option<String>,
-    pub unity_version: Option<String>,
+    pub engine_version: Option<String>,
     pub display_status: String,
     pub current_step_label: String,
     pub current_step_status: String,
@@ -474,10 +478,10 @@ pub struct BuildHistoryRecord {
     pub git_commit: Option<String>,
     pub build_target_id: i64,
     pub build_target_name: String,
-    pub platform: String,
+    pub unity_target_platform: String,
     pub runner_type: String,
-    pub build_method: Option<String>,
-    pub unity_version: Option<String>,
+    pub unity_build_method: Option<String>,
+    pub engine_version: Option<String>,
     pub image_ref: Option<String>,
     pub status: String,
     pub workspace_path: Option<String>,
@@ -506,7 +510,7 @@ pub struct ArtifactInspectionRecord {
     pub git_commit: Option<String>,
     pub build_target_id: i64,
     pub build_target_name: String,
-    pub platform: String,
+    pub unity_target_platform: String,
     pub runner_type: String,
     pub build_status: String,
     pub artifact_name: String,
@@ -531,9 +535,9 @@ pub struct BuildTargetRuntimeSettingsRecord {
     pub repository_id: i64,
     pub repository_name: String,
     pub name: String,
-    pub platform: String,
+    pub unity_target_platform: String,
     pub runner_type: String,
-    pub build_method: Option<String>,
+    pub unity_build_method: Option<String>,
     pub enabled: bool,
     pub config_json: String,
 }
@@ -664,21 +668,21 @@ pub struct CreateRepositoryProjectCredentialInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateRepositoryProjectBuildTargetInput {
     pub name: String,
-    pub platform: String,
+    pub build_kind: String,
     pub runner_type: String,
-    pub build_method: String,
     pub output_kind: Option<String>,
     pub output_path_template: Option<String>,
-    pub unity_version_override: Option<String>,
     pub timeout_seconds: i64,
     pub enabled: bool,
-    pub config_json: String,
+    pub contract_json: String,
+    pub runner_config_json: String,
 }
 
 /// Defines the durable payload required to register one managed repository project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateRepositoryProjectInput {
     pub name: String,
+    pub engine_kind: String,
     pub repo_url: String,
     pub credentials: Option<CreateRepositoryProjectCredentialInput>,
     pub default_branch: Option<String>,
@@ -696,15 +700,14 @@ pub struct CreateRepositoryProjectInput {
 pub struct UpdateRepositoryProjectBuildTargetInput {
     pub build_target_id: Option<i64>,
     pub name: String,
-    pub platform: String,
+    pub build_kind: String,
     pub runner_type: String,
-    pub build_method: String,
     pub output_kind: Option<String>,
     pub output_path_template: Option<String>,
-    pub unity_version_override: Option<String>,
     pub timeout_seconds: i64,
     pub enabled: bool,
-    pub config_json: String,
+    pub contract_json: String,
+    pub runner_config_json: String,
 }
 
 /// Defines the durable payload required to update one managed repository
@@ -713,6 +716,7 @@ pub struct UpdateRepositoryProjectBuildTargetInput {
 pub struct UpdateRepositoryProjectInput {
     pub repository_id: i64,
     pub name: String,
+    pub engine_kind: String,
     pub repo_url: String,
     pub default_branch: Option<String>,
     pub artifacts_root_override: Option<String>,
