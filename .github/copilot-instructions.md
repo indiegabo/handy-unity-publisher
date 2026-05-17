@@ -205,8 +205,12 @@ existing snippet".
   checks explicit, deterministic, and overrideable.
 - Avoid hardcoded host-specific paths and assumptions that only work on one
   machine layout.
-- Preserve compatibility with Windows-first workflows and treat WSL detection
-  as a host capability concern, not a required runtime topology.
+- Structure host-specific workflows so Windows, Linux, and macOS each have an
+  explicit extension path even when only the Windows implementation is being
+  validated at the current delivery stage.
+- Keep the current hands-on validation loop compatible with Windows-first
+  development while treating WSL detection as a host capability concern, not a
+  required runtime topology.
 - Prefer explicit app-managed directories for state, artifacts, logs, and
   workspaces.
 

@@ -19,6 +19,11 @@ The active product architecture is:
 The current delivery scope targets one local host and one supervised runtime
 instance.
 
+HGP targets Windows, Linux, and macOS as host platforms. The current hands-on
+validation loop is still Windows-based, but host-specific flows must keep
+explicit extension points for Linux and macOS instead of collapsing the
+product model into a Windows-only design.
+
 ## System Shape
 
 ### Desktop Shell
@@ -283,10 +288,17 @@ introducing parallel control flows.
 Credentials are currently stored in SQLite configuration JSON and managed from
 the desktop shell.
 
-Repository project creation currently treats PAT input as the only first-class
-operator authentication path. Once the operator provides that PAT, repository
-polling and workspace synchronization must remain seamless and non-interactive
-for runtime-owned Git operations.
+Repository authentication is now project-scoped instead of provider-global.
+The shell first assesses the repository URL non-interactively to determine the
+provider family, normalized instance URL, and whether anonymous access is
+enough. Public repositories continue without a repository credential binding by
+default. Private repositories surface one explicit connect or reconnect action
+inside the owning project create or edit flow.
+
+Reusable provider sessions can still exist as standalone credential records,
+but binding one of those records to a repository must remain an explicit
+project decision. Runtime-owned Git operations must never become the moment
+where a browser, credential helper, or interactive prompt reappears.
 
 The shell must never echo stored secret values back into operator diagnostics.
 Instead, it should expose:
@@ -297,15 +309,16 @@ Instead, it should expose:
 - storage warnings
 
 PAT secret values should live in the host keyring or another redacted secret
-backend, while SQLite persists only the credential metadata and secret
-references required to resolve them at execution time.
+backend, while SQLite persists only the credential metadata, repository auth
+assessment state, and secret references required to resolve them at execution
+time.
 
-Future wizard work will add an explicit operator choice between PAT input and a
-provider-specific interactive sign-in flow when that flow is supported by the
-repository host and current platform. When that capability arrives, any login
-window belongs to project creation or credential refresh only, and the runtime
-must continue to execute Git operations non-interactively after the required
-token has been stored.
+When provider-specific interactive sign-in is supported by the repository host
+and current platform, any login window still belongs only to project creation
+or credential refresh. If polling or build preparation later encounters stale,
+missing, or invalid credentials, the repository must move into a durable auth
+state such as `reauth_required` or `required_unbound`, and the operator must
+recover from the project surface rather than from runtime automation.
 
 Future secret backends must preserve the same redaction discipline and durable
 binding model.

@@ -88,6 +88,30 @@ sandbox. Normal operation still expects one runtime root owned by the
 application, while per-run workspaces live under `runs/` or repository-specific
 workspace overrides recorded in SQLite.
 
+## Repository Auth Contract
+
+Repository auth behavior in the desktop shell and bundled runtime now follows
+these rules:
+
+- the operator enters only the repository URL first
+- the shell assesses provider family and anonymous repository visibility before
+  requesting repository auth
+- public repositories stay credential-free by default
+- private repositories expose one explicit connect or reconnect action inside
+  the owning project create or edit flow
+- polling and build execution stay non-interactive, and stale credentials are
+  surfaced as durable repository auth state instead of reopening credential UI
+
+For focused validation of that contract during development, prefer these
+checks before wider desktop testing:
+
+```bash
+cargo test --package desktop-shell persist_repository_project_creates_repository_inspection_entry -- --nocapture
+cargo test --package desktop-shell persist_repository_project_persists_repository_auth_state_in_inspection -- --nocapture
+cargo test --package runtime-bin run_repository_poll_cycle_stops_on_authentication_failure_and_emits_runtime_event -- --nocapture
+cargo test --package runtime-bin build_run_next_command_marks_repository_reauth_required_on_auth_resolution_failure -- --nocapture
+```
+
 ## Runtime Commands
 
 ### Bootstrap And Inspection
@@ -132,11 +156,16 @@ npm start
 
 The root `npm start` command resolves the local Tauri CLI and runs `tauri dev`
 from `apps/desktop`. The Tauri development loop owns the UI development server
-through `beforeDevCommand`, and the desktop shell startup path then launches
-the bundled runtime supervisor. On Windows the runner also attempts to enter
-the Visual Studio developer environment before invoking Tauri, but it still
-requires the native Tauri prerequisites, including the Visual Studio C++
-workload for the MSVC toolchain.
+and version synchronization through `beforeDevCommand`, and the desktop shell
+startup path then launches the bundled runtime supervisor. On Windows the
+runner also attempts to enter the Visual Studio developer environment before
+invoking Tauri, but it still requires the native Tauri prerequisites,
+including the Visual Studio C++ workload for the MSVC toolchain.
+
+The desktop app targets Windows, Linux, and macOS. The current hands-on
+validation loop is still Windows-based, so host-specific behavior should keep
+explicit extension points for Linux and macOS instead of treating Windows as
+the only supported route.
 
 The desktop app version is centralized in the workspace Cargo manifest at
 `Cargo.toml` under `[workspace.package].version`. Run `npm run version:sync`
@@ -240,12 +269,12 @@ Run the interrupted-recovery end-to-end smoke target through the repository
 entrypoint instead of mixing it into ad hoc unit-test commands:
 
 ```bash
-bash scripts/runtime-smoke.sh
+npm run smoke:runtime
 ```
 
 The workspace default Cargo artifacts live under
 `tmp/cargo-targets/default/`.
-The smoke script pins `CARGO_TARGET_DIR` to
+The smoke entrypoint pins `CARGO_TARGET_DIR` to
 `tmp/cargo-targets/runtime-smoke/` so local runtime processes holding the
 default runtime binary do not block the validation binary rebuild.
 The isolated artifacts stay under `tmp/` so the repository root does not

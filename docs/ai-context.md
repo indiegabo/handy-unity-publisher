@@ -65,20 +65,20 @@ The product is not a Unity gameplay codebase.
 - Each manifest describes Git access, trigger behavior, build targets, publish
   targets, and build-to-publish bindings.
 - The runtime store mirrors validated manifest state into SQLite.
-- Repository project creation currently uses Personal Access Tokens as the only
-  first-class interactive credential input.
-- After the operator supplies a PAT, HGP is expected to perform repository
-  polling, workspace synchronization, and build-related Git operations without
-  any additional login prompts.
+- Repository authentication is project-scoped: the shell assesses the
+  repository URL first, keeps public repositories credential-free by default,
+  and requests repository auth only when the detected access state requires it.
+- Reusable provider sessions can exist globally, but binding one of those
+  credentials to a repository is an explicit project-level action.
+- After the operator supplies a PAT or completes a provider-backed sign-in,
+  HGP is expected to perform repository polling, workspace synchronization, and
+  build-related Git operations without any additional login prompts.
 - PAT secret material is stored through shell-managed host keyring references,
-  while SQLite stores only the durable credential metadata and references.
-- Future wizard work will let the operator choose between PAT entry and a
-  provider-specific interactive sign-in flow when the host platform and
-  repository provider support it.
-- When that future sign-in flow exists, any authentication window should appear
-  only during project creation or credential refresh, after which HGP should
-  store the required token and resume seamless non-interactive runtime Git
-  operations.
+  while SQLite stores only the durable credential metadata, repository auth
+  state, and references.
+- When runtime Git work later fails because credentials are stale, missing, or
+  invalid, the repository enters a durable recovery state such as
+  `reauth_required` instead of reopening provider UI from polling or builds.
 
 ## Active Operator Surfaces
 
