@@ -1,7 +1,14 @@
 import { startTransition, useEffect, useEffectEvent, useState } from "react";
 
 import { Button } from "./Button";
-import { Badge, SurfacePanel, type BadgeTone } from "./Surface";
+import {
+  Badge,
+  FocusPageFrame,
+  MetaItem,
+  MetaRow,
+  SurfacePanel,
+  type BadgeTone,
+} from "./Surface";
 import {
   loadAuthProviders,
   loginWithGithubAuth,
@@ -53,7 +60,7 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
         setActionMessage(
           `GitHub login connected. ${formatBoundRepositoryCount(
             provider.bound_repository_count,
-          )} now use it by default.`,
+          )} currently connect to it explicitly.`,
         );
       });
     } catch (loginError) {
@@ -67,10 +74,17 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
     }
   });
 
+  const connectedProviderCount = providers.filter(
+    (provider) => provider.status === "connected",
+  ).length;
+  const totalBoundRepositoryCount = providers.reduce(
+    (total, provider) => total + provider.bound_repository_count,
+    0,
+  );
+
   return (
     <div className="auth-providers-shell">
-      <SurfacePanel
-        className="focus-primary-panel"
+      <FocusPageFrame
         actions={
           <Button
             leadingIcon="refresh"
@@ -83,7 +97,22 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
         }
         description="GitHub login is delegated to Git Credential Manager and reused by repository polling and checkout flows."
         eyebrow="Accounts"
-        title="Possible Logins"
+        summary={
+          <MetaRow>
+            <MetaItem label="Providers">
+              {isLoading ? "Loading..." : providers.length}
+            </MetaItem>
+            {!isLoading ? (
+              <MetaItem label="Connected">{connectedProviderCount}</MetaItem>
+            ) : null}
+            {!isLoading ? (
+              <MetaItem label="Connected projects">
+                {totalBoundRepositoryCount}
+              </MetaItem>
+            ) : null}
+          </MetaRow>
+        }
+        title="Login Providers"
       >
         {error ? (
           <p className="feed-banner feed-banner--error">{error}</p>
@@ -114,64 +143,73 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
           </div>
         ) : null}
 
-        {providers.length > 0 ? (
-          <div className="auth-provider-grid">
-            {providers.map((provider) => (
-              <section
-                className="auth-provider-card"
-                key={provider.provider_id}
-              >
-                <header className="auth-provider-card__header">
-                  <div className="auth-provider-card__title-block">
-                    <h3 className="auth-provider-card__title">
-                      {provider.label}
-                    </h3>
-                    <p className="auth-provider-card__copy">
-                      {provider.instance_url}
-                    </p>
+        <SurfacePanel
+          className="auth-provider-section"
+          description="Host-backed login providers available to the desktop shell."
+          eyebrow="Provider Inventory"
+          headerSeparated
+          title="Available Accounts"
+          tone="section"
+        >
+          {providers.length > 0 ? (
+            <div className="auth-provider-grid">
+              {providers.map((provider) => (
+                <section
+                  className="auth-provider-card"
+                  key={provider.provider_id}
+                >
+                  <header className="auth-provider-card__header">
+                    <div className="auth-provider-card__title-block">
+                      <h3 className="auth-provider-card__title">
+                        {provider.label}
+                      </h3>
+                      <p className="auth-provider-card__copy">
+                        {provider.instance_url}
+                      </p>
+                    </div>
+                    <Badge tone={resolveAuthProviderTone(provider.status)}>
+                      {formatAuthProviderStatus(provider.status)}
+                    </Badge>
+                  </header>
+
+                  <p className="auth-provider-card__copy">
+                    {provider.status_message}
+                  </p>
+
+                  <MetaRow className="auth-provider-card__summary">
+                    <MetaItem label="Credential">
+                      {provider.credential_name || "No reusable credential"}
+                    </MetaItem>
+                    <MetaItem label="Usage">
+                      {formatBoundRepositoryCount(
+                        provider.bound_repository_count,
+                      )}
+                    </MetaItem>
+                  </MetaRow>
+
+                  <div className="auth-provider-card__actions">
+                    <Button
+                      disabled={pendingProviderId === provider.provider_id}
+                      leadingIcon="arrowUpRight"
+                      onClick={() => void handleGithubLogin()}
+                      size="sm"
+                      variant={
+                        provider.status === "connected" ? "secondary" : "primary"
+                      }
+                    >
+                      {pendingProviderId === provider.provider_id
+                        ? "Connecting..."
+                        : provider.status === "connected"
+                          ? "Reconnect with browser"
+                          : "Log in with browser"}
+                    </Button>
                   </div>
-                  <Badge tone={resolveAuthProviderTone(provider.status)}>
-                    {formatAuthProviderStatus(provider.status)}
-                  </Badge>
-                </header>
-
-                <p className="auth-provider-card__copy">
-                  {provider.status_message}
-                </p>
-
-                <div className="auth-provider-card__meta">
-                  {provider.credential_name ? (
-                    <Badge tone="muted">{provider.credential_name}</Badge>
-                  ) : null}
-                  <Badge tone="muted">
-                    {formatBoundRepositoryCount(
-                      provider.bound_repository_count,
-                    )}
-                  </Badge>
-                </div>
-
-                <div className="auth-provider-card__actions">
-                  <Button
-                    disabled={pendingProviderId === provider.provider_id}
-                    leadingIcon="arrowUpRight"
-                    onClick={() => void handleGithubLogin()}
-                    size="sm"
-                    variant={
-                      provider.status === "connected" ? "secondary" : "primary"
-                    }
-                  >
-                    {pendingProviderId === provider.provider_id
-                      ? "Connecting..."
-                      : provider.status === "connected"
-                        ? "Reconnect with browser"
-                        : "Log in with browser"}
-                  </Button>
-                </div>
-              </section>
-            ))}
-          </div>
-        ) : null}
-      </SurfacePanel>
+                </section>
+              ))}
+            </div>
+          ) : null}
+        </SurfacePanel>
+      </FocusPageFrame>
     </div>
   );
 }

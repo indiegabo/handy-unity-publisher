@@ -7,23 +7,45 @@ import {
   useState,
 } from "react";
 
-import { Button } from "./Button";
-import { SelectField, TextField } from "./Field";
+import { Button, IconButton } from "./Button";
+import { RepositoryCredentialComposer } from "./RepositoryCredentialComposer";
+import { SelectField, TextField, type SelectOption } from "./Field";
 import { PathPickerField } from "./PathPickerField";
 import { RepositoryEngineField } from "./RepositoryEngineField";
-import { Badge } from "./Surface";
+import {
+  Badge,
+  FocusPageFrame,
+  MetaItem,
+  MetaRow,
+} from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
 import {
+  connectRepositoryAuth,
+  detectRepositoryProvider,
+  disconnectRepositoryAuth,
+  loadSecretSettings,
   loadRepositoryInspection,
+  reconnectRepositoryAuth,
+  saveSecretCredential,
   updateRepositoryProject,
   validateUnityExecutablePath,
+  type RepositoryAccessAssessment,
   type RepositoryEngineKind,
   type RepositoryInspectionEntry,
+  type RepositoryProviderDetection,
+  type SaveSecretCredentialInput,
+  type SecretCredentialSetting,
   type UnityExecutableValidation,
   type UpdateRepositoryProjectInput,
 } from "../services/projects";
+import {
+  loadAuthProviders,
+  loginWithGithubAuth,
+  type AuthProviderStatus,
+} from "../services/auth";
 
 type RepositoryProjectDetailProps = {
+  onProjectNameResolved?: (repositoryName: string) => void;
   repositoryId: number;
 };
 
@@ -40,6 +62,7 @@ type RepositoryProjectDraft = {
   engineKind: RepositoryEngineKind;
   name: string;
   repositoryUrl: string;
+  repositoryVisibility: "public" | "private";
   defaultBranch: string;
   artifactsRootOverride: string;
   workspaceRootOverride: string;
@@ -60,6 +83,7 @@ type RepositoryProjectValidationErrors = {
   name?: string;
   repositoryUrl?: string;
   pollingIntervalSeconds?: string;
+  repositoryAccess?: string;
   buildTargetsRoot?: string;
   buildTargets: Record<string, RepositoryProjectBuildTargetValidationErrors>;
 };
@@ -85,6 +109,10 @@ const PROJECT_STATUS_OPTIONS = [
   { label: "Enabled", value: "enabled" },
   { label: "Disabled", value: "disabled" },
 ] as const;
+const REPOSITORY_VISIBILITY_OPTIONS = [
+  { label: "Public", value: "public" },
+  { label: "Private", value: "private" },
+] as const;
 const PLATFORM_OPTIONS = [
   { label: "Select a Unity target", value: "" },
   { label: "Windows", value: "StandaloneWindows64" },
@@ -94,12 +122,13 @@ const PLATFORM_OPTIONS = [
   { label: "Android", value: "Android" },
 ] as const;
 const DEFAULT_SECTION_OPEN_STATE: Record<ProjectDetailSectionKey, boolean> = {
-  project: true,
-  targets: true,
-  automation: true,
+  project: false,
+  targets: false,
+  automation: false,
 };
 
 export function RepositoryProjectDetail({
+  onProjectNameResolved,
   repositoryId,
 }: RepositoryProjectDetailProps) {
   const [repository, setRepository] =
@@ -112,6 +141,40 @@ export function RepositoryProjectDetail({
   const [error, setError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [githubAuthProvider, setGithubAuthProvider] =
+    useState<AuthProviderStatus | null>(null);
+  const [isLoadingAuthProviders, setIsLoadingAuthProviders] = useState(true);
+  const [authProviderError, setAuthProviderError] = useState<string | null>(
+    null,
+  );
+  const [repositoryCredentials, setRepositoryCredentials] = useState<
+    SecretCredentialSetting[]
+  >([]);
+  const [isLoadingRepositoryCredentials, setIsLoadingRepositoryCredentials] =
+    useState(true);
+  const [repositoryCredentialsError, setRepositoryCredentialsError] = useState<
+    string | null
+  >(null);
+  const [repositoryAccessAssessment, setRepositoryAccessAssessment] =
+    useState<RepositoryAccessAssessment | null>(null);
+  const [isAssessingRepositoryAccess, setIsAssessingRepositoryAccess] =
+    useState(false);
+  const [repositoryAccessError, setRepositoryAccessError] = useState<
+    string | null
+  >(null);
+  const [repositoryCredentialId, setRepositoryCredentialId] = useState<
+    number | null
+  >(null);
+  const [repositoryAccessActionMessage, setRepositoryAccessActionMessage] =
+    useState<string | null>(null);
+  const [pendingRepositoryAccessAction, setPendingRepositoryAccessAction] =
+    useState(false);
+  const [showRepositoryCredentialComposer, setShowRepositoryCredentialComposer] =
+    useState(false);
+  const [pendingRepositoryCredentialSave, setPendingRepositoryCredentialSave] =
+    useState(false);
+  const [repositoryCredentialSaveError, setRepositoryCredentialSaveError] =
+    useState<string | null>(null);
   const [pathDiagnostics, setPathDiagnostics] = useState<
     Record<string, UnityExecutableValidation | null>
   >({});
@@ -127,6 +190,8 @@ export function RepositoryProjectDetail({
   const nextBuildTargetIdRef = useRef(1);
   const validationTimersRef = useRef<ValidationTimerMap>({});
   const validationTokenRef = useRef<Record<string, number>>({});
+  const accessAssessmentTimerRef = useRef<number | undefined>(undefined);
+  const accessAssessmentTokenRef = useRef(0);
 
   const resolveRepositoryDetail = useEffectEvent(async () => {
     const inspection = await loadRepositoryInspection();
@@ -163,6 +228,10 @@ export function RepositoryProjectDetail({
         setPathDiagnostics(targetEditorState.pathDiagnostics);
         setValidatingTargets({});
         setExpandedTargetIds(targetEditorState.expandedTargetIds);
+        setRepositoryCredentialId(
+          matchingRepository?.credentials?.credential_id ?? null,
+        );
+        setRepositoryAccessActionMessage(null);
         setError(null);
         setIsLoading(false);
         if (showLoading) {
@@ -189,8 +258,183 @@ export function RepositoryProjectDetail({
           window.clearTimeout(timerId);
         }
       }
+
+      if (accessAssessmentTimerRef.current !== undefined) {
+        window.clearTimeout(accessAssessmentTimerRef.current);
+      }
     };
   }, [repositoryId]);
+
+  const loadAuthProvidersEffect = useEffectEvent(async () => {
+    setIsLoadingAuthProviders(true);
+
+    try {
+      const providers = await loadAuthProviders();
+      const githubProvider = providers.find(
+        (provider) => provider.provider_id === "github",
+      );
+
+      startTransition(() => {
+        setGithubAuthProvider(githubProvider ?? null);
+        setAuthProviderError(null);
+        setIsLoadingAuthProviders(false);
+      });
+    } catch (loadError) {
+      startTransition(() => {
+        setGithubAuthProvider(null);
+        setAuthProviderError(buildProjectSaveErrorMessage(loadError));
+        setIsLoadingAuthProviders(false);
+      });
+    }
+  });
+
+  const listRepositoryCredentialsEffect = useEffectEvent(async () => {
+    const settings = await loadSecretSettings();
+    return settings.credentials.filter(isRepositoryCredentialSelectable);
+  });
+
+  const loadRepositoryCredentialsEffect = useEffectEvent(async () => {
+    setIsLoadingRepositoryCredentials(true);
+
+    try {
+      const credentials = await listRepositoryCredentialsEffect();
+
+      startTransition(() => {
+        setRepositoryCredentials(credentials);
+        setRepositoryCredentialsError(null);
+        setIsLoadingRepositoryCredentials(false);
+      });
+    } catch (loadError) {
+      startTransition(() => {
+        setRepositoryCredentials([]);
+        setRepositoryCredentialsError(buildProjectSaveErrorMessage(loadError));
+        setIsLoadingRepositoryCredentials(false);
+      });
+    }
+  });
+
+  useEffect(() => {
+    void loadAuthProvidersEffect();
+    void loadRepositoryCredentialsEffect();
+  }, [loadAuthProvidersEffect, loadRepositoryCredentialsEffect]);
+
+  const loadRepositoryAccessAssessmentEffect = useEffectEvent(
+    async (
+      repositoryUrl: string,
+      repositoryVisibility: RepositoryProjectDraft["repositoryVisibility"],
+      assessmentToken: number,
+    ) => {
+      try {
+        const detection = await detectRepositoryProvider(repositoryUrl);
+        if (accessAssessmentTokenRef.current !== assessmentToken) {
+          return;
+        }
+
+        const assessment = buildRepositoryAccessAssessmentFromDetection(
+          detection,
+          repositoryVisibility,
+        );
+
+        startTransition(() => {
+          setRepositoryAccessAssessment(assessment);
+          setRepositoryAccessError(null);
+          setIsAssessingRepositoryAccess(false);
+        });
+      } catch (assessmentError) {
+        if (accessAssessmentTokenRef.current !== assessmentToken) {
+          return;
+        }
+
+        startTransition(() => {
+          setRepositoryAccessAssessment(null);
+          setRepositoryAccessError(buildProjectSaveErrorMessage(assessmentError));
+          setIsAssessingRepositoryAccess(false);
+        });
+      }
+    },
+  );
+
+  useEffect(() => {
+    const repositoryUrl = draft?.repositoryUrl ?? "";
+    const repositoryVisibility = draft?.repositoryVisibility ?? "public";
+    const normalizedUrl = repositoryUrl.trim();
+
+    if (
+      !normalizedUrl ||
+      !(
+        normalizedUrl.startsWith("https://") ||
+        normalizedUrl.startsWith("http://")
+      )
+    ) {
+      if (accessAssessmentTimerRef.current !== undefined) {
+        window.clearTimeout(accessAssessmentTimerRef.current);
+        accessAssessmentTimerRef.current = undefined;
+      }
+
+      accessAssessmentTokenRef.current += 1;
+      startTransition(() => {
+        setRepositoryAccessAssessment(null);
+        setRepositoryAccessError(null);
+        setIsAssessingRepositoryAccess(false);
+        setRepositoryAccessActionMessage(null);
+      });
+      return;
+    }
+
+    if (accessAssessmentTimerRef.current !== undefined) {
+      window.clearTimeout(accessAssessmentTimerRef.current);
+    }
+
+    accessAssessmentTokenRef.current += 1;
+    const assessmentToken = accessAssessmentTokenRef.current;
+
+    startTransition(() => {
+      setIsAssessingRepositoryAccess(true);
+      setRepositoryAccessError(null);
+      setRepositoryAccessActionMessage(null);
+    });
+
+    accessAssessmentTimerRef.current = window.setTimeout(() => {
+      void loadRepositoryAccessAssessmentEffect(
+        normalizedUrl,
+        repositoryVisibility,
+        assessmentToken,
+      );
+    }, 250);
+
+    return () => {
+      if (accessAssessmentTimerRef.current !== undefined) {
+        window.clearTimeout(accessAssessmentTimerRef.current);
+        accessAssessmentTimerRef.current = undefined;
+      }
+    };
+  }, [
+    draft?.repositoryUrl,
+    draft?.repositoryVisibility,
+    loadRepositoryAccessAssessmentEffect,
+  ]);
+
+  useEffect(() => {
+    if (supportsShellRepositoryLoginAction(repositoryAccessAssessment)) {
+      return;
+    }
+
+    startTransition(() => {
+      setRepositoryCredentialId(null);
+      setShowRepositoryCredentialComposer(false);
+      setRepositoryCredentialSaveError(null);
+    });
+  }, [repositoryAccessAssessment?.auth_requirement]);
+
+  useEffect(() => {
+    const resolvedName = draft?.name.trim() || repository?.repository_name.trim();
+
+    if (!resolvedName) {
+      return;
+    }
+
+    onProjectNameResolved?.(resolvedName);
+  }, [draft?.name, onProjectNameResolved, repository?.repository_name]);
 
   const handleDraftFieldChange = useEffectEvent(
     (fieldName: RepositoryProjectFieldName, value: string) => {
@@ -399,15 +643,164 @@ export function RepositoryProjectDetail({
     },
   );
 
+  const handleBindRepositoryAccess = useEffectEvent(async () => {
+    if (
+      pendingRepositoryAccessAction ||
+      !repositoryAccessAssessment ||
+      repositoryAccessAssessment.provider_id !== "github"
+    ) {
+      return;
+    }
+
+    startTransition(() => {
+      setPendingRepositoryAccessAction(true);
+      setRepositoryAccessActionMessage(null);
+      setSaveError(null);
+    });
+
+    try {
+      let provider = githubAuthProvider;
+      if (provider?.status !== "connected" || !provider.credential_id) {
+        provider = await loginWithGithubAuth();
+      }
+
+      if (!provider.credential_id) {
+        throw new Error(
+          "GitHub login completed without a reusable credential id.",
+        );
+      }
+
+      startTransition(() => {
+        setGithubAuthProvider(provider);
+        setRepositoryCredentialId(provider.credential_id);
+        setRepositoryAccessActionMessage(
+          "GitHub login connected for this project. Save changes to keep the connection.",
+        );
+      });
+    } catch (bindingError) {
+      startTransition(() => {
+        setSaveError(buildProjectSaveErrorMessage(bindingError));
+      });
+    } finally {
+      startTransition(() => {
+        setPendingRepositoryAccessAction(false);
+      });
+    }
+  });
+
+  const handleClearRepositoryAccessBinding = useEffectEvent(() => {
+    startTransition(() => {
+      setRepositoryCredentialId(null);
+      setRepositoryAccessActionMessage(
+        "Repository credential cleared from the draft. Save changes to keep it disconnected.",
+      );
+      setSaveError(null);
+    });
+  });
+
+  const handleRepositoryCredentialSelectionChange = useEffectEvent(
+    (nextCredentialId: string) => {
+      startTransition(() => {
+        setRepositoryCredentialId(
+          nextCredentialId ? Number(nextCredentialId) : null,
+        );
+        setRepositoryAccessActionMessage(
+          nextCredentialId
+            ? "Stored repository credential selected for this project. Save changes to keep the connection."
+            : "Repository credential cleared from the draft. Save changes to keep it disconnected.",
+        );
+        setRepositoryCredentialSaveError(null);
+        setShowRepositoryCredentialComposer(false);
+        setSaveError(null);
+      });
+    },
+  );
+
+  const handleOpenRepositoryCredentialComposer = useEffectEvent(() => {
+    startTransition(() => {
+      setShowRepositoryCredentialComposer(true);
+      setRepositoryCredentialSaveError(null);
+      setSaveError(null);
+    });
+  });
+
+  const handleCloseRepositoryCredentialComposer = useEffectEvent(() => {
+    startTransition(() => {
+      setShowRepositoryCredentialComposer(false);
+      setRepositoryCredentialSaveError(null);
+    });
+  });
+
+  const handleSaveRepositoryCredential = useEffectEvent(
+    async (input: SaveSecretCredentialInput) => {
+      startTransition(() => {
+        setPendingRepositoryCredentialSave(true);
+        setRepositoryCredentialSaveError(null);
+        setSaveError(null);
+      });
+
+      try {
+        await saveSecretCredential(input);
+        const credentials = await listRepositoryCredentialsEffect();
+        const createdCredential = credentials.find(
+          (credential) => credential.name === input.name.trim(),
+        );
+        if (!createdCredential) {
+          throw new Error(
+            "The saved repository credential could not be reloaded.",
+          );
+        }
+
+        startTransition(() => {
+          setRepositoryCredentials(credentials);
+          setRepositoryCredentialsError(null);
+          setIsLoadingRepositoryCredentials(false);
+          setRepositoryCredentialId(createdCredential.credential_id);
+          setRepositoryAccessActionMessage(
+            "Repository credential created and selected for this project.",
+          );
+          setShowRepositoryCredentialComposer(false);
+        });
+      } catch (error) {
+        startTransition(() => {
+          setRepositoryCredentialSaveError(
+            buildProjectSaveErrorMessage(error),
+          );
+        });
+      } finally {
+        startTransition(() => {
+          setPendingRepositoryCredentialSave(false);
+        });
+      }
+    },
+  );
+
   const handleSaveProject = useEffectEvent(async () => {
     if (!repository || !draft || isSaving) {
       return;
     }
 
+    const repositoryCredentialIdForSave = resolveRepositoryCredentialIdForSave(
+      repositoryAccessAssessment,
+      repositoryCredentialId,
+    );
+
     const nextValidationErrors = validateRepositoryProjectDraft(
       draft,
       pathDiagnostics,
       validatingTargets,
+      {
+        repositoryAccessAssessment,
+        isAssessingRepositoryAccess,
+        repositoryAccessError,
+        repositoryCredentialId: repositoryCredentialIdForSave,
+        githubAuthProvider,
+        isLoadingAuthProviders,
+        authProviderError,
+        isLoadingRepositoryCredentials,
+        repositoryCredentialsError,
+        repositoryCredentialCount: repositoryCredentials.length,
+      },
     );
     if (hasValidationErrors(nextValidationErrors)) {
       const invalidTargetIds = collectInvalidTargetIds(nextValidationErrors);
@@ -436,8 +829,28 @@ export function RepositoryProjectDetail({
 
     try {
       await updateRepositoryProject(
-        buildRepositoryProjectUpdateInput(repository.repository_id, draft),
+        buildRepositoryProjectUpdateInput(
+          repository.repository_id,
+          draft,
+          repositoryAccessAssessment,
+        ),
       );
+
+      const persistedRepositoryCredentialId =
+        repository.credentials?.credential_id ?? null;
+      if (repositoryCredentialIdForSave === null) {
+        await disconnectRepositoryAuth(repository.repository_id);
+      } else if (persistedRepositoryCredentialId === null) {
+        await connectRepositoryAuth(
+          repository.repository_id,
+          repositoryCredentialIdForSave,
+        );
+      } else {
+        await reconnectRepositoryAuth(
+          repository.repository_id,
+          repositoryCredentialIdForSave,
+        );
+      }
 
       const refreshedRepository = await resolveRepositoryDetail();
       if (!refreshedRepository) {
@@ -483,13 +896,19 @@ export function RepositoryProjectDetail({
   if (isLoading) {
     return (
       <div className="project-detail-shell">
-        <div className="feed-state">
-          <p className="feed-state__title">Loading project detail...</p>
-          <p className="feed-state__copy">
-            The shell is resolving the repository configuration that was just
-            created.
-          </p>
-        </div>
+        <FocusPageFrame
+          description="Inspect and edit repository identity, build targets, and runtime-managed paths."
+          eyebrow="Repository Project"
+          title="Project Detail"
+        >
+          <div className="feed-state">
+            <p className="feed-state__title">Loading project detail...</p>
+            <p className="feed-state__copy">
+              The shell is resolving the repository configuration that was just
+              created.
+            </p>
+          </div>
+        </FocusPageFrame>
       </div>
     );
   }
@@ -497,7 +916,13 @@ export function RepositoryProjectDetail({
   if (error) {
     return (
       <div className="project-detail-shell">
-        <p className="feed-banner feed-banner--error">{error}</p>
+        <FocusPageFrame
+          description="Inspect and edit repository identity, build targets, and runtime-managed paths."
+          eyebrow="Repository Project"
+          title="Project Detail"
+        >
+          <p className="feed-banner feed-banner--error">{error}</p>
+        </FocusPageFrame>
       </div>
     );
   }
@@ -505,13 +930,19 @@ export function RepositoryProjectDetail({
   if (!repository) {
     return (
       <div className="project-detail-shell">
-        <div className="feed-state">
-          <p className="feed-state__title">Project not found.</p>
-          <p className="feed-state__copy">
-            The repository was created, but the current inspection payload does
-            not include it yet.
-          </p>
-        </div>
+        <FocusPageFrame
+          description="Inspect and edit repository identity, build targets, and runtime-managed paths."
+          eyebrow="Repository Project"
+          title="Project Detail"
+        >
+          <div className="feed-state">
+            <p className="feed-state__title">Project not found.</p>
+            <p className="feed-state__copy">
+              The repository was created, but the current inspection payload does
+              not include it yet.
+            </p>
+          </div>
+        </FocusPageFrame>
       </div>
     );
   }
@@ -519,19 +950,40 @@ export function RepositoryProjectDetail({
   const hasUnsavedChanges = repository && draft
     ? isRepositoryProjectDraftChanged(repository, draft)
     : false;
+  const desiredRepositoryCredentialId = resolveRepositoryCredentialIdForSave(
+    repositoryAccessAssessment,
+    repositoryCredentialId,
+  );
+  const repositoryCredentialOptions = buildRepositoryCredentialOptions(
+    repositoryCredentials,
+    desiredRepositoryCredentialId,
+    isLoadingRepositoryCredentials,
+  );
+  const hasRepositoryCredentialChanges = repository
+    ? (repository.credentials?.credential_id ?? null) !==
+      desiredRepositoryCredentialId
+    : false;
+  const hasPendingChanges = hasUnsavedChanges || hasRepositoryCredentialChanges;
   const activeTargetCount = draft?.buildTargets.length ?? 0;
+  const validatingTargetCount = Object.values(validatingTargets).filter(
+    Boolean,
+  ).length;
+  const targetAttentionCount = draft
+    ? draft.buildTargets.filter((target) => {
+        const diagnostics = pathDiagnostics[target.id];
+
+        return diagnostics !== null && diagnostics.status !== "ready";
+      }).length
+    : 0;
   const pollingIntervalLabel = draft?.pollingIntervalSeconds.trim() || String(
     repository.polling_interval_seconds,
   );
+  const runningWorkCount =
+    repository.running_build_runs + repository.running_publish_runs;
 
   return (
     <div className="project-detail-shell">
-      {saveMessage ? <p className="notice-banner">{saveMessage}</p> : null}
-      {saveError ? (
-        <p className="feed-banner feed-banner--error">{saveError}</p>
-      ) : null}
-
-      <ProjectDetailSectionAccordion
+      <FocusPageFrame
         actions={
           <div className="project-detail-toolbar">
             <Button
@@ -543,7 +995,7 @@ export function RepositoryProjectDetail({
               Reload
             </Button>
             <Button
-              disabled={!hasUnsavedChanges || isSaving}
+              disabled={!hasPendingChanges || isSaving}
               onClick={() => void handleSaveProject()}
               size="sm"
               variant="primary"
@@ -552,361 +1004,597 @@ export function RepositoryProjectDetail({
             </Button>
           </div>
         }
-        description="Edit the repository identity, cadence, and runtime-managed paths."
+        description={repository.repo_url}
         eyebrow="Repository Project"
-        onOpenChange={(nextOpen) => handleSectionOpenChange("project", nextOpen)}
-        open={sectionOpenState.project}
-        title="Edit Project"
-      >
-        <div className="project-detail-summary">
-          <Badge tone={draft?.enabled === "enabled" ? "strong" : "muted"}>
-            {draft?.enabled === "enabled" ? "enabled" : "disabled"}
-          </Badge>
-          <Badge tone="neutral">engine: {draft?.engineKind ?? "unity"}</Badge>
-          <Badge tone="neutral">
-            Poll every {pollingIntervalLabel}s
-          </Badge>
-          <Badge tone="muted">
-            {activeTargetCount} active target{activeTargetCount === 1 ? "" : "s"}
-          </Badge>
-          <Badge tone="muted">
-            {repository.credentials
-              ? `credential: ${repository.credentials.name}`
-              : "no repository credential"}
-          </Badge>
-        </div>
-
-        {draft ? (
-          <div className="project-detail-form">
-            <div className="project-detail-form-grid">
-              <TextField
-                error={validationErrors.name}
-                label="Project name"
-                onChange={(event) =>
-                  handleDraftFieldChange("name", event.target.value)
-                }
-                placeholder="Project name"
-                value={draft.name}
-              />
-
-              <TextField
-                error={validationErrors.repositoryUrl}
-                label="Repository URL"
-                onChange={(event) =>
-                  handleDraftFieldChange("repositoryUrl", event.target.value)
-                }
-                placeholder="https://example.com/repository.git"
-                value={draft.repositoryUrl}
-              />
-
-              <RepositoryEngineField
-                error={validationErrors.engineKind}
-                onChange={(event) =>
-                  handleDraftFieldChange(
-                    "engineKind",
-                    event.target.value as RepositoryProjectDraft["engineKind"],
-                  )
-                }
-                value={draft.engineKind}
-              />
-
-              <TextField
-                hint="Optional"
-                label="Default branch"
-                onChange={(event) =>
-                  handleDraftFieldChange("defaultBranch", event.target.value)
-                }
-                placeholder="main"
-                value={draft.defaultBranch}
-              />
-
-              <TextField
-                error={validationErrors.pollingIntervalSeconds}
-                hint="Minimum 5s"
-                inputMode="numeric"
-                label="Polling interval"
-                min={MIN_PROJECT_POLL_INTERVAL_SECONDS}
-                onChange={(event) =>
-                  handleDraftFieldChange(
-                    "pollingIntervalSeconds",
-                    event.target.value,
-                  )
-                }
-                placeholder="300"
-                type="number"
-                value={draft.pollingIntervalSeconds}
-              />
-
-              <SelectField
-                label="Project status"
-                onChange={(event) =>
-                  handleDraftFieldChange(
-                    "enabled",
-                      event.target.value as RepositoryProjectDraft["enabled"],
-                  )
-                }
-                options={PROJECT_STATUS_OPTIONS}
-                value={draft.enabled}
-              />
-
-              <div className="project-detail-form-grid__span-full">
-                <PathPickerField
-                  buttonLabel="Pick artifacts root"
-                  clearLabel="Reset"
-                  clearable
-                  dialogTitle="Select artifacts root override"
-                  disabled={isSaving}
-                  hint="Optional repository-specific override"
-                  label="Artifacts root override"
-                  onClear={() =>
-                    handleDraftFieldChange("artifactsRootOverride", "")
-                  }
-                  onError={(pickError) => {
-                    setSaveError(buildProjectSaveErrorMessage(pickError));
-                  }}
-                  onPathPicked={(path) =>
-                    handleDraftFieldChange("artifactsRootOverride", path)
-                  }
-                  pickerKind="directory"
-                  placeholder="Uses the runtime artifacts root when empty"
-                  value={draft.artifactsRootOverride}
-                />
-              </div>
-
-              <div className="project-detail-form-grid__span-full">
-                <PathPickerField
-                  buttonLabel="Pick workspace root"
-                  clearLabel="Reset"
-                  clearable
-                  dialogTitle="Select workspace root override"
-                  disabled={isSaving}
-                  hint="Optional repository-specific checkout root"
-                  label="Workspace root override"
-                  onClear={() =>
-                    handleDraftFieldChange("workspaceRootOverride", "")
-                  }
-                  onError={(pickError) => {
-                    setSaveError(buildProjectSaveErrorMessage(pickError));
-                  }}
-                  onPathPicked={(path) =>
-                    handleDraftFieldChange("workspaceRootOverride", path)
-                  }
-                  pickerKind="directory"
-                  placeholder="Uses the runtime workspace root when empty"
-                  value={draft.workspaceRootOverride}
-                />
-              </div>
-            </div>
-          </div>
-        ) : null}
-      </ProjectDetailSectionAccordion>
-
-      <ProjectDetailSectionAccordion
-        actions={
-          <Button
-            disabled={isSaving}
-            leadingIcon="plus"
-            onClick={handleAddBuildTarget}
-            size="sm"
-            variant="secondary"
-          >
-            Add target
-          </Button>
+        summary={
+          <MetaRow>
+            <MetaItem label="Draft">
+                {hasPendingChanges ? "Unsaved changes" : "Saved"}
+            </MetaItem>
+            <MetaItem label="Status">{draft?.enabled ?? "enabled"}</MetaItem>
+            <MetaItem label="Cadence">{`${pollingIntervalLabel}s`}</MetaItem>
+            <MetaItem label="Targets">{formatTargetCount(activeTargetCount)}</MetaItem>
+              <MetaItem label="Access">
+                {formatRepositoryAccessSummary(
+                  repositoryAccessAssessment,
+                  isAssessingRepositoryAccess,
+                  repositoryAccessError,
+                )}
+              </MetaItem>
+              <MetaItem label="Connection">
+                {formatRepositoryBindingSummary(
+                  repository,
+                  desiredRepositoryCredentialId,
+                )}
+            </MetaItem>
+          </MetaRow>
         }
-        description="Host-native targets registered for this repository."
-        eyebrow="Execution"
-        onOpenChange={(nextOpen) => handleSectionOpenChange("targets", nextOpen)}
-        open={sectionOpenState.targets}
-        title="Build Targets"
+        title={draft?.name.trim() || repository.repository_name}
       >
-        {validationErrors.buildTargetsRoot ? (
-          <p className="feed-banner feed-banner--error">
-            {validationErrors.buildTargetsRoot}
-          </p>
+        {saveMessage ? <p className="notice-banner">{saveMessage}</p> : null}
+        {saveError ? (
+          <p className="feed-banner feed-banner--error">{saveError}</p>
         ) : null}
 
-        {draft && draft.buildTargets.length === 0 ? (
-          <div className="feed-state">
-            <p className="feed-state__title">No build targets configured.</p>
-            <p className="feed-state__copy">
-              This repository will not produce build work until at least one
-              target is enabled.
-            </p>
-          </div>
-        ) : (
-          <div className="project-detail-target-list">
-            {draft?.buildTargets.map((target, index) => {
-              const diagnostics = pathDiagnostics[target.id];
-              const fieldErrors = validationErrors.buildTargets[target.id] ?? {};
+        <ProjectDetailSectionAccordion
+          description="Edit the repository identity, cadence, and runtime-managed paths."
+          eyebrow="Repository Settings"
+          onOpenChange={(nextOpen) =>
+            handleSectionOpenChange("project", nextOpen)
+          }
+          open={sectionOpenState.project}
+          summary={
+            <MetaRow>
+              <MetaItem label="Status">{draft?.enabled ?? "enabled"}</MetaItem>
+              <MetaItem label="Engine">{draft?.engineKind ?? "unity"}</MetaItem>
+              <MetaItem label="Branch">
+                {formatOptionalBranchLabel(draft?.defaultBranch ?? "")}
+              </MetaItem>
+            </MetaRow>
+          }
+          title="Project Settings"
+        >
+          {draft ? (
+            <div className="project-detail-form">
+              <div className="project-detail-form-grid">
+                <TextField
+                  error={validationErrors.name}
+                  label="Project name"
+                  onChange={(event) =>
+                    handleDraftFieldChange("name", event.target.value)
+                  }
+                  placeholder="Project name"
+                  value={draft.name}
+                />
 
-              return (
-                <VerticalAccordion
-                  bodyClassName="wizard-target-card__body"
-                  className="wizard-target-card"
-                  collapsedToggleLabel={`Expand build target ${index + 1}`}
-                  expandedToggleLabel={`Collapse build target ${index + 1}`}
-                  header={
-                    <div className="wizard-target-card__header">
-                      <div className="wizard-target-card__title-block">
-                        <p className="wizard-target-card__eyebrow">
-                          Build target {index + 1}
+                <TextField
+                  error={validationErrors.repositoryUrl}
+                  label="Repository URL"
+                  onChange={(event) =>
+                    handleDraftFieldChange("repositoryUrl", event.target.value)
+                  }
+                  placeholder="https://example.com/repository.git"
+                  value={draft.repositoryUrl}
+                />
+
+                <RepositoryEngineField
+                  error={validationErrors.engineKind}
+                  onChange={(event) =>
+                    handleDraftFieldChange(
+                      "engineKind",
+                      event.target.value as RepositoryProjectDraft["engineKind"],
+                    )
+                  }
+                  value={draft.engineKind}
+                />
+
+                <TextField
+                  hint="Optional"
+                  label="Default branch"
+                  onChange={(event) =>
+                    handleDraftFieldChange("defaultBranch", event.target.value)
+                  }
+                  placeholder="main"
+                  value={draft.defaultBranch}
+                />
+
+                <TextField
+                  error={validationErrors.pollingIntervalSeconds}
+                  hint="Minimum 5s"
+                  inputMode="numeric"
+                  label="Polling interval"
+                  min={MIN_PROJECT_POLL_INTERVAL_SECONDS}
+                  onChange={(event) =>
+                    handleDraftFieldChange(
+                      "pollingIntervalSeconds",
+                      event.target.value,
+                    )
+                  }
+                  placeholder="300"
+                  type="number"
+                  value={draft.pollingIntervalSeconds}
+                />
+
+                <SelectField
+                  label="Project status"
+                  onChange={(event) =>
+                    handleDraftFieldChange(
+                      "enabled",
+                        event.target.value as RepositoryProjectDraft["enabled"],
+                    )
+                  }
+                  options={PROJECT_STATUS_OPTIONS}
+                  value={draft.enabled}
+                />
+
+                <SelectField
+                  hint="Tell HGP whether this remote should be treated as public or private."
+                  label="Repository visibility"
+                  onChange={(event) =>
+                    handleDraftFieldChange(
+                      "repositoryVisibility",
+                      event.target.value,
+                    )
+                  }
+                  options={REPOSITORY_VISIBILITY_OPTIONS}
+                  value={draft.repositoryVisibility}
+                />
+
+                <div className="project-detail-form-grid__span-full">
+                  <div className="wizard-callout wizard-callout--compact wizard-callout--auth wizard-callout--support">
+                    <div className="wizard-callout__header">
+                      <div>
+                        <p className="wizard-callout__title">Repository access</p>
+                        <p className="wizard-callout__copy">
+                          {resolveRepositoryAccessCopy(
+                            draft.repositoryUrl,
+                            repositoryAccessAssessment,
+                            isAssessingRepositoryAccess,
+                            repositoryAccessError,
+                          )}
                         </p>
-                        <h3 className="wizard-target-card__title">
-                          {target.name.trim() || "Unnamed target"}
-                        </h3>
                       </div>
 
-                      <div className="wizard-target-card__actions">
-                        <Badge tone="neutral">
-                          {target.targetPlatform.trim() || "no Unity target"}
-                        </Badge>
-                        {diagnostics ? (
-                          <Badge
-                            tone={
-                              diagnostics.status === "ready"
-                                ? "strong"
-                                : "muted"
-                            }
-                          >
-                            {formatDiagnosticStatus(diagnostics.status)}
-                          </Badge>
-                        ) : null}
-                        <Button
-                          disabled={draft.buildTargets.length === 1 || isSaving}
-                          onClick={() => handleRemoveBuildTarget(target.id)}
-                          size="sm"
-                          variant="ghost"
+                      <div className="wizard-callout__badges">
+                        <Badge
+                          tone={resolveRepositoryAccessBadgeTone(
+                            repositoryAccessAssessment,
+                            isAssessingRepositoryAccess,
+                            repositoryAccessError,
+                          )}
                         >
-                          Remove
-                        </Button>
+                          {formatRepositoryAccessStatus(
+                            draft.repositoryUrl,
+                            repositoryAccessAssessment,
+                            isAssessingRepositoryAccess,
+                            repositoryAccessError,
+                          )}
+                        </Badge>
                       </div>
                     </div>
-                  }
-                  key={target.id}
-                  onOpenChange={(nextOpen) =>
-                    handleTargetAccordionChange(target.id, nextOpen)
-                  }
-                  open={Boolean(expandedTargetIds[target.id])}
-                  triggerMode="button"
-                >
-                  <div className="wizard-form-grid wizard-form-grid--targets">
-                    <TextField
-                      error={fieldErrors.name}
-                      hint="Keep the target name stable. It becomes part of the artifact file name."
-                      label="Target name"
-                      onChange={(event) => {
-                        updateBuildTarget(target.id, {
-                          name: event.currentTarget.value,
-                        });
-                      }}
-                      placeholder="Windows"
-                      value={target.name}
-                    />
-                    <SelectField
-                      error={fieldErrors.targetPlatform}
-                      hint="This writes the Unity targetPlatform contract field directly."
-                      label="Unity target platform"
-                      onChange={(event) => {
-                        updateBuildTarget(target.id, {
-                          targetPlatform: normalizeUnityTargetPlatformValue(
-                            event.currentTarget.value,
-                          ),
-                        });
-                      }}
-                      options={PLATFORM_OPTIONS}
-                      value={normalizeUnityTargetPlatformValue(
-                        target.targetPlatform,
-                      )}
-                    />
-                    <TextField
-                      error={fieldErrors.buildMethod}
-                      hint="Point this at a real static Unity method, for example Builder.PerformWindows."
-                      label="Unity build method"
-                      onChange={(event) => {
-                        updateBuildTarget(target.id, {
-                          buildMethod: event.currentTarget.value,
-                        });
-                      }}
-                      placeholder="Builder.PerformWindows"
-                      value={target.buildMethod}
-                    />
-                    <PathPickerField
-                      buttonLabel="Choose Unity executable"
-                      disabled={isSaving}
-                      dialogTitle="Select Unity Editor executable"
-                      error={fieldErrors.unityExecutablePath}
-                      filters={[
-                        {
-                          name: "Unity Editor",
-                          extensions: ["exe", "app"],
-                        },
-                      ]}
-                      hint="Select the host-local Unity Editor executable that should run this target."
-                      label="Unity executable"
-                      onError={(pickError) => {
-                        setSaveError(buildProjectSaveErrorMessage(pickError));
-                      }}
-                      onPathPicked={(selectedPath) =>
-                        handlePickUnityExecutablePath(target.id, selectedPath)
-                      }
-                      pickerKind="file"
-                      placeholder="C:/Program Files/Unity/Hub/Editor/.../Unity.exe"
-                      value={target.unityExecutablePath}
-                    />
 
-                    {diagnostics ? (
-                      <p
-                        className={joinClassNames(
-                          "wizard-target-card__diagnostic",
-                          diagnostics.status !== "ready" &&
-                            "wizard-target-card__diagnostic--error",
-                        )}
-                      >
-                        {diagnostics.message}
+                    {draft.repositoryUrl.trim() ||
+                    isAssessingRepositoryAccess ||
+                    repositoryAccessAssessment ||
+                    repositoryAccessError ? (
+                      <MetaRow className="wizard-callout__meta">
+                        <MetaItem label="Provider">
+                          {formatRepositoryAccessProviderLabel(
+                            repositoryAccessAssessment,
+                            isAssessingRepositoryAccess,
+                            repositoryAccessError,
+                          )}
+                        </MetaItem>
+                        <MetaItem label="Visibility">
+                          {formatRepositoryVisibilityLabel(
+                            repositoryAccessAssessment,
+                            isAssessingRepositoryAccess,
+                            repositoryAccessError,
+                          )}
+                        </MetaItem>
+                        <MetaItem label="Login">
+                          {formatRepositoryLoginStatus(
+                            repositoryAccessAssessment,
+                            githubAuthProvider,
+                            isLoadingAuthProviders,
+                          )}
+                        </MetaItem>
+                        <MetaItem label="Connection">
+                          {formatRepositoryBindingStatus(
+                            repositoryAccessAssessment,
+                            desiredRepositoryCredentialId,
+                            pendingRepositoryAccessAction,
+                          )}
+                        </MetaItem>
+                      </MetaRow>
+                    ) : null}
+
+                    {repositoryAccessActionMessage ? (
+                      <p className="notice-banner">{repositoryAccessActionMessage}</p>
+                    ) : null}
+
+                    {validationErrors.repositoryAccess ? (
+                      <p className="ui-field__error">
+                        {validationErrors.repositoryAccess}
                       </p>
                     ) : null}
 
-                    {validatingTargets[target.id] ? (
-                      <p className="wizard-target-card__diagnostic">
-                        Validating Unity executable path...
-                      </p>
+                    {shouldShowRepositoryLoginAction(repositoryAccessAssessment) ? (
+                      <>
+                        <SelectField
+                          disabled={
+                            isLoadingRepositoryCredentials ||
+                            pendingRepositoryAccessAction ||
+                            pendingRepositoryCredentialSave
+                          }
+                          hint={formatRepositoryCredentialFieldHint(
+                            repositoryAccessAssessment,
+                            isLoadingRepositoryCredentials,
+                          )}
+                          label="Repository credential"
+                          onChange={(event) =>
+                            handleRepositoryCredentialSelectionChange(
+                              event.currentTarget.value,
+                            )
+                          }
+                          options={repositoryCredentialOptions}
+                          value={desiredRepositoryCredentialId?.toString() ?? ""}
+                        />
+
+                        <div className="wizard-callout__actions">
+                          {supportsShellRepositoryLoginAction(
+                            repositoryAccessAssessment,
+                          ) ? (
+                            <Button
+                              disabled={
+                                pendingRepositoryAccessAction ||
+                                pendingRepositoryCredentialSave
+                              }
+                              leadingIcon="key"
+                              onClick={() => void handleBindRepositoryAccess()}
+                              size="sm"
+                              variant={
+                                desiredRepositoryCredentialId !== null
+                                  ? "secondary"
+                                  : "primary"
+                              }
+                            >
+                              {pendingRepositoryAccessAction
+                                ? "Connecting login..."
+                                : formatRepositoryBindingActionLabel(
+                                    repositoryAccessAssessment,
+                                    githubAuthProvider,
+                                    desiredRepositoryCredentialId,
+                                  )}
+                            </Button>
+                          ) : null}
+
+                          {desiredRepositoryCredentialId !== null ? (
+                            <Button
+                              onClick={handleClearRepositoryAccessBinding}
+                              size="sm"
+                              variant="ghost"
+                            >
+                              Disconnect
+                            </Button>
+                          ) : null}
+
+                          {!showRepositoryCredentialComposer ? (
+                            <Button
+                              disabled={pendingRepositoryCredentialSave}
+                              leadingIcon="plus"
+                              onClick={handleOpenRepositoryCredentialComposer}
+                              size="sm"
+                              variant="ghost"
+                            >
+                              New credential
+                            </Button>
+                          ) : null}
+                        </div>
+
+                        {showRepositoryCredentialComposer &&
+                        repositoryAccessAssessment ? (
+                          <RepositoryCredentialComposer
+                            isSaving={pendingRepositoryCredentialSave}
+                            onCancel={handleCloseRepositoryCredentialComposer}
+                            onSave={handleSaveRepositoryCredential}
+                            providerLabel={repositoryAccessAssessment.provider_label}
+                            saveError={repositoryCredentialSaveError}
+                          />
+                        ) : null}
+                      </>
                     ) : null}
                   </div>
-                </VerticalAccordion>
-              );
-            })}
-          </div>
-        )}
-      </ProjectDetailSectionAccordion>
+                </div>
 
-      <ProjectDetailSectionAccordion
-        description="Queue and execution backlog for the registered repository."
-        eyebrow="Automation"
-        onOpenChange={(nextOpen) =>
-          handleSectionOpenChange("automation", nextOpen)
-        }
-        open={sectionOpenState.automation}
-        title="Runtime Status"
-      >
-        <div className="project-detail-status-grid">
-          <div className="project-detail-status-card">
-            <strong>{repository.pending_release_count}</strong>
-            <span>Pending releases</span>
+                <div className="project-detail-form-grid__span-full">
+                  <PathPickerField
+                    buttonLabel="Pick artifacts root"
+                    clearLabel="Reset"
+                    clearable
+                    dialogTitle="Select artifacts root override"
+                    disabled={isSaving}
+                    hint="Optional repository-specific override"
+                    label="Artifacts root override"
+                    onClear={() =>
+                      handleDraftFieldChange("artifactsRootOverride", "")
+                    }
+                    onError={(pickError) => {
+                      setSaveError(buildProjectSaveErrorMessage(pickError));
+                    }}
+                    onPathPicked={(path) =>
+                      handleDraftFieldChange("artifactsRootOverride", path)
+                    }
+                    pickerKind="directory"
+                    placeholder="Uses the runtime artifacts root when empty"
+                    value={draft.artifactsRootOverride}
+                  />
+                </div>
+
+                <div className="project-detail-form-grid__span-full">
+                  <PathPickerField
+                    buttonLabel="Pick workspace root"
+                    clearLabel="Reset"
+                    clearable
+                    dialogTitle="Select workspace root override"
+                    disabled={isSaving}
+                    hint="Optional repository-specific checkout root"
+                    label="Workspace root override"
+                    onClear={() =>
+                      handleDraftFieldChange("workspaceRootOverride", "")
+                    }
+                    onError={(pickError) => {
+                      setSaveError(buildProjectSaveErrorMessage(pickError));
+                    }}
+                    onPathPicked={(path) =>
+                      handleDraftFieldChange("workspaceRootOverride", path)
+                    }
+                    pickerKind="directory"
+                    placeholder="Uses the runtime workspace root when empty"
+                    value={draft.workspaceRootOverride}
+                  />
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </ProjectDetailSectionAccordion>
+
+        <ProjectDetailSectionAccordion
+          actions={
+            <Button
+              disabled={isSaving}
+              leadingIcon="plus"
+              onClick={handleAddBuildTarget}
+              size="sm"
+              variant="secondary"
+            >
+              Add target
+            </Button>
+          }
+          description="Host-native targets registered for this repository."
+          eyebrow="Execution"
+          onOpenChange={(nextOpen) =>
+            handleSectionOpenChange("targets", nextOpen)
+          }
+          open={sectionOpenState.targets}
+          summary={
+            <MetaRow>
+              <MetaItem label="Targets">{formatTargetCount(activeTargetCount)}</MetaItem>
+              <MetaItem label="Diagnostics">
+                {formatTargetAttentionSummary(targetAttentionCount)}
+              </MetaItem>
+              {validatingTargetCount > 0 ? (
+                <MetaItem label="Validation">
+                  {`${validatingTargetCount} running`}
+                </MetaItem>
+              ) : null}
+            </MetaRow>
+          }
+          title="Build Targets"
+        >
+          {validationErrors.buildTargetsRoot ? (
+            <p className="feed-banner feed-banner--error">
+              {validationErrors.buildTargetsRoot}
+            </p>
+          ) : null}
+
+          {draft && draft.buildTargets.length === 0 ? (
+            <div className="feed-state">
+              <p className="feed-state__title">No build targets configured.</p>
+              <p className="feed-state__copy">
+                This repository will not produce build work until at least one
+                target is enabled.
+              </p>
+            </div>
+          ) : (
+            <div className="project-detail-target-list">
+              {draft?.buildTargets.map((target, index) => {
+                const diagnostics = pathDiagnostics[target.id];
+                const fieldErrors = validationErrors.buildTargets[target.id] ?? {};
+
+                return (
+                  <VerticalAccordion
+                    bodyClassName="wizard-target-card__body"
+                    bodyInset
+                    className="wizard-target-card project-detail-target-accordion"
+                    collapsedToggleLabel={`Expand build target ${index + 1}`}
+                    expandedToggleLabel={`Collapse build target ${index + 1}`}
+                    header={
+                      <div className="wizard-target-card__header">
+                        <div className="wizard-target-card__top-row">
+                          <p className="wizard-target-card__eyebrow">
+                            Build target {index + 1}
+                          </p>
+                          <IconButton
+                            className="wizard-target-card__remove"
+                            disabled={draft.buildTargets.length === 1 || isSaving}
+                            icon="trash"
+                            label={`Remove build target ${index + 1}`}
+                            onClick={() => handleRemoveBuildTarget(target.id)}
+                            size="sm"
+                            variant="ghost"
+                          />
+                        </div>
+
+                        <div className="wizard-target-card__title-block">
+                          <h3 className="wizard-target-card__title">
+                            {target.name.trim() || "Unnamed target"}
+                          </h3>
+                        </div>
+
+                        <div className="wizard-target-card__badges">
+                          <Badge tone="neutral">
+                            {target.targetPlatform.trim() || "no Unity target"}
+                          </Badge>
+                          {diagnostics ? (
+                            <Badge
+                              tone={
+                                diagnostics.status === "ready"
+                                  ? "strong"
+                                  : "muted"
+                              }
+                            >
+                              {formatDiagnosticStatus(diagnostics.status)}
+                            </Badge>
+                          ) : null}
+                        </div>
+                      </div>
+                    }
+                    headerSeparated
+                    key={target.id}
+                    onOpenChange={(nextOpen) =>
+                      handleTargetAccordionChange(target.id, nextOpen)
+                    }
+                    open={Boolean(expandedTargetIds[target.id])}
+                    tone="section"
+                    triggerMode="button"
+                  >
+                    <div className="wizard-form-grid wizard-form-grid--targets">
+                      <TextField
+                        error={fieldErrors.name}
+                        hint="Keep the target name stable. It becomes part of the artifact file name."
+                        label="Target name"
+                        onChange={(event) => {
+                          updateBuildTarget(target.id, {
+                            name: event.currentTarget.value,
+                          });
+                        }}
+                        placeholder="Windows"
+                        value={target.name}
+                      />
+                      <SelectField
+                        error={fieldErrors.targetPlatform}
+                        hint="This writes the Unity targetPlatform contract field directly."
+                        label="Unity target platform"
+                        onChange={(event) => {
+                          updateBuildTarget(target.id, {
+                            targetPlatform: normalizeUnityTargetPlatformValue(
+                              event.currentTarget.value,
+                            ),
+                          });
+                        }}
+                        options={PLATFORM_OPTIONS}
+                        value={normalizeUnityTargetPlatformValue(
+                          target.targetPlatform,
+                        )}
+                      />
+                      <TextField
+                        error={fieldErrors.buildMethod}
+                        hint="Point this at a real static Unity method, for example Builder.PerformWindows."
+                        label="Unity build method"
+                        onChange={(event) => {
+                          updateBuildTarget(target.id, {
+                            buildMethod: event.currentTarget.value,
+                          });
+                        }}
+                        placeholder="Builder.PerformWindows"
+                        value={target.buildMethod}
+                      />
+                      <PathPickerField
+                        buttonLabel="Choose Unity executable"
+                        disabled={isSaving}
+                        dialogTitle="Select Unity Editor executable"
+                        error={fieldErrors.unityExecutablePath}
+                        filters={[
+                          {
+                            name: "Unity Editor",
+                            extensions: ["exe", "app"],
+                          },
+                        ]}
+                        hint="Select the host-local Unity Editor executable that should run this target."
+                        label="Unity executable"
+                        onError={(pickError) => {
+                          setSaveError(buildProjectSaveErrorMessage(pickError));
+                        }}
+                        onPathPicked={(selectedPath) =>
+                          handlePickUnityExecutablePath(target.id, selectedPath)
+                        }
+                        pickerKind="file"
+                        placeholder="C:/Program Files/Unity/Hub/Editor/.../Unity.exe"
+                        value={target.unityExecutablePath}
+                      />
+
+                      {diagnostics ? (
+                        <p
+                          className={joinClassNames(
+                            "wizard-target-card__diagnostic",
+                            diagnostics.status !== "ready" &&
+                              "wizard-target-card__diagnostic--error",
+                          )}
+                        >
+                          {diagnostics.message}
+                        </p>
+                      ) : null}
+
+                      {validatingTargets[target.id] ? (
+                        <p className="wizard-target-card__diagnostic">
+                          Validating Unity executable path...
+                        </p>
+                      ) : null}
+                    </div>
+                  </VerticalAccordion>
+                );
+              })}
+            </div>
+          )}
+        </ProjectDetailSectionAccordion>
+
+        <ProjectDetailSectionAccordion
+          description="Queue and execution backlog for the registered repository."
+          eyebrow="Automation"
+          onOpenChange={(nextOpen) =>
+            handleSectionOpenChange("automation", nextOpen)
+          }
+          open={sectionOpenState.automation}
+          summary={
+            <MetaRow>
+              <MetaItem label="Pending">{repository.pending_release_count}</MetaItem>
+              <MetaItem label="Queued">{repository.queued_build_runs}</MetaItem>
+              <MetaItem label="Running">{runningWorkCount}</MetaItem>
+            </MetaRow>
+          }
+          title="Runtime Status"
+        >
+          <div className="project-detail-status-grid">
+            <div className="project-detail-status-card">
+              <strong>{repository.pending_release_count}</strong>
+              <span>Pending releases</span>
+            </div>
+            <div className="project-detail-status-card">
+              <strong>{repository.queued_build_runs}</strong>
+              <span>Queued builds</span>
+            </div>
+            <div className="project-detail-status-card">
+              <strong>{repository.running_build_runs}</strong>
+              <span>Running builds</span>
+            </div>
+            <div className="project-detail-status-card">
+              <strong>{repository.running_publish_runs}</strong>
+              <span>Running publishes</span>
+            </div>
           </div>
-          <div className="project-detail-status-card">
-            <strong>{repository.queued_build_runs}</strong>
-            <span>Queued builds</span>
-          </div>
-          <div className="project-detail-status-card">
-            <strong>{repository.running_build_runs}</strong>
-            <span>Running builds</span>
-          </div>
-          <div className="project-detail-status-card">
-            <strong>{repository.running_publish_runs}</strong>
-            <span>Running publishes</span>
-          </div>
-        </div>
-      </ProjectDetailSectionAccordion>
+        </ProjectDetailSectionAccordion>
+      </FocusPageFrame>
     </div>
   );
 }
@@ -918,6 +1606,7 @@ function ProjectDetailSectionAccordion({
   eyebrow,
   onOpenChange,
   open,
+  summary,
   title,
 }: {
   actions?: ReactNode;
@@ -926,12 +1615,13 @@ function ProjectDetailSectionAccordion({
   eyebrow: string;
   onOpenChange: (nextOpen: boolean) => void;
   open: boolean;
+  summary?: ReactNode;
   title: string;
 }) {
   return (
     <VerticalAccordion
       bodyClassName="ui-panel__body project-detail-section-accordion__body"
-      className="ui-panel project-detail-section-accordion"
+      className="ui-panel ui-panel--section project-detail-section-accordion"
       collapsedToggleLabel={`Expand ${title}`}
       expandedToggleLabel={`Collapse ${title}`}
       header={
@@ -940,6 +1630,11 @@ function ProjectDetailSectionAccordion({
             <p className="ui-panel__eyebrow">{eyebrow}</p>
             <h2 className="ui-panel__title">{title}</h2>
             <p className="ui-panel__description">{description}</p>
+            {summary ? (
+              <div className="project-detail-section-accordion__summary">
+                {summary}
+              </div>
+            ) : null}
           </div>
           {actions ? (
             <div className="project-detail-section-accordion__actions">
@@ -948,13 +1643,429 @@ function ProjectDetailSectionAccordion({
           ) : null}
         </div>
       }
+      headerSeparated
       headerClassName="project-detail-section-accordion__header"
       onOpenChange={onOpenChange}
       open={open}
+      tone="section"
       triggerMode="button"
     >
       {children}
     </VerticalAccordion>
+  );
+}
+
+function formatRepositoryAccessSummary(
+  assessment: RepositoryAccessAssessment | null,
+  isAssessingRepositoryAccess: boolean,
+  repositoryAccessError: string | null,
+) {
+  if (isAssessingRepositoryAccess) {
+    return "Checking";
+  }
+
+  if (repositoryAccessError) {
+    return "Check failed";
+  }
+
+  if (!assessment) {
+    return "Pending";
+  }
+
+  switch (assessment.visibility) {
+    case "public":
+      return "Public";
+    case "private":
+      return "Private";
+    case "invalid":
+      return "Invalid";
+    default:
+      return "Unknown";
+  }
+}
+
+function formatRepositoryBindingSummary(
+  repository: RepositoryInspectionEntry,
+  repositoryCredentialId: number | null,
+) {
+  const persistedCredentialId = repository.credentials?.credential_id ?? null;
+
+  if (repositoryCredentialId !== null && repositoryCredentialId !== persistedCredentialId) {
+    return "Pending save";
+  }
+
+  if (repositoryCredentialId !== null) {
+    return repository.credentials?.name ?? "Bound";
+  }
+
+  return "No credential";
+}
+
+function formatOptionalBranchLabel(branch: string) {
+  const trimmed = branch.trim();
+  return trimmed ? trimmed : "No default branch";
+}
+
+function formatTargetCount(targetCount: number) {
+  return `${targetCount} active target${targetCount === 1 ? "" : "s"}`;
+}
+
+function formatTargetAttentionSummary(targetAttentionCount: number) {
+  if (targetAttentionCount === 0) {
+    return "All ready";
+  }
+
+  return `${targetAttentionCount} need review`;
+}
+
+function formatGithubAuthProviderStatus(
+  provider: AuthProviderStatus | null,
+  isLoadingAuthProviders: boolean,
+) {
+  if (isLoadingAuthProviders) {
+    return "loading";
+  }
+
+  if (!provider) {
+    return "unavailable";
+  }
+
+  if (provider.status === "connected") {
+    return "connected";
+  }
+
+  if (provider.status === "disconnected") {
+    return "ready to connect";
+  }
+
+  return "unavailable";
+}
+
+function resolveRepositoryAccessBadgeTone(
+  assessment: RepositoryAccessAssessment | null,
+  isAssessingRepositoryAccess: boolean,
+  repositoryAccessError: string | null,
+): "strong" | "neutral" | "muted" {
+  if (isAssessingRepositoryAccess) {
+    return "muted";
+  }
+
+  if (repositoryAccessError) {
+    return "neutral";
+  }
+
+  if (!assessment) {
+    return "muted";
+  }
+
+  if (assessment.visibility === "public") {
+    return "strong";
+  }
+
+  if (assessment.visibility === "private") {
+    return assessment.supports_interactive_login ? "neutral" : "muted";
+  }
+
+  if (assessment.visibility === "invalid") {
+    return "neutral";
+  }
+
+  return "muted";
+}
+
+function formatRepositoryAccessStatus(
+  repositoryUrl: string,
+  assessment: RepositoryAccessAssessment | null,
+  isAssessingRepositoryAccess: boolean,
+  repositoryAccessError: string | null,
+) {
+  if (!repositoryUrl.trim()) {
+    return "pending";
+  }
+
+  if (isAssessingRepositoryAccess) {
+    return "checking";
+  }
+
+  if (repositoryAccessError) {
+    return "check failed";
+  }
+
+  if (!assessment) {
+    return "pending";
+  }
+
+  switch (assessment.visibility) {
+    case "public":
+      return "public";
+    case "private":
+      return assessment.supports_interactive_login
+        ? "login required"
+        : "unsupported";
+    case "invalid":
+      return "invalid";
+    default:
+      return "unknown";
+  }
+}
+
+function resolveRepositoryAccessCopy(
+  repositoryUrl: string,
+  assessment: RepositoryAccessAssessment | null,
+  isAssessingRepositoryAccess: boolean,
+  repositoryAccessError: string | null,
+) {
+  if (!repositoryUrl.trim()) {
+    return "Paste a repository URL, choose whether the repository is public or private, and HGP will detect which platform owns the host.";
+  }
+
+  if (isAssessingRepositoryAccess) {
+    return "HGP is identifying which platform owns this repository URL and whether private login is supported for the selected visibility.";
+  }
+
+  if (repositoryAccessError) {
+    return repositoryAccessError;
+  }
+
+  if (assessment) {
+    return assessment.message;
+  }
+
+  return "Repository access has not been checked yet.";
+}
+
+function formatRepositoryAccessProviderLabel(
+  assessment: RepositoryAccessAssessment | null,
+  isAssessingRepositoryAccess: boolean,
+  repositoryAccessError: string | null,
+) {
+  if (isAssessingRepositoryAccess) {
+    return "Detecting";
+  }
+
+  if (repositoryAccessError || !assessment) {
+    return "Pending";
+  }
+
+  return assessment.provider_label;
+}
+
+function formatRepositoryVisibilityLabel(
+  assessment: RepositoryAccessAssessment | null,
+  isAssessingRepositoryAccess: boolean,
+  repositoryAccessError: string | null,
+) {
+  if (isAssessingRepositoryAccess) {
+    return "Checking";
+  }
+
+  if (repositoryAccessError) {
+    return "Needs review";
+  }
+
+  if (!assessment) {
+    return "Pending";
+  }
+
+  switch (assessment.visibility) {
+    case "public":
+      return "Public";
+    case "private":
+      return "Private";
+    case "invalid":
+      return "Invalid";
+    default:
+      return "Unknown";
+  }
+}
+
+function formatRepositoryLoginStatus(
+  assessment: RepositoryAccessAssessment | null,
+  githubAuthProvider: AuthProviderStatus | null,
+  isLoadingAuthProviders: boolean,
+) {
+  if (!assessment) {
+    return "Pending";
+  }
+
+  if (assessment.auth_requirement === "none") {
+    return "Not required";
+  }
+
+  if (!assessment.supports_interactive_login) {
+    return "Not available";
+  }
+
+  if (assessment.provider_id === "github") {
+    return formatGithubAuthProviderStatus(
+      githubAuthProvider,
+      isLoadingAuthProviders,
+    );
+  }
+
+  return "Required";
+}
+
+function formatRepositoryBindingStatus(
+  assessment: RepositoryAccessAssessment | null,
+  repositoryCredentialId: number | null,
+  pendingRepositoryAccessAction: boolean,
+) {
+  if (!assessment) {
+    return "Pending";
+  }
+
+  if (pendingRepositoryAccessAction) {
+    return "Connecting";
+  }
+
+  if (assessment.auth_requirement === "none") {
+    return "Not required";
+  }
+
+  if (!supportsShellRepositoryLoginAction(assessment)) {
+    return "Unavailable";
+  }
+
+  return repositoryCredentialId ? "Selected" : "Pending";
+}
+
+function formatRepositoryBindingActionLabel(
+  assessment: RepositoryAccessAssessment | null,
+  githubAuthProvider: AuthProviderStatus | null,
+  repositoryCredentialId: number | null,
+) {
+  if (!assessment) {
+    return "Connect login";
+  }
+
+  if (repositoryCredentialId) {
+    return assessment.provider_id === "github"
+      ? "Reconnect GitHub login"
+      : "Change credential";
+  }
+
+  if (assessment.provider_id === "github") {
+    return githubAuthProvider?.status === "connected"
+      ? "Connect GitHub login"
+      : "Log in and connect";
+  }
+
+  return "Select credential";
+}
+
+function shouldShowRepositoryLoginAction(
+  assessment: RepositoryAccessAssessment | null,
+) {
+  return supportsShellRepositoryLoginAction(assessment);
+}
+
+function supportsShellRepositoryLoginAction(
+  assessment: RepositoryAccessAssessment | null,
+) {
+  return Boolean(
+    assessment?.auth_requirement === "required" &&
+      assessment.supports_interactive_login &&
+      assessment.provider_id === "github",
+  );
+}
+
+function resolveRepositoryCredentialIdForSave(
+  assessment: RepositoryAccessAssessment | null,
+  repositoryCredentialId: number | null,
+) {
+  if (!assessment) {
+    return repositoryCredentialId;
+  }
+
+  if (assessment.auth_requirement !== "required") {
+    return null;
+  }
+
+  return repositoryCredentialId;
+}
+
+function formatRepositoryCredentialFieldHint(
+  assessment: RepositoryAccessAssessment | null,
+  isLoadingRepositoryCredentials: boolean,
+) {
+  if (isLoadingRepositoryCredentials) {
+    return "Loading stored repository credentials...";
+  }
+
+  if (!assessment || assessment.auth_requirement !== "required") {
+    return "Public repositories can keep this empty.";
+  }
+
+  return "Choose a stored GitHub credential or use the login action below.";
+}
+
+function buildRepositoryCredentialOptions(
+  credentials: SecretCredentialSetting[],
+  repositoryCredentialId: number | null,
+  isLoadingRepositoryCredentials: boolean,
+): SelectOption[] {
+  const placeholderLabel = isLoadingRepositoryCredentials
+    ? "Loading stored credentials..."
+    : credentials.length === 0
+      ? "No stored repository credentials available"
+      : "No repository credential selected";
+  const options: SelectOption[] = [
+    {
+      disabled: isLoadingRepositoryCredentials,
+      label: placeholderLabel,
+      value: "",
+    },
+    ...credentials.map((credential) => ({
+      label: formatRepositoryCredentialOptionLabel(credential),
+      value: credential.credential_id.toString(),
+    })),
+  ];
+
+  if (
+    repositoryCredentialId !== null &&
+    !credentials.some(
+      (credential) => credential.credential_id === repositoryCredentialId,
+    )
+  ) {
+    options.push({
+      label: `Current credential #${repositoryCredentialId}`,
+      value: repositoryCredentialId.toString(),
+    });
+  }
+
+  return options;
+}
+
+function formatRepositoryCredentialOptionLabel(
+  credential: SecretCredentialSetting,
+) {
+  return `${credential.name} (${formatRepositoryCredentialKindLabel(credential.kind)})`;
+}
+
+function formatRepositoryCredentialKindLabel(kind: string) {
+  switch (kind) {
+    case "git-http-basic":
+      return "HTTP basic";
+    case "git-http-bearer":
+      return "Bearer token";
+    case "git-http-github-host-login":
+      return "GitHub login";
+    default:
+      return kind;
+  }
+}
+
+function isRepositoryCredentialSelectable(
+  credential: SecretCredentialSetting,
+) {
+  return (
+    credential.config_summary.status === "ready" &&
+    [
+      "git-http-basic",
+      "git-http-bearer",
+      "git-http-github-host-login",
+    ].includes(credential.kind)
   );
 }
 
@@ -1018,6 +2129,7 @@ function buildRepositoryProjectDraft(
     engineKind: normalizeRepositoryEngineKind(repository.engine_kind),
     name: repository.repository_name,
     repositoryUrl: repository.repo_url,
+    repositoryVisibility: resolveRepositoryVisibilitySelection(repository),
     defaultBranch: repository.default_branch ?? "",
     artifactsRootOverride: repository.artifacts_root_override ?? "",
     workspaceRootOverride: repository.workspace_root_override ?? "",
@@ -1025,6 +2137,20 @@ function buildRepositoryProjectDraft(
     enabled: repository.enabled ? "enabled" : "disabled",
     buildTargets,
   };
+}
+
+function resolveRepositoryVisibilitySelection(
+  repository: RepositoryInspectionEntry,
+): RepositoryProjectDraft["repositoryVisibility"] {
+  if (
+    repository.visibility_status === "private" ||
+    repository.auth_requirement_status === "required" ||
+    repository.credentials !== null
+  ) {
+    return "private";
+  }
+
+  return "public";
 }
 
 function buildRepositoryProjectTargetEditorState(
@@ -1050,7 +2176,7 @@ function buildRepositoryProjectTargetEditorState(
         target.host_native_diagnostics?.unity_executable_path ?? "",
     });
     pathDiagnostics[targetId] = target.host_native_diagnostics;
-    expandedTargetIds[targetId] = true;
+    expandedTargetIds[targetId] = false;
   }
 
   return {
@@ -1065,6 +2191,18 @@ function validateRepositoryProjectDraft(
   draft: RepositoryProjectDraft,
   pathDiagnostics: Record<string, UnityExecutableValidation | null>,
   validatingTargets: Record<string, boolean>,
+  authState: {
+    repositoryAccessAssessment: RepositoryAccessAssessment | null;
+    isAssessingRepositoryAccess: boolean;
+    repositoryAccessError: string | null;
+    repositoryCredentialId: number | null;
+    githubAuthProvider: AuthProviderStatus | null;
+    isLoadingAuthProviders: boolean;
+    authProviderError: string | null;
+    isLoadingRepositoryCredentials: boolean;
+    repositoryCredentialsError: string | null;
+    repositoryCredentialCount: number;
+  },
 ): RepositoryProjectValidationErrors {
   const errors = createEmptyValidationErrors();
 
@@ -1085,6 +2223,70 @@ function validateRepositoryProjectDraft(
     !repositoryUrl.startsWith("http://")
   ) {
     errors.repositoryUrl = "Repository URL must use http:// or https://.";
+  } else if (authState.isAssessingRepositoryAccess) {
+    errors.repositoryAccess = "Repository access is still being checked.";
+  } else if (authState.repositoryAccessError) {
+    errors.repositoryAccess =
+      "Repository access could not be checked from the desktop shell.";
+  } else if (!authState.repositoryAccessAssessment) {
+    errors.repositoryAccess = "Repository access has not been checked yet.";
+  } else if (
+    authState.repositoryAccessAssessment.visibility === "invalid" ||
+    authState.repositoryAccessAssessment.visibility === "unknown"
+  ) {
+    errors.repositoryAccess = authState.repositoryAccessAssessment.message;
+  } else if (
+    authState.repositoryAccessAssessment.auth_requirement === "required"
+  ) {
+    if (
+      !supportsShellRepositoryLoginAction(
+        authState.repositoryAccessAssessment,
+      )
+    ) {
+      const providerLabel =
+        authState.repositoryAccessAssessment.provider_id === "unknown"
+          ? "this host"
+          : authState.repositoryAccessAssessment.provider_label || "this host";
+      errors.repositoryAccess =
+        authState.repositoryAccessAssessment.provider_id === "unknown"
+          ? "Private repositories are not supported for this host yet. Only public repositories can be saved right now."
+          : `Private ${providerLabel} repositories are not supported yet. Only public repositories are available for this platform right now.`;
+    } else if (authState.isLoadingRepositoryCredentials) {
+      errors.repositoryAccess =
+        "Repository credentials are still loading from the desktop shell.";
+    } else if (authState.repositoryCredentialsError) {
+      errors.repositoryAccess =
+        "Repository credentials could not be loaded from the desktop shell.";
+    } else if (!authState.repositoryCredentialId) {
+      const providerLabel =
+        authState.repositoryAccessAssessment.provider_label || "Repository";
+
+      if (
+        authState.repositoryAccessAssessment.provider_id === "github" &&
+        authState.repositoryAccessAssessment.supports_interactive_login
+      ) {
+        if (authState.isLoadingAuthProviders) {
+          errors.repositoryAccess = "GitHub login status is still loading.";
+        } else if (authState.authProviderError) {
+          errors.repositoryAccess =
+            "GitHub login status could not be loaded from the desktop shell.";
+        } else if (authState.githubAuthProvider?.status !== "connected") {
+          errors.repositoryAccess =
+            "Private GitHub repository detected. Log in and connect a GitHub credential, or select another stored repository credential, before saving.";
+        } else {
+          errors.repositoryAccess =
+            "Private GitHub repository detected. Connect a credential to this project before saving.";
+        }
+      } else if (authState.repositoryCredentialCount === 0) {
+        errors.repositoryAccess =
+          `Private ${providerLabel} repository detected. No stored repository credentials are available for this project yet.`;
+      } else {
+        errors.repositoryAccess =
+          `Private ${providerLabel} repository detected. Select a stored repository credential before saving.`;
+      }
+    } else {
+      errors.repositoryAccess = undefined;
+    }
   }
 
   const pollingIntervalSeconds = Number(draft.pollingIntervalSeconds);
@@ -1151,6 +2353,7 @@ function hasValidationErrors(errors: RepositoryProjectValidationErrors) {
       errors.name ||
       errors.repositoryUrl ||
       errors.pollingIntervalSeconds ||
+      errors.repositoryAccess ||
       errors.buildTargetsRoot ||
       Object.values(errors.buildTargets).some((fieldErrors) =>
         hasBuildTargetFieldErrors(fieldErrors),
@@ -1194,12 +2397,14 @@ function mergeExpandedTargetIds(
 function buildRepositoryProjectUpdateInput(
   repositoryId: number,
   draft: RepositoryProjectDraft,
+  repositoryAccessAssessment: RepositoryAccessAssessment | null,
 ): UpdateRepositoryProjectInput {
   return {
     repository_id: repositoryId,
     name: draft.name.trim(),
     engine_kind: draft.engineKind,
     repository_url: draft.repositoryUrl.trim(),
+    repository_access_assessment: repositoryAccessAssessment,
     default_branch: normalizeOptionalDraftValue(draft.defaultBranch),
     artifacts_root_override: normalizeOptionalDraftValue(
       draft.artifactsRootOverride,
@@ -1222,6 +2427,68 @@ function buildRepositoryProjectUpdateInput(
       },
       unity_executable_path: target.unityExecutablePath.trim(),
     })),
+  };
+}
+
+function buildRepositoryAccessAssessmentFromDetection(
+  detection: RepositoryProviderDetection,
+  repositoryVisibility: RepositoryProjectDraft["repositoryVisibility"],
+): RepositoryAccessAssessment {
+  if (repositoryVisibility === "public") {
+    return {
+      provider_id: detection.provider_id,
+      provider_label: detection.provider_label,
+      instance_url: detection.instance_url,
+      normalized_url: detection.normalized_url,
+      visibility: "public",
+      auth_requirement: "none",
+      auth_status: "not_required",
+      supports_interactive_login: detection.supports_interactive_login,
+      message:
+        "Public repository selected. HGP will poll and clone this remote without repository authentication.",
+    };
+  }
+
+  if (detection.supports_interactive_login && detection.provider_id === "github") {
+    return {
+      provider_id: detection.provider_id,
+      provider_label: detection.provider_label,
+      instance_url: detection.instance_url,
+      normalized_url: detection.normalized_url,
+      visibility: "private",
+      auth_requirement: "required",
+      auth_status: "required_unbound",
+      supports_interactive_login: detection.supports_interactive_login,
+      message:
+        "Private GitHub repository selected. Log in and connect this project before saving.",
+    };
+  }
+
+  if (detection.provider_id === "unknown") {
+    return {
+      provider_id: detection.provider_id,
+      provider_label: detection.provider_label,
+      instance_url: detection.instance_url,
+      normalized_url: detection.normalized_url,
+      visibility: "private",
+      auth_requirement: "required",
+      auth_status: "unsupported",
+      supports_interactive_login: detection.supports_interactive_login,
+      message:
+        "Private repository selected, but HGP could not identify a supported login platform from this URL. Only public repositories are supported for this host right now.",
+    };
+  }
+
+  return {
+    provider_id: detection.provider_id,
+    provider_label: detection.provider_label,
+    instance_url: detection.instance_url,
+    normalized_url: detection.normalized_url,
+    visibility: "private",
+    auth_requirement: "required",
+    auth_status: "unsupported",
+    supports_interactive_login: detection.supports_interactive_login,
+    message: `Private ${detection.provider_label} repositories are not supported yet. Only public repositories are available for this platform right now.`,
   };
 }
 

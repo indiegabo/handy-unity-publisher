@@ -13,14 +13,15 @@ import { AuthProvidersFocusScreen } from "./components/AuthProvidersFocusScreen"
 import { CreateProjectWizard } from "./components/CreateProjectWizard";
 import {
   ProcessFeedItem,
-  type ProcessFeedRecord,
 } from "./components/ProcessFeedItem";
+import { ProcessDetailFocusScreen } from "./components/ProcessDetailFocusScreen";
 import { ProjectsFocusScreen } from "./components/ProjectsFocusScreen";
 import { RepositoryProjectDetail } from "./components/RepositoryProjectDetail";
 import {
   WorkerStatusIndicator,
   type WorkerStatusTone,
 } from "./components/WorkerStatusIndicator";
+import { type ProcessFeedRecord } from "./components/processFeedPresentation";
 import {
   ProjectWorkersFocusScreen,
   type ProjectWorkerEntry,
@@ -83,7 +84,7 @@ type AppScreen =
       repositoryId: number;
       returnTo: "main" | "project-list";
     }
-  | { kind: "process-detail"; processId: number };
+  | { kind: "process-detail"; process: ProcessFeedRecord };
 
 const PROCESS_FEED_PAGE_SIZE = 5;
 const PRODUCT_NAME = "Handy Games Publisher";
@@ -108,6 +109,9 @@ const EMPTY_WORKER_STATUS_SNAPSHOT: WorkerStatusSnapshot = {
 function App() {
   const [page, setPage] = useState(1);
   const [activeScreen, setActiveScreen] = useState<AppScreen>({ kind: "main" });
+  const [activeProjectTitle, setActiveProjectTitle] = useState<string | null>(
+    null,
+  );
   const [isMainWindowPinned, setIsMainWindowPinned] = useState(false);
   const [isScreenBlank, setIsScreenBlank] = useState(false);
   const [transitionError, setTransitionError] = useState<string | null>(null);
@@ -136,6 +140,18 @@ function App() {
   const isNavigatingRef = useRef(false);
   const workerStatus = resolveWorkerStatusSummary(workerSnapshot);
   const projectWorkers = collectProjectWorkers(workerSnapshot.repositories);
+  const activeProcessDetail =
+    activeScreen.kind === "process-detail"
+      ? processPage.items.find(
+          (process) =>
+            process.release_run_id === activeScreen.process.release_run_id,
+        ) ?? activeScreen.process
+      : null;
+  const activeProcessDetailUsesLiveSnapshot =
+    activeScreen.kind === "process-detail" &&
+    processPage.items.some(
+      (process) => process.release_run_id === activeScreen.process.release_run_id,
+    );
 
   const loadProcessFeed = useEffectEvent(
     async (pageToLoad: number, reason: "page" | "event") => {
@@ -318,7 +334,7 @@ function App() {
     (process: ProcessFeedRecord) => {
       void transitionToScreen({
         kind: "process-detail",
-        processId: process.release_run_id,
+        process,
       });
     },
   );
@@ -374,11 +390,29 @@ function App() {
     });
   });
 
-  const handleOpenProjectDetail = useEffectEvent((repositoryId: number) => {
-    void transitionToScreen({
-      kind: "project-detail",
-      repositoryId,
-      returnTo: "project-list",
+  const handleOpenProjectDetail = useEffectEvent(
+    (repositoryId: number, repositoryName?: string) => {
+      startTransition(() => {
+        setActiveProjectTitle(repositoryName?.trim() || null);
+      });
+
+      void transitionToScreen({
+        kind: "project-detail",
+        repositoryId,
+        returnTo: "project-list",
+      });
+    },
+  );
+
+  const handleProjectNameResolved = useEffectEvent((repositoryName: string) => {
+    const normalizedName = repositoryName.trim();
+
+    if (!normalizedName) {
+      return;
+    }
+
+    startTransition(() => {
+      setActiveProjectTitle(normalizedName);
     });
   });
 
@@ -514,7 +548,7 @@ function App() {
           }}
         >
           <span className="window-titlebar__title">
-            {resolveWindowTitle(activeScreen)}
+            {resolveWindowTitle(activeScreen, activeProjectTitle)}
           </span>
         </div>
         <div className="window-titlebar__actions">
@@ -812,14 +846,16 @@ function App() {
 
               {activeScreen.kind === "project-detail" ? (
                 <RepositoryProjectDetail
+                  onProjectNameResolved={handleProjectNameResolved}
                   repositoryId={activeScreen.repositoryId}
                 />
               ) : null}
 
               {activeScreen.kind === "process-detail" ? (
-                <p className="focus-screen-shell__title">
-                  {`Detalhe do processo #${activeScreen.processId}`}
-                </p>
+                <ProcessDetailFocusScreen
+                  process={activeProcessDetail}
+                  usesLiveSnapshot={activeProcessDetailUsesLiveSnapshot}
+                />
               ) : null}
             </section>
           </div>
@@ -1039,7 +1075,10 @@ function formatRuntimeStatus(status: RuntimeHealthStatus) {
   return status.replace(/_/g, " ");
 }
 
-function resolveWindowTitle(activeScreen: AppScreen) {
+function resolveWindowTitle(
+  activeScreen: AppScreen,
+  activeProjectTitle: string | null,
+) {
   switch (activeScreen.kind) {
     case "main":
       return PRODUCT_NAME;
@@ -1054,9 +1093,11 @@ function resolveWindowTitle(activeScreen: AppScreen) {
     case "project-workers":
       return `${PRODUCT_NAME} · Project Workers`;
     case "project-detail":
-      return `${PRODUCT_NAME} · Project #${activeScreen.repositoryId}`;
+      return activeProjectTitle?.trim()
+        ? `${PRODUCT_NAME} · ${activeProjectTitle.trim()}`
+        : `${PRODUCT_NAME} · Project #${activeScreen.repositoryId}`;
     case "process-detail":
-      return `${PRODUCT_NAME} · Process #${activeScreen.processId}`;
+      return `${PRODUCT_NAME} · Process #${activeScreen.process.release_run_id}`;
   }
 }
 

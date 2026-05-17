@@ -33,7 +33,6 @@ export function WorkerStatusIndicator({
         expanded && "worker-status-indicator--expanded",
         className,
       )}
-      title={label}
       type={type}
     >
       <span aria-hidden="true" className="worker-status-indicator__halo" />

@@ -21,7 +21,8 @@ export type IconName =
   | "server"
   | "settings"
   | "spark"
-  | "terminal";
+  | "terminal"
+  | "trash";
 
 type IconProps = Omit<SVGProps<SVGSVGElement>, "children"> & {
   name: IconName;
@@ -224,6 +225,17 @@ function renderIcon(name: IconName) {
           <rect height="16" rx="2.5" width="18" x="3" y="4" />
           <path d="M7.5 10.5L10.5 13 7.5 15.5" />
           <path d="M12.5 15.5h4" />
+        </>
+      );
+    case "trash":
+      return (
+        <>
+          <path d="M5.5 7.5h13" />
+          <path d="M9 7.5V5.75A1.75 1.75 0 0110.75 4h2.5A1.75 1.75 0 0115 5.75V7.5" />
+          <path d="M8 10.5v6" />
+          <path d="M12 10.5v6" />
+          <path d="M16 10.5v6" />
+          <path d="M7.5 7.5l.8 11A2 2 0 0010.29 20h3.42a2 2 0 001.99-1.5l.8-11" />
         </>
       );
   }

@@ -1,5 +1,13 @@
+import { type ReactNode, useState } from "react";
+
 import { Button } from "./Button";
-import { Badge, SurfacePanel } from "./Surface";
+import {
+  Badge,
+  FocusPageFrame,
+  MetaItem,
+  MetaRow,
+} from "./Surface";
+import { VerticalAccordion } from "./VerticalAccordion";
 import type { RuntimeHealthStatus } from "../services/runtime";
 
 export type RuntimeControlAction = "start" | "stop" | "restart";
@@ -48,10 +56,27 @@ export function ProjectWorkersFocusScreen({
 }: ProjectWorkersFocusScreenProps) {
   const runtimeIsRunning = runtimeStatus ? runtimeStatus !== "stopped" : false;
   const runtimeBusy = pendingRuntimeAction !== null;
+  const [runtimeOverviewOpen, setRuntimeOverviewOpen] = useState(
+    () => runtimeStatus !== null && runtimeStatus !== "healthy",
+  );
+  const [workerInventoryOpen, setWorkerInventoryOpen] = useState(true);
+  const totalBuildTargetCount = projectWorkers.reduce(
+    (total, projectWorker) => total + projectWorker.buildTargets.length,
+    0,
+  );
+  const attentionTargetCount = projectWorkers.reduce(
+    (total, projectWorker) =>
+      total +
+      projectWorker.buildTargets.filter(
+        (buildTarget) => buildTarget.diagnosticStatus !== "ready",
+      ).length,
+    0,
+  );
+  const readyTargetCount = totalBuildTargetCount - attentionTargetCount;
 
   return (
     <div className="project-workers-focus-shell">
-      <SurfacePanel
+      <FocusPageFrame
         actions={
           <div className="project-workers-focus-toolbar">
             <Button
@@ -82,137 +107,278 @@ export function ProjectWorkersFocusScreen({
             </Button>
           </div>
         }
-        description="Control the local automation runtime and trigger immediate repository checks."
+        description="Control the local automation runtime and inspect repositories that currently expose enabled build targets."
         eyebrow="Runtime"
-        title="Runtime Controls"
-      >
-        <div className="project-workers-focus-status-row">
-          <Badge tone={resolveRuntimeBadgeTone(runtimeStatus)}>
-            {formatRuntimeStatus(runtimeStatus)}
-          </Badge>
-          <p className="project-workers-focus-copy">
-            {buildRuntimeCopy(runtimeStatus)}
-          </p>
-        </div>
-      </SurfacePanel>
-
-      {actionMessage ? <p className="notice-banner">{actionMessage}</p> : null}
-      {actionError ? (
-        <p className="feed-banner feed-banner--error">{actionError}</p>
-      ) : null}
-
-      <SurfacePanel
-        description="Repositories that currently expose enabled build targets."
-        eyebrow="Inventory"
+        summary={
+          <MetaRow>
+            <MetaItem label="Runtime">{formatRuntimeStatus(runtimeStatus)}</MetaItem>
+            <MetaItem label="Workers">{projectWorkers.length}</MetaItem>
+            <MetaItem label="Targets">{totalBuildTargetCount}</MetaItem>
+            <MetaItem label="Attention">
+              {attentionTargetCount === 0 ? "All ready" : attentionTargetCount}
+            </MetaItem>
+          </MetaRow>
+        }
         title="Project Workers"
       >
-        {!inspectionAvailable ? (
-          <div className="feed-state">
-            <p className="feed-state__title">
-              Loading project worker inventory...
-            </p>
-            <p className="feed-state__copy">
-              The shell is refreshing the repositories that currently expose
-              enabled build targets.
-            </p>
-          </div>
+        {actionMessage ? <p className="notice-banner">{actionMessage}</p> : null}
+        {actionError ? (
+          <p className="feed-banner feed-banner--error">{actionError}</p>
         ) : null}
 
-        {inspectionAvailable && projectWorkers.length === 0 ? (
-          <div className="feed-state">
-            <p className="feed-state__title">
-              No active project workers configured.
-            </p>
-            <p className="feed-state__copy">
-              Enabled repositories need at least one enabled build target before
-              they appear here.
-            </p>
+        <ProjectWorkersSectionAccordion
+          description="Current lifecycle state of the local automation runtime."
+          eyebrow="Runtime State"
+          onOpenChange={setRuntimeOverviewOpen}
+          open={runtimeOverviewOpen}
+          summary={
+            <MetaRow>
+              <MetaItem label="State">{formatRuntimeStatus(runtimeStatus)}</MetaItem>
+              <MetaItem label="Controls">
+                {runtimeBusy ? "Transition in progress" : "Ready"}
+              </MetaItem>
+            </MetaRow>
+          }
+          title="Runtime Overview"
+        >
+          <div className="project-workers-focus-panel-body">
+            <div className="project-workers-focus-status-row">
+              <Badge tone={resolveRuntimeBadgeTone(runtimeStatus)}>
+                {formatRuntimeStatus(runtimeStatus)}
+              </Badge>
+              <p className="project-workers-focus-copy">
+                {buildRuntimeCopy(runtimeStatus)}
+              </p>
+            </div>
           </div>
-        ) : null}
+        </ProjectWorkersSectionAccordion>
 
-        {inspectionAvailable && projectWorkers.length > 0 ? (
-          <div className="project-workers-focus-project-list">
-            {projectWorkers.map((projectWorker) => (
-              <section
-                className="project-workers-focus-card"
-                key={projectWorker.repositoryId}
-              >
-                <div className="project-workers-focus-card__header">
-                  <div className="project-workers-focus-card__title-block">
-                    <h3 className="project-workers-focus-card__title">
-                      {projectWorker.repositoryName}
-                    </h3>
-                    <p className="project-workers-focus-card__copy">
-                      Poll every {projectWorker.pollingIntervalSeconds}s
-                    </p>
-                  </div>
+        <ProjectWorkersSectionAccordion
+          description="Repositories that currently expose enabled build targets."
+          eyebrow="Inventory"
+          onOpenChange={setWorkerInventoryOpen}
+          open={workerInventoryOpen}
+          summary={
+            <MetaRow>
+              <MetaItem label="Projects">{projectWorkers.length}</MetaItem>
+              <MetaItem label="Ready">{readyTargetCount}</MetaItem>
+              <MetaItem label="Attention">
+                {attentionTargetCount === 0 ? "All ready" : attentionTargetCount}
+              </MetaItem>
+            </MetaRow>
+          }
+          title="Worker Inventory"
+        >
+          {!inspectionAvailable ? (
+            <div className="feed-state">
+              <p className="feed-state__title">
+                Loading project worker inventory...
+              </p>
+              <p className="feed-state__copy">
+                The shell is refreshing the repositories that currently expose
+                enabled build targets.
+              </p>
+            </div>
+          ) : null}
 
-                  <Button
-                    disabled={
-                      runtimeBusy || pendingInstantCheckRepositoryId !== null
-                    }
-                    leadingIcon="refresh"
-                    onClick={() =>
-                      onInstantCheck(
-                        projectWorker.repositoryId,
-                        projectWorker.repositoryName,
-                      )
-                    }
-                    size="sm"
-                    variant="secondary"
-                  >
-                    {pendingInstantCheckRepositoryId ===
-                    projectWorker.repositoryId
-                      ? "Checking..."
-                      : "Instant Check"}
-                  </Button>
-                </div>
+          {inspectionAvailable && projectWorkers.length === 0 ? (
+            <div className="feed-state">
+              <p className="feed-state__title">
+                No active project workers configured.
+              </p>
+              <p className="feed-state__copy">
+                Enabled repositories need at least one enabled build target
+                before they appear here.
+              </p>
+            </div>
+          ) : null}
 
-                <div className="project-workers-focus-card__meta">
-                  <Badge tone="neutral">
-                    {projectWorker.buildTargets.length} build target
-                    {projectWorker.buildTargets.length === 1 ? "" : "s"}
-                  </Badge>
-                </div>
-
-                <div className="project-workers-focus-build-target-list">
-                  {projectWorker.buildTargets.map((buildTarget) => (
-                    <article
-                      className="project-workers-focus-build-target-chip"
-                      key={buildTarget.buildTargetId}
-                    >
-                      <div className="project-workers-focus-build-target-chip__header">
-                        <div className="project-workers-focus-build-target-chip__title-block">
-                          <p className="project-workers-focus-build-target-chip__title">
-                            {buildTarget.name}
-                          </p>
-                          <p className="project-workers-focus-build-target-chip__copy">
-                            {buildTarget.unityTargetPlatform}
-                          </p>
-                        </div>
-
-                        <Badge
-                          tone={resolveBuildTargetBadgeTone(
-                            buildTarget.diagnosticStatus,
-                          )}
-                        >
-                          {buildTarget.diagnosticStatus.replace(/_/g, " ")}
-                        </Badge>
-                      </div>
-
-                      <p className="project-workers-focus-build-target-chip__copy">
-                        {buildTarget.diagnosticMessage}
-                      </p>
-                    </article>
-                  ))}
-                </div>
-              </section>
-            ))}
-          </div>
-        ) : null}
-      </SurfacePanel>
+          {inspectionAvailable && projectWorkers.length > 0 ? (
+            <div className="project-workers-focus-project-list">
+              {projectWorkers.map((projectWorker) => (
+                <ProjectWorkerAccordion
+                  key={projectWorker.repositoryId}
+                  onInstantCheck={onInstantCheck}
+                  pendingInstantCheckRepositoryId={
+                    pendingInstantCheckRepositoryId
+                  }
+                  projectWorker={projectWorker}
+                  runtimeBusy={runtimeBusy}
+                />
+              ))}
+            </div>
+          ) : null}
+        </ProjectWorkersSectionAccordion>
+      </FocusPageFrame>
     </div>
   );
+}
+
+function ProjectWorkersSectionAccordion({
+  children,
+  description,
+  eyebrow,
+  onOpenChange,
+  open,
+  summary,
+  title,
+}: {
+  children: ReactNode;
+  description: string;
+  eyebrow: string;
+  onOpenChange: (nextOpen: boolean) => void;
+  open: boolean;
+  summary?: ReactNode;
+  title: string;
+}) {
+  return (
+    <VerticalAccordion
+      bodyClassName="ui-panel__body project-workers-section-accordion__body"
+      className="ui-panel ui-panel--section project-workers-section-accordion"
+      collapsedToggleLabel={`Expand ${title}`}
+      expandedToggleLabel={`Collapse ${title}`}
+      header={
+        <div className="project-workers-section-accordion__header-content">
+          <div className="ui-panel__title-block">
+            <p className="ui-panel__eyebrow">{eyebrow}</p>
+            <h2 className="ui-panel__title">{title}</h2>
+            <p className="ui-panel__description">{description}</p>
+            {summary ? (
+              <div className="project-workers-section-accordion__summary">
+                {summary}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      }
+      headerSeparated
+      headerClassName="project-workers-section-accordion__header"
+      onOpenChange={onOpenChange}
+      open={open}
+      tone="section"
+      triggerMode="button"
+    >
+      {children}
+    </VerticalAccordion>
+  );
+}
+
+function ProjectWorkerAccordion({
+  onInstantCheck,
+  pendingInstantCheckRepositoryId,
+  projectWorker,
+  runtimeBusy,
+}: {
+  onInstantCheck: (repositoryId: number, repositoryName: string) => void;
+  pendingInstantCheckRepositoryId: number | null;
+  projectWorker: ProjectWorkerEntry;
+  runtimeBusy: boolean;
+}) {
+  const attentionTargetCount = resolveWorkerAttentionCount(projectWorker);
+  const readyTargetCount =
+    projectWorker.buildTargets.length - attentionTargetCount;
+
+  return (
+    <VerticalAccordion
+      bodyClassName="project-workers-worker-accordion__body"
+      className="ui-panel ui-panel--inset project-workers-worker-accordion"
+      collapsedToggleLabel={`Expand ${projectWorker.repositoryName}`}
+      defaultOpen={attentionTargetCount > 0}
+      expandedToggleLabel={`Collapse ${projectWorker.repositoryName}`}
+      header={
+        <div className="project-workers-worker-accordion__header-content">
+          <div className="ui-panel__title-block">
+            <h3 className="ui-panel__title">{projectWorker.repositoryName}</h3>
+            <div className="project-workers-worker-accordion__summary">
+              <MetaRow>
+                <MetaItem label="Poll">
+                  {`${projectWorker.pollingIntervalSeconds}s`}
+                </MetaItem>
+                <MetaItem label="Targets">
+                  {projectWorker.buildTargets.length}
+                </MetaItem>
+                <MetaItem
+                  label={attentionTargetCount === 0 ? "Ready" : "Attention"}
+                >
+                  {attentionTargetCount === 0
+                    ? readyTargetCount
+                    : attentionTargetCount}
+                </MetaItem>
+              </MetaRow>
+            </div>
+          </div>
+          <div
+            className="project-workers-worker-accordion__actions"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+          >
+            <Button
+              disabled={runtimeBusy || pendingInstantCheckRepositoryId !== null}
+              leadingIcon="refresh"
+              onClick={() =>
+                onInstantCheck(
+                  projectWorker.repositoryId,
+                  projectWorker.repositoryName,
+                )
+              }
+              size="sm"
+              variant="secondary"
+            >
+              {pendingInstantCheckRepositoryId === projectWorker.repositoryId
+                ? "Checking..."
+                : "Instant Check"}
+            </Button>
+          </div>
+        </div>
+      }
+      headerSeparated
+      headerClassName="project-workers-worker-accordion__header"
+      tone="section"
+      triggerMode="both"
+    >
+      <div className="project-workers-focus-target-list">
+        {projectWorker.buildTargets.map((buildTarget) => {
+          const hasAttention = buildTarget.diagnosticStatus !== "ready";
+
+          return (
+            <article
+              className="project-workers-focus-target-row"
+              key={buildTarget.buildTargetId}
+            >
+              <div className="project-workers-focus-target-row__main">
+                <div className="project-workers-focus-target-row__header">
+                  <p className="project-workers-focus-target-row__title">
+                    {buildTarget.name}
+                  </p>
+                  <p className="project-workers-focus-target-row__meta">
+                    {buildTarget.unityTargetPlatform}
+                  </p>
+                </div>
+
+                {hasAttention && buildTarget.diagnosticMessage.trim() ? (
+                  <p className="project-workers-focus-target-row__message">
+                    {buildTarget.diagnosticMessage}
+                  </p>
+                ) : null}
+              </div>
+
+              <Badge
+                tone={resolveBuildTargetBadgeTone(buildTarget.diagnosticStatus)}
+              >
+                {formatDiagnosticStatus(buildTarget.diagnosticStatus)}
+              </Badge>
+            </article>
+          );
+        })}
+      </div>
+    </VerticalAccordion>
+  );
+}
+
+function resolveWorkerAttentionCount(projectWorker: ProjectWorkerEntry) {
+  return projectWorker.buildTargets.filter(
+    (buildTarget) => buildTarget.diagnosticStatus !== "ready",
+  ).length;
 }
 
 function resolveRuntimeBadgeTone(runtimeStatus: RuntimeHealthStatus | null) {
@@ -229,6 +395,10 @@ function resolveRuntimeBadgeTone(runtimeStatus: RuntimeHealthStatus | null) {
 
 function resolveBuildTargetBadgeTone(diagnosticStatus: string) {
   return diagnosticStatus === "ready" ? "strong" : "muted";
+}
+
+function formatDiagnosticStatus(diagnosticStatus: string) {
+  return diagnosticStatus.replace(/_/g, " ");
 }
 
 function formatRuntimeStatus(runtimeStatus: RuntimeHealthStatus | null) {

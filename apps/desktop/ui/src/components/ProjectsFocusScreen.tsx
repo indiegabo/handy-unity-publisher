@@ -8,7 +8,13 @@ import {
 
 import { Button } from "./Button";
 import { Icon } from "./Icon";
-import { Badge, SurfacePanel } from "./Surface";
+import {
+  Badge,
+  FocusPageFrame,
+  MetaItem,
+  MetaRow,
+  SurfacePanel,
+} from "./Surface";
 import {
   loadRepositoryInspection,
   type RepositoryInspectionEntry,
@@ -16,7 +22,7 @@ import {
 
 type ProjectsFocusScreenProps = {
   highlightedRepositoryId?: number | null;
-  onOpenProject: (repositoryId: number) => void;
+  onOpenProject: (repositoryId: number, repositoryName: string) => void;
 };
 
 export function ProjectsFocusScreen({
@@ -36,6 +42,14 @@ export function ProjectsFocusScreen({
       : repositories.find(
           (repository) => repository.repository_id === highlightedRepositoryId,
         ) ?? null;
+  const enabledRepositoryCount = repositories.filter(
+    (repository) => repository.enabled,
+  ).length;
+  const disabledRepositoryCount = repositories.length - enabledRepositoryCount;
+  const activeBuildTargetCount = repositories.reduce(
+    (total, repository) => total + repository.enabled_build_target_count,
+    0,
+  );
 
   const loadProjects = useEffectEvent(async () => {
     setIsLoading(true);
@@ -74,14 +88,7 @@ export function ProjectsFocusScreen({
 
   return (
     <div className="project-list-shell">
-      {error ? <p className="feed-banner feed-banner--error">{error}</p> : null}
-      {highlightedProject ? (
-        <p className="notice-banner">
-          {`${highlightedProject.repository_name} was created. Open it to continue editing.`}
-        </p>
-      ) : null}
-
-      <SurfacePanel
+      <FocusPageFrame
         actions={
           <Button
             leadingIcon="refresh"
@@ -92,88 +99,130 @@ export function ProjectsFocusScreen({
             Refresh
           </Button>
         }
-        description="Repository projects registered in the local runtime."
+        description="Review repository projects registered in the local runtime and open one to inspect or edit its pipeline settings."
         eyebrow="Projects"
+        summary={
+          <MetaRow>
+            <MetaItem label="Projects">
+              {isLoading ? "Loading snapshot..." : `${repositories.length} registered`}
+            </MetaItem>
+            {!isLoading ? (
+              <MetaItem label="Enabled">{enabledRepositoryCount}</MetaItem>
+            ) : null}
+            {!isLoading ? (
+              <MetaItem label="Disabled">{disabledRepositoryCount}</MetaItem>
+            ) : null}
+            {!isLoading ? (
+              <MetaItem label="Active targets">{activeBuildTargetCount}</MetaItem>
+            ) : null}
+          </MetaRow>
+        }
         title="Project List"
       >
-        {isLoading ? (
-          <div className="feed-state">
-            <p className="feed-state__title">Loading projects...</p>
-            <p className="feed-state__copy">
-              The shell is resolving the latest repository inspection snapshot.
-            </p>
-          </div>
+        {error ? (
+          <p className="feed-banner feed-banner--error">{error}</p>
+        ) : null}
+        {highlightedProject ? (
+          <p className="notice-banner">
+            {`${highlightedProject.repository_name} was created. Open it to continue editing.`}
+          </p>
         ) : null}
 
-        {!isLoading && repositories.length === 0 ? (
-          <div className="feed-state">
-            <p className="feed-state__title">No projects configured yet.</p>
-            <p className="feed-state__copy">
-              Create a repository project from the home screen to manage it
-              here.
-            </p>
-          </div>
-        ) : null}
+        <SurfacePanel
+          className="project-list-section"
+          description="Repository projects currently known by the local runtime."
+          eyebrow="Registered Projects"
+          headerSeparated
+          title="Project Inventory"
+          tone="section"
+        >
+          {isLoading ? (
+            <div className="feed-state">
+              <p className="feed-state__title">Loading projects...</p>
+              <p className="feed-state__copy">
+                The shell is resolving the latest repository inspection snapshot.
+              </p>
+            </div>
+          ) : null}
 
-        {!isLoading && repositories.length > 0 ? (
-          <div className="project-list-grid">
-            {repositories.map((repository) => (
-              <button
-                className={joinClassNames(
-                  "project-list-card",
-                  repository.repository_id === highlightedRepositoryId &&
-                    "project-list-card--highlighted",
-                )}
-                key={repository.repository_id}
-                onClick={() => onOpenProject(repository.repository_id)}
-                ref={(element) => {
-                  projectCardRefs.current[repository.repository_id] = element;
-                }}
-                type="button"
-              >
-                <div className="project-list-card__header">
-                  <div className="project-list-card__title-block">
-                    <h3 className="project-list-card__title">
-                      {repository.repository_name}
-                    </h3>
-                    <p className="project-list-card__copy">
-                      {repository.repo_url}
-                    </p>
+          {!isLoading && repositories.length === 0 ? (
+            <div className="feed-state">
+              <p className="feed-state__title">No projects configured yet.</p>
+              <p className="feed-state__copy">
+                Create a repository project from the home screen to manage it
+                here.
+              </p>
+            </div>
+          ) : null}
+
+          {!isLoading && repositories.length > 0 ? (
+            <div className="project-list-grid">
+              {repositories.map((repository) => (
+                <button
+                  className={joinClassNames(
+                    "project-list-card",
+                    repository.repository_id === highlightedRepositoryId &&
+                      "project-list-card--highlighted",
+                  )}
+                  key={repository.repository_id}
+                  onClick={() =>
+                    onOpenProject(
+                      repository.repository_id,
+                      repository.repository_name,
+                    )
+                  }
+                  ref={(element) => {
+                    projectCardRefs.current[repository.repository_id] = element;
+                  }}
+                  type="button"
+                >
+                  <div className="project-list-card__header">
+                    <div className="project-list-card__title-block">
+                      <div className="project-list-card__title-row">
+                        <h3 className="project-list-card__title">
+                          {repository.repository_name}
+                        </h3>
+                        <div className="project-list-card__badges">
+                          {repository.repository_id === highlightedRepositoryId ? (
+                            <Badge tone="strong">new</Badge>
+                          ) : null}
+                          <Badge tone={repository.enabled ? "strong" : "muted"}>
+                            {repository.enabled ? "enabled" : "disabled"}
+                          </Badge>
+                        </div>
+                      </div>
+                      <p className="project-list-card__copy">
+                        {repository.repo_url}
+                      </p>
+                    </div>
+
+                    <span className="project-list-card__direction">
+                      <span className="project-list-card__direction-label">
+                        Edit
+                      </span>
+                      <Icon name="arrowUpRight" size={14} />
+                    </span>
                   </div>
 
-                  <span className="project-list-card__direction">
-                    <span className="project-list-card__direction-label">
-                      Edit
-                    </span>
-                    <Icon name="arrowUpRight" size={14} />
-                  </span>
-                </div>
+                  <MetaRow className="project-list-card__meta">
+                    <MetaItem label="Engine">{repository.engine_kind}</MetaItem>
+                    <MetaItem label="Poll">
+                      {`${repository.polling_interval_seconds}s cadence`}
+                    </MetaItem>
+                    <MetaItem label="Targets">
+                      {formatTargetCount(repository.enabled_build_target_count)}
+                    </MetaItem>
+                  </MetaRow>
 
-                <div className="project-list-card__meta">
-                  {repository.repository_id === highlightedRepositoryId ? (
-                    <Badge tone="strong">new</Badge>
-                  ) : null}
-                  <Badge tone="neutral">engine: {repository.engine_kind}</Badge>
-                  <Badge tone={repository.enabled ? "strong" : "muted"}>
-                    {repository.enabled ? "enabled" : "disabled"}
-                  </Badge>
-                  <Badge tone="neutral">
-                    Poll every {repository.polling_interval_seconds}s
-                  </Badge>
-                  <Badge tone="muted">
-                    {repository.enabled_build_target_count} active target
-                    {repository.enabled_build_target_count === 1 ? "" : "s"}
-                  </Badge>
-                </div>
-
-                <p className="project-list-card__copy project-list-card__copy--muted">
-                  {buildRepositorySummary(repository)}
-                </p>
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </SurfacePanel>
+                  <p className="project-list-card__summary">
+                    {buildRepositorySummary(repository)}
+                  </p>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </SurfacePanel>
+      </FocusPageFrame>
     </div>
   );
 }
@@ -186,6 +235,10 @@ function buildRepositorySummary(repository: RepositoryInspectionEntry) {
   const publishTargetCount = repository.publish_targets.length;
 
   return `${lastSeenTag} ${publishTargetCount} publish target${publishTargetCount === 1 ? "" : "s"} registered.`;
+}
+
+function formatTargetCount(targetCount: number) {
+  return `${targetCount} active target${targetCount === 1 ? "" : "s"}`;
 }
 
 function buildProjectsListErrorMessage(error: unknown) {

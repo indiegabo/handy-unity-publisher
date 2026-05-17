@@ -6,13 +6,15 @@ import {
   useState,
 } from "react";
 
-import { IconButton } from "./Button";
+import { Icon } from "./Icon";
 
 export type AccordionTriggerMode = "both" | "button" | "header";
+export type AccordionTone = "default" | "section";
 
 type VerticalAccordionProps = {
   animatedBorder?: boolean;
   bodyClassName?: string;
+  bodyInset?: boolean;
   children: ReactNode;
   className?: string;
   collapsedToggleLabel?: string;
@@ -20,14 +22,17 @@ type VerticalAccordionProps = {
   expandedToggleLabel?: string;
   header: ReactNode;
   headerClassName?: string;
+  headerSeparated?: boolean;
   onOpenChange?: (nextOpen: boolean) => void;
   open?: boolean;
+  tone?: AccordionTone;
   triggerMode?: AccordionTriggerMode;
 };
 
 export function VerticalAccordion({
   animatedBorder = false,
   bodyClassName,
+  bodyInset = false,
   children,
   className,
   collapsedToggleLabel = "Expand section",
@@ -35,8 +40,10 @@ export function VerticalAccordion({
   expandedToggleLabel = "Collapse section",
   header,
   headerClassName,
+  headerSeparated = false,
   onOpenChange,
   open,
+  tone = "default",
   triggerMode = "both",
 }: VerticalAccordionProps) {
   const [uncontrolledIsOpen, setUncontrolledIsOpen] = useState(defaultOpen);
@@ -87,7 +94,10 @@ export function VerticalAccordion({
       className={joinClassNames(
         "vertical-accordion",
         animatedBorder && "vertical-accordion--animated-border",
+        bodyInset && "vertical-accordion--body-inset",
+        headerSeparated && "vertical-accordion--header-separated",
         isOpen && "vertical-accordion--open",
+        `vertical-accordion--${tone}`,
         className,
       )}
       data-state={isOpen ? "open" : "closed"}
@@ -105,16 +115,22 @@ export function VerticalAccordion({
         role={headerIsInteractive ? "button" : undefined}
         tabIndex={headerIsInteractive ? 0 : undefined}
       >
-        <IconButton
+        <button
           aria-controls={bodyId}
           aria-expanded={isOpen}
+          aria-label={isOpen ? expandedToggleLabel : collapsedToggleLabel}
           className="vertical-accordion__toggle"
-          icon="chevronDown"
-          label={isOpen ? expandedToggleLabel : collapsedToggleLabel}
           onClick={handleToggleClick}
-          size="sm"
-          variant="ghost"
-        />
+          title={isOpen ? expandedToggleLabel : collapsedToggleLabel}
+          type="button"
+        >
+          <Icon
+            aria-hidden
+            className="ui-button__icon"
+            name="chevronDown"
+            style={{ transform: isOpen ? "rotate(0deg)" : "rotate(-90deg)" }}
+          />
+        </button>
 
         <div className="vertical-accordion__header-content">{header}</div>
       </div>
@@ -122,7 +138,9 @@ export function VerticalAccordion({
       <div
         aria-hidden={!isOpen}
         className={joinClassNames("vertical-accordion__body", bodyClassName)}
+        hidden={!isOpen}
         id={bodyId}
+        style={{ display: isOpen ? "grid" : "none" }}
       >
         <div className="vertical-accordion__body-inner">{children}</div>
       </div>
