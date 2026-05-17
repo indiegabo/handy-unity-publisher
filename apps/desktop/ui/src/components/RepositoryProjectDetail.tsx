@@ -12,12 +12,7 @@ import { RepositoryCredentialComposer } from "./RepositoryCredentialComposer";
 import { SelectField, TextField, type SelectOption } from "./Field";
 import { PathPickerField } from "./PathPickerField";
 import { RepositoryEngineField } from "./RepositoryEngineField";
-import {
-  Badge,
-  FocusPageFrame,
-  MetaItem,
-  MetaRow,
-} from "./Surface";
+import { Badge, FocusPageFrame, MetaItem, MetaRow } from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
 import {
   connectRepositoryAuth,
@@ -31,6 +26,8 @@ import {
   validateUnityExecutablePath,
   type RepositoryAccessAssessment,
   type RepositoryEngineKind,
+  type RepositoryPublishBindingInspection,
+  type RepositoryPublishTargetInspection,
   type RepositoryInspectionEntry,
   type RepositoryProviderDetection,
   type SaveSecretCredentialInput,
@@ -93,7 +90,11 @@ type RepositoryProjectFieldName = Exclude<
   "buildTargets"
 >;
 
-type ProjectDetailSectionKey = "project" | "targets" | "automation";
+type ProjectDetailSectionKey =
+  | "project"
+  | "targets"
+  | "destinations"
+  | "automation";
 
 type ValidationTimerMap = Record<string, number | undefined>;
 
@@ -124,6 +125,7 @@ const PLATFORM_OPTIONS = [
 const DEFAULT_SECTION_OPEN_STATE: Record<ProjectDetailSectionKey, boolean> = {
   project: false,
   targets: false,
+  destinations: false,
   automation: false,
 };
 
@@ -169,8 +171,10 @@ export function RepositoryProjectDetail({
     useState<string | null>(null);
   const [pendingRepositoryAccessAction, setPendingRepositoryAccessAction] =
     useState(false);
-  const [showRepositoryCredentialComposer, setShowRepositoryCredentialComposer] =
-    useState(false);
+  const [
+    showRepositoryCredentialComposer,
+    setShowRepositoryCredentialComposer,
+  ] = useState(false);
   const [pendingRepositoryCredentialSave, setPendingRepositoryCredentialSave] =
     useState(false);
   const [repositoryCredentialSaveError, setRepositoryCredentialSaveError] =
@@ -347,7 +351,9 @@ export function RepositoryProjectDetail({
 
         startTransition(() => {
           setRepositoryAccessAssessment(null);
-          setRepositoryAccessError(buildProjectSaveErrorMessage(assessmentError));
+          setRepositoryAccessError(
+            buildProjectSaveErrorMessage(assessmentError),
+          );
           setIsAssessingRepositoryAccess(false);
         });
       }
@@ -427,7 +433,8 @@ export function RepositoryProjectDetail({
   }, [repositoryAccessAssessment?.auth_requirement]);
 
   useEffect(() => {
-    const resolvedName = draft?.name.trim() || repository?.repository_name.trim();
+    const resolvedName =
+      draft?.name.trim() || repository?.repository_name.trim();
 
     if (!resolvedName) {
       return;
@@ -559,7 +566,9 @@ export function RepositoryProjectDetail({
   );
 
   const handleAddBuildTarget = useEffectEvent(() => {
-    const nextTarget = createEmptyBuildTargetDraft(nextBuildTargetIdRef.current);
+    const nextTarget = createEmptyBuildTargetDraft(
+      nextBuildTargetIdRef.current,
+    );
     nextBuildTargetIdRef.current += 1;
 
     startTransition(() => {
@@ -763,9 +772,7 @@ export function RepositoryProjectDetail({
         });
       } catch (error) {
         startTransition(() => {
-          setRepositoryCredentialSaveError(
-            buildProjectSaveErrorMessage(error),
-          );
+          setRepositoryCredentialSaveError(buildProjectSaveErrorMessage(error));
         });
       } finally {
         startTransition(() => {
@@ -817,7 +824,9 @@ export function RepositoryProjectDetail({
           project: true,
           targets:
             current.targets ||
-            Boolean(nextValidationErrors.buildTargetsRoot || invalidTargetIds.length),
+            Boolean(
+              nextValidationErrors.buildTargetsRoot || invalidTargetIds.length,
+            ),
         }));
       });
       return;
@@ -857,9 +866,8 @@ export function RepositoryProjectDetail({
         throw new Error("The updated project could not be reloaded.");
       }
 
-      const targetEditorState = buildRepositoryProjectTargetEditorState(
-        refreshedRepository,
-      );
+      const targetEditorState =
+        buildRepositoryProjectTargetEditorState(refreshedRepository);
       nextBuildTargetIdRef.current = targetEditorState.nextBuildTargetIndex;
 
       startTransition(() => {
@@ -876,7 +884,9 @@ export function RepositoryProjectDetail({
         setExpandedTargetIds(targetEditorState.expandedTargetIds);
         setError(null);
         setIsLoading(false);
-        setSaveMessage(`Saved changes for ${refreshedRepository.repository_name}.`);
+        setSaveMessage(
+          `Saved changes for ${refreshedRepository.repository_name}.`,
+        );
       });
     } catch (saveProjectError) {
       startTransition(() => {
@@ -938,8 +948,8 @@ export function RepositoryProjectDetail({
           <div className="feed-state">
             <p className="feed-state__title">Project not found.</p>
             <p className="feed-state__copy">
-              The repository was created, but the current inspection payload does
-              not include it yet.
+              The repository was created, but the current inspection payload
+              does not include it yet.
             </p>
           </div>
         </FocusPageFrame>
@@ -947,9 +957,10 @@ export function RepositoryProjectDetail({
     );
   }
 
-  const hasUnsavedChanges = repository && draft
-    ? isRepositoryProjectDraftChanged(repository, draft)
-    : false;
+  const hasUnsavedChanges =
+    repository && draft
+      ? isRepositoryProjectDraftChanged(repository, draft)
+      : false;
   const desiredRepositoryCredentialId = resolveRepositoryCredentialIdForSave(
     repositoryAccessAssessment,
     repositoryCredentialId,
@@ -965,9 +976,8 @@ export function RepositoryProjectDetail({
     : false;
   const hasPendingChanges = hasUnsavedChanges || hasRepositoryCredentialChanges;
   const activeTargetCount = draft?.buildTargets.length ?? 0;
-  const validatingTargetCount = Object.values(validatingTargets).filter(
-    Boolean,
-  ).length;
+  const validatingTargetCount =
+    Object.values(validatingTargets).filter(Boolean).length;
   const targetAttentionCount = draft
     ? draft.buildTargets.filter((target) => {
         const diagnostics = pathDiagnostics[target.id];
@@ -975,9 +985,18 @@ export function RepositoryProjectDetail({
         return diagnostics !== null && diagnostics.status !== "ready";
       }).length
     : 0;
-  const pollingIntervalLabel = draft?.pollingIntervalSeconds.trim() || String(
-    repository.polling_interval_seconds,
+  const publishDestinationCount = repository.publish_targets.length;
+  const enabledNonConsumingBindingCount = countEnabledPublishBindings(
+    repository,
+    "non_consuming",
   );
+  const enabledConsumingBindingCount = countEnabledPublishBindings(
+    repository,
+    "consuming",
+  );
+  const pollingIntervalLabel =
+    draft?.pollingIntervalSeconds.trim() ||
+    String(repository.polling_interval_seconds);
   const runningWorkCount =
     repository.running_build_runs + repository.running_publish_runs;
 
@@ -1009,23 +1028,25 @@ export function RepositoryProjectDetail({
         summary={
           <MetaRow>
             <MetaItem label="Draft">
-                {hasPendingChanges ? "Unsaved changes" : "Saved"}
+              {hasPendingChanges ? "Unsaved changes" : "Saved"}
             </MetaItem>
             <MetaItem label="Status">{draft?.enabled ?? "enabled"}</MetaItem>
             <MetaItem label="Cadence">{`${pollingIntervalLabel}s`}</MetaItem>
-            <MetaItem label="Targets">{formatTargetCount(activeTargetCount)}</MetaItem>
-              <MetaItem label="Access">
-                {formatRepositoryAccessSummary(
-                  repositoryAccessAssessment,
-                  isAssessingRepositoryAccess,
-                  repositoryAccessError,
-                )}
-              </MetaItem>
-              <MetaItem label="Connection">
-                {formatRepositoryBindingSummary(
-                  repository,
-                  desiredRepositoryCredentialId,
-                )}
+            <MetaItem label="Targets">
+              {formatTargetCount(activeTargetCount)}
+            </MetaItem>
+            <MetaItem label="Access">
+              {formatRepositoryAccessSummary(
+                repositoryAccessAssessment,
+                isAssessingRepositoryAccess,
+                repositoryAccessError,
+              )}
+            </MetaItem>
+            <MetaItem label="Connection">
+              {formatRepositoryBindingSummary(
+                repository,
+                desiredRepositoryCredentialId,
+              )}
             </MetaItem>
           </MetaRow>
         }
@@ -1082,7 +1103,8 @@ export function RepositoryProjectDetail({
                   onChange={(event) =>
                     handleDraftFieldChange(
                       "engineKind",
-                      event.target.value as RepositoryProjectDraft["engineKind"],
+                      event.target
+                        .value as RepositoryProjectDraft["engineKind"],
                     )
                   }
                   value={draft.engineKind}
@@ -1120,7 +1142,7 @@ export function RepositoryProjectDetail({
                   onChange={(event) =>
                     handleDraftFieldChange(
                       "enabled",
-                        event.target.value as RepositoryProjectDraft["enabled"],
+                      event.target.value as RepositoryProjectDraft["enabled"],
                     )
                   }
                   options={PROJECT_STATUS_OPTIONS}
@@ -1144,7 +1166,9 @@ export function RepositoryProjectDetail({
                   <div className="wizard-callout wizard-callout--compact wizard-callout--auth wizard-callout--support">
                     <div className="wizard-callout__header">
                       <div>
-                        <p className="wizard-callout__title">Repository access</p>
+                        <p className="wizard-callout__title">
+                          Repository access
+                        </p>
                         <p className="wizard-callout__copy">
                           {resolveRepositoryAccessCopy(
                             draft.repositoryUrl,
@@ -1210,7 +1234,9 @@ export function RepositoryProjectDetail({
                     ) : null}
 
                     {repositoryAccessActionMessage ? (
-                      <p className="notice-banner">{repositoryAccessActionMessage}</p>
+                      <p className="notice-banner">
+                        {repositoryAccessActionMessage}
+                      </p>
                     ) : null}
 
                     {validationErrors.repositoryAccess ? (
@@ -1219,7 +1245,9 @@ export function RepositoryProjectDetail({
                       </p>
                     ) : null}
 
-                    {shouldShowRepositoryLoginAction(repositoryAccessAssessment) ? (
+                    {shouldShowRepositoryLoginAction(
+                      repositoryAccessAssessment,
+                    ) ? (
                       <>
                         <SelectField
                           disabled={
@@ -1238,7 +1266,9 @@ export function RepositoryProjectDetail({
                             )
                           }
                           options={repositoryCredentialOptions}
-                          value={desiredRepositoryCredentialId?.toString() ?? ""}
+                          value={
+                            desiredRepositoryCredentialId?.toString() ?? ""
+                          }
                         />
 
                         <div className="wizard-callout__actions">
@@ -1298,7 +1328,9 @@ export function RepositoryProjectDetail({
                             isSaving={pendingRepositoryCredentialSave}
                             onCancel={handleCloseRepositoryCredentialComposer}
                             onSave={handleSaveRepositoryCredential}
-                            providerLabel={repositoryAccessAssessment.provider_label}
+                            providerLabel={
+                              repositoryAccessAssessment.provider_label
+                            }
                             saveError={repositoryCredentialSaveError}
                           />
                         ) : null}
@@ -1379,7 +1411,9 @@ export function RepositoryProjectDetail({
           open={sectionOpenState.targets}
           summary={
             <MetaRow>
-              <MetaItem label="Targets">{formatTargetCount(activeTargetCount)}</MetaItem>
+              <MetaItem label="Targets">
+                {formatTargetCount(activeTargetCount)}
+              </MetaItem>
               <MetaItem label="Diagnostics">
                 {formatTargetAttentionSummary(targetAttentionCount)}
               </MetaItem>
@@ -1410,7 +1444,8 @@ export function RepositoryProjectDetail({
             <div className="project-detail-target-list">
               {draft?.buildTargets.map((target, index) => {
                 const diagnostics = pathDiagnostics[target.id];
-                const fieldErrors = validationErrors.buildTargets[target.id] ?? {};
+                const fieldErrors =
+                  validationErrors.buildTargets[target.id] ?? {};
 
                 return (
                   <VerticalAccordion
@@ -1427,7 +1462,9 @@ export function RepositoryProjectDetail({
                           </p>
                           <IconButton
                             className="wizard-target-card__remove"
-                            disabled={draft.buildTargets.length === 1 || isSaving}
+                            disabled={
+                              draft.buildTargets.length === 1 || isSaving
+                            }
                             icon="trash"
                             label={`Remove build target ${index + 1}`}
                             onClick={() => handleRemoveBuildTarget(target.id)}
@@ -1560,6 +1597,166 @@ export function RepositoryProjectDetail({
         </ProjectDetailSectionAccordion>
 
         <ProjectDetailSectionAccordion
+          description="Inspect publish destinations, bound credentials, and per-target binding semantics."
+          eyebrow="Publishing"
+          onOpenChange={(nextOpen) =>
+            handleSectionOpenChange("destinations", nextOpen)
+          }
+          open={sectionOpenState.destinations}
+          summary={
+            <MetaRow>
+              <MetaItem label="Destinations">
+                {formatPublishDestinationCount(publishDestinationCount)}
+              </MetaItem>
+              <MetaItem label="Non-consuming">
+                {enabledNonConsumingBindingCount}
+              </MetaItem>
+              <MetaItem label="Consuming">
+                {enabledConsumingBindingCount}
+              </MetaItem>
+            </MetaRow>
+          }
+          title="Publish Destinations"
+        >
+          {repository.publish_targets.length === 0 ? (
+            <div className="feed-state">
+              <p className="feed-state__title">
+                No publish destinations configured.
+              </p>
+              <p className="feed-state__copy">
+                This repository can build artifacts, but no publish destination
+                has been registered for inspection yet.
+              </p>
+            </div>
+          ) : (
+            <div className="project-detail-target-list">
+              <div className="wizard-callout wizard-callout--compact wizard-callout--support">
+                <div className="wizard-callout__header">
+                  <div>
+                    <p className="wizard-callout__title">
+                      Binding dispatch rules
+                    </p>
+                    <p className="wizard-callout__copy">
+                      Non-consuming bindings always run before the single
+                      consuming binding on the same build target. HGP rejects
+                      more than one enabled consuming binding for that target.
+                    </p>
+                  </div>
+
+                  <div className="wizard-callout__badges">
+                    <Badge tone="neutral">ordered by semantics</Badge>
+                  </div>
+                </div>
+              </div>
+
+              {repository.publish_targets.map((publishTarget) => {
+                const enabledBindingCount = publishTarget.bindings.filter(
+                  (binding) => binding.enabled,
+                ).length;
+                const consumingBindingCount = publishTarget.bindings.filter(
+                  (binding) =>
+                    binding.enabled &&
+                    binding.consumption_behavior === "consuming",
+                ).length;
+
+                return (
+                  <div
+                    className="project-detail-target-card"
+                    key={publishTarget.publish_target_id}
+                  >
+                    <div className="project-detail-target-card__header">
+                      <div className="project-detail-target-card__title-block">
+                        <h3 className="project-detail-target-card__title">
+                          {publishTarget.name}
+                        </h3>
+                        <p className="project-detail-target-card__copy">
+                          {formatPublishTargetConfigSummary(publishTarget)}
+                        </p>
+                      </div>
+
+                      <div className="project-detail-target-card__badges">
+                        <Badge
+                          tone={publishTarget.enabled ? "strong" : "muted"}
+                        >
+                          {publishTarget.enabled ? "enabled" : "disabled"}
+                        </Badge>
+                        <Badge tone="neutral">
+                          {formatPublishTargetKindLabel(publishTarget.kind)}
+                        </Badge>
+                      </div>
+                    </div>
+
+                    <MetaRow>
+                      <MetaItem label="Credential">
+                        {formatPublishTargetCredentialSummary(publishTarget)}
+                      </MetaItem>
+                      <MetaItem label="Active bindings">
+                        {enabledBindingCount}
+                      </MetaItem>
+                      <MetaItem label="Consumers">
+                        {consumingBindingCount}
+                      </MetaItem>
+                    </MetaRow>
+
+                    {publishTarget.bindings.length === 0 ? (
+                      <p className="project-detail-target-card__copy project-detail-target-card__copy--muted">
+                        No build target binding references this destination yet.
+                      </p>
+                    ) : (
+                      <div className="project-detail-status-grid">
+                        {publishTarget.bindings.map((binding) => (
+                          <div
+                            className="project-detail-target-card"
+                            key={`${publishTarget.publish_target_id}-${binding.build_target_id}`}
+                          >
+                            <div className="project-detail-target-card__header">
+                              <div className="project-detail-target-card__title-block">
+                                <h4 className="project-detail-target-card__title">
+                                  {binding.build_target_name}
+                                </h4>
+                                <p className="project-detail-target-card__copy">
+                                  {formatPublishBindingSemanticsCopy(binding)}
+                                </p>
+                              </div>
+
+                              <div className="project-detail-target-card__badges">
+                                <Badge
+                                  tone={binding.enabled ? "strong" : "muted"}
+                                >
+                                  {binding.enabled ? "enabled" : "disabled"}
+                                </Badge>
+                                <Badge
+                                  tone={
+                                    binding.consumption_behavior === "consuming"
+                                      ? "neutral"
+                                      : "strong"
+                                  }
+                                >
+                                  {formatPublishBindingBehaviorLabel(
+                                    binding.consumption_behavior,
+                                  )}
+                                </Badge>
+                              </div>
+                            </div>
+
+                            <p className="project-detail-target-card__copy project-detail-target-card__copy--muted">
+                              {formatPublishBindingOptionsSummary(
+                                publishTarget.kind,
+                                binding.options_json,
+                              )}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </ProjectDetailSectionAccordion>
+
+        <ProjectDetailSectionAccordion
           description="Queue and execution backlog for the registered repository."
           eyebrow="Automation"
           onOpenChange={(nextOpen) =>
@@ -1568,7 +1765,9 @@ export function RepositoryProjectDetail({
           open={sectionOpenState.automation}
           summary={
             <MetaRow>
-              <MetaItem label="Pending">{repository.pending_release_count}</MetaItem>
+              <MetaItem label="Pending">
+                {repository.pending_release_count}
+              </MetaItem>
               <MetaItem label="Queued">{repository.queued_build_runs}</MetaItem>
               <MetaItem label="Running">{runningWorkCount}</MetaItem>
             </MetaRow>
@@ -1690,7 +1889,10 @@ function formatRepositoryBindingSummary(
 ) {
   const persistedCredentialId = repository.credentials?.credential_id ?? null;
 
-  if (repositoryCredentialId !== null && repositoryCredentialId !== persistedCredentialId) {
+  if (
+    repositoryCredentialId !== null &&
+    repositoryCredentialId !== persistedCredentialId
+  ) {
     return "Pending save";
   }
 
@@ -1716,6 +1918,175 @@ function formatTargetAttentionSummary(targetAttentionCount: number) {
   }
 
   return `${targetAttentionCount} need review`;
+}
+
+function countEnabledPublishBindings(
+  repository: RepositoryInspectionEntry,
+  behavior: RepositoryPublishBindingInspection["consumption_behavior"],
+) {
+  return repository.publish_targets.reduce((total, target) => {
+    return (
+      total +
+      target.bindings.filter(
+        (binding) =>
+          binding.enabled && binding.consumption_behavior === behavior,
+      ).length
+    );
+  }, 0);
+}
+
+function formatPublishDestinationCount(destinationCount: number) {
+  return `${destinationCount} destination${destinationCount === 1 ? "" : "s"}`;
+}
+
+function formatPublishTargetKindLabel(kind: string) {
+  switch (kind.trim().toLocaleLowerCase()) {
+    case "filesystem":
+      return "filesystem";
+    case "itch":
+      return "itch.io";
+    default:
+      return kind;
+  }
+}
+
+function formatPublishTargetCredentialSummary(
+  publishTarget: RepositoryPublishTargetInspection,
+) {
+  if (!publishTarget.credentials) {
+    return publishTarget.kind === "itch"
+      ? "Credential missing"
+      : "No credential bound";
+  }
+
+  if (publishTarget.credentials.config_status === "ready") {
+    return publishTarget.credentials.name;
+  }
+
+  return `${publishTarget.credentials.name} (${formatDiagnosticStatus(
+    publishTarget.credentials.config_status,
+  )})`;
+}
+
+function formatPublishTargetConfigSummary(
+  publishTarget: RepositoryPublishTargetInspection,
+) {
+  const config = parseJsonObject(publishTarget.config_json);
+
+  if (publishTarget.kind === "filesystem") {
+    const rootPath = readJsonStringField(config, "root_path");
+
+    return rootPath
+      ? `Publishes into ${rootPath}.`
+      : "Publishes to a filesystem path resolved by the destination or binding.";
+  }
+
+  if (publishTarget.kind === "itch") {
+    const accountName = readJsonStringField(config, "account_name");
+    const gameSlug = readJsonStringField(config, "game_slug");
+
+    if (accountName && gameSlug) {
+      return `Uploads to ${accountName}/${gameSlug} through butler.`;
+    }
+
+    return "Uploads build artifacts to Itch.io through butler.";
+  }
+
+  return "Uses the persisted publish destination contract.";
+}
+
+function formatPublishBindingBehaviorLabel(
+  behavior: RepositoryPublishBindingInspection["consumption_behavior"],
+) {
+  return behavior === "consuming" ? "consuming" : "non-consuming";
+}
+
+function formatPublishBindingSemanticsCopy(
+  binding: RepositoryPublishBindingInspection,
+) {
+  if (binding.consumption_behavior === "consuming") {
+    return binding.enabled
+      ? "Runs after non-consuming bindings and becomes the artifact's active location."
+      : "Disabled consuming binding. When enabled, it will run after non-consuming bindings.";
+  }
+
+  return binding.enabled
+    ? "Runs before any consuming binding and leaves the artifact available for later publishes."
+    : "Disabled non-consuming binding. When enabled, it will run before any consuming binding.";
+}
+
+function formatPublishBindingOptionsSummary(
+  publishTargetKind: string,
+  optionsJson: string,
+) {
+  const options = parseJsonObject(optionsJson);
+
+  if (publishTargetKind === "filesystem") {
+    const operation = readJsonStringField(options, "operation");
+    const directoryPath = readJsonStringField(options, "directory_path");
+
+    if (operation === "move" && directoryPath) {
+      return `Move the artifact into ${directoryPath}.`;
+    }
+
+    if (directoryPath) {
+      return `Publish into ${directoryPath}.`;
+    }
+
+    return "Uses the destination default filesystem path.";
+  }
+
+  if (publishTargetKind === "itch") {
+    const channel = readJsonStringField(options, "channel");
+    const userversionTemplate = readJsonStringField(
+      options,
+      "userversion_template",
+    );
+
+    if (channel && userversionTemplate) {
+      return `Channel ${channel}. Version template ${userversionTemplate}.`;
+    }
+
+    if (channel) {
+      return `Channel ${channel}. Uses the git tag as the Itch userversion.`;
+    }
+
+    return "Uses the persisted Itch binding options.";
+  }
+
+  return "Uses the persisted binding options.";
+}
+
+function parseJsonObject(value: string): Record<string, unknown> | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+      return null;
+    }
+
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function readJsonStringField(
+  value: Record<string, unknown> | null,
+  key: string,
+) {
+  const candidate = value?.[key];
+
+  if (typeof candidate !== "string") {
+    return null;
+  }
+
+  const trimmed = candidate.trim();
+  return trimmed ? trimmed : null;
 }
 
 function formatGithubAuthProviderStatus(
@@ -1965,8 +2336,8 @@ function supportsShellRepositoryLoginAction(
 ) {
   return Boolean(
     assessment?.auth_requirement === "required" &&
-      assessment.supports_interactive_login &&
-      assessment.provider_id === "github",
+    assessment.supports_interactive_login &&
+    assessment.provider_id === "github",
   );
 }
 
@@ -2056,9 +2427,7 @@ function formatRepositoryCredentialKindLabel(kind: string) {
   }
 }
 
-function isRepositoryCredentialSelectable(
-  credential: SecretCredentialSetting,
-) {
+function isRepositoryCredentialSelectable(credential: SecretCredentialSetting) {
   return (
     credential.config_summary.status === "ready" &&
     [
@@ -2239,9 +2608,7 @@ function validateRepositoryProjectDraft(
     authState.repositoryAccessAssessment.auth_requirement === "required"
   ) {
     if (
-      !supportsShellRepositoryLoginAction(
-        authState.repositoryAccessAssessment,
-      )
+      !supportsShellRepositoryLoginAction(authState.repositoryAccessAssessment)
     ) {
       const providerLabel =
         authState.repositoryAccessAssessment.provider_id === "unknown"
@@ -2278,11 +2645,9 @@ function validateRepositoryProjectDraft(
             "Private GitHub repository detected. Connect a credential to this project before saving.";
         }
       } else if (authState.repositoryCredentialCount === 0) {
-        errors.repositoryAccess =
-          `Private ${providerLabel} repository detected. No stored repository credentials are available for this project yet.`;
+        errors.repositoryAccess = `Private ${providerLabel} repository detected. No stored repository credentials are available for this project yet.`;
       } else {
-        errors.repositoryAccess =
-          `Private ${providerLabel} repository detected. Select a stored repository credential before saving.`;
+        errors.repositoryAccess = `Private ${providerLabel} repository detected. Select a stored repository credential before saving.`;
       }
     } else {
       errors.repositoryAccess = undefined;
@@ -2311,7 +2676,8 @@ function validateRepositoryProjectDraft(
     } else {
       const duplicateKey = normalizedName.toLocaleLowerCase();
       if (seenNames.has(duplicateKey)) {
-        fieldErrors.name = "Target names must remain unique within the project.";
+        fieldErrors.name =
+          "Target names must remain unique within the project.";
       }
       seenNames.add(duplicateKey);
     }
@@ -2350,14 +2716,14 @@ function validateRepositoryProjectDraft(
 function hasValidationErrors(errors: RepositoryProjectValidationErrors) {
   return Boolean(
     errors.engineKind ||
-      errors.name ||
-      errors.repositoryUrl ||
-      errors.pollingIntervalSeconds ||
-      errors.repositoryAccess ||
-      errors.buildTargetsRoot ||
-      Object.values(errors.buildTargets).some((fieldErrors) =>
-        hasBuildTargetFieldErrors(fieldErrors),
-      ),
+    errors.name ||
+    errors.repositoryUrl ||
+    errors.pollingIntervalSeconds ||
+    errors.repositoryAccess ||
+    errors.buildTargetsRoot ||
+    Object.values(errors.buildTargets).some((fieldErrors) =>
+      hasBuildTargetFieldErrors(fieldErrors),
+    ),
   );
 }
 
@@ -2366,9 +2732,9 @@ function hasBuildTargetFieldErrors(
 ) {
   return Boolean(
     errors.name ||
-      errors.targetPlatform ||
-      errors.buildMethod ||
-      errors.unityExecutablePath,
+    errors.targetPlatform ||
+    errors.buildMethod ||
+    errors.unityExecutablePath,
   );
 }
 
@@ -2449,7 +2815,10 @@ function buildRepositoryAccessAssessmentFromDetection(
     };
   }
 
-  if (detection.supports_interactive_login && detection.provider_id === "github") {
+  if (
+    detection.supports_interactive_login &&
+    detection.provider_id === "github"
+  ) {
     return {
       provider_id: detection.provider_id,
       provider_label: detection.provider_label,
@@ -2534,8 +2903,7 @@ function areBuildTargetDraftsEqual(
       target.name.trim() === candidate.name.trim() &&
       target.targetPlatform.trim() === candidate.targetPlatform.trim() &&
       target.buildMethod.trim() === candidate.buildMethod.trim() &&
-      target.unityExecutablePath.trim() ===
-        candidate.unityExecutablePath.trim()
+      target.unityExecutablePath.trim() === candidate.unityExecutablePath.trim()
     );
   });
 }

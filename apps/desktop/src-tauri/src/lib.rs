@@ -55,7 +55,9 @@ use runtime_store::{
     initialize_database, list_artifact_inspection_records,
     list_build_history_records, list_process_feed_page,
     list_build_target_runtime_settings, list_credential_records,
+    list_publish_target_binding_runtime_settings,
     list_publish_target_runtime_settings, LocalCoordinator, StorageLayout,
+    KIND_ITCH_API_KEY,
 };
 use runtime_events::start_runtime_event_bridge;
 use serde::{Deserialize, Serialize};
@@ -587,12 +589,23 @@ struct RepositoryCredentialReference {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RepositoryPublishBindingInspection {
+    build_target_id: i64,
+    build_target_name: String,
+    enabled: bool,
+    options_json: String,
+    consumption_behavior: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct RepositoryPublishTargetInspection {
     publish_target_id: i64,
     name: String,
     kind: String,
     enabled: bool,
+    config_json: String,
     credentials: Option<RepositoryCredentialReference>,
+    bindings: Vec<RepositoryPublishBindingInspection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1610,25 +1623,45 @@ fn load_repository_inspection(
             .push(target);
     }
 
+    let mut publish_bindings_by_target =
+        HashMap::<i64, Vec<RepositoryPublishBindingInspection>>::new();
+    for binding in list_publish_target_binding_runtime_settings(&storage)? {
+        publish_bindings_by_target
+            .entry(binding.publish_target_id)
+            .or_default()
+            .push(RepositoryPublishBindingInspection {
+                build_target_id: binding.build_target_id,
+                build_target_name: binding.build_target_name,
+                enabled: binding.enabled,
+                options_json: binding.options_json,
+                consumption_behavior: binding.consumption_behavior,
+            });
+    }
+
     let mut publish_targets_by_repository =
         HashMap::<i64, Vec<RepositoryPublishTargetInspection>>::new();
-    for target in secret_settings.publish_target_bindings {
+    for target in list_publish_target_runtime_settings(&storage)? {
         publish_targets_by_repository
             .entry(target.repository_id)
             .or_default()
             .push(RepositoryPublishTargetInspection {
-                publish_target_id: target.publish_target_id,
-                name: target.publish_target_name,
-                kind: target.publish_target_kind,
+                publish_target_id: target.id,
+                name: target.name,
+                kind: target.kind,
                 enabled: target.enabled,
+                config_json: target.config_json,
                 credentials: clone_credential_reference(
                     &credential_by_id,
                     target.credentials_id,
                 ),
+                bindings: publish_bindings_by_target
+                    .remove(&target.id)
+                    .unwrap_or_default(),
             });
     }
 
-    let repositories = LocalCoordinator::new(&storage)
+    let coordinator = LocalCoordinator::new(&storage);
+    let repositories = coordinator
         .list_polling_repositories()?
         .into_iter()
         .map(|repository| {
@@ -3175,6 +3208,7 @@ fn supported_credential_kinds() -> Vec<String> {
         String::from(KIND_GIT_HTTP_BASIC),
         String::from(KIND_GIT_HTTP_BEARER),
         String::from(KIND_GIT_HTTP_GITHUB_HOST_LOGIN),
+        String::from(KIND_ITCH_API_KEY),
     ]
 }
 
@@ -3184,6 +3218,7 @@ fn credential_kind_supported(kind: &str) -> bool {
         KIND_GIT_HTTP_BASIC
             | KIND_GIT_HTTP_BEARER
             | KIND_GIT_HTTP_GITHUB_HOST_LOGIN
+            | KIND_ITCH_API_KEY
     )
 }
 
@@ -3197,6 +3232,7 @@ fn expected_credential_keys(kind: &str) -> Vec<String> {
             String::from("instance_url"),
             String::from("provider"),
         ],
+        KIND_ITCH_API_KEY => vec![String::from("api_key")],
         _ => Vec::new(),
     }
 }
@@ -3971,9 +4007,9 @@ mod tests {
             .execute(
                 "INSERT INTO credentials (name, kind, config_json) VALUES (?, ?, ?)",
                 params![
-                    "publish-bearer",
-                    "git-http-bearer",
-                    r#"{"token":"top-secret-token"}"#,
+                    "itch-release-token",
+                    "itch-api-key",
+                    r#"{"api_key":"top-secret-token"}"#,
                 ],
             )
             .expect("publish credentials should insert");
@@ -4021,6 +4057,7 @@ mod tests {
                 ],
             )
             .expect("build target should insert");
+        let build_target_id = connection.last_insert_rowid();
         connection
             .execute(
                 "
@@ -4028,18 +4065,79 @@ mod tests {
                     repository_id,
                     name,
                     kind,
+                    config_json,
                     credentials_id
                 )
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?)
+                ",
+                params![
+                    repository_id,
+                    "itch-release",
+                    "itch",
+                    r#"{"account_name":"indiegabo","game_slug":"revolutions"}"#,
+                    publish_credentials_id,
+                ],
+            )
+            .expect("itch publish target should insert");
+        let itch_publish_target_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO publish_targets (
+                    repository_id,
+                    name,
+                    kind,
+                    config_json,
+                    credentials_id
+                )
+                VALUES (?, ?, ?, ?, ?)
                 ",
                 params![
                     repository_id,
                     "filesystem-release",
                     "filesystem",
-                    publish_credentials_id,
+                    r#"{"root_path":"D:/published"}"#,
+                    Option::<i64>::None,
                 ],
             )
             .expect("publish target should insert");
+        let filesystem_publish_target_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO build_publish_bindings (
+                    build_target_id,
+                    publish_target_id,
+                    enabled,
+                    options_json
+                ) VALUES (?, ?, ?, ?)
+                ",
+                params![
+                    build_target_id,
+                    filesystem_publish_target_id,
+                    1_i64,
+                    r#"{"operation":"move","directory_path":"D:/published"}"#,
+                ],
+            )
+            .expect("filesystem binding should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO build_publish_bindings (
+                    build_target_id,
+                    publish_target_id,
+                    enabled,
+                    options_json
+                ) VALUES (?, ?, ?, ?)
+                ",
+                params![
+                    build_target_id,
+                    itch_publish_target_id,
+                    1_i64,
+                    r#"{"channel":"windows-stable","userversion_template":"release-{{git_tag}}"}"#,
+                ],
+            )
+            .expect("itch binding should insert");
         drop(connection);
 
         LocalCoordinator::new(&storage)
@@ -4064,8 +4162,7 @@ mod tests {
         assert_eq!(repository.enabled_build_target_count, 1);
         assert_eq!(repository.build_targets.len(), 1);
         assert_eq!(repository.build_targets[0].target_name, "windows-player");
-        assert_eq!(repository.publish_targets.len(), 1);
-        assert_eq!(repository.publish_targets[0].name, "filesystem-release");
+        assert_eq!(repository.publish_targets.len(), 2);
         assert_eq!(repository.pending_release_count, 1);
         assert_eq!(repository.release_queue.len(), 1);
         assert_eq!(repository.release_queue[0].git_tag, "v10.0.0");
@@ -4078,12 +4175,44 @@ mod tests {
         assert_eq!(repository_credentials.kind, "git-http-basic");
         assert_eq!(repository_credentials.config_status, "ready");
 
-        let publish_credentials = repository.publish_targets[0]
+        let itch_target = repository
+            .publish_targets
+            .iter()
+            .find(|target| target.name == "itch-release")
+            .expect("itch destination should be present");
+        assert_eq!(itch_target.kind, "itch");
+        assert_eq!(
+            itch_target.config_json,
+            r#"{"account_name":"indiegabo","game_slug":"revolutions"}"#
+        );
+        assert_eq!(itch_target.bindings.len(), 1);
+        assert_eq!(itch_target.bindings[0].build_target_name, "windows-player");
+        assert_eq!(itch_target.bindings[0].consumption_behavior, "non_consuming");
+
+        let publish_credentials = itch_target
             .credentials
             .as_ref()
             .expect("publish target credentials should resolve");
-        assert_eq!(publish_credentials.name, "publish-bearer");
-        assert_eq!(publish_credentials.kind, "git-http-bearer");
+        assert_eq!(publish_credentials.name, "itch-release-token");
+        assert_eq!(publish_credentials.kind, "itch-api-key");
+        assert_eq!(publish_credentials.config_status, "ready");
+
+        let filesystem_target = repository
+            .publish_targets
+            .iter()
+            .find(|target| target.name == "filesystem-release")
+            .expect("filesystem destination should be present");
+        assert_eq!(filesystem_target.kind, "filesystem");
+        assert_eq!(
+            filesystem_target.config_json,
+            r#"{"root_path":"D:/published"}"#
+        );
+        assert!(filesystem_target.credentials.is_none());
+        assert_eq!(filesystem_target.bindings.len(), 1);
+        assert_eq!(
+            filesystem_target.bindings[0].consumption_behavior,
+            "consuming"
+        );
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }

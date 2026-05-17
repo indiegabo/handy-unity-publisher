@@ -19,12 +19,26 @@ export type RepositoryCredentialReference = {
     config_message: string;
 };
 
+export type RepositoryPublishBindingConsumptionBehavior =
+    | "consuming"
+    | "non_consuming";
+
+export type RepositoryPublishBindingInspection = {
+    build_target_id: number;
+    build_target_name: string;
+    enabled: boolean;
+    options_json: string;
+    consumption_behavior: RepositoryPublishBindingConsumptionBehavior;
+};
+
 export type RepositoryPublishTargetInspection = {
     publish_target_id: number;
     name: string;
     kind: string;
     enabled: boolean;
+    config_json: string;
     credentials: RepositoryCredentialReference | null;
+    bindings: RepositoryPublishBindingInspection[];
 };
 
 export type ReleaseAutomationStatus = {
@@ -158,7 +172,8 @@ export type SecretSettings = {
 export type SecretCredentialKind =
     | "git-http-basic"
     | "git-http-bearer"
-    | "git-http-github-host-login";
+    | "git-http-github-host-login"
+    | "itch-api-key";
 
 export type SaveSecretCredentialInput = {
     credential_id?: number | null;

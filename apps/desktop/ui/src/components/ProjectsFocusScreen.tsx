@@ -39,9 +39,9 @@ export function ProjectsFocusScreen({
   const highlightedProject =
     highlightedRepositoryId === null
       ? null
-      : repositories.find(
+      : (repositories.find(
           (repository) => repository.repository_id === highlightedRepositoryId,
-        ) ?? null;
+        ) ?? null);
   const enabledRepositoryCount = repositories.filter(
     (repository) => repository.enabled,
   ).length;
@@ -104,7 +104,9 @@ export function ProjectsFocusScreen({
         summary={
           <MetaRow>
             <MetaItem label="Projects">
-              {isLoading ? "Loading snapshot..." : `${repositories.length} registered`}
+              {isLoading
+                ? "Loading snapshot..."
+                : `${repositories.length} registered`}
             </MetaItem>
             {!isLoading ? (
               <MetaItem label="Enabled">{enabledRepositoryCount}</MetaItem>
@@ -113,7 +115,9 @@ export function ProjectsFocusScreen({
               <MetaItem label="Disabled">{disabledRepositoryCount}</MetaItem>
             ) : null}
             {!isLoading ? (
-              <MetaItem label="Active targets">{activeBuildTargetCount}</MetaItem>
+              <MetaItem label="Active targets">
+                {activeBuildTargetCount}
+              </MetaItem>
             ) : null}
           </MetaRow>
         }
@@ -140,7 +144,8 @@ export function ProjectsFocusScreen({
             <div className="feed-state">
               <p className="feed-state__title">Loading projects...</p>
               <p className="feed-state__copy">
-                The shell is resolving the latest repository inspection snapshot.
+                The shell is resolving the latest repository inspection
+                snapshot.
               </p>
             </div>
           ) : null}
@@ -183,7 +188,8 @@ export function ProjectsFocusScreen({
                           {repository.repository_name}
                         </h3>
                         <div className="project-list-card__badges">
-                          {repository.repository_id === highlightedRepositoryId ? (
+                          {repository.repository_id ===
+                          highlightedRepositoryId ? (
                             <Badge tone="strong">new</Badge>
                           ) : null}
                           <Badge tone={repository.enabled ? "strong" : "muted"}>
@@ -232,9 +238,9 @@ function buildRepositorySummary(repository: RepositoryInspectionEntry) {
     ? `Last seen tag ${repository.last_seen_tag}.`
     : "No baseline tag recorded yet.";
 
-  const publishTargetCount = repository.publish_targets.length;
+  const publishDestinationCount = repository.publish_targets.length;
 
-  return `${lastSeenTag} ${publishTargetCount} publish target${publishTargetCount === 1 ? "" : "s"} registered.`;
+  return `${lastSeenTag} ${publishDestinationCount} publish destination${publishDestinationCount === 1 ? "" : "s"} registered.`;
 }
 
 function formatTargetCount(targetCount: number) {
