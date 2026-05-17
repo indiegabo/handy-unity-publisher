@@ -15,6 +15,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Reject deprecated build files
         shell: bash
         run: |
@@ -38,6 +43,70 @@ jobs:
             printf '  %s\n' "${legacy_files[@]}" >&2
             exit 1
           fi
+
+      - name: Validate HGP identity references
+        shell: bash
+        run: npm run identity:check
+
+  portable-validation:
+    name: Portable Validation (${{ matrix.os }})
+    needs: repository-shape
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install desktop UI dependencies
+        shell: bash
+        run: npm ci --prefix apps/desktop/ui
+
+      - name: Validate synchronized app version
+        shell: bash
+        run: npm run version:check
+
+      - name: Build desktop UI
+        shell: bash
+        run: npm run build --prefix apps/desktop/ui
+
+      - name: Compile portable workspace slices
+        shell: bash
+        run: cargo check --workspace --exclude desktop-shell
+
+      - name: Test portable runtime crates
+        shell: bash
+        run: |
+          cargo test -p runtime-contracts --lib -q
+          cargo test -p runtime-config --lib -q
+          cargo test -p runtime-core --lib -q
+          cargo test -p runtime-manifests --lib -q
+          cargo test -p runtime-publish --lib -q
+          cargo test -p runtime-git --lib -q
+          cargo test -p runtime-runner --lib -q
+
+      - name: Test runtime store process feed slice
+        shell: bash
+        run: cargo test -p runtime-store process_feed -- --nocapture
 
   windows-validation:
     name: Windows Validation

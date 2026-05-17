@@ -120,11 +120,17 @@ npm start
 
 `npm start` resolves the local Tauri CLI from the root package and launches
 the desktop shell from `apps/desktop`. The Tauri development loop owns the UI
-development server through `beforeDevCommand`, and the desktop shell startup
-path then launches the bundled runtime supervisor. On Windows the runner also
-attempts to enter the Visual Studio developer environment before invoking
-Tauri, but it still requires the native Tauri prerequisites, including the
-Visual Studio C++ workload for the MSVC toolchain.
+development server and version synchronization through `beforeDevCommand`, and
+the desktop shell startup path then launches the bundled runtime supervisor.
+On Windows the runner also attempts to enter the Visual Studio developer
+environment before invoking Tauri, but it still requires the native Tauri
+prerequisites, including the Visual Studio C++ workload for the MSVC
+toolchain.
+
+The desktop app targets Windows, Linux, and macOS. The current hands-on
+validation loop is still Windows-based, so host-specific behavior should keep
+explicit extension points for Linux and macOS instead of treating Windows as
+the only supported route.
 
 The desktop app version is centralized in `Cargo.toml` under
 `[workspace.package].version`. Run `npm run version:sync` after changing that
@@ -155,7 +161,7 @@ Run the runtime interrupted-recovery smoke target without contending for the
 workspace default Cargo binary output:
 
 ```bash
-bash scripts/runtime-smoke.sh
+npm run smoke:runtime
 ```
 
 The workspace default Cargo artifacts live under `tmp/cargo-targets/default/`.

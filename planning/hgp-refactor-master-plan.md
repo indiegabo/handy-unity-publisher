@@ -213,8 +213,6 @@ Completed in code:
   Vitest setup now prove that Unity remains selectable while `Unreal`,
   `Godot`, `GameMaker`, `Defold`, and `Cocos Creator` stay visible but
   disabled in the shared selector.
-- `scripts/revolutions-managed-repository.sql` and the matching
-  `runtime-store` seed test now persist only contract-first build-target rows.
 - The `queue_lease_renewer_keeps_claimed_message_leased_until_acknowledged`
   test now uses a wider lease window on Windows so the renewer assertion is
   stable instead of scheduler-dependent.
