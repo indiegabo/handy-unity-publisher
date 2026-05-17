@@ -14,6 +14,7 @@ type RepositoryCredentialComposerProps = {
   onSave: (input: SaveSecretCredentialInput) => Promise<void> | void;
   providerLabel: string;
   saveError: string | null;
+  scope?: "repository" | "publish";
 };
 
 type RepositoryCredentialDraftKind = Exclude<
@@ -23,6 +24,7 @@ type RepositoryCredentialDraftKind = Exclude<
 
 type RepositoryCredentialDraft = {
   kind: RepositoryCredentialDraftKind;
+  apiKey: string;
   name: string;
   password: string;
   token: string;
@@ -30,15 +32,20 @@ type RepositoryCredentialDraft = {
 };
 
 type RepositoryCredentialDraftErrors = {
+  apiKey?: string;
   name?: string;
   password?: string;
   token?: string;
   username?: string;
 };
 
-const CREDENTIAL_KIND_OPTIONS = [
+const REPOSITORY_CREDENTIAL_KIND_OPTIONS = [
   { label: "HTTP basic", value: "git-http-basic" },
   { label: "Bearer token", value: "git-http-bearer" },
+] as const;
+
+const PUBLISH_CREDENTIAL_KIND_OPTIONS = [
+  { label: "Itch API key", value: "itch-api-key" },
 ] as const;
 
 export function RepositoryCredentialComposer({
@@ -47,15 +54,31 @@ export function RepositoryCredentialComposer({
   onSave,
   providerLabel,
   saveError,
+  scope = "repository",
 }: RepositoryCredentialComposerProps) {
   const [draft, setDraft] = useState<RepositoryCredentialDraft>({
-    kind: "git-http-basic",
+    kind: scope === "publish" ? "itch-api-key" : "git-http-basic",
+    apiKey: "",
     name: "",
     password: "",
     token: "",
     username: "",
   });
   const [errors, setErrors] = useState<RepositoryCredentialDraftErrors>({});
+  const credentialKindOptions =
+    scope === "publish"
+      ? PUBLISH_CREDENTIAL_KIND_OPTIONS
+      : REPOSITORY_CREDENTIAL_KIND_OPTIONS;
+  const panelTitle =
+    scope === "publish" ? "New publish credential" : "New repository credential";
+  const panelDescription =
+    scope === "publish"
+      ? `Create one reusable ${providerLabel} credential and bind it to this publish destination.`
+      : `Create one reusable ${providerLabel} credential and connect it to this project.`;
+  const credentialNamePlaceholder =
+    scope === "publish"
+      ? `${providerLabel} publish credential`
+      : `${providerLabel} repository credential`;
 
   const handleDraftFieldChange = (
     field: keyof RepositoryCredentialDraft,
@@ -83,9 +106,9 @@ export function RepositoryCredentialComposer({
 
   return (
     <SurfacePanel
-      description={`Create one reusable ${providerLabel} credential and connect it to this project.`}
+      description={panelDescription}
       tone="inset"
-      title="New repository credential"
+      title={panelTitle}
     >
       <TextField
         autoComplete="off"
@@ -95,7 +118,7 @@ export function RepositoryCredentialComposer({
         onChange={(event) =>
           handleDraftFieldChange("name", event.currentTarget.value)
         }
-        placeholder={`${providerLabel} repository credential`}
+        placeholder={credentialNamePlaceholder}
         value={draft.name}
       />
 
@@ -107,7 +130,7 @@ export function RepositoryCredentialComposer({
             event.currentTarget.value as RepositoryCredentialDraftKind,
           )
         }
-        options={CREDENTIAL_KIND_OPTIONS}
+        options={credentialKindOptions}
         value={draft.kind}
       />
 
@@ -135,7 +158,7 @@ export function RepositoryCredentialComposer({
             value={draft.password}
           />
         </>
-      ) : (
+        ) : draft.kind === "git-http-bearer" ? (
         <TextField
           autoComplete="new-password"
           error={errors.token}
@@ -146,6 +169,18 @@ export function RepositoryCredentialComposer({
           }
           type="password"
           value={draft.token}
+        />
+      ) : (
+        <TextField
+          autoComplete="new-password"
+          error={errors.apiKey}
+          hint="Stored exactly as provided for the Itch butler API key."
+          label="API key"
+          onChange={(event) =>
+            handleDraftFieldChange("apiKey", event.currentTarget.value)
+          }
+          type="password"
+          value={draft.apiKey}
         />
       )}
 
@@ -197,6 +232,10 @@ function validateRepositoryCredentialDraft(
     errors.token = "Bearer token is required.";
   }
 
+  if (draft.kind === "itch-api-key" && !draft.apiKey.trim()) {
+    errors.apiKey = "API key is required.";
+  }
+
   return errors;
 }
 
@@ -217,6 +256,10 @@ function buildSaveSecretCredentialInput(
             password: draft.password.trim(),
             username: draft.username.trim(),
           })
+        : draft.kind === "itch-api-key"
+          ? JSON.stringify({
+              api_key: draft.apiKey.trim(),
+            })
         : JSON.stringify({
             token: draft.token.trim(),
           }),

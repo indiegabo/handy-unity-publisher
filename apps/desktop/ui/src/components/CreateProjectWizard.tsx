@@ -8,6 +8,18 @@ import {
 
 import { Button, IconButton } from "./Button";
 import { RepositoryCredentialComposer } from "./RepositoryCredentialComposer";
+import {
+  PublishDestinationsEditor,
+  buildCreateProjectPublishTargetsInput,
+  buildPublishDestinationReviewSummary,
+  collectBuildTargetBindingImpact,
+  hasPublishDestinationValidationErrors,
+  listUnboundBuildTargetNames,
+  removeBuildTargetBindings,
+  type ProjectBuildTargetReference,
+  type PublishDestinationDraft,
+  validatePublishDestinationDrafts,
+} from "./PublishDestinationsEditor";
 import { SelectField, TextField, type SelectOption } from "./Field";
 import { PathPickerField } from "./PathPickerField";
 import { RepositoryEngineField } from "./RepositoryEngineField";
@@ -60,9 +72,16 @@ type ProjectDraft = {
   artifactsRootOverride: string;
   workspaceRootOverride: string;
   buildTargets: BuildTargetDraft[];
+  publishDestinations: PublishDestinationDraft[];
 };
 
-type WizardStepKey = "identity" | "access" | "targets" | "paths" | "review";
+type WizardStepKey =
+  | "identity"
+  | "access"
+  | "targets"
+  | "publish"
+  | "paths"
+  | "review";
 
 type TargetFieldErrors = {
   name?: string;
@@ -112,6 +131,12 @@ const WIZARD_STEPS: Array<{
     description: "Compose the host-native Unity targets that HGP will execute.",
   },
   {
+    key: "publish",
+    label: "Publish Destinations",
+    description:
+      "Bind build targets to publish destinations and validate destination-specific policy before save.",
+  },
+  {
     key: "paths",
     label: "Paths",
     description:
@@ -151,6 +176,7 @@ const EMPTY_VALIDATION_ATTEMPTS: Record<WizardStepKey, boolean> = {
   identity: false,
   access: false,
   targets: false,
+  publish: false,
   paths: false,
   review: false,
 };
@@ -170,6 +196,7 @@ export function CreateProjectWizard({
     artifactsRootOverride: "",
     workspaceRootOverride: "",
     buildTargets: [createEmptyBuildTargetDraft(1)],
+    publishDestinations: [],
   }));
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [attemptedSteps, setAttemptedSteps] = useState(
@@ -191,6 +218,9 @@ export function CreateProjectWizard({
     null,
   );
   const [repositoryCredentials, setRepositoryCredentials] = useState<
+    SecretCredentialSetting[]
+  >([]);
+  const [publishCredentials, setPublishCredentials] = useState<
     SecretCredentialSetting[]
   >([]);
   const [isLoadingRepositoryCredentials, setIsLoadingRepositoryCredentials] =
@@ -218,6 +248,10 @@ export function CreateProjectWizard({
     useState(false);
   const [repositoryCredentialSaveError, setRepositoryCredentialSaveError] =
     useState<string | null>(null);
+  const [pendingPublishCredentialSave, setPendingPublishCredentialSave] =
+    useState(false);
+  const [publishCredentialSaveError, setPublishCredentialSaveError] =
+    useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pathDiagnostics, setPathDiagnostics] = useState<
@@ -231,6 +265,8 @@ export function CreateProjectWizard({
   >({
     "target-1": true,
   });
+  const [pendingBuildTargetRemovalId, setPendingBuildTargetRemovalId] =
+    useState<string | null>(null);
   const nextBuildTargetIdRef = useRef(2);
   const validationTimersRef = useRef<ValidationTimerMap>({});
   const validationTokenRef = useRef<Record<string, number>>({});
@@ -259,6 +295,35 @@ export function CreateProjectWizard({
     pathDiagnostics,
     validatingTargets,
   );
+  const buildTargetReferences: ProjectBuildTargetReference[] = draft.buildTargets.map(
+    (target) => ({
+      id: target.id,
+      buildTargetId: null,
+      name: target.name.trim() || "Unnamed target",
+    }),
+  );
+  const publishDestinationErrors = validatePublishDestinationDrafts(
+    draft.publishDestinations,
+    buildTargetReferences,
+  );
+  const publishDestinationReviewSummary = buildPublishDestinationReviewSummary(
+    draft.publishDestinations,
+    buildTargetReferences,
+  );
+  const unboundPublishTargetNames = listUnboundBuildTargetNames(
+    draft.publishDestinations,
+    buildTargetReferences,
+  );
+  const pendingBuildTargetRemoval = pendingBuildTargetRemovalId
+    ? draft.buildTargets.find((target) => target.id === pendingBuildTargetRemovalId) ??
+      null
+    : null;
+  const pendingBuildTargetBindingImpact = pendingBuildTargetRemoval
+    ? collectBuildTargetBindingImpact(
+        draft.publishDestinations,
+        pendingBuildTargetRemoval.id,
+      )
+    : [];
   const pathErrors = validatePathStep(draft);
   const repositoryAccessSummary = formatRepositoryAccessSummary(
     draft.repositoryUrl,
@@ -304,6 +369,24 @@ export function CreateProjectWizard({
           {validatingTargetCount > 0
             ? `${validatingTargetCount} running`
             : "Idle"}
+        </MetaItem>
+      </MetaRow>
+    ) : currentStep.key === "publish" ? (
+      <MetaRow>
+        <MetaItem label="Destinations">
+          {`${draft.publishDestinations.length}`}
+        </MetaItem>
+        <MetaItem label="Bound targets">
+          {publishDestinationReviewSummary.reduce(
+            (total, destination) =>
+              total + destination.bindingTargetNames.length,
+            0,
+          )}
+        </MetaItem>
+        <MetaItem label="Validation">
+          {hasPublishDestinationValidationErrors(publishDestinationErrors)
+            ? "Needs review"
+            : "Ready"}
         </MetaItem>
       </MetaRow>
     ) : currentStep.key === "paths" ? (
@@ -369,7 +452,7 @@ export function CreateProjectWizard({
 
   const listRepositoryCredentialsEffect = useEffectEvent(async () => {
     const settings = await loadSecretSettings();
-    return settings.credentials.filter(isRepositoryCredentialSelectable);
+    return settings.credentials;
   });
 
   const loadRepositoryCredentialsEffect = useEffectEvent(async () => {
@@ -379,13 +462,17 @@ export function CreateProjectWizard({
       const credentials = await listRepositoryCredentialsEffect();
 
       startTransition(() => {
-        setRepositoryCredentials(credentials);
+        setRepositoryCredentials(
+          credentials.filter(isRepositoryCredentialSelectable),
+        );
+        setPublishCredentials(credentials.filter(isItchCredentialSelectable));
         setRepositoryCredentialsError(null);
         setIsLoadingRepositoryCredentials(false);
       });
     } catch (error) {
       startTransition(() => {
         setRepositoryCredentials([]);
+        setPublishCredentials([]);
         setRepositoryCredentialsError(buildProjectErrorMessage(error));
         setIsLoadingRepositoryCredentials(false);
       });
@@ -536,7 +623,10 @@ export function CreateProjectWizard({
         }
 
         startTransition(() => {
-          setRepositoryCredentials(credentials);
+          setRepositoryCredentials(
+            credentials.filter(isRepositoryCredentialSelectable),
+          );
+          setPublishCredentials(credentials.filter(isItchCredentialSelectable));
           setRepositoryCredentialsError(null);
           setIsLoadingRepositoryCredentials(false);
           setRepositoryCredentialId(createdCredential.credential_id);
@@ -552,6 +642,60 @@ export function CreateProjectWizard({
       } finally {
         startTransition(() => {
           setPendingRepositoryCredentialSave(false);
+        });
+      }
+    },
+  );
+
+  const handleSavePublishCredential = useEffectEvent(
+    async (destinationId: string, input: SaveSecretCredentialInput) => {
+      startTransition(() => {
+        setPendingPublishCredentialSave(true);
+        setPublishCredentialSaveError(null);
+        setSubmitError(null);
+      });
+
+      try {
+        await saveSecretCredential(input);
+        const credentials = await listRepositoryCredentialsEffect();
+        const createdCredential = credentials.find(
+          (credential) =>
+            credential.name === input.name.trim() &&
+            credential.kind === input.kind,
+        );
+
+        if (!createdCredential) {
+          throw new Error(
+            "The saved publish credential could not be reloaded.",
+          );
+        }
+
+        startTransition(() => {
+          setRepositoryCredentials(
+            credentials.filter(isRepositoryCredentialSelectable),
+          );
+          setPublishCredentials(credentials.filter(isItchCredentialSelectable));
+          setDraft((current) => ({
+            ...current,
+            publishDestinations: current.publishDestinations.map(
+              (destination) =>
+                destination.id === destinationId
+                  ? {
+                      ...destination,
+                      credentialsId: createdCredential.credential_id,
+                    }
+                  : destination,
+            ),
+          }));
+          setPublishCredentialSaveError(null);
+        });
+      } catch (error) {
+        startTransition(() => {
+          setPublishCredentialSaveError(buildProjectErrorMessage(error));
+        });
+      } finally {
+        startTransition(() => {
+          setPendingPublishCredentialSave(false);
         });
       }
     },
@@ -792,7 +936,7 @@ export function CreateProjectWizard({
     });
   });
 
-  const handleRemoveBuildTarget = useEffectEvent((targetId: string) => {
+  const finalizeBuildTargetRemoval = useEffectEvent((targetId: string) => {
     const existingTimerId = validationTimersRef.current[targetId];
     if (existingTimerId !== undefined) {
       window.clearTimeout(existingTimerId);
@@ -803,6 +947,10 @@ export function CreateProjectWizard({
         ...current,
         buildTargets: current.buildTargets.filter(
           (target) => target.id !== targetId,
+        ),
+        publishDestinations: removeBuildTargetBindings(
+          current.publishDestinations,
+          targetId,
         ),
       }));
       setPathDiagnostics((current) => {
@@ -820,6 +968,31 @@ export function CreateProjectWizard({
         delete next[targetId];
         return next;
       });
+    });
+  });
+
+  const handleRemoveBuildTarget = useEffectEvent((targetId: string) => {
+    if (
+      collectBuildTargetBindingImpact(draft.publishDestinations, targetId).length >
+      0
+    ) {
+      startTransition(() => {
+        setPendingBuildTargetRemovalId(targetId);
+      });
+      return;
+    }
+
+    finalizeBuildTargetRemoval(targetId);
+  });
+
+  const handleConfirmBuildTargetRemoval = useEffectEvent(() => {
+    if (!pendingBuildTargetRemovalId) {
+      return;
+    }
+
+    finalizeBuildTargetRemoval(pendingBuildTargetRemovalId);
+    startTransition(() => {
+      setPendingBuildTargetRemovalId(null);
     });
   });
 
@@ -875,6 +1048,18 @@ export function CreateProjectWizard({
       }
     }
 
+    if (currentStep.key === "publish") {
+      if (hasPublishDestinationValidationErrors(publishDestinationErrors)) {
+        startTransition(() => {
+          setAttemptedSteps((current) => ({
+            ...current,
+            publish: true,
+          }));
+        });
+        return;
+      }
+    }
+
     if (currentStep.key === "paths") {
       if (hasPathErrors(pathErrors)) {
         startTransition(() => {
@@ -905,6 +1090,7 @@ export function CreateProjectWizard({
       identityErrors,
       accessErrors,
       targetErrors,
+      publishErrors: publishDestinationErrors,
       pathErrors,
       isLoadingRepositoryInventory,
     });
@@ -1429,6 +1615,46 @@ export function CreateProjectWizard({
               </p>
             ) : null}
 
+            {pendingBuildTargetRemoval ? (
+              <div className="wizard-callout wizard-callout--compact wizard-callout--auth">
+                <div className="wizard-callout__header">
+                  <div>
+                    <p className="wizard-callout__title">
+                      Confirm build target removal
+                    </p>
+                    <p className="wizard-callout__copy">
+                      Removing
+                      {" "}
+                      {pendingBuildTargetRemoval.name.trim() ||
+                        "this build target"}
+                      {" "}
+                      also removes publish bindings from
+                      {" "}
+                      {pendingBuildTargetBindingImpact.join(", ")}.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="wizard-callout__actions">
+                  <Button
+                    leadingIcon="trash"
+                    onClick={handleConfirmBuildTargetRemoval}
+                    size="sm"
+                    variant="primary"
+                  >
+                    Remove target and bindings
+                  </Button>
+                  <Button
+                    onClick={() => setPendingBuildTargetRemovalId(null)}
+                    size="sm"
+                    variant="ghost"
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+
             {draft.buildTargets.map((target, index) => {
               const diagnostics = pathDiagnostics[target.id];
               const fieldErrors = targetErrors.targets[target.id] ?? {};
@@ -1639,6 +1865,29 @@ export function CreateProjectWizard({
           </div>
         ) : null}
 
+        {currentStep.key === "publish" ? (
+          <PublishDestinationsEditor
+            buildTargets={buildTargetReferences}
+            credentialSaveError={publishCredentialSaveError}
+            credentials={publishCredentials}
+            destinations={draft.publishDestinations}
+            disabled={isSubmitting}
+            errors={
+              attemptedSteps.publish ? publishDestinationErrors : undefined
+            }
+            isSavingCredential={pendingPublishCredentialSave}
+            onChange={(nextPublishDestinations) => {
+              startTransition(() => {
+                setDraft((current) => ({
+                  ...current,
+                  publishDestinations: nextPublishDestinations,
+                }));
+              });
+            }}
+            onSaveCredential={handleSavePublishCredential}
+          />
+        ) : null}
+
         {currentStep.key === "paths" ? (
           <div className="wizard-form-grid">
             <PathPickerField
@@ -1748,6 +1997,67 @@ export function CreateProjectWizard({
                     </p>
                   </div>
                 ))}
+              </div>
+            </SurfacePanel>
+
+            <SurfacePanel
+              className="wizard-review-panel"
+              description="Destination-specific publish bindings and credential readiness."
+              eyebrow="Publish Destinations"
+              headerSeparated
+              title="Destination Review"
+              tone="inset"
+            >
+              <div className="wizard-summary-list">
+                {publishDestinationReviewSummary.length === 0 ? (
+                  <div className="wizard-summary-list__item">
+                    <div className="wizard-summary-list__title-row">
+                      <strong>No publish destinations configured</strong>
+                      <Badge tone="muted">valid</Badge>
+                    </div>
+                    <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
+                      Every build target will keep its artifact under the
+                      runtime-managed output root.
+                    </p>
+                  </div>
+                ) : (
+                  publishDestinationReviewSummary.map((destination) => (
+                    <div className="wizard-summary-list__item" key={destination.id}>
+                      <div className="wizard-summary-list__title-row">
+                        <strong>{destination.name}</strong>
+                        <Badge tone={destination.enabled ? "strong" : "muted"}>
+                          {destination.kindLabel}
+                        </Badge>
+                      </div>
+                      <p className="wizard-summary-list__copy">
+                        {destination.bindingTargetNames.length > 0
+                          ? destination.bindingTargetNames.join(", ")
+                          : "No build targets bound yet."}
+                      </p>
+                      <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
+                        {destination.missingCredential
+                          ? "Credential still missing."
+                          : destination.usesHostTransportProbe
+                            ? "Uses host butler resolution from PATH."
+                            : "Publish transport and credentials are bound from the draft."}
+                      </p>
+                    </div>
+                  ))
+                )}
+
+                <div className="wizard-summary-list__item">
+                  <div className="wizard-summary-list__title-row">
+                    <strong>Unbound build targets</strong>
+                    <Badge tone="muted">
+                      {unboundPublishTargetNames.length === 0 ? "none" : "kept local"}
+                    </Badge>
+                  </div>
+                  <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
+                    {unboundPublishTargetNames.length > 0
+                      ? unboundPublishTargetNames.join(", ")
+                      : "Every configured build target is bound to at least one publish destination."}
+                  </p>
+                </div>
               </div>
             </SurfacePanel>
 
@@ -2165,6 +2475,7 @@ function findFirstInvalidStep(input: {
   identityErrors: ReturnType<typeof validateIdentityStep>;
   accessErrors: ReturnType<typeof validateAccessStep>;
   targetErrors: TargetStepErrors;
+  publishErrors: ReturnType<typeof validatePublishDestinationDrafts>;
   pathErrors: PathStepErrors;
   isLoadingRepositoryInventory: boolean;
 }): WizardStepKey | null {
@@ -2182,6 +2493,9 @@ function findFirstInvalidStep(input: {
   }
   if (hasTargetErrors(input.targetErrors)) {
     return "targets";
+  }
+  if (hasPublishDestinationValidationErrors(input.publishErrors)) {
+    return "publish";
   }
   if (hasPathErrors(input.pathErrors)) {
     return "paths";
@@ -2217,6 +2531,14 @@ function buildCreateProjectInput(
       },
       unity_executable_path: target.unityExecutablePath.trim(),
     })),
+    publish_targets: buildCreateProjectPublishTargetsInput(
+      draft.publishDestinations,
+      draft.buildTargets.map((target) => ({
+        id: target.id,
+        buildTargetId: null,
+        name: target.name.trim() || "Unnamed target",
+      })),
+    ),
   };
 }
 
@@ -2733,6 +3055,13 @@ function isRepositoryCredentialSelectable(
       "git-http-bearer",
       "git-http-github-host-login",
     ].includes(credential.kind)
+  );
+}
+
+function isItchCredentialSelectable(credential: SecretCredentialSetting) {
+  return (
+    credential.kind === "itch-api-key" &&
+    credential.config_summary.status === "ready"
   );
 }
 

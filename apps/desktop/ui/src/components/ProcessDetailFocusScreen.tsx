@@ -647,6 +647,7 @@ export function ProcessDetailFocusScreen({
                 {completedSnapshot.artifacts.map((artifact) => {
                   const artifactAbsolutePath =
                     resolveArtifactAbsolutePath(artifact);
+                  const artifactFolderPath = resolveArtifactFolderPath(artifact);
 
                   return (
                     <div
@@ -660,6 +661,9 @@ export function ProcessDetailFocusScreen({
                           </p>
                           <p className="process-detail-artifact-card__copy">
                             {artifact.artifact_path}
+                          </p>
+                          <p className="process-detail-artifact-card__copy process-detail-artifact-card__copy--muted">
+                            {formatArtifactActiveLocationSummary(artifact)}
                           </p>
                         </div>
 
@@ -684,15 +688,13 @@ export function ProcessDetailFocusScreen({
                           <Button
                             disabled={
                               deletedOutputs ||
-                              !artifact.artifact_root_path ||
-                              pendingOpenPath === artifact.artifact_root_path
+                              !artifactFolderPath ||
+                              pendingOpenPath === artifactFolderPath
                             }
                             leadingIcon="folder"
                             onClick={() =>
-                              artifact.artifact_root_path
-                                ? void handleOpenPath(
-                                    artifact.artifact_root_path,
-                                  )
+                              artifactFolderPath
+                                ? void handleOpenPath(artifactFolderPath)
                                 : undefined
                             }
                             size="sm"
@@ -710,6 +712,11 @@ export function ProcessDetailFocusScreen({
                         <MetaItem label="Build target">
                           {artifact.build_target_name}
                         </MetaItem>
+                        <MetaItem label="Active location">
+                          {formatArtifactActiveLocationKindLabel(
+                            artifact.artifact_active_location_kind,
+                          )}
+                        </MetaItem>
                         <MetaItem label="Size">
                           {formatByteSize(artifact.size_bytes)}
                         </MetaItem>
@@ -717,6 +724,45 @@ export function ProcessDetailFocusScreen({
                           {String(artifact.publish_run_count)}
                         </MetaItem>
                       </MetaRow>
+
+                      {artifact.publish_runs.length > 0 ? (
+                        <div className="project-detail-status-grid">
+                          {artifact.publish_runs.map((publishRun) => (
+                            <div
+                              className="project-detail-target-card"
+                              key={publishRun.publish_run_id}
+                            >
+                              <div className="project-detail-target-card__header">
+                                <div className="project-detail-target-card__title-block">
+                                  <h4 className="project-detail-target-card__title">
+                                    {publishRun.publish_target_name}
+                                  </h4>
+                                  <p className="project-detail-target-card__copy">
+                                    {formatArtifactPublishRunSummary(
+                                      publishRun,
+                                    )}
+                                  </p>
+                                </div>
+
+                                <div className="project-detail-target-card__badges">
+                                  <Badge
+                                    tone={resolveArtifactPublishRunTone(
+                                      publishRun.status,
+                                    )}
+                                  >
+                                    {publishRun.status}
+                                  </Badge>
+                                  <Badge tone="neutral">
+                                    {formatPublishTargetKindLabel(
+                                      publishRun.publish_target_kind,
+                                    )}
+                                  </Badge>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   );
                 })}
@@ -968,6 +1014,17 @@ function resolveOutputsPath(
 }
 
 function resolveArtifactAbsolutePath(artifact: ArtifactInspectionRecord) {
+  if (
+    artifact.artifact_active_location_kind === "filesystem_absolute" &&
+    looksLikeAbsoluteHostPath(artifact.artifact_active_location_ref)
+  ) {
+    return artifact.artifact_active_location_ref;
+  }
+
+  if (looksLikeAbsoluteHostPath(artifact.artifact_active_location_ref)) {
+    return artifact.artifact_active_location_ref;
+  }
+
   if (!artifact.artifact_root_path?.trim()) {
     return null;
   }
@@ -979,6 +1036,73 @@ function resolveArtifactAbsolutePath(artifact: ArtifactInspectionRecord) {
     separator,
   );
   return `${normalizedRoot}${separator}${normalizedRelative}`;
+}
+
+function resolveArtifactFolderPath(artifact: ArtifactInspectionRecord) {
+  const artifactAbsolutePath = resolveArtifactAbsolutePath(artifact);
+  if (artifactAbsolutePath?.trim()) {
+    return artifactAbsolutePath.replace(/[\\/][^\\/]+$/, "");
+  }
+
+  return artifact.artifact_root_path?.trim() || null;
+}
+
+function formatArtifactActiveLocationSummary(artifact: ArtifactInspectionRecord) {
+  return `${formatArtifactActiveLocationKindLabel(
+    artifact.artifact_active_location_kind,
+  )}: ${artifact.artifact_active_location_ref}`;
+}
+
+function formatArtifactActiveLocationKindLabel(kind: string) {
+  switch (kind.trim().toLocaleLowerCase()) {
+    case "runtime_artifact":
+      return "Managed output root";
+    case "filesystem_absolute":
+      return "Filesystem publish move";
+    default:
+      return kind.replace(/_/g, " ");
+  }
+}
+
+function formatArtifactPublishRunSummary(
+  publishRun: ArtifactInspectionRecord["publish_runs"][number],
+) {
+  if (publishRun.destination_ref?.trim()) {
+    return publishRun.destination_ref;
+  }
+
+  return "Destination reference pending.";
+}
+
+function resolveArtifactPublishRunTone(status: string): "strong" | "neutral" | "muted" {
+  switch (status.trim().toLocaleLowerCase()) {
+    case "succeeded":
+      return "strong";
+    case "failed":
+    case "running":
+      return "neutral";
+    default:
+      return "muted";
+  }
+}
+
+function formatPublishTargetKindLabel(kind: string) {
+  switch (kind.trim().toLocaleLowerCase()) {
+    case "filesystem":
+      return "Move To Folder";
+    case "itch":
+      return "Itch.io Upload";
+    default:
+      return kind;
+  }
+}
+
+function looksLikeAbsoluteHostPath(value: string) {
+  return (
+    /^[a-zA-Z]:[\\/]/.test(value) ||
+    value.startsWith("/") ||
+    value.startsWith("\\\\")
+  );
 }
 
 function buildExecutionReportSummary(report: JsonValue | null) {

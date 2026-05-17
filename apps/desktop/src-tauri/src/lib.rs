@@ -44,10 +44,14 @@ use runtime_store::{
     ArtifactInspectionRecord, AutomationSnapshot, BuildHistoryRecord,
     CredentialRecord,
     CreateRepositoryProjectBuildTargetInput,
+    CreateRepositoryProjectPublishBindingInput as StoreCreateRepositoryProjectPublishBindingInput,
+    CreateRepositoryProjectPublishTargetInput as StoreCreateRepositoryProjectPublishTargetInput,
     CreateRepositoryProjectInput as StoreCreateRepositoryProjectInput,
     CreatedRepositoryProjectRecord,
     UpdateRepositoryAuthStateInput as StoreUpdateRepositoryAuthStateInput,
     UpdateRepositoryProjectBuildTargetInput as StoreUpdateRepositoryProjectBuildTargetInput,
+    UpdateRepositoryProjectPublishBindingInput as StoreUpdateRepositoryProjectPublishBindingInput,
+    UpdateRepositoryProjectPublishTargetInput as StoreUpdateRepositoryProjectPublishTargetInput,
     UpdateRepositoryProjectInput as StoreUpdateRepositoryProjectInput,
     RuntimeControlRequest,
     ProcessFeedPage, ReleaseAutomationStatus, UpsertCredentialRecordInput,
@@ -430,6 +434,24 @@ struct CreateRepositoryProjectBuildTargetCommandInput {
     unity_executable_path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct CreateRepositoryProjectPublishBindingCommandInput {
+    build_target_name: String,
+    enabled: bool,
+    options_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct CreateRepositoryProjectPublishTargetCommandInput {
+    name: String,
+    kind: String,
+    enabled: bool,
+    config_json: String,
+    credentials_id: Option<i64>,
+    #[serde(default)]
+    bindings: Vec<CreateRepositoryProjectPublishBindingCommandInput>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum HostPathSelectionKind {
@@ -464,6 +486,8 @@ struct CreateRepositoryProjectCommandInput {
     workspace_root_override: Option<String>,
     polling_interval_seconds: i64,
     build_targets: Vec<CreateRepositoryProjectBuildTargetCommandInput>,
+    #[serde(default)]
+    publish_targets: Vec<CreateRepositoryProjectPublishTargetCommandInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -472,6 +496,26 @@ struct UpdateRepositoryProjectBuildTargetCommandInput {
     name: String,
     contract: BuildContractCommandInput,
     unity_executable_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct UpdateRepositoryProjectPublishBindingCommandInput {
+    build_target_id: Option<i64>,
+    build_target_name: String,
+    enabled: bool,
+    options_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct UpdateRepositoryProjectPublishTargetCommandInput {
+    publish_target_id: Option<i64>,
+    name: String,
+    kind: String,
+    enabled: bool,
+    config_json: String,
+    credentials_id: Option<i64>,
+    #[serde(default)]
+    bindings: Vec<UpdateRepositoryProjectPublishBindingCommandInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -487,6 +531,8 @@ struct UpdateRepositoryProjectCommandInput {
     polling_interval_seconds: i64,
     enabled: bool,
     build_targets: Vec<UpdateRepositoryProjectBuildTargetCommandInput>,
+    #[serde(default)]
+    publish_targets: Vec<UpdateRepositoryProjectPublishTargetCommandInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -503,6 +549,23 @@ struct NormalizedCreateRepositoryProjectBuildTargetCommandInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedCreateRepositoryProjectPublishBindingCommandInput {
+    build_target_name: String,
+    enabled: bool,
+    options_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedCreateRepositoryProjectPublishTargetCommandInput {
+    name: String,
+    kind: String,
+    enabled: bool,
+    config_json: String,
+    credentials_id: Option<i64>,
+    bindings: Vec<NormalizedCreateRepositoryProjectPublishBindingCommandInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedCreateRepositoryProjectCommandInput {
     name: String,
     engine_kind: String,
@@ -514,6 +577,7 @@ struct NormalizedCreateRepositoryProjectCommandInput {
     workspace_root_override: Option<String>,
     polling_interval_seconds: i64,
     build_targets: Vec<NormalizedCreateRepositoryProjectBuildTargetCommandInput>,
+    publish_targets: Vec<NormalizedCreateRepositoryProjectPublishTargetCommandInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -523,6 +587,25 @@ struct NormalizedUpdateRepositoryProjectBuildTargetCommandInput {
     target_platform: String,
     build_method: String,
     unity_executable_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedUpdateRepositoryProjectPublishBindingCommandInput {
+    build_target_id: Option<i64>,
+    build_target_name: String,
+    enabled: bool,
+    options_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedUpdateRepositoryProjectPublishTargetCommandInput {
+    publish_target_id: Option<i64>,
+    name: String,
+    kind: String,
+    enabled: bool,
+    config_json: String,
+    credentials_id: Option<i64>,
+    bindings: Vec<NormalizedUpdateRepositoryProjectPublishBindingCommandInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -538,6 +621,7 @@ struct NormalizedUpdateRepositoryProjectCommandInput {
     polling_interval_seconds: i64,
     enabled: bool,
     build_targets: Vec<NormalizedUpdateRepositoryProjectBuildTargetCommandInput>,
+    publish_targets: Vec<NormalizedUpdateRepositoryProjectPublishTargetCommandInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -2723,6 +2807,26 @@ fn persist_repository_project(
                     ),
                 })
                 .collect(),
+            publish_targets: normalized
+                .publish_targets
+                .into_iter()
+                .map(|target| StoreCreateRepositoryProjectPublishTargetInput {
+                    name: target.name,
+                    kind: target.kind,
+                    enabled: target.enabled,
+                    config_json: target.config_json,
+                    credentials_id: target.credentials_id,
+                    bindings: target
+                        .bindings
+                        .into_iter()
+                        .map(|binding| StoreCreateRepositoryProjectPublishBindingInput {
+                            build_target_name: binding.build_target_name,
+                            enabled: binding.enabled,
+                            options_json: binding.options_json,
+                        })
+                        .collect(),
+                })
+                .collect(),
         },
     )?;
 
@@ -2783,6 +2887,28 @@ fn persist_repository_project_update(
                     runner_config_json: unity_runner_config_json(
                         &target.unity_executable_path,
                     ),
+                })
+                .collect(),
+            publish_targets: normalized
+                .publish_targets
+                .into_iter()
+                .map(|target| StoreUpdateRepositoryProjectPublishTargetInput {
+                    publish_target_id: target.publish_target_id,
+                    name: target.name,
+                    kind: target.kind,
+                    enabled: target.enabled,
+                    config_json: target.config_json,
+                    credentials_id: target.credentials_id,
+                    bindings: target
+                        .bindings
+                        .into_iter()
+                        .map(|binding| StoreUpdateRepositoryProjectPublishBindingInput {
+                            build_target_id: binding.build_target_id,
+                            build_target_name: binding.build_target_name,
+                            enabled: binding.enabled,
+                            options_json: binding.options_json,
+                        })
+                        .collect(),
                 })
                 .collect(),
         },
@@ -2877,6 +3003,20 @@ fn normalize_create_repository_project_command_input(
         build_targets.push(normalized);
     }
 
+    let mut publish_target_names = std::collections::HashSet::new();
+    let mut publish_targets = Vec::with_capacity(input.publish_targets.len());
+    for target in input.publish_targets {
+        let normalized = normalize_create_repository_project_publish_target_command_input(target)?;
+        let duplicate_key = normalized.name.to_ascii_lowercase();
+        if !publish_target_names.insert(duplicate_key) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "repository publish target names must be unique",
+            ));
+        }
+        publish_targets.push(normalized);
+    }
+
     Ok(NormalizedCreateRepositoryProjectCommandInput {
         name,
         engine_kind,
@@ -2888,6 +3028,7 @@ fn normalize_create_repository_project_command_input(
         workspace_root_override: normalize_optional_shell_string(input.workspace_root_override),
         polling_interval_seconds: input.polling_interval_seconds,
         build_targets,
+        publish_targets,
     })
 }
 
@@ -2956,6 +3097,33 @@ fn normalize_update_repository_project_command_input(
         build_targets.push(normalized);
     }
 
+    let mut publish_target_ids = HashSet::new();
+    let mut publish_target_names = HashSet::new();
+    let mut publish_targets = Vec::with_capacity(input.publish_targets.len());
+    for target in input.publish_targets {
+        let normalized = normalize_update_repository_project_publish_target_command_input(target)?;
+        if let Some(publish_target_id) = normalized.publish_target_id {
+            if !publish_target_ids.insert(publish_target_id) {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "repository publish target {publish_target_id} was provided more than once"
+                    ),
+                ));
+            }
+        }
+
+        let duplicate_key = normalized.name.to_ascii_lowercase();
+        if !publish_target_names.insert(duplicate_key) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "repository publish target names must be unique",
+            ));
+        }
+
+        publish_targets.push(normalized);
+    }
+
     Ok(NormalizedUpdateRepositoryProjectCommandInput {
         repository_id: input.repository_id,
         name,
@@ -2968,6 +3136,7 @@ fn normalize_update_repository_project_command_input(
         polling_interval_seconds: input.polling_interval_seconds,
         enabled: input.enabled,
         build_targets,
+        publish_targets,
     })
 }
 
@@ -3030,6 +3199,129 @@ fn normalize_update_repository_project_build_target_command_input(
         target_platform: normalized.target_platform,
         build_method: normalized.build_method,
         unity_executable_path: normalized.unity_executable_path,
+    })
+}
+
+fn normalize_create_repository_project_publish_target_command_input(
+    input: CreateRepositoryProjectPublishTargetCommandInput,
+) -> io::Result<NormalizedCreateRepositoryProjectPublishTargetCommandInput> {
+    if let Some(credentials_id) = input.credentials_id {
+        if credentials_id <= 0 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "publish target credentials_id must be a positive integer when provided",
+            ));
+        }
+    }
+
+    let mut build_target_names = HashSet::new();
+    let mut bindings = Vec::with_capacity(input.bindings.len());
+    for binding in input.bindings {
+        let normalized = normalize_create_repository_project_publish_binding_command_input(binding)?;
+        let duplicate_key = normalized.build_target_name.to_ascii_lowercase();
+        if !build_target_names.insert(duplicate_key) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "publish target bindings must not repeat the same build target",
+            ));
+        }
+        bindings.push(normalized);
+    }
+
+    Ok(NormalizedCreateRepositoryProjectPublishTargetCommandInput {
+        name: require_shell_non_empty(&input.name, "publish target name")?,
+        kind: require_shell_non_empty(&input.kind, "publish target kind")?
+            .to_ascii_lowercase(),
+        enabled: input.enabled,
+        config_json: require_shell_non_empty(&input.config_json, "publish target config_json")?,
+        credentials_id: input.credentials_id,
+        bindings,
+    })
+}
+
+fn normalize_create_repository_project_publish_binding_command_input(
+    input: CreateRepositoryProjectPublishBindingCommandInput,
+) -> io::Result<NormalizedCreateRepositoryProjectPublishBindingCommandInput> {
+    Ok(NormalizedCreateRepositoryProjectPublishBindingCommandInput {
+        build_target_name: require_shell_non_empty(
+            &input.build_target_name,
+            "publish binding build_target_name",
+        )?,
+        enabled: input.enabled,
+        options_json: require_shell_non_empty(&input.options_json, "publish binding options_json")?,
+    })
+}
+
+fn normalize_update_repository_project_publish_target_command_input(
+    input: UpdateRepositoryProjectPublishTargetCommandInput,
+) -> io::Result<NormalizedUpdateRepositoryProjectPublishTargetCommandInput> {
+    if let Some(publish_target_id) = input.publish_target_id {
+        if publish_target_id <= 0 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "publish_target_id must be a positive integer when provided",
+            ));
+        }
+    }
+
+    if let Some(credentials_id) = input.credentials_id {
+        if credentials_id <= 0 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "publish target credentials_id must be a positive integer when provided",
+            ));
+        }
+    }
+
+    let mut claimed_build_targets = HashSet::new();
+    let mut bindings = Vec::with_capacity(input.bindings.len());
+    for binding in input.bindings {
+        let normalized = normalize_update_repository_project_publish_binding_command_input(binding)?;
+        let duplicate_key = normalized
+            .build_target_id
+            .map(|build_target_id| format!("id:{build_target_id}"))
+            .unwrap_or_else(|| normalized.build_target_name.to_ascii_lowercase());
+        if !claimed_build_targets.insert(duplicate_key) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "publish target bindings must not repeat the same build target",
+            ));
+        }
+        bindings.push(normalized);
+    }
+
+    Ok(NormalizedUpdateRepositoryProjectPublishTargetCommandInput {
+        publish_target_id: input.publish_target_id,
+        name: require_shell_non_empty(&input.name, "publish target name")?,
+        kind: require_shell_non_empty(&input.kind, "publish target kind")?
+            .to_ascii_lowercase(),
+        enabled: input.enabled,
+        config_json: require_shell_non_empty(&input.config_json, "publish target config_json")?,
+        credentials_id: input.credentials_id,
+        bindings,
+    })
+}
+
+fn normalize_update_repository_project_publish_binding_command_input(
+    input: UpdateRepositoryProjectPublishBindingCommandInput,
+) -> io::Result<NormalizedUpdateRepositoryProjectPublishBindingCommandInput> {
+    if let Some(build_target_id) = input.build_target_id {
+        if build_target_id <= 0 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "publish binding build_target_id must be a positive integer when provided",
+            ));
+        }
+    }
+
+    Ok(NormalizedUpdateRepositoryProjectPublishBindingCommandInput {
+        build_target_id: input.build_target_id,
+        build_target_name: require_shell_non_empty(
+            &input.build_target_name,
+            "publish binding build_target_name",
+        )?,
+        enabled: input.enabled,
+        options_json: require_shell_non_empty(&input.options_json, "publish binding options_json")?,
     })
 }
 

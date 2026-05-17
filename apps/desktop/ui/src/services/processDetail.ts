@@ -54,6 +54,8 @@ export type ArtifactInspectionRecord = {
     artifact_kind: string;
     artifact_path: string;
     artifact_root_path: string | null;
+    artifact_active_location_kind: string;
+    artifact_active_location_ref: string;
     size_bytes: number | null;
     checksum_sha256: string | null;
     publish_run_count: number;
@@ -62,7 +64,19 @@ export type ArtifactInspectionRecord = {
     succeeded_publish_runs: number;
     failed_publish_runs: number;
     canceled_publish_runs: number;
+    publish_runs: ArtifactPublishRunRecord[];
     created_at: string;
+};
+
+export type ArtifactPublishRunRecord = {
+    publish_run_id: number;
+    publish_target_id: number;
+    publish_target_name: string;
+    publish_target_kind: string;
+    status: string;
+    destination_ref: string | null;
+    created_at: string;
+    updated_at: string;
 };
 
 export type BuildExecutionReportPayload = {
@@ -276,6 +290,16 @@ function normalizeArtifactInspectionRecord(value: unknown): ArtifactInspectionRe
             "artifact_root_path",
             "artifactRootPath",
         ),
+        artifact_active_location_kind: readString(
+            record,
+            "artifact_active_location_kind",
+            "artifactActiveLocationKind",
+        ),
+        artifact_active_location_ref: readString(
+            record,
+            "artifact_active_location_ref",
+            "artifactActiveLocationRef",
+        ),
         size_bytes: readNullableNumber(record, "size_bytes", "sizeBytes"),
         checksum_sha256: readNullableString(
             record,
@@ -308,7 +332,41 @@ function normalizeArtifactInspectionRecord(value: unknown): ArtifactInspectionRe
             "canceled_publish_runs",
             "canceledPublishRuns",
         ),
+        publish_runs: readArray(record, "publish_runs", "publishRuns").map(
+            normalizeArtifactPublishRunRecord,
+        ),
         created_at: readString(record, "created_at", "createdAt"),
+    };
+}
+
+function normalizeArtifactPublishRunRecord(value: unknown): ArtifactPublishRunRecord {
+    const record = asRecord(value);
+
+    return {
+        publish_run_id: readNumber(record, "publish_run_id", "publishRunId"),
+        publish_target_id: readNumber(
+            record,
+            "publish_target_id",
+            "publishTargetId",
+        ),
+        publish_target_name: readString(
+            record,
+            "publish_target_name",
+            "publishTargetName",
+        ),
+        publish_target_kind: readString(
+            record,
+            "publish_target_kind",
+            "publishTargetKind",
+        ),
+        status: readString(record, "status"),
+        destination_ref: readNullableString(
+            record,
+            "destination_ref",
+            "destinationRef",
+        ),
+        created_at: readString(record, "created_at", "createdAt"),
+        updated_at: readString(record, "updated_at", "updatedAt"),
     };
 }
 
@@ -521,6 +579,17 @@ function readStringArray(record: Record<string, unknown>, ...keys: string[]) {
     }
 
     return [];
+}
+
+function readArray(record: Record<string, unknown>, ...keys: string[]) {
+    for (const key of keys) {
+        const value = record[key];
+        if (Array.isArray(value)) {
+            return value;
+        }
+    }
+
+    return [] as unknown[];
 }
 
 function readJsonValue(record: Record<string, unknown>, ...keys: string[]): JsonValue | null {

@@ -201,6 +201,21 @@ export type CreateRepositoryProjectBuildTargetInput = {
     unity_executable_path: string;
 };
 
+export type CreateRepositoryProjectPublishBindingInput = {
+    build_target_name: string;
+    enabled: boolean;
+    options_json: string;
+};
+
+export type CreateRepositoryProjectPublishTargetInput = {
+    name: string;
+    kind: string;
+    enabled: boolean;
+    config_json: string;
+    credentials_id?: number | null;
+    bindings: CreateRepositoryProjectPublishBindingInput[];
+};
+
 export type CreateRepositoryProjectInput = {
     name: string;
     engine_kind: RepositoryEngineKind;
@@ -212,6 +227,7 @@ export type CreateRepositoryProjectInput = {
     workspace_root_override?: string | null;
     polling_interval_seconds: number;
     build_targets: CreateRepositoryProjectBuildTargetInput[];
+    publish_targets: CreateRepositoryProjectPublishTargetInput[];
 };
 
 export type UpdateRepositoryProjectBuildTargetInput = {
@@ -221,11 +237,28 @@ export type UpdateRepositoryProjectBuildTargetInput = {
     unity_executable_path: string;
 };
 
+export type UpdateRepositoryProjectPublishBindingInput = {
+    build_target_id?: number | null;
+    build_target_name: string;
+    enabled: boolean;
+    options_json: string;
+};
+
 export type CreatedRepositoryProjectRecord = {
     repository_id: number;
     repository_name: string;
     credentials_id: number | null;
     build_target_ids: number[];
+};
+
+export type UpdateRepositoryProjectPublishTargetInput = {
+    publish_target_id?: number | null;
+    name: string;
+    kind: string;
+    enabled: boolean;
+    config_json: string;
+    credentials_id?: number | null;
+    bindings: UpdateRepositoryProjectPublishBindingInput[];
 };
 
 export type UpdateRepositoryProjectInput = {
@@ -240,6 +273,7 @@ export type UpdateRepositoryProjectInput = {
     polling_interval_seconds: number;
     enabled: boolean;
     build_targets: UpdateRepositoryProjectBuildTargetInput[];
+    publish_targets: UpdateRepositoryProjectPublishTargetInput[];
 };
 
 export async function loadRepositoryInspection(): Promise<RepositoryInspectionSettings> {

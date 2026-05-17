@@ -9,6 +9,21 @@ import {
 
 import { Button, IconButton } from "./Button";
 import { RepositoryCredentialComposer } from "./RepositoryCredentialComposer";
+import {
+  PublishDestinationsEditor,
+  buildPublishDestinationDrafts,
+  buildPublishDestinationReviewSummary,
+  buildUpdateProjectPublishTargetsInput,
+  collectBuildTargetBindingImpact,
+  createEmptyPublishDestinationValidationErrors,
+  hasPublishDestinationValidationErrors,
+  listUnboundBuildTargetNames,
+  removeBuildTargetBindings,
+  type ProjectBuildTargetReference,
+  type PublishDestinationDraft,
+  type PublishDestinationValidationErrors,
+  validatePublishDestinationDrafts,
+} from "./PublishDestinationsEditor";
 import { SelectField, TextField, type SelectOption } from "./Field";
 import { PathPickerField } from "./PathPickerField";
 import { RepositoryEngineField } from "./RepositoryEngineField";
@@ -27,7 +42,6 @@ import {
   type RepositoryAccessAssessment,
   type RepositoryEngineKind,
   type RepositoryPublishBindingInspection,
-  type RepositoryPublishTargetInspection,
   type RepositoryInspectionEntry,
   type RepositoryProviderDetection,
   type SaveSecretCredentialInput,
@@ -66,6 +80,7 @@ type RepositoryProjectDraft = {
   pollingIntervalSeconds: string;
   enabled: "enabled" | "disabled";
   buildTargets: RepositoryProjectBuildTargetDraft[];
+  publishDestinations: PublishDestinationDraft[];
 };
 
 type RepositoryProjectBuildTargetValidationErrors = {
@@ -83,11 +98,12 @@ type RepositoryProjectValidationErrors = {
   repositoryAccess?: string;
   buildTargetsRoot?: string;
   buildTargets: Record<string, RepositoryProjectBuildTargetValidationErrors>;
+  publishDestinations: PublishDestinationValidationErrors;
 };
 
 type RepositoryProjectFieldName = Exclude<
   keyof RepositoryProjectDraft,
-  "buildTargets"
+  "buildTargets" | "publishDestinations"
 >;
 
 type ProjectDetailSectionKey =
@@ -152,6 +168,9 @@ export function RepositoryProjectDetail({
   const [repositoryCredentials, setRepositoryCredentials] = useState<
     SecretCredentialSetting[]
   >([]);
+  const [publishCredentials, setPublishCredentials] = useState<
+    SecretCredentialSetting[]
+  >([]);
   const [isLoadingRepositoryCredentials, setIsLoadingRepositoryCredentials] =
     useState(true);
   const [repositoryCredentialsError, setRepositoryCredentialsError] = useState<
@@ -179,6 +198,10 @@ export function RepositoryProjectDetail({
     useState(false);
   const [repositoryCredentialSaveError, setRepositoryCredentialSaveError] =
     useState<string | null>(null);
+  const [pendingPublishCredentialSave, setPendingPublishCredentialSave] =
+    useState(false);
+  const [publishCredentialSaveError, setPublishCredentialSaveError] =
+    useState<string | null>(null);
   const [pathDiagnostics, setPathDiagnostics] = useState<
     Record<string, UnityExecutableValidation | null>
   >({});
@@ -191,6 +214,8 @@ export function RepositoryProjectDetail({
   const [sectionOpenState, setSectionOpenState] = useState(
     DEFAULT_SECTION_OPEN_STATE,
   );
+  const [pendingBuildTargetRemovalId, setPendingBuildTargetRemovalId] =
+    useState<string | null>(null);
   const nextBuildTargetIdRef = useRef(1);
   const validationTimersRef = useRef<ValidationTimerMap>({});
   const validationTokenRef = useRef<Record<string, number>>({});
@@ -294,7 +319,7 @@ export function RepositoryProjectDetail({
 
   const listRepositoryCredentialsEffect = useEffectEvent(async () => {
     const settings = await loadSecretSettings();
-    return settings.credentials.filter(isRepositoryCredentialSelectable);
+    return settings.credentials;
   });
 
   const loadRepositoryCredentialsEffect = useEffectEvent(async () => {
@@ -304,13 +329,17 @@ export function RepositoryProjectDetail({
       const credentials = await listRepositoryCredentialsEffect();
 
       startTransition(() => {
-        setRepositoryCredentials(credentials);
+        setRepositoryCredentials(
+          credentials.filter(isRepositoryCredentialSelectable),
+        );
+        setPublishCredentials(credentials.filter(isItchCredentialSelectable));
         setRepositoryCredentialsError(null);
         setIsLoadingRepositoryCredentials(false);
       });
     } catch (loadError) {
       startTransition(() => {
         setRepositoryCredentials([]);
+        setPublishCredentials([]);
         setRepositoryCredentialsError(buildProjectSaveErrorMessage(loadError));
         setIsLoadingRepositoryCredentials(false);
       });
@@ -593,7 +622,7 @@ export function RepositoryProjectDetail({
     });
   });
 
-  const handleRemoveBuildTarget = useEffectEvent((targetId: string) => {
+  const finalizeBuildTargetRemoval = useEffectEvent((targetId: string) => {
     const existingTimerId = validationTimersRef.current[targetId];
     if (existingTimerId !== undefined) {
       window.clearTimeout(existingTimerId);
@@ -609,6 +638,10 @@ export function RepositoryProjectDetail({
           ...currentDraft,
           buildTargets: currentDraft.buildTargets.filter(
             (target) => target.id !== targetId,
+          ),
+          publishDestinations: removeBuildTargetBindings(
+            currentDraft.publishDestinations,
+            targetId,
           ),
         };
       });
@@ -627,6 +660,35 @@ export function RepositoryProjectDetail({
         delete next[targetId];
         return next;
       });
+    });
+  });
+
+  const handleRemoveBuildTarget = useEffectEvent((targetId: string) => {
+    if (!draft) {
+      return;
+    }
+
+    if (
+      collectBuildTargetBindingImpact(draft.publishDestinations, targetId).length >
+      0
+    ) {
+      startTransition(() => {
+        setPendingBuildTargetRemovalId(targetId);
+      });
+      return;
+    }
+
+    finalizeBuildTargetRemoval(targetId);
+  });
+
+  const handleConfirmBuildTargetRemoval = useEffectEvent(() => {
+    if (!pendingBuildTargetRemovalId) {
+      return;
+    }
+
+    finalizeBuildTargetRemoval(pendingBuildTargetRemovalId);
+    startTransition(() => {
+      setPendingBuildTargetRemovalId(null);
     });
   });
 
@@ -761,7 +823,10 @@ export function RepositoryProjectDetail({
         }
 
         startTransition(() => {
-          setRepositoryCredentials(credentials);
+          setRepositoryCredentials(
+            credentials.filter(isRepositoryCredentialSelectable),
+          );
+          setPublishCredentials(credentials.filter(isItchCredentialSelectable));
           setRepositoryCredentialsError(null);
           setIsLoadingRepositoryCredentials(false);
           setRepositoryCredentialId(createdCredential.credential_id);
@@ -777,6 +842,65 @@ export function RepositoryProjectDetail({
       } finally {
         startTransition(() => {
           setPendingRepositoryCredentialSave(false);
+        });
+      }
+    },
+  );
+
+  const handleSavePublishCredential = useEffectEvent(
+    async (destinationId: string, input: SaveSecretCredentialInput) => {
+      startTransition(() => {
+        setPendingPublishCredentialSave(true);
+        setPublishCredentialSaveError(null);
+        setSaveError(null);
+      });
+
+      try {
+        await saveSecretCredential(input);
+        const credentials = await listRepositoryCredentialsEffect();
+        const createdCredential = credentials.find(
+          (credential) =>
+            credential.name === input.name.trim() &&
+            credential.kind === input.kind,
+        );
+        if (!createdCredential) {
+          throw new Error(
+            "The saved publish credential could not be reloaded.",
+          );
+        }
+
+        startTransition(() => {
+          setRepositoryCredentials(
+            credentials.filter(isRepositoryCredentialSelectable),
+          );
+          setPublishCredentials(credentials.filter(isItchCredentialSelectable));
+          setDraft((currentDraft) => {
+            if (!currentDraft) {
+              return currentDraft;
+            }
+
+            return {
+              ...currentDraft,
+              publishDestinations: currentDraft.publishDestinations.map(
+                (destination) =>
+                  destination.id === destinationId
+                    ? {
+                        ...destination,
+                        credentialsId: createdCredential.credential_id,
+                      }
+                    : destination,
+              ),
+            };
+          });
+          setPublishCredentialSaveError(null);
+        });
+      } catch (error) {
+        startTransition(() => {
+          setPublishCredentialSaveError(buildProjectSaveErrorMessage(error));
+        });
+      } finally {
+        startTransition(() => {
+          setPendingPublishCredentialSave(false);
         });
       }
     },
@@ -811,6 +935,9 @@ export function RepositoryProjectDetail({
     );
     if (hasValidationErrors(nextValidationErrors)) {
       const invalidTargetIds = collectInvalidTargetIds(nextValidationErrors);
+      const hasPublishErrors = hasPublishDestinationValidationErrors(
+        nextValidationErrors.publishDestinations,
+      );
 
       startTransition(() => {
         setValidationErrors(nextValidationErrors);
@@ -827,6 +954,7 @@ export function RepositoryProjectDetail({
             Boolean(
               nextValidationErrors.buildTargetsRoot || invalidTargetIds.length,
             ),
+          destinations: current.destinations || hasPublishErrors,
         }));
       });
       return;
@@ -957,6 +1085,26 @@ export function RepositoryProjectDetail({
     );
   }
 
+  if (!draft) {
+    return (
+      <div className="project-detail-shell">
+        <FocusPageFrame
+          description="Inspect and edit repository identity, build targets, and runtime-managed paths."
+          eyebrow="Repository Project"
+          title="Project Detail"
+        >
+          <div className="feed-state">
+            <p className="feed-state__title">Draft state unavailable.</p>
+            <p className="feed-state__copy">
+              Reload the project detail to rebuild the editable draft from the
+              persisted repository snapshot.
+            </p>
+          </div>
+        </FocusPageFrame>
+      </div>
+    );
+  }
+
   const hasUnsavedChanges =
     repository && draft
       ? isRepositoryProjectDraftChanged(repository, draft)
@@ -978,6 +1126,12 @@ export function RepositoryProjectDetail({
   const activeTargetCount = draft?.buildTargets.length ?? 0;
   const validatingTargetCount =
     Object.values(validatingTargets).filter(Boolean).length;
+  const buildTargetReferences: ProjectBuildTargetReference[] =
+    draft?.buildTargets.map((target) => ({
+      id: target.id,
+      buildTargetId: target.buildTargetId,
+      name: target.name.trim() || "Unnamed target",
+    })) ?? [];
   const targetAttentionCount = draft
     ? draft.buildTargets.filter((target) => {
         const diagnostics = pathDiagnostics[target.id];
@@ -985,15 +1139,42 @@ export function RepositoryProjectDetail({
         return diagnostics !== null && diagnostics.status !== "ready";
       }).length
     : 0;
-  const publishDestinationCount = repository.publish_targets.length;
-  const enabledNonConsumingBindingCount = countEnabledPublishBindings(
-    repository,
-    "non_consuming",
-  );
-  const enabledConsumingBindingCount = countEnabledPublishBindings(
-    repository,
-    "consuming",
-  );
+  const publishDestinationCount = draft?.publishDestinations.length ?? 0;
+  const publishDestinationReviewSummary = draft
+    ? buildPublishDestinationReviewSummary(
+        draft.publishDestinations,
+        buildTargetReferences,
+      )
+    : [];
+  const unboundPublishTargetNames = draft
+    ? listUnboundBuildTargetNames(
+        draft.publishDestinations,
+        buildTargetReferences,
+      )
+    : [];
+  const enabledNonConsumingBindingCount = draft
+    ? countEnabledPublishDestinationBindings(
+        draft.publishDestinations,
+        "non_consuming",
+      )
+    : 0;
+  const enabledConsumingBindingCount = draft
+    ? countEnabledPublishDestinationBindings(
+        draft.publishDestinations,
+        "consuming",
+      )
+    : 0;
+  const pendingBuildTargetRemoval = pendingBuildTargetRemovalId
+    ? draft?.buildTargets.find(
+        (target) => target.id === pendingBuildTargetRemovalId,
+      ) ?? null
+    : null;
+  const pendingBuildTargetBindingImpact = pendingBuildTargetRemoval
+    ? collectBuildTargetBindingImpact(
+        draft?.publishDestinations ?? [],
+        pendingBuildTargetRemoval.id,
+      )
+    : [];
   const pollingIntervalLabel =
     draft?.pollingIntervalSeconds.trim() ||
     String(repository.polling_interval_seconds);
@@ -1432,6 +1613,48 @@ export function RepositoryProjectDetail({
             </p>
           ) : null}
 
+          {pendingBuildTargetRemoval ? (
+            <div className="wizard-callout wizard-callout--compact wizard-callout--auth">
+              <div className="wizard-callout__header">
+                <div>
+                  <p className="wizard-callout__title">
+                    Confirm build target removal
+                  </p>
+                  <p className="wizard-callout__copy">
+                    Removing
+                    {" "}
+                    {pendingBuildTargetRemoval.name.trim() ||
+                      "this build target"}
+                    {" "}
+                    also removes publish bindings from
+                    {" "}
+                    {pendingBuildTargetBindingImpact.join(", ")}.
+                  </p>
+                </div>
+              </div>
+
+              <div className="wizard-callout__actions">
+                <Button
+                  disabled={isSaving}
+                  leadingIcon="trash"
+                  onClick={handleConfirmBuildTargetRemoval}
+                  size="sm"
+                  variant="primary"
+                >
+                  Remove target and bindings
+                </Button>
+                <Button
+                  disabled={isSaving}
+                  onClick={() => setPendingBuildTargetRemovalId(null)}
+                  size="sm"
+                  variant="ghost"
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : null}
+
           {draft && draft.buildTargets.length === 0 ? (
             <div className="feed-state">
               <p className="feed-state__title">No build targets configured.</p>
@@ -1597,7 +1820,7 @@ export function RepositoryProjectDetail({
         </ProjectDetailSectionAccordion>
 
         <ProjectDetailSectionAccordion
-          description="Inspect publish destinations, bound credentials, and per-target binding semantics."
+          description="Edit publish destinations, credentials, and per-target binding semantics."
           eyebrow="Publishing"
           onOpenChange={(nextOpen) =>
             handleSectionOpenChange("destinations", nextOpen)
@@ -1618,142 +1841,71 @@ export function RepositoryProjectDetail({
           }
           title="Publish Destinations"
         >
-          {repository.publish_targets.length === 0 ? (
-            <div className="feed-state">
-              <p className="feed-state__title">
-                No publish destinations configured.
-              </p>
-              <p className="feed-state__copy">
-                This repository can build artifacts, but no publish destination
-                has been registered for inspection yet.
-              </p>
-            </div>
-          ) : (
-            <div className="project-detail-target-list">
-              <div className="wizard-callout wizard-callout--compact wizard-callout--support">
-                <div className="wizard-callout__header">
-                  <div>
-                    <p className="wizard-callout__title">
-                      Binding dispatch rules
-                    </p>
-                    <p className="wizard-callout__copy">
-                      Non-consuming bindings always run before the single
-                      consuming binding on the same build target. HGP rejects
-                      more than one enabled consuming binding for that target.
-                    </p>
-                  </div>
+          <div className="project-detail-target-list">
+            <PublishDestinationsEditor
+              buildTargets={buildTargetReferences}
+              credentialSaveError={publishCredentialSaveError}
+              credentials={publishCredentials}
+              destinations={draft.publishDestinations}
+              disabled={isSaving}
+              errors={validationErrors.publishDestinations}
+              isSavingCredential={pendingPublishCredentialSave}
+              onChange={(nextPublishDestinations) => {
+                startTransition(() => {
+                  setDraft((currentDraft) => {
+                    if (!currentDraft) {
+                      return currentDraft;
+                    }
 
-                  <div className="wizard-callout__badges">
-                    <Badge tone="neutral">ordered by semantics</Badge>
-                  </div>
+                    return {
+                      ...currentDraft,
+                      publishDestinations: nextPublishDestinations,
+                    };
+                  });
+                });
+              }}
+              onSaveCredential={handleSavePublishCredential}
+            />
+
+            <div className="wizard-callout wizard-callout--compact wizard-callout--support">
+              <div className="wizard-callout__header">
+                <div>
+                  <p className="wizard-callout__title">Draft impact</p>
+                  <p className="wizard-callout__copy">
+                    Unbound targets stay local under the runtime-managed output
+                    root until a destination binding consumes or uploads them.
+                  </p>
                 </div>
               </div>
 
-              {repository.publish_targets.map((publishTarget) => {
-                const enabledBindingCount = publishTarget.bindings.filter(
-                  (binding) => binding.enabled,
-                ).length;
-                const consumingBindingCount = publishTarget.bindings.filter(
-                  (binding) =>
-                    binding.enabled &&
-                    binding.consumption_behavior === "consuming",
-                ).length;
+              <MetaRow className="wizard-callout__meta">
+                <MetaItem label="Unbound targets">
+                  {String(unboundPublishTargetNames.length)}
+                </MetaItem>
+                <MetaItem label="Credential gaps">
+                  {
+                    publishDestinationReviewSummary.filter(
+                      (destination) => destination.missingCredential,
+                    ).length
+                  }
+                </MetaItem>
+              </MetaRow>
 
-                return (
-                  <div
-                    className="project-detail-target-card"
-                    key={publishTarget.publish_target_id}
-                  >
-                    <div className="project-detail-target-card__header">
-                      <div className="project-detail-target-card__title-block">
-                        <h3 className="project-detail-target-card__title">
-                          {publishTarget.name}
-                        </h3>
-                        <p className="project-detail-target-card__copy">
-                          {formatPublishTargetConfigSummary(publishTarget)}
-                        </p>
-                      </div>
-
-                      <div className="project-detail-target-card__badges">
-                        <Badge
-                          tone={publishTarget.enabled ? "strong" : "muted"}
-                        >
-                          {publishTarget.enabled ? "enabled" : "disabled"}
-                        </Badge>
-                        <Badge tone="neutral">
-                          {formatPublishTargetKindLabel(publishTarget.kind)}
-                        </Badge>
-                      </div>
-                    </div>
-
-                    <MetaRow>
-                      <MetaItem label="Credential">
-                        {formatPublishTargetCredentialSummary(publishTarget)}
-                      </MetaItem>
-                      <MetaItem label="Active bindings">
-                        {enabledBindingCount}
-                      </MetaItem>
-                      <MetaItem label="Consumers">
-                        {consumingBindingCount}
-                      </MetaItem>
-                    </MetaRow>
-
-                    {publishTarget.bindings.length === 0 ? (
-                      <p className="project-detail-target-card__copy project-detail-target-card__copy--muted">
-                        No build target binding references this destination yet.
-                      </p>
-                    ) : (
-                      <div className="project-detail-status-grid">
-                        {publishTarget.bindings.map((binding) => (
-                          <div
-                            className="project-detail-target-card"
-                            key={`${publishTarget.publish_target_id}-${binding.build_target_id}`}
-                          >
-                            <div className="project-detail-target-card__header">
-                              <div className="project-detail-target-card__title-block">
-                                <h4 className="project-detail-target-card__title">
-                                  {binding.build_target_name}
-                                </h4>
-                                <p className="project-detail-target-card__copy">
-                                  {formatPublishBindingSemanticsCopy(binding)}
-                                </p>
-                              </div>
-
-                              <div className="project-detail-target-card__badges">
-                                <Badge
-                                  tone={binding.enabled ? "strong" : "muted"}
-                                >
-                                  {binding.enabled ? "enabled" : "disabled"}
-                                </Badge>
-                                <Badge
-                                  tone={
-                                    binding.consumption_behavior === "consuming"
-                                      ? "neutral"
-                                      : "strong"
-                                  }
-                                >
-                                  {formatPublishBindingBehaviorLabel(
-                                    binding.consumption_behavior,
-                                  )}
-                                </Badge>
-                              </div>
-                            </div>
-
-                            <p className="project-detail-target-card__copy project-detail-target-card__copy--muted">
-                              {formatPublishBindingOptionsSummary(
-                                publishTarget.kind,
-                                binding.options_json,
-                              )}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+              {publishDestinationReviewSummary.length > 0 ? (
+                <p className="wizard-callout__copy">
+                  {publishDestinationReviewSummary
+                    .map((destination) => {
+                      const targetSummary =
+                        destination.bindingTargetNames.length > 0
+                          ? destination.bindingTargetNames.join(", ")
+                          : "no bound targets";
+                      return `${destination.name}: ${targetSummary}`;
+                    })
+                    .join(" | ")}
+                </p>
+              ) : null}
             </div>
-          )}
+          </div>
         </ProjectDetailSectionAccordion>
 
         <ProjectDetailSectionAccordion
@@ -1920,173 +2072,26 @@ function formatTargetAttentionSummary(targetAttentionCount: number) {
   return `${targetAttentionCount} need review`;
 }
 
-function countEnabledPublishBindings(
-  repository: RepositoryInspectionEntry,
+function countEnabledPublishDestinationBindings(
+  destinations: PublishDestinationDraft[],
   behavior: RepositoryPublishBindingInspection["consumption_behavior"],
 ) {
-  return repository.publish_targets.reduce((total, target) => {
+  return destinations.reduce((total, destination) => {
+    const matchesBehavior =
+      (behavior === "consuming" && destination.kind === "filesystem") ||
+      (behavior === "non_consuming" && destination.kind === "itch");
+    if (!matchesBehavior) {
+      return total;
+    }
+
     return (
-      total +
-      target.bindings.filter(
-        (binding) =>
-          binding.enabled && binding.consumption_behavior === behavior,
-      ).length
+      total + destination.bindings.filter((binding) => binding.enabled).length
     );
   }, 0);
 }
 
 function formatPublishDestinationCount(destinationCount: number) {
   return `${destinationCount} destination${destinationCount === 1 ? "" : "s"}`;
-}
-
-function formatPublishTargetKindLabel(kind: string) {
-  switch (kind.trim().toLocaleLowerCase()) {
-    case "filesystem":
-      return "filesystem";
-    case "itch":
-      return "itch.io";
-    default:
-      return kind;
-  }
-}
-
-function formatPublishTargetCredentialSummary(
-  publishTarget: RepositoryPublishTargetInspection,
-) {
-  if (!publishTarget.credentials) {
-    return publishTarget.kind === "itch"
-      ? "Credential missing"
-      : "No credential bound";
-  }
-
-  if (publishTarget.credentials.config_status === "ready") {
-    return publishTarget.credentials.name;
-  }
-
-  return `${publishTarget.credentials.name} (${formatDiagnosticStatus(
-    publishTarget.credentials.config_status,
-  )})`;
-}
-
-function formatPublishTargetConfigSummary(
-  publishTarget: RepositoryPublishTargetInspection,
-) {
-  const config = parseJsonObject(publishTarget.config_json);
-
-  if (publishTarget.kind === "filesystem") {
-    const rootPath = readJsonStringField(config, "root_path");
-
-    return rootPath
-      ? `Publishes into ${rootPath}.`
-      : "Publishes to a filesystem path resolved by the destination or binding.";
-  }
-
-  if (publishTarget.kind === "itch") {
-    const accountName = readJsonStringField(config, "account_name");
-    const gameSlug = readJsonStringField(config, "game_slug");
-
-    if (accountName && gameSlug) {
-      return `Uploads to ${accountName}/${gameSlug} through butler.`;
-    }
-
-    return "Uploads build artifacts to Itch.io through butler.";
-  }
-
-  return "Uses the persisted publish destination contract.";
-}
-
-function formatPublishBindingBehaviorLabel(
-  behavior: RepositoryPublishBindingInspection["consumption_behavior"],
-) {
-  return behavior === "consuming" ? "consuming" : "non-consuming";
-}
-
-function formatPublishBindingSemanticsCopy(
-  binding: RepositoryPublishBindingInspection,
-) {
-  if (binding.consumption_behavior === "consuming") {
-    return binding.enabled
-      ? "Runs after non-consuming bindings and becomes the artifact's active location."
-      : "Disabled consuming binding. When enabled, it will run after non-consuming bindings.";
-  }
-
-  return binding.enabled
-    ? "Runs before any consuming binding and leaves the artifact available for later publishes."
-    : "Disabled non-consuming binding. When enabled, it will run before any consuming binding.";
-}
-
-function formatPublishBindingOptionsSummary(
-  publishTargetKind: string,
-  optionsJson: string,
-) {
-  const options = parseJsonObject(optionsJson);
-
-  if (publishTargetKind === "filesystem") {
-    const operation = readJsonStringField(options, "operation");
-    const directoryPath = readJsonStringField(options, "directory_path");
-
-    if (operation === "move" && directoryPath) {
-      return `Move the artifact into ${directoryPath}.`;
-    }
-
-    if (directoryPath) {
-      return `Publish into ${directoryPath}.`;
-    }
-
-    return "Uses the destination default filesystem path.";
-  }
-
-  if (publishTargetKind === "itch") {
-    const channel = readJsonStringField(options, "channel");
-    const userversionTemplate = readJsonStringField(
-      options,
-      "userversion_template",
-    );
-
-    if (channel && userversionTemplate) {
-      return `Channel ${channel}. Version template ${userversionTemplate}.`;
-    }
-
-    if (channel) {
-      return `Channel ${channel}. Uses the git tag as the Itch userversion.`;
-    }
-
-    return "Uses the persisted Itch binding options.";
-  }
-
-  return "Uses the persisted binding options.";
-}
-
-function parseJsonObject(value: string): Record<string, unknown> | null {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  try {
-    const parsed: unknown = JSON.parse(trimmed);
-    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
-      return null;
-    }
-
-    return parsed as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
-function readJsonStringField(
-  value: Record<string, unknown> | null,
-  key: string,
-) {
-  const candidate = value?.[key];
-
-  if (typeof candidate !== "string") {
-    return null;
-  }
-
-  const trimmed = candidate.trim();
-  return trimmed ? trimmed : null;
 }
 
 function formatGithubAuthProviderStatus(
@@ -2438,6 +2443,13 @@ function isRepositoryCredentialSelectable(credential: SecretCredentialSetting) {
   );
 }
 
+function isItchCredentialSelectable(credential: SecretCredentialSetting) {
+  return (
+    credential.kind === "itch-api-key" &&
+    credential.config_summary.status === "ready"
+  );
+}
+
 function buildProjectDetailErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -2465,6 +2477,7 @@ function buildProjectSaveErrorMessage(error: unknown): string {
 function createEmptyValidationErrors(): RepositoryProjectValidationErrors {
   return {
     buildTargets: {},
+    publishDestinations: createEmptyPublishDestinationValidationErrors(),
   };
 }
 
@@ -2505,6 +2518,14 @@ function buildRepositoryProjectDraft(
     pollingIntervalSeconds: String(repository.polling_interval_seconds),
     enabled: repository.enabled ? "enabled" : "disabled",
     buildTargets,
+    publishDestinations: buildPublishDestinationDrafts(
+      repository.publish_targets,
+      buildTargets.map((target) => ({
+        id: target.id,
+        buildTargetId: target.buildTargetId,
+        name: target.name.trim() || "Unnamed target",
+      })),
+    ),
   };
 }
 
@@ -2710,6 +2731,15 @@ function validateRepositoryProjectDraft(
     errors.buildTargets[target.id] = fieldErrors;
   }
 
+  errors.publishDestinations = validatePublishDestinationDrafts(
+    draft.publishDestinations,
+    draft.buildTargets.map((target) => ({
+      id: target.id,
+      buildTargetId: target.buildTargetId,
+      name: target.name.trim() || "Unnamed target",
+    })),
+  );
+
   return errors;
 }
 
@@ -2721,6 +2751,7 @@ function hasValidationErrors(errors: RepositoryProjectValidationErrors) {
     errors.pollingIntervalSeconds ||
     errors.repositoryAccess ||
     errors.buildTargetsRoot ||
+    hasPublishDestinationValidationErrors(errors.publishDestinations) ||
     Object.values(errors.buildTargets).some((fieldErrors) =>
       hasBuildTargetFieldErrors(fieldErrors),
     ),
@@ -2793,6 +2824,14 @@ function buildRepositoryProjectUpdateInput(
       },
       unity_executable_path: target.unityExecutablePath.trim(),
     })),
+    publish_targets: buildUpdateProjectPublishTargetsInput(
+      draft.publishDestinations,
+      draft.buildTargets.map((target) => ({
+        id: target.id,
+        buildTargetId: target.buildTargetId,
+        name: target.name.trim() || "Unnamed target",
+      })),
+    ),
   };
 }
 
@@ -2880,7 +2919,11 @@ function isRepositoryProjectDraftChanged(
       draft.workspaceRootOverride.trim() ||
     persistedDraft.pollingIntervalSeconds !== draft.pollingIntervalSeconds ||
     persistedDraft.enabled !== draft.enabled ||
-    !areBuildTargetDraftsEqual(persistedDraft.buildTargets, draft.buildTargets)
+    !areBuildTargetDraftsEqual(persistedDraft.buildTargets, draft.buildTargets) ||
+    !arePublishDestinationDraftsEqual(
+      persistedDraft.publishDestinations,
+      draft.publishDestinations,
+    )
   );
 }
 
@@ -2904,6 +2947,66 @@ function areBuildTargetDraftsEqual(
       target.targetPlatform.trim() === candidate.targetPlatform.trim() &&
       target.buildMethod.trim() === candidate.buildMethod.trim() &&
       target.unityExecutablePath.trim() === candidate.unityExecutablePath.trim()
+    );
+  });
+}
+
+function arePublishDestinationDraftsEqual(
+  left: PublishDestinationDraft[],
+  right: PublishDestinationDraft[],
+) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((destination, index) => {
+    const candidate = right[index];
+    if (!candidate) {
+      return false;
+    }
+
+    return (
+      destination.publishTargetId === candidate.publishTargetId &&
+      destination.name.trim() === candidate.name.trim() &&
+      destination.kind === candidate.kind &&
+      destination.enabled === candidate.enabled &&
+      destination.itchAccountName.trim() ===
+        candidate.itchAccountName.trim() &&
+      destination.itchGameSlug.trim() === candidate.itchGameSlug.trim() &&
+      destination.itchButlerPath.trim() === candidate.itchButlerPath.trim() &&
+      destination.credentialsId === candidate.credentialsId &&
+      arePublishDestinationBindingDraftsEqual(
+        destination.bindings,
+        candidate.bindings,
+      )
+    );
+  });
+}
+
+function arePublishDestinationBindingDraftsEqual(
+  left: PublishDestinationDraft["bindings"],
+  right: PublishDestinationDraft["bindings"],
+) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((binding, index) => {
+    const candidate = right[index];
+    if (!candidate) {
+      return false;
+    }
+
+    return (
+      binding.buildTargetId === candidate.buildTargetId &&
+      binding.buildTargetDraftId === candidate.buildTargetDraftId &&
+      binding.buildTargetName.trim() === candidate.buildTargetName.trim() &&
+      binding.enabled === candidate.enabled &&
+      binding.filesystemDirectoryPath.trim() ===
+        candidate.filesystemDirectoryPath.trim() &&
+      binding.itchChannel.trim() === candidate.itchChannel.trim() &&
+      binding.itchUserversionTemplate.trim() ===
+        candidate.itchUserversionTemplate.trim()
     );
   });
 }
