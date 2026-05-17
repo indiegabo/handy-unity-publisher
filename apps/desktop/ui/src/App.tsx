@@ -11,9 +11,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button, IconButton } from "./components/Button";
 import { AuthProvidersFocusScreen } from "./components/AuthProvidersFocusScreen";
 import { CreateProjectWizard } from "./components/CreateProjectWizard";
-import {
-  ProcessFeedItem,
-} from "./components/ProcessFeedItem";
+import { ProcessFeedItem } from "./components/ProcessFeedItem";
 import { ProcessDetailFocusScreen } from "./components/ProcessDetailFocusScreen";
 import { ProjectsFocusScreen } from "./components/ProjectsFocusScreen";
 import { RepositoryProjectDetail } from "./components/RepositoryProjectDetail";
@@ -142,15 +140,16 @@ function App() {
   const projectWorkers = collectProjectWorkers(workerSnapshot.repositories);
   const activeProcessDetail =
     activeScreen.kind === "process-detail"
-      ? processPage.items.find(
+      ? (processPage.items.find(
           (process) =>
             process.release_run_id === activeScreen.process.release_run_id,
-        ) ?? activeScreen.process
+        ) ?? activeScreen.process)
       : null;
   const activeProcessDetailUsesLiveSnapshot =
     activeScreen.kind === "process-detail" &&
     processPage.items.some(
-      (process) => process.release_run_id === activeScreen.process.release_run_id,
+      (process) =>
+        process.release_run_id === activeScreen.process.release_run_id,
     );
 
   const loadProcessFeed = useEffectEvent(
@@ -794,7 +793,9 @@ function App() {
                         ? "focus-screen-shell focus-screen-shell--project-list"
                         : activeScreen.kind === "project-detail"
                           ? "focus-screen-shell focus-screen-shell--project-detail"
-                          : "focus-screen-shell"
+                          : activeScreen.kind === "process-detail"
+                            ? "focus-screen-shell focus-screen-shell--process-detail"
+                            : "focus-screen-shell"
               }
               aria-label="Focus screen"
             >
