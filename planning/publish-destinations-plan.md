@@ -77,8 +77,8 @@ The target behavior is:
 - the runtime store already persists `publish_targets` and
   `build_publish_bindings`
 - the current publish runtime supports one backend, `filesystem`
-- the current filesystem backend derives the destination path from one
-  destination-wide `root_path` instead of per-build-target binding policy
+- the current filesystem backend resolves the destination path from the
+  binding-specific `directory_path` policy
 - successful publish runs persist `destination_ref`, but the artifact's durable
   canonical location is not rewritten after a move or copy-like publication
 - repository inspection already reports registered publish target counts, but
@@ -455,12 +455,6 @@ The new filesystem backend should instead:
 - update the artifact's active location after successful completion
 - persist the final absolute path into `publish_runs.destination_ref`
 
-Compatibility note:
-
-- legacy rows that still carry destination-wide `root_path` may be supported as
-  a temporary fallback while shell-created destination bindings migrate to the
-  new policy shape
-
 ### 7. Deliver Itch.io Through A Host-Native Publisher Surface
 
 The Itch.io destination should be implemented through one explicit runtime
@@ -682,7 +676,7 @@ investigation. The task list below remains the original backlog checklist.
       same build target.
 - [x] Enforce deterministic per-artifact publish ordering.
 - [x] Add tests for mixed non-consuming and consuming bindings.
-- [ ] Add tests proving queued publish runs keep their original snapshot after
+- [x] Add tests proving queued publish runs keep their original snapshot after
       later project edits.
 
 ### Phase 3 - Filesystem Move Backend
@@ -693,9 +687,9 @@ investigation. The task list below remains the original backlog checklist.
 - [x] Move artifacts into the binding-specific absolute directory.
 - [x] Update the artifact's active location on successful move.
 - [x] Persist the moved absolute path into `publish_runs.destination_ref`.
-- [ ] Add compatibility fallback for legacy destination-wide `root_path` rows if
-      required.
-- [ ] Add tests for selective binding where one build target moves and another
+- [x] Refuse legacy destination-wide `root_path` config and keep filesystem
+      targets on the binding-only contract.
+- [x] Add tests for selective binding where one build target moves and another
       remains in runtime output.
 
 ### Phase 4 - Itch.io Backend
@@ -713,24 +707,24 @@ investigation. The task list below remains the original backlog checklist.
 
 ### Phase 5 - Desktop Create-Project Flow
 
-- [ ] Add the `Publish Destinations` wizard step after `Build Targets`.
-- [ ] Add destination creation, removal, and editing UI.
-- [ ] Add per-destination binding editors for build targets.
-- [ ] Add client-side validation for destination config and binding policy.
-- [ ] Add review-step summaries for destinations and unbound build targets.
-- [ ] Add confirmation when removing a build target that owns destination
+- [x] Add the `Publish Destinations` wizard step after `Build Targets`.
+- [x] Add destination creation, removal, and editing UI.
+- [x] Add per-destination binding editors for build targets.
+- [x] Add client-side validation for destination config and binding policy.
+- [x] Add review-step summaries for destinations and unbound build targets.
+- [x] Add confirmation when removing a build target that owns destination
       bindings.
-- [ ] Add focused UI tests for destination authoring and destructive warnings.
+- [x] Add focused UI tests for destination authoring and destructive warnings.
 
 ### Phase 6 - Desktop Edit-Project Flow
 
 - [x] Add a dedicated `Publish Destinations` section to repository detail.
 - [x] Render existing destinations with bound-target summaries.
-- [ ] Allow editing destination-wide config and binding policies.
-- [ ] Add confirmation when removing a destination that still owns bindings.
-- [ ] Add confirmation when changing destination kind invalidates existing
+- [x] Allow editing destination-wide config and binding policies.
+- [x] Add confirmation when removing a destination that still owns bindings.
+- [x] Add confirmation when changing destination kind invalidates existing
       bindings.
-- [ ] Add focused UI tests for edit-project destination workflows.
+- [x] Add focused UI tests for edit-project destination workflows.
 
 ### Phase 7 - Diagnostics And Operator Reporting
 
@@ -738,41 +732,41 @@ investigation. The task list below remains the original backlog checklist.
       shell.
 - [x] Extend repository inspection payloads with destination and binding
       summaries.
-- [ ] Surface active artifact location in publish and artifact diagnostics.
-- [ ] Show destination kind, destination name, and result reference in process
+- [x] Surface active artifact location in publish and artifact diagnostics.
+- [x] Show destination kind, destination name, and result reference in process
       detail views.
-- [ ] Surface capability and credential state for Itch destinations.
+- [x] Surface capability and credential state for Itch destinations.
 
 ### Phase 8 - Documentation And Validation
 
-- [ ] Document the operator contract for publish destinations in the desktop
+- [x] Document the operator contract for publish destinations in the desktop
       product docs.
-- [ ] Document filesystem move behavior and active artifact location semantics.
-- [ ] Document Itch destination prerequisites and credential requirements.
+- [x] Document filesystem move behavior and active artifact location semantics.
+- [x] Document Itch destination prerequisites and credential requirements.
 - [x] Run focused Rust tests for runtime-store and runtime-publish.
-- [ ] Run focused desktop UI tests for create and edit flows.
-- [ ] Run one end-to-end smoke scenario with no destinations, one filesystem
+- [x] Run focused desktop UI tests for create and edit flows.
+- [x] Run one end-to-end smoke scenario with no destinations, one filesystem
       destination, and one mixed filesystem-plus-Itch scenario.
 
 ## Acceptance Criteria
 
-- [ ] a project can be created and edited with zero publish destinations
-- [ ] one project can define multiple publish destinations of different kinds
-- [ ] one destination can bind only a selected subset of build targets
-- [ ] an unbound build target keeps its artifact in runtime-managed output
-- [ ] a filesystem destination can move one build target artifact into a
+- [x] a project can be created and edited with zero publish destinations
+- [x] one project can define multiple publish destinations of different kinds
+- [x] one destination can bind only a selected subset of build targets
+- [x] an unbound build target keeps its artifact in runtime-managed output
+- [x] a filesystem destination can move one build target artifact into a
       binding-specific absolute folder
-- [ ] after a filesystem move, the artifact's active location resolves to the
+- [x] after a filesystem move, the artifact's active location resolves to the
       moved absolute path
-- [ ] an Itch destination can upload only the build targets that are explicitly
+- [x] an Itch destination can upload only the build targets that are explicitly
       bound to it
-- [ ] removing a build target with existing destination bindings requires an
+- [x] removing a build target with existing destination bindings requires an
       explicit confirmation in the shell
-- [ ] queued publish runs keep the snapshotted behavior they were created with,
+- [x] queued publish runs keep the snapshotted behavior they were created with,
       even if the project is edited later
-- [ ] project validation rejects more than one enabled consuming binding for the
+- [x] project validation rejects more than one enabled consuming binding for the
       same build target in the first slice
-- [ ] repository and process diagnostics expose publish destination state and
+- [x] repository and process diagnostics expose publish destination state and
       final result references clearly
 
 ## Suggested Execution Order

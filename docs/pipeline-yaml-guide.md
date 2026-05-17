@@ -162,20 +162,22 @@ spec:
       - name: filesystem-release
         enabled: true
         kind: filesystem
-        config:
-          root_path: /data/published
+        config: {}
 
   bindings:
     - buildTarget: linux64
       publishTarget: filesystem-release
       enabled: true
       options:
-        channel: stable
+        operation: move
+        directory_path: /data/published/linux64
 
     - buildTarget: webgl
       publishTarget: filesystem-release
       enabled: true
-      options: {}
+      options:
+        operation: move
+        directory_path: /data/published/webgl
 ```
 
 The `output.path` values above describe the requested build-method path shape,
@@ -236,14 +238,15 @@ spec:
         enabled: true
         kind: filesystem
         credentials: <credential-name-or-empty>
-        config:
-          root_path: <absolute-destination-path>
+        config: {}
 
   bindings:
     - buildTarget: <target-name>
       publishTarget: <publish-target-name>
       enabled: true
-      options: {}
+      options:
+        operation: move
+        directory_path: <absolute-destination-path>
 ```
 
 ## Value Sources
@@ -298,8 +301,10 @@ Do not set more than one of `value`, `env`, or `file` on the same field.
 - `spec.build.targets[].config`, `spec.publish.targets[].config`, and
   `spec.bindings[].options` are stored as JSON objects for executor-specific
   behavior.
-- `spec.publish.targets[].config.root_path` must be absolute for `filesystem`
-  publish targets.
+- `spec.publish.targets[].config` must stay empty for `filesystem` publish
+  targets in the current slice.
+- `spec.bindings[].options.directory_path` must be absolute for `filesystem`
+  bindings, and `spec.bindings[].options.operation` must be `move`.
 
 ## Artifact Naming And Storage
 
@@ -360,14 +365,15 @@ information in this order and only then write the file:
    or an explicit literal value.
 9. Ask for build targets one by one:
    - target name
-  - Unity targetPlatform
-  - Unity buildMethod
-  - Unity editorVersion override if any
-   - output kind
-  - output path hint or expected extension
-  - for archive outputs, a staging path without a `.zip` suffix
-  - timeout
-  - optional config object
+
+- Unity targetPlatform
+- Unity buildMethod
+- Unity editorVersion override if any
+- output kind
+- output path hint or expected extension
+- for archive outputs, a staging path without a `.zip` suffix
+- timeout
+- optional config object
 
 10. Ask for publish targets one by one.
 11. If the user asks for a publish kind other than `filesystem`, explain that

@@ -190,8 +190,8 @@ binding-aware, consuming move behavior.
 - move the artifact into the binding-specific absolute directory
 - update publish-run `destination_ref` on success
 - update artifact active location when the move succeeds
-- keep a temporary compatibility path for legacy destination-wide `root_path`
-  records if existing tests still rely on them
+- keep filesystem destinations on the binding-only `directory_path` contract;
+  update stale tests instead of preserving a compatibility path
 
 ### Out Of Scope
 
