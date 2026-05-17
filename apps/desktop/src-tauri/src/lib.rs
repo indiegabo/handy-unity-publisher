@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::io::ErrorKind;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -65,11 +66,14 @@ use tauri::{
     AppHandle, Manager, PhysicalPosition, PhysicalSize, RunEvent,
     WebviewWindow, WindowEvent,
 };
+use zip::ZipArchive;
 
 const RUNTIME_PACKAGE_NAME: &str = "runtime-bin";
 const RUNTIME_BINARY_NAME: &str = "hgp-runtime";
 const DEFAULT_RUNTIME_LOG_LINE_LIMIT: usize = 100;
 const MAX_RUNTIME_LOG_LINE_LIMIT: usize = 500;
+const DEFAULT_TEXT_FILE_PREVIEW_MAX_BYTES: usize = 128 * 1024;
+const MAX_TEXT_FILE_PREVIEW_MAX_BYTES: usize = 512 * 1024;
 const SECRET_STORAGE_MODEL_INLINE_SQLITE: &str =
     "sqlite-config-json-and-keyring-references";
 const RUNTIME_STARTUP_PROBE_MILLIS: u64 = 150;
@@ -77,6 +81,7 @@ const RUNTIME_SHUTDOWN_WAIT_POLL_MILLIS: u64 = 100;
 const RUNTIME_SHUTDOWN_WAIT_POLLS: usize = 20;
 const BUILD_EXECUTION_RETAINED_DIR_NAME: &str = "retained";
 const BUILD_EXECUTION_REPORT_FILE_NAME: &str = "execution-report.json";
+const BUILD_EXECUTION_LOG_ARCHIVE_FILE_NAME: &str = "execution-logs.zip";
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ICON_ID: &str = "hgp-tray";
 const TRAY_MENU_OPEN_ID: &str = "tray-open";
@@ -627,12 +632,24 @@ struct RepositoryInspectionSettings {
     repositories: Vec<RepositoryInspectionEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RetainedLogArchiveEntry {
+    entry_path: String,
+    entry_name: String,
+    size_bytes: u64,
+    compressed_size_bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct BuildExecutionReportPayload {
     build_run_id: i64,
     workspace_path: Option<PathBuf>,
+    retained_dir_path: Option<PathBuf>,
     report_path: Option<PathBuf>,
+    logs_archive_path: Option<PathBuf>,
     exists: bool,
+    logs_archive_exists: bool,
+    log_entries: Vec<RetainedLogArchiveEntry>,
     report: Option<serde_json::Value>,
 }
 
@@ -643,6 +660,42 @@ struct BuildExecutionRetentionPurgeReport {
     retained_dir_path: Option<PathBuf>,
     removed_paths: Vec<PathBuf>,
     workspace_removed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct HostTextFilePayload {
+    path: PathBuf,
+    exists: bool,
+    size_bytes: u64,
+    truncated: bool,
+    content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RetainedLogArchiveEntryPreviewPayload {
+    archive_path: PathBuf,
+    entry_path: String,
+    exists: bool,
+    size_bytes: u64,
+    truncated: bool,
+    content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ReleaseProcessOutputsDeleteReport {
+    release_run_id: i64,
+    artifact_root_path: Option<PathBuf>,
+    removed_paths: Vec<PathBuf>,
+    missing_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct BuildLogDeleteReport {
+    build_run_id: i64,
+    log_path: Option<PathBuf>,
+    removed_paths: Vec<PathBuf>,
+    missing_paths: Vec<PathBuf>,
+    parent_removed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -866,6 +919,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             application_version,
             process_feed,
+            open_host_path,
+            read_host_text_file,
             transition_window_focus,
             main_window_pin_state,
             set_main_window_pinned,
@@ -884,7 +939,10 @@ pub fn run() {
             build_history,
             artifact_inspection,
             build_execution_report,
+            read_retained_log_archive_entry,
             purge_build_execution_retention,
+            delete_release_process_outputs,
+            delete_build_log,
             detect_repository_provider,
             assess_repository_access,
             auth_providers,
@@ -1099,6 +1157,23 @@ fn runtime_lifecycle_settings() -> Result<RuntimeLifecycleSettings, String> {
 }
 
 #[tauri::command]
+fn open_host_path(path: String) -> Result<(), String> {
+    open_path_in_host(Path::new(path.trim())).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn read_host_text_file(
+    path: String,
+    max_bytes: Option<usize>,
+) -> Result<HostTextFilePayload, String> {
+    load_host_text_file(
+        Path::new(path.trim()),
+        normalize_text_file_preview_max_bytes(max_bytes),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn release_status() -> Result<AutomationSnapshot, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_release_status(&config).map_err(|error| error.to_string())
@@ -1129,12 +1204,43 @@ fn build_execution_report(build_run_id: i64) -> Result<BuildExecutionReportPaylo
 }
 
 #[tauri::command]
+fn read_retained_log_archive_entry(
+    build_run_id: i64,
+    entry_path: String,
+    max_bytes: Option<usize>,
+) -> Result<RetainedLogArchiveEntryPreviewPayload, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    load_retained_log_archive_entry(
+        &config,
+        build_run_id,
+        &entry_path,
+        normalize_text_file_preview_max_bytes(max_bytes),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn purge_build_execution_retention(
     build_run_id: i64,
 ) -> Result<BuildExecutionRetentionPurgeReport, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     purge_build_execution_retention_files(&config, build_run_id)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_release_process_outputs(
+    release_run_id: i64,
+) -> Result<ReleaseProcessOutputsDeleteReport, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    delete_release_process_outputs_files(&config, release_run_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_build_log(build_run_id: i64) -> Result<BuildLogDeleteReport, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    delete_build_log_file(&config, build_run_id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1642,6 +1748,10 @@ fn build_execution_report_path(workspace_path: &Path) -> PathBuf {
     build_execution_retained_dir(workspace_path).join(BUILD_EXECUTION_REPORT_FILE_NAME)
 }
 
+fn build_execution_log_archive_path(workspace_path: &Path) -> PathBuf {
+    build_execution_retained_dir(workspace_path).join(BUILD_EXECUTION_LOG_ARCHIVE_FILE_NAME)
+}
+
 fn load_build_execution_report(
     config: &RuntimeConfig,
     build_run_id: i64,
@@ -1652,8 +1762,12 @@ fn load_build_execution_report(
         return Ok(BuildExecutionReportPayload {
             build_run_id,
             workspace_path: None,
+            retained_dir_path: None,
             report_path: None,
+            logs_archive_path: None,
             exists: false,
+            logs_archive_exists: false,
+            log_entries: Vec::new(),
             report: None,
         });
     }
@@ -1665,7 +1779,17 @@ fn load_build_execution_report(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
+    let retained_dir_path = workspace_path.as_deref().map(build_execution_retained_dir);
     let report_path = workspace_path.as_deref().map(build_execution_report_path);
+    let logs_archive_path = workspace_path.as_deref().map(build_execution_log_archive_path);
+    let logs_archive_exists = logs_archive_path
+        .as_ref()
+        .map(|path| path.is_file())
+        .unwrap_or(false);
+    let log_entries = match logs_archive_path.as_deref() {
+        Some(path) if path.is_file() => load_retained_log_archive_entries(path)?,
+        _ => Vec::new(),
+    };
     let report = match report_path.as_ref() {
         Some(path) if path.is_file() => Some(
             serde_json::from_slice(&fs::read(path)?)
@@ -1677,9 +1801,116 @@ fn load_build_execution_report(
     Ok(BuildExecutionReportPayload {
         build_run_id,
         workspace_path,
+        retained_dir_path,
         report_path,
+        logs_archive_path,
         exists: report.is_some(),
+        logs_archive_exists,
+        log_entries,
         report,
+    })
+}
+
+fn load_retained_log_archive_entries(
+    archive_path: &Path,
+) -> io::Result<Vec<RetainedLogArchiveEntry>> {
+    let archive_path = require_existing_regular_file(archive_path)?;
+    let archive_file = fs::File::open(&archive_path)?;
+    let mut archive = ZipArchive::new(archive_file).map_err(io::Error::other)?;
+    let mut entries = Vec::new();
+
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(io::Error::other)?;
+        if entry.is_dir() {
+            continue;
+        }
+
+        let entry_path = entry.name().to_owned();
+        entries.push(RetainedLogArchiveEntry {
+            entry_name: retained_log_archive_entry_name(&entry_path),
+            entry_path,
+            size_bytes: entry.size(),
+            compressed_size_bytes: entry.compressed_size(),
+        });
+    }
+
+    Ok(entries)
+}
+
+pub(crate) fn load_retained_log_archive_entry(
+    config: &RuntimeConfig,
+    build_run_id: i64,
+    entry_path: &str,
+    max_bytes: usize,
+) -> io::Result<RetainedLogArchiveEntryPreviewPayload> {
+    let normalized_entry_path = entry_path.trim();
+    if normalized_entry_path.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "retained log archive entry path must not be empty",
+        ));
+    }
+
+    config.directories.ensure_exists()?;
+    let storage = StorageLayout::from_directories(&config.directories);
+    if !storage.database_path.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::NotFound,
+            "runtime database is unavailable for retained log lookup",
+        ));
+    }
+
+    let build_run = LocalCoordinator::new(&storage).get_build_run_record(build_run_id)?;
+    let workspace_path = build_run
+        .workspace_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                format!("build run {} does not have a retained workspace path", build_run_id),
+            )
+        })?;
+    let archive_path = require_existing_regular_file(&build_execution_log_archive_path(&workspace_path))?;
+    let archive_file = fs::File::open(&archive_path)?;
+    let mut archive = ZipArchive::new(archive_file).map_err(io::Error::other)?;
+    let mut entry = archive.by_name(normalized_entry_path).map_err(|_| {
+        io::Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "retained log entry '{}' was not found in archive '{}'",
+                normalized_entry_path,
+                archive_path.display(),
+            ),
+        )
+    })?;
+
+    if entry.is_dir() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            format!("retained log entry '{}' is a directory", normalized_entry_path),
+        ));
+    }
+
+    let size_bytes = entry.size();
+    let mut contents = Vec::new();
+    entry.read_to_end(&mut contents)?;
+    let truncated = contents.len() > max_bytes;
+    let preview = if truncated {
+        &contents[contents.len() - max_bytes..]
+    } else {
+        &contents
+    };
+
+    Ok(RetainedLogArchiveEntryPreviewPayload {
+        archive_path,
+        entry_path: normalized_entry_path.to_owned(),
+        exists: true,
+        size_bytes,
+        truncated,
+        content: String::from_utf8_lossy(preview).into_owned(),
     })
 }
 
@@ -1735,6 +1966,256 @@ fn purge_build_execution_retention_files(
         removed_paths,
         workspace_removed,
     })
+}
+
+fn delete_release_process_outputs_files(
+    config: &RuntimeConfig,
+    release_run_id: i64,
+) -> io::Result<ReleaseProcessOutputsDeleteReport> {
+    config.directories.ensure_exists()?;
+    let storage = StorageLayout::from_directories(&config.directories);
+    if !storage.database_path.is_file() {
+        return Ok(ReleaseProcessOutputsDeleteReport {
+            release_run_id,
+            artifact_root_path: None,
+            removed_paths: Vec::new(),
+            missing_paths: Vec::new(),
+        });
+    }
+
+    let artifact_root_path = list_build_history_records(&storage)?
+        .into_iter()
+        .find(|record| record.release_run_id == release_run_id)
+        .and_then(|record| {
+            record
+                .artifact_root_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        });
+    let mut removed_paths = Vec::new();
+    let mut missing_paths = Vec::new();
+
+    if let Some(path) = artifact_root_path.as_ref() {
+        remove_directory_path(path, &mut removed_paths, &mut missing_paths)?;
+    }
+
+    Ok(ReleaseProcessOutputsDeleteReport {
+        release_run_id,
+        artifact_root_path,
+        removed_paths,
+        missing_paths,
+    })
+}
+
+fn delete_build_log_file(
+    config: &RuntimeConfig,
+    build_run_id: i64,
+) -> io::Result<BuildLogDeleteReport> {
+    config.directories.ensure_exists()?;
+    let storage = StorageLayout::from_directories(&config.directories);
+    if !storage.database_path.is_file() {
+        return Ok(BuildLogDeleteReport {
+            build_run_id,
+            log_path: None,
+            removed_paths: Vec::new(),
+            missing_paths: Vec::new(),
+            parent_removed: false,
+        });
+    }
+
+    let build_run = LocalCoordinator::new(&storage).get_build_run_record(build_run_id)?;
+    let log_path = build_run
+        .log_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let mut removed_paths = Vec::new();
+    let mut missing_paths = Vec::new();
+    let mut parent_removed = false;
+
+    if let Some(path) = log_path.as_ref() {
+        remove_file_path(path, &mut removed_paths, &mut missing_paths)?;
+
+        if missing_paths.is_empty() {
+            if let Some(parent) = path.parent() {
+                if parent.is_dir() && fs::read_dir(parent)?.next().is_none() {
+                    fs::remove_dir(parent)?;
+                    removed_paths.push(parent.to_path_buf());
+                    parent_removed = true;
+                }
+            }
+        }
+    }
+
+    Ok(BuildLogDeleteReport {
+        build_run_id,
+        log_path,
+        removed_paths,
+        missing_paths,
+        parent_removed,
+    })
+}
+
+fn normalize_text_file_preview_max_bytes(max_bytes: Option<usize>) -> usize {
+    match max_bytes {
+        Some(value) if value > 0 => value.min(MAX_TEXT_FILE_PREVIEW_MAX_BYTES),
+        _ => DEFAULT_TEXT_FILE_PREVIEW_MAX_BYTES,
+    }
+}
+
+fn retained_log_archive_entry_name(entry_path: &str) -> String {
+    entry_path
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(entry_path)
+        .to_owned()
+}
+
+fn load_host_text_file(path: &Path, max_bytes: usize) -> io::Result<HostTextFilePayload> {
+    let normalized_path = require_existing_regular_file(path)?;
+    let contents = fs::read(&normalized_path)?;
+    let size_bytes = contents.len() as u64;
+    let truncated = contents.len() > max_bytes;
+    let preview = if truncated {
+        &contents[contents.len() - max_bytes..]
+    } else {
+        &contents
+    };
+
+    Ok(HostTextFilePayload {
+        path: normalized_path,
+        exists: true,
+        size_bytes,
+        truncated,
+        content: String::from_utf8_lossy(preview).into_owned(),
+    })
+}
+
+fn open_path_in_host(path: &Path) -> io::Result<()> {
+    let normalized_path = require_existing_path(path)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(&normalized_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&normalized_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(&normalized_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err(io::Error::new(
+        ErrorKind::Unsupported,
+        "host path opening is not supported on this platform",
+    ))
+}
+
+fn require_existing_path(path: &Path) -> io::Result<PathBuf> {
+    let trimmed = path.to_string_lossy().trim().to_owned();
+    if trimmed.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "host path must not be empty",
+        ));
+    }
+
+    let normalized_path = PathBuf::from(trimmed);
+    if !normalized_path.exists() {
+        return Err(io::Error::new(
+            ErrorKind::NotFound,
+            format!("host path '{}' was not found", normalized_path.display()),
+        ));
+    }
+
+    Ok(normalized_path)
+}
+
+fn require_existing_regular_file(path: &Path) -> io::Result<PathBuf> {
+    let normalized_path = require_existing_path(path)?;
+    if !normalized_path.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "host text file '{}' is not a regular file",
+                normalized_path.display()
+            ),
+        ));
+    }
+
+    Ok(normalized_path)
+}
+
+fn remove_directory_path(
+    path: &Path,
+    removed_paths: &mut Vec<PathBuf>,
+    missing_paths: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    if !path.exists() {
+        missing_paths.push(path.to_path_buf());
+        return Ok(());
+    }
+
+    if !path.is_dir() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("expected directory path '{}', found non-directory", path.display()),
+        ));
+    }
+
+    fs::remove_dir_all(path)?;
+    removed_paths.push(path.to_path_buf());
+    Ok(())
+}
+
+fn remove_file_path(
+    path: &Path,
+    removed_paths: &mut Vec<PathBuf>,
+    missing_paths: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    if !path.exists() {
+        missing_paths.push(path.to_path_buf());
+        return Ok(());
+    }
+
+    if !path.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("expected file path '{}', found non-file", path.display()),
+        ));
+    }
+
+    fs::remove_file(path)?;
+    removed_paths.push(path.to_path_buf());
+    Ok(())
 }
 
 fn clone_credential_reference(
@@ -3088,6 +3569,7 @@ fn runtime_binary_file_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::load_retained_log_archive_entry;
     use super::{
         finalize_github_auth_login,
         load_artifact_inspection,
@@ -3890,6 +4372,7 @@ mod tests {
         let retained_dir = workspace_path.join("retained");
         std::fs::create_dir_all(&retained_dir).expect("retained directory should create");
         let report_path = retained_dir.join("execution-report.json");
+        let archive_path = retained_dir.join("execution-logs.zip");
         std::fs::write(
             &report_path,
             serde_json::to_vec_pretty(&serde_json::json!({
@@ -3905,6 +4388,19 @@ mod tests {
             .expect("report json should serialize"),
         )
         .expect("report file should write");
+        write_test_log_archive(
+            &archive_path,
+            &[
+                (
+                    "release-run-1/logs/03-unity-build-standalonewindows64.log",
+                    "windows line 1\nwindows line 2\n",
+                ),
+                (
+                    "release-run-1/logs/04-unity-build-standalonelinux64.log",
+                    "linux line 1\nlinux line 2\n",
+                ),
+            ],
+        );
 
         let connection = open_connection(&storage.database_path).expect("connection should open");
         connection
@@ -3990,8 +4486,16 @@ mod tests {
 
         assert_eq!(payload.build_run_id, build_run_id);
         assert_eq!(payload.workspace_path.as_deref(), Some(workspace_path.as_path()));
+        assert_eq!(payload.retained_dir_path.as_deref(), Some(retained_dir.as_path()));
         assert_eq!(payload.report_path.as_deref(), Some(report_path.as_path()));
+        assert_eq!(payload.logs_archive_path.as_deref(), Some(archive_path.as_path()));
         assert!(payload.exists);
+        assert!(payload.logs_archive_exists);
+        assert_eq!(payload.log_entries.len(), 2);
+        assert_eq!(
+            payload.log_entries[0].entry_name,
+            String::from("03-unity-build-standalonewindows64.log")
+        );
         assert_eq!(
             payload
                 .report
@@ -4001,6 +4505,128 @@ mod tests {
                 .and_then(|status| status.as_str()),
             Some("completed")
         );
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn load_retained_log_archive_entry_reads_content_from_execution_logs_zip() {
+        let root = std::env::temp_dir().join("desktop-shell-retained-log-entry-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let workspace_path = config.directories.runs_dir.join("build-run-log-entry-sample");
+        let retained_dir = workspace_path.join("retained");
+        std::fs::create_dir_all(&retained_dir).expect("retained directory should create");
+        let archive_path = retained_dir.join("execution-logs.zip");
+        write_test_log_archive(
+            &archive_path,
+            &[(
+                "release-run-1/logs/04-unity-build-standalonelinux64.log",
+                "line 1\nline 2\nline 3\n",
+            )],
+        );
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params!["log-entry-repo", "https://example.com/log-entry.git", "unity"],
+            )
+            .expect("repository should insert");
+        let repository_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO build_targets (
+                    repository_id,
+                    name,
+                    build_kind,
+                    runner_type,
+                    contract_json,
+                    config_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ",
+                params![
+                    repository_id,
+                    "linux-player",
+                    "player",
+                    "host-native",
+                    r#"{"unity":{"targetPlatform":"linux","buildMethod":"CI.Build.Perform","editorVersion":""}}"#,
+                    "{}",
+                ],
+            )
+            .expect("build target should insert");
+        let build_target_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO release_runs (
+                    repository_id,
+                    git_tag,
+                    git_commit,
+                    engine_version,
+                    status
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ",
+                params![
+                    repository_id,
+                    "v18.0.0",
+                    "deadbeef",
+                    "2022.3.20f1",
+                    "succeeded",
+                ],
+            )
+            .expect("release run should insert");
+        let release_run_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO build_runs (
+                    release_run_id,
+                    build_target_id,
+                    status,
+                    workspace_path,
+                    artifact_root_path,
+                    finished_at
+                )
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ",
+                params![
+                    release_run_id,
+                    build_target_id,
+                    "succeeded",
+                    workspace_path.display().to_string(),
+                    "C:/artifacts/build-run-log-entry-sample",
+                ],
+            )
+            .expect("build run should insert");
+        let build_run_id = connection.last_insert_rowid();
+        drop(connection);
+
+        let preview = load_retained_log_archive_entry(
+            &config,
+            build_run_id,
+            "release-run-1/logs/04-unity-build-standalonelinux64.log",
+            1024,
+        )
+        .expect("retained log entry preview should load");
+
+        assert_eq!(preview.archive_path, archive_path);
+        assert!(preview.exists);
+        assert_eq!(
+            preview.entry_path,
+            String::from("release-run-1/logs/04-unity-build-standalonelinux64.log")
+        );
+        assert!(!preview.truncated);
+        assert_eq!(preview.content, String::from("line 1\nline 2\nline 3\n"));
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }
@@ -4120,6 +4746,24 @@ mod tests {
         assert!(!workspace_path.exists());
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    fn write_test_log_archive(archive_path: &Path, entries: &[(&str, &str)]) {
+        let archive_file = std::fs::File::create(archive_path)
+            .expect("log archive file should create");
+        let mut archive = zip::ZipWriter::new(archive_file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        for (entry_path, contents) in entries {
+            archive
+                .start_file(entry_path, options)
+                .expect("archive entry should start");
+            std::io::Write::write_all(&mut archive, contents.as_bytes())
+                .expect("archive entry should write");
+        }
+
+        archive.finish().expect("archive should finish");
     }
 
     #[test]
