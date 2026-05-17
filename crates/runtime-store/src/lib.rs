@@ -45,6 +45,7 @@ const DEFAULT_HOST_NATIVE_RUNNER_TYPE: &str = "host-native";
 const DEFAULT_REPOSITORY_POLL_TRIGGER_RULE_NAME: &str = "poll-release-tags";
 pub const HOST_KEYRING_SERVICE: &str = "handy-games-publisher";
 pub const KEYRING_SECRET_REF_PREFIX: &str = "keyring://";
+pub const KIND_ITCH_API_KEY: &str = "itch-api-key";
 const REPOSITORY_AUTH_BINDING_STATUS_REAUTH_REQUIRED: &str = "reauth_required";
 const SUPPORTED_REPOSITORY_ENGINE_UNITY: &str = "unity";
 const SUPPORTED_REPOSITORY_BUILD_KIND_PLAYER: &str = "player";
@@ -124,6 +125,11 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0012_repository_auth_state.sql",
         sql: include_str!("../migrations/0012_repository_auth_state.sql"),
+        transactional: true,
+    },
+    Migration {
+        name: "0013_publish_destination_execution_contract.sql",
+        sql: include_str!("../migrations/0013_publish_destination_execution_contract.sql"),
         transactional: true,
     },
 ];
@@ -246,6 +252,7 @@ struct BuildRunClaimState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PublishRunClaimState {
+    artifact_id: Option<i64>,
     status: String,
 }
 
@@ -2574,14 +2581,18 @@ impl LocalCoordinator {
                         name,
                         kind,
                         path,
+                        active_location_kind,
+                        active_location_ref,
                         size_bytes,
                         checksum_sha256
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ",
                     params![
                         build_run_id,
                         normalized.name,
                         normalized.kind,
+                        normalized.path,
+                        "runtime_artifact",
                         normalized.path,
                         normalized.size_bytes,
                         normalized.checksum_sha256,
@@ -2635,15 +2646,22 @@ impl LocalCoordinator {
             )));
         }
 
-        let publish_target_ids =
-            list_enabled_publish_target_ids(&transaction, summary.build_target_id)?;
+        let publish_bindings =
+            list_enabled_publish_binding_plans(&transaction, summary.build_target_id)?;
         let mut existing = list_existing_publish_run_keys(&transaction, build_run_id)?;
 
-        for publish_target_id in publish_target_ids {
-            for artifact_id in &artifact_ids {
+        for artifact_id in &artifact_ids {
+            for publish_binding in &publish_bindings {
+                let publish_target_id = publish_binding.publish_target_id;
                 if existing.contains(&(publish_target_id, *artifact_id)) {
                     continue;
                 }
+
+                let execution_contract_json = build_publish_run_execution_contract_json(
+                    &transaction,
+                    publish_binding,
+                    *artifact_id,
+                )?;
 
                 transaction
                     .execute(
@@ -2653,8 +2671,9 @@ impl LocalCoordinator {
                             build_run_id,
                             publish_target_id,
                             artifact_id,
-                            status
-                        ) VALUES (?, ?, ?, ?, ?)
+                            status,
+                            execution_contract_json
+                        ) VALUES (?, ?, ?, ?, ?, ?)
                         ",
                         params![
                             summary.release_run_id,
@@ -2662,6 +2681,7 @@ impl LocalCoordinator {
                             publish_target_id,
                             artifact_id,
                             PublishStatus::Queued.as_str(),
+                            execution_contract_json,
                         ],
                     )
                     .map_err(sqlite_error)?;
@@ -2728,12 +2748,15 @@ impl LocalCoordinator {
                        pt.name,
                        pt.kind,
                        pt.config_json,
+                      pr.execution_contract_json,
                        pr.status,
                        pr.artifact_id,
                        a.name,
                        a.kind,
                        a.path,
-                       br.artifact_root_path
+                      br.artifact_root_path,
+                      a.active_location_kind,
+                      a.active_location_ref
                 FROM publish_runs pr
                 JOIN release_runs rr ON rr.id = pr.release_run_id
                 JOIN repositories r ON r.id = rr.repository_id
@@ -2807,6 +2830,14 @@ impl LocalCoordinator {
         input: CompletePublishRunInput,
     ) -> io::Result<PublishRunRecord> {
         require_positive_identifier(publish_run_id, "publish run id")?;
+        if input.artifact_active_location_kind.is_some()
+            != input.artifact_active_location_ref.is_some()
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "artifact active location updates require both kind and ref",
+            ));
+        }
 
         let connection = open_connection(&self.database_path)?;
         let updated = connection
@@ -2835,6 +2866,32 @@ impl LocalCoordinator {
                 PublishStatus::Running.as_str(),
                 "complete",
             ));
+        }
+
+        if let (Some(active_location_kind), Some(active_location_ref)) = (
+            normalize_optional_string(input.artifact_active_location_kind.clone()),
+            normalize_optional_string(input.artifact_active_location_ref.clone()),
+        ) {
+            let updated_artifacts = connection
+                .execute(
+                    "
+                    UPDATE artifacts
+                    SET active_location_kind = ?,
+                        active_location_ref = ?
+                    WHERE id = (
+                        SELECT artifact_id
+                        FROM publish_runs
+                        WHERE id = ?
+                    )
+                    ",
+                    params![active_location_kind, active_location_ref, publish_run_id],
+                )
+                .map_err(sqlite_error)?;
+            if updated_artifacts == 0 {
+                return Err(not_found_error(format!(
+                    "publish run {publish_run_id} does not reference an artifact to update"
+                )));
+            }
         }
 
         let record = self.load_publish_run_record(publish_run_id)?.ok_or_else(|| {
@@ -3711,6 +3768,15 @@ fn remove_release_run_rebuild_cleanup_paths(
                 self.delete_queue_message(&transaction, message.id)?;
                 continue;
             }
+            if let Some(artifact_id) = run.artifact_id {
+                if has_incomplete_prior_publish_run_for_artifact(
+                    &transaction,
+                    job.publish_run_id,
+                    artifact_id,
+                )? {
+                    continue;
+                }
+            }
 
             let claimed = self.claim_specific_message(
                 &transaction,
@@ -3892,11 +3958,12 @@ fn remove_release_run_rebuild_cleanup_paths(
     ) -> io::Result<Option<PublishRunClaimState>> {
         transaction
             .query_row(
-                "SELECT status FROM publish_runs WHERE id = ?",
+                "SELECT artifact_id, status FROM publish_runs WHERE id = ?",
                 [publish_run_id],
                 |row| {
                     Ok(PublishRunClaimState {
-                        status: row.get(0)?,
+                        artifact_id: row.get(0)?,
+                        status: row.get(1)?,
                     })
                 },
             )
@@ -4125,6 +4192,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                        artifact_id,
                        status,
                        destination_ref,
+                      execution_contract_json,
                        started_at,
                        finished_at,
                        error_message,
@@ -4653,6 +4721,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                        artifact_id,
                        status,
                       destination_ref,
+                      execution_contract_json,
                        started_at,
                        finished_at,
                        error_message,
@@ -6116,6 +6185,8 @@ pub fn list_artifact_inspection_records(
                    a.kind,
                    a.path,
                    br.artifact_root_path,
+                   a.active_location_kind,
+                   a.active_location_ref,
                    a.size_bytes,
                    a.checksum_sha256,
                    COUNT(DISTINCT pr.id) AS publish_run_count,
@@ -6155,6 +6226,8 @@ pub fn list_artifact_inspection_records(
                      a.kind,
                      a.path,
                      br.artifact_root_path,
+                     a.active_location_kind,
+                     a.active_location_ref,
                      a.size_bytes,
                      a.checksum_sha256,
                      a.created_at
@@ -6281,6 +6354,7 @@ pub fn list_publish_target_runtime_settings(
                    r.name,
                    pt.name,
                    pt.kind,
+                     pt.config_json,
                    pt.credentials_id,
                    pt.enabled
             FROM publish_targets pt
@@ -6297,8 +6371,9 @@ pub fn list_publish_target_runtime_settings(
                 repository_name: row.get(2)?,
                 name: row.get(3)?,
                 kind: row.get::<_, String>(4)?.trim().to_owned(),
-                credentials_id: row.get(5)?,
-                enabled: row.get::<_, i64>(6)? != 0,
+                config_json: row.get(5)?,
+                credentials_id: row.get(6)?,
+                enabled: row.get::<_, i64>(7)? != 0,
             })
         })
         .map_err(sqlite_error)?;
@@ -6309,6 +6384,71 @@ pub fn list_publish_target_runtime_settings(
     }
 
     Ok(targets)
+}
+
+/// Lists every persisted publish binding needed by shell inspection surfaces.
+pub fn list_publish_target_binding_runtime_settings(
+    storage: &StorageLayout,
+) -> io::Result<Vec<PublishTargetBindingRuntimeSettingsRecord>> {
+    let connection = open_connection(&storage.database_path)?;
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT bpb.publish_target_id,
+                   pt.repository_id,
+                   bpb.build_target_id,
+                   bt.name,
+                   bpb.enabled,
+                   bpb.options_json,
+                   pt.kind
+            FROM build_publish_bindings bpb
+            JOIN publish_targets pt ON pt.id = bpb.publish_target_id
+            JOIN repositories r ON r.id = pt.repository_id
+            JOIN build_targets bt ON bt.id = bpb.build_target_id
+            ORDER BY r.name ASC, bpb.publish_target_id ASC, bt.name ASC, bpb.id ASC
+            ",
+        )
+        .map_err(sqlite_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)? != 0,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(sqlite_error)?;
+
+    let mut bindings = Vec::new();
+    for row in rows {
+        let (
+            publish_target_id,
+            repository_id,
+            build_target_id,
+            build_target_name,
+            enabled,
+            options_json,
+            publish_target_kind,
+        ) = row.map_err(sqlite_error)?;
+        let consumption_behavior = String::from(
+            classify_publish_binding_consumption(&publish_target_kind, &options_json)?.as_str(),
+        );
+        bindings.push(PublishTargetBindingRuntimeSettingsRecord {
+            publish_target_id,
+            repository_id,
+            build_target_id,
+            build_target_name,
+            enabled,
+            options_json,
+            consumption_behavior,
+        });
+    }
+
+    Ok(bindings)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8095,21 +8235,59 @@ fn scan_artifact_inspection_record(
         artifact_kind: row.get::<_, String>(16)?.trim().to_owned(),
         artifact_path: row.get::<_, String>(17)?.trim().to_owned(),
         artifact_root_path: normalize_optional_string(row.get(18)?),
-        size_bytes: row.get(19)?,
-        checksum_sha256: normalize_optional_string(row.get(20)?),
-        publish_run_count: row.get(21)?,
-        queued_publish_runs: row.get(22)?,
-        running_publish_runs: row.get(23)?,
-        succeeded_publish_runs: row.get(24)?,
-        failed_publish_runs: row.get(25)?,
-        canceled_publish_runs: row.get(26)?,
-        created_at: row.get(27)?,
+        artifact_active_location_kind: normalize_optional_string(row.get(19)?)
+            .unwrap_or_else(|| String::from("runtime_artifact")),
+        artifact_active_location_ref: normalize_optional_string(row.get(20)?)
+            .unwrap_or_else(|| row.get::<_, String>(17).unwrap_or_default().trim().to_owned()),
+        size_bytes: row.get(21)?,
+        checksum_sha256: normalize_optional_string(row.get(22)?),
+        publish_run_count: row.get(23)?,
+        queued_publish_runs: row.get(24)?,
+        running_publish_runs: row.get(25)?,
+        succeeded_publish_runs: row.get(26)?,
+        failed_publish_runs: row.get(27)?,
+        canceled_publish_runs: row.get(28)?,
+        created_at: row.get(29)?,
     })
 }
 
 struct BuildPublishSummary {
     release_run_id: i64,
     build_target_id: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PublishBindingConsumption {
+    NonConsuming,
+    Consuming,
+}
+
+impl PublishBindingConsumption {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NonConsuming => "non_consuming",
+            Self::Consuming => "consuming",
+        }
+    }
+
+    const fn dispatch_rank(self) -> i64 {
+        match self {
+            Self::NonConsuming => 0,
+            Self::Consuming => 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublishBindingPlanningRecord {
+    binding_id: i64,
+    publish_target_id: i64,
+    publish_target_name: String,
+    publish_target_kind: String,
+    publish_target_config_json: String,
+    publish_target_credentials_id: Option<i64>,
+    binding_options_json: String,
+    consumption: PublishBindingConsumption,
 }
 
 fn load_build_publish_summary(
@@ -8148,6 +8326,8 @@ fn list_build_artifacts_with_connection(
                    name,
                    kind,
                    path,
+                     active_location_kind,
+                     active_location_ref,
                    size_bytes,
                    checksum_sha256,
                    created_at
@@ -8192,31 +8372,102 @@ fn list_build_artifact_ids(connection: &Connection, build_run_id: i64) -> io::Re
     Ok(artifact_ids)
 }
 
-fn list_enabled_publish_target_ids(
+fn list_enabled_publish_binding_plans(
     connection: &Connection,
     build_target_id: i64,
-) -> io::Result<Vec<i64>> {
+) -> io::Result<Vec<PublishBindingPlanningRecord>> {
     let mut statement = connection
         .prepare(
             "
-            SELECT publish_target_id
-            FROM build_publish_bindings
-            WHERE build_target_id = ?
-              AND enabled = 1
-            ORDER BY id ASC
+            SELECT bpb.id,
+                   bpb.publish_target_id,
+                   pt.name,
+                   pt.kind,
+                   pt.config_json,
+                     pt.credentials_id,
+                   bpb.options_json
+            FROM build_publish_bindings bpb
+            JOIN publish_targets pt ON pt.id = bpb.publish_target_id
+            WHERE bpb.build_target_id = ?
+              AND bpb.enabled = 1
+            ORDER BY bpb.id ASC
             ",
         )
         .map_err(sqlite_error)?;
     let rows = statement
-        .query_map([build_target_id], |row| row.get(0))
+        .query_map([build_target_id], |row| {
+            let publish_target_kind = row.get::<_, String>(3)?.trim().to_owned();
+            let binding_options_json = row.get::<_, String>(6)?;
+
+            Ok(PublishBindingPlanningRecord {
+                binding_id: row.get(0)?,
+                publish_target_id: row.get(1)?,
+                publish_target_name: row.get::<_, String>(2)?.trim().to_owned(),
+                consumption: classify_publish_binding_consumption(
+                    publish_target_kind.as_str(),
+                    binding_options_json.as_str(),
+                )
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        6,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+                publish_target_kind,
+                publish_target_config_json: row.get(4)?,
+                publish_target_credentials_id: row.get(5)?,
+                binding_options_json,
+            })
+        })
         .map_err(sqlite_error)?;
 
-    let mut publish_target_ids = Vec::new();
+    let mut publish_bindings = Vec::new();
     for row in rows {
-        publish_target_ids.push(row.map_err(sqlite_error)?);
+        publish_bindings.push(row.map_err(sqlite_error)?);
     }
 
-    Ok(publish_target_ids)
+    let consuming_count = publish_bindings
+        .iter()
+        .filter(|binding| binding.consumption == PublishBindingConsumption::Consuming)
+        .count();
+    if consuming_count > 1 {
+        return Err(invalid_input_error(format!(
+            "build target {build_target_id} cannot enable more than one consuming publish binding"
+        )));
+    }
+
+    publish_bindings.sort_by_key(|binding| (binding.consumption.dispatch_rank(), binding.binding_id));
+
+    Ok(publish_bindings)
+}
+
+fn classify_publish_binding_consumption(
+    publish_target_kind: &str,
+    binding_options_json: &str,
+) -> io::Result<PublishBindingConsumption> {
+    if !publish_target_kind.trim().eq_ignore_ascii_case("filesystem") {
+        return Ok(PublishBindingConsumption::NonConsuming);
+    }
+
+    let raw = binding_options_json.trim();
+    if raw.is_empty() {
+        return Ok(PublishBindingConsumption::NonConsuming);
+    }
+
+    let parsed = serde_json::from_str::<serde_json::Value>(raw)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    let operation = parsed
+        .get("operation")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+
+    if operation.eq_ignore_ascii_case("move") {
+        return Ok(PublishBindingConsumption::Consuming);
+    }
+
+    Ok(PublishBindingConsumption::NonConsuming)
 }
 
 fn list_existing_publish_run_keys(
@@ -8264,6 +8515,7 @@ fn list_publish_runs_with_connection(
                    artifact_id,
                    status,
                    destination_ref,
+                     execution_contract_json,
                    started_at,
                    finished_at,
                    error_message,
@@ -8271,8 +8523,7 @@ fn list_publish_runs_with_connection(
                    updated_at
             FROM publish_runs
             WHERE build_run_id = ?
-            ORDER BY publish_target_id ASC,
-                     artifact_id ASC,
+            ORDER BY artifact_id ASC,
                      id ASC
             ",
         )
@@ -8290,15 +8541,21 @@ fn list_publish_runs_with_connection(
 }
 
 fn scan_artifact_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRecord> {
+    let path = row.get::<_, String>(4)?.trim().to_owned();
+    let (active_location_kind, active_location_ref) =
+        scan_artifact_active_location_columns(row.get(5)?, row.get(6)?, path.as_str());
+
     Ok(ArtifactRecord {
         id: row.get(0)?,
         build_run_id: row.get(1)?,
         name: row.get::<_, String>(2)?.trim().to_owned(),
         kind: row.get::<_, String>(3)?.trim().to_owned(),
-        path: row.get::<_, String>(4)?.trim().to_owned(),
-        size_bytes: row.get(5)?,
-        checksum_sha256: normalize_optional_string(row.get(6)?),
-        created_at: row.get(7)?,
+        path,
+        active_location_kind,
+        active_location_ref,
+        size_bytes: row.get(7)?,
+        checksum_sha256: normalize_optional_string(row.get(8)?),
+        created_at: row.get(9)?,
     })
 }
 
@@ -8311,20 +8568,30 @@ fn scan_publish_run_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<PublishR
         artifact_id: row.get(4)?,
         status: row.get(5)?,
         destination_ref: normalize_optional_string(row.get(6)?),
-        started_at: normalize_optional_string(row.get(7)?),
-        finished_at: normalize_optional_string(row.get(8)?),
-        error_message: normalize_optional_string(row.get(9)?),
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        execution_contract_json: row.get(7)?,
+        started_at: normalize_optional_string(row.get(8)?),
+        finished_at: normalize_optional_string(row.get(9)?),
+        error_message: normalize_optional_string(row.get(10)?),
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
 fn scan_publish_execution_plan(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<PublishExecutionPlan> {
-    let artifact_id = row.get::<_, Option<i64>>(11)?.ok_or_else(|| {
+    let execution_contract_json = row.get::<_, String>(10)?;
+    let publish_target_credentials_id =
+        scan_publish_target_credentials_id(execution_contract_json.as_str()).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                10,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    let artifact_id = row.get::<_, Option<i64>>(12)?.ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
-            11,
+            12,
             rusqlite::types::Type::Integer,
             Box::new(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -8336,11 +8603,11 @@ fn scan_publish_execution_plan(
         )
     })?;
     let artifact_name = row
-        .get::<_, Option<String>>(12)?
+        .get::<_, Option<String>>(13)?
         .and_then(|value| normalize_optional_string(Some(value)))
         .ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
-                12,
+                13,
                 rusqlite::types::Type::Text,
                 Box::new(io::Error::new(
                     ErrorKind::InvalidInput,
@@ -8352,17 +8619,17 @@ fn scan_publish_execution_plan(
             )
         })?;
     let artifact_kind = row
-        .get::<_, Option<String>>(13)?
+        .get::<_, Option<String>>(14)?
         .and_then(|value| normalize_optional_string(Some(value)))
         .unwrap_or_else(|| String::from("file"));
     let artifact_path = normalize_relative_store_artifact_path(
         &row
-            .get::<_, Option<String>>(14)?
+            .get::<_, Option<String>>(15)?
             .and_then(|value| normalize_optional_string(Some(value)))
             .ok_or_else(
             || {
                 rusqlite::Error::FromSqlConversionFailure(
-                    14,
+                    15,
                     rusqlite::types::Type::Text,
                     Box::new(io::Error::new(
                         ErrorKind::InvalidInput,
@@ -8376,17 +8643,17 @@ fn scan_publish_execution_plan(
         )?)
         .map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                14,
+                15,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?;
     let artifact_root_path = row
-        .get::<_, Option<String>>(15)?
+        .get::<_, Option<String>>(16)?
         .and_then(|value| normalize_optional_string(Some(value)))
         .ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
-                15,
+                16,
                 rusqlite::types::Type::Text,
                 Box::new(io::Error::new(
                     ErrorKind::InvalidInput,
@@ -8397,10 +8664,20 @@ fn scan_publish_execution_plan(
                 )),
             )
         })?;
-    let source_path = Path::new(&artifact_root_path)
-        .join(artifact_path.replace('/', &std::path::MAIN_SEPARATOR.to_string()))
-        .display()
-        .to_string();
+    let (artifact_active_location_kind, artifact_active_location_ref) =
+        scan_artifact_active_location_columns(row.get(17)?, row.get(18)?, artifact_path.as_str());
+    let source_path = resolve_artifact_source_path(
+        artifact_active_location_kind.as_str(),
+        artifact_active_location_ref.as_str(),
+        artifact_root_path.as_str(),
+    )
+    .map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            18,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })?;
 
     Ok(PublishExecutionPlan {
         publish_run_id: row.get(0)?,
@@ -8413,14 +8690,153 @@ fn scan_publish_execution_plan(
         publish_target_name: row.get::<_, String>(7)?.trim().to_owned(),
         publish_target_kind: row.get::<_, String>(8)?.trim().to_owned(),
         publish_target_config_json: row.get(9)?,
-        status: row.get(10)?,
+        publish_target_credentials_id,
+        execution_contract_json,
+        status: row.get(11)?,
         artifact_id,
         artifact_name,
         artifact_kind,
         artifact_path,
+        artifact_active_location_kind,
+        artifact_active_location_ref,
         artifact_root_path,
         source_path,
     })
+}
+
+fn scan_publish_target_credentials_id(execution_contract_json: &str) -> io::Result<Option<i64>> {
+    let trimmed = execution_contract_json.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let parsed = serde_json::from_str::<serde_json::Value>(trimmed)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    Ok(parsed
+        .get("publish_target_credentials_id")
+        .and_then(serde_json::Value::as_i64))
+}
+
+fn scan_artifact_active_location_columns(
+    kind: Option<String>,
+    reference: Option<String>,
+    artifact_path: &str,
+) -> (String, String) {
+    let normalized_kind = normalize_optional_string(kind)
+        .unwrap_or_else(|| String::from("runtime_artifact"));
+    let normalized_ref = normalize_optional_string(reference)
+        .unwrap_or_else(|| artifact_path.trim().to_owned());
+
+    (normalized_kind, normalized_ref)
+}
+
+fn resolve_artifact_source_path(
+    active_location_kind: &str,
+    active_location_ref: &str,
+    artifact_root_path: &str,
+) -> io::Result<String> {
+    match active_location_kind.trim() {
+        "" | "runtime_artifact" => {
+            let relative_path = normalize_relative_store_artifact_path(active_location_ref)?;
+            Ok(Path::new(artifact_root_path)
+                .join(relative_path.replace('/', &std::path::MAIN_SEPARATOR.to_string()))
+                .display()
+                .to_string())
+        }
+        "filesystem_absolute" => {
+            let absolute_path = PathBuf::from(active_location_ref.trim());
+            if absolute_path.as_os_str().is_empty() {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "filesystem absolute active location must not be empty",
+                ));
+            }
+            if !absolute_path.is_absolute() {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "filesystem absolute active location must be absolute",
+                ));
+            }
+
+            Ok(absolute_path.display().to_string())
+        }
+        other => Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("unsupported artifact active location kind {other:?}"),
+        )),
+    }
+}
+
+fn build_publish_run_execution_contract_json(
+    connection: &Connection,
+    publish_binding: &PublishBindingPlanningRecord,
+    artifact_id: i64,
+) -> io::Result<String> {
+    let snapshot = connection
+        .query_row(
+            "
+            SELECT a.path,
+                   a.active_location_kind,
+                   a.active_location_ref
+            FROM artifacts a
+            WHERE a.id = ?
+            ",
+            [artifact_id],
+            |row| {
+                let artifact_path = row.get::<_, String>(0)?.trim().to_owned();
+                let (active_location_kind, active_location_ref) =
+                    scan_artifact_active_location_columns(row.get(1)?, row.get(2)?, artifact_path.as_str());
+
+                Ok(serde_json::json!({
+                    "publish_target_id": publish_binding.publish_target_id,
+                    "publish_target_credentials_id": publish_binding.publish_target_credentials_id,
+                    "artifact_id": artifact_id,
+                    "publish_target_name": publish_binding.publish_target_name,
+                    "publish_target_kind": publish_binding.publish_target_kind,
+                    "publish_target_config_json": publish_binding.publish_target_config_json,
+                    "binding_id": publish_binding.binding_id,
+                    "binding_options_json": publish_binding.binding_options_json,
+                    "consumption_behavior": publish_binding.consumption.as_str(),
+                    "dispatch_rank": publish_binding.consumption.dispatch_rank(),
+                    "artifact_path": artifact_path,
+                    "artifact_active_location_kind": active_location_kind,
+                    "artifact_active_location_ref": active_location_ref,
+                }))
+            },
+        )
+        .optional()
+        .map_err(sqlite_error)?
+        .ok_or_else(|| not_found_error(format!("artifact {artifact_id} was not found")))?;
+
+    serde_json::to_string(&snapshot)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
+}
+
+fn has_incomplete_prior_publish_run_for_artifact(
+    transaction: &rusqlite::Transaction<'_>,
+    publish_run_id: i64,
+    artifact_id: i64,
+) -> io::Result<bool> {
+    let blocked_count: i64 = transaction
+        .query_row(
+            "
+            SELECT COUNT(1)
+            FROM publish_runs
+            WHERE artifact_id = ?
+              AND id < ?
+              AND status IN (?, ?)
+            ",
+            params![
+                artifact_id,
+                publish_run_id,
+                PublishStatus::Queued.as_str(),
+                PublishStatus::Running.as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+
+    Ok(blocked_count > 0)
 }
 
 fn normalize_relative_store_artifact_path(path: &str) -> io::Result<String> {
@@ -9086,6 +9502,7 @@ fn credential_secret_value_keys(kind: &str) -> &'static [&'static str] {
     match kind.trim() {
         KIND_GIT_HTTP_BASIC => &["password"],
         KIND_GIT_HTTP_BEARER => &["token"],
+        KIND_ITCH_API_KEY => &["api_key"],
         _ => &[],
     }
 }
@@ -9262,6 +9679,7 @@ mod tests {
         ensure_migration_ledger, initialize_database,
         list_artifact_inspection_records, list_build_history_records,
         list_process_feed_page,
+        list_publish_target_binding_runtime_settings,
         list_build_target_runtime_settings,
         resolve_build_target_read_model_projection,
         CreateRepositoryProjectBuildTargetInput,
@@ -11174,10 +11592,95 @@ mod tests {
                 repository_name: String::from("publish-settings"),
                 name: String::from("publish-settings-publish"),
                 kind: String::from("filesystem"),
+                config_json: String::from("{}"),
                 credentials_id: Some(credentials_id),
                 enabled: false,
             }
         );
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn list_publish_target_binding_runtime_settings_reports_consumption_behavior() {
+        let root = test_root("publish-binding-settings");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let fixture = seed_repository_fixture(&connection, "publish-binding-settings");
+        connection
+            .execute(
+                "
+                INSERT INTO build_publish_bindings (
+                    build_target_id,
+                    publish_target_id,
+                    enabled,
+                    options_json
+                ) VALUES (?, ?, ?, ?)
+                ",
+                params![
+                    fixture.primary_build_target_id,
+                    fixture.publish_target_id,
+                    1_i64,
+                    r#"{"operation":"move","directory_path":"D:/published"}"#,
+                ],
+            )
+            .expect("consuming publish binding should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO build_publish_bindings (
+                    build_target_id,
+                    publish_target_id,
+                    enabled,
+                    options_json
+                ) VALUES (?, ?, ?, ?)
+                ",
+                params![
+                    fixture.secondary_build_target_id,
+                    fixture.publish_target_id,
+                    0_i64,
+                    "{}",
+                ],
+            )
+            .expect("non-consuming publish binding should insert");
+        drop(connection);
+
+        let bindings = list_publish_target_binding_runtime_settings(&layout)
+            .expect("publish binding settings should load");
+
+        assert_eq!(bindings.len(), 2);
+
+        let non_consuming = bindings
+            .iter()
+            .find(|binding| binding.build_target_id == fixture.secondary_build_target_id)
+            .expect("secondary build target binding should exist");
+        assert_eq!(non_consuming.publish_target_id, fixture.publish_target_id);
+        assert_eq!(non_consuming.repository_id, fixture.repository_id);
+        assert_eq!(
+            non_consuming.build_target_name,
+            "publish-binding-settings-linux"
+        );
+        assert!(!non_consuming.enabled);
+        assert_eq!(non_consuming.options_json, "{}");
+        assert_eq!(non_consuming.consumption_behavior, "non_consuming");
+
+        let consuming = bindings
+            .iter()
+            .find(|binding| binding.build_target_id == fixture.primary_build_target_id)
+            .expect("primary build target binding should exist");
+        assert_eq!(consuming.publish_target_id, fixture.publish_target_id);
+        assert_eq!(consuming.repository_id, fixture.repository_id);
+        assert_eq!(consuming.build_target_name, "publish-binding-settings-windows");
+        assert!(consuming.enabled);
+        assert_eq!(
+            consuming.options_json,
+            r#"{"operation":"move","directory_path":"D:/published"}"#
+        );
+        assert_eq!(consuming.consumption_behavior, "consuming");
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -13340,6 +13843,143 @@ mod tests {
     }
 
     #[test]
+    fn plan_build_publish_runs_orders_non_consuming_before_consuming_for_same_artifact() {
+        let root = test_root("plan-build-publish-run-order");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repo = seed_repository_fixture(&connection, "publish-order-repo");
+        insert_build_publish_binding(
+            &connection,
+            repo.primary_build_target_id,
+            repo.publish_target_id,
+            true,
+        );
+        connection
+            .execute(
+                "UPDATE build_publish_bindings SET options_json = ? WHERE build_target_id = ? AND publish_target_id = ?",
+                params![
+                    serde_json::json!({"operation": "move"}).to_string(),
+                    repo.primary_build_target_id,
+                    repo.publish_target_id,
+                ],
+            )
+            .expect("filesystem binding should update");
+        connection
+            .execute(
+                "INSERT INTO publish_targets (repository_id, name, kind) VALUES (?, ?, ?)",
+                params![repo.repository_id, "itch-release", "itch"],
+            )
+            .expect("itch publish target should insert");
+        let itch_publish_target_id = connection.last_insert_rowid();
+        insert_build_publish_binding(
+            &connection,
+            repo.primary_build_target_id,
+            itch_publish_target_id,
+            true,
+        );
+
+        let release_run_id = insert_release_run(&connection, repo.repository_id, "v8.0.0", "queued");
+        let build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            repo.primary_build_target_id,
+            BuildStatus::Succeeded.as_str(),
+        );
+        insert_artifact(&connection, build_run_id, "game.zip");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let runs = coordinator
+            .plan_build_publish_runs(build_run_id)
+            .expect("publish planning should succeed");
+
+        assert_eq!(runs.len(), 2);
+        let first_snapshot: Value = serde_json::from_str(&runs[0].execution_contract_json)
+            .expect("first execution snapshot should decode");
+        let second_snapshot: Value = serde_json::from_str(&runs[1].execution_contract_json)
+            .expect("second execution snapshot should decode");
+        assert_eq!(first_snapshot["publish_target_kind"], "itch");
+        assert_eq!(first_snapshot["consumption_behavior"], "non_consuming");
+        assert_eq!(second_snapshot["publish_target_kind"], "filesystem");
+        assert_eq!(second_snapshot["consumption_behavior"], "consuming");
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn plan_build_publish_runs_rejects_multiple_consuming_bindings_for_build_target() {
+        let root = test_root("plan-build-publish-multiple-consuming");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repo = seed_repository_fixture(&connection, "publish-consuming-repo");
+        insert_build_publish_binding(
+            &connection,
+            repo.primary_build_target_id,
+            repo.publish_target_id,
+            true,
+        );
+        connection
+            .execute(
+                "UPDATE build_publish_bindings SET options_json = ? WHERE build_target_id = ? AND publish_target_id = ?",
+                params![
+                    serde_json::json!({"operation": "move"}).to_string(),
+                    repo.primary_build_target_id,
+                    repo.publish_target_id,
+                ],
+            )
+            .expect("first consuming binding should update");
+        connection
+            .execute(
+                "INSERT INTO publish_targets (repository_id, name, kind) VALUES (?, ?, ?)",
+                params![repo.repository_id, "second-filesystem", "filesystem"],
+            )
+            .expect("second filesystem target should insert");
+        let second_publish_target_id = connection.last_insert_rowid();
+        insert_build_publish_binding(
+            &connection,
+            repo.primary_build_target_id,
+            second_publish_target_id,
+            true,
+        );
+        connection
+            .execute(
+                "UPDATE build_publish_bindings SET options_json = ? WHERE build_target_id = ? AND publish_target_id = ?",
+                params![
+                    serde_json::json!({"operation": "move"}).to_string(),
+                    repo.primary_build_target_id,
+                    second_publish_target_id,
+                ],
+            )
+            .expect("second consuming binding should update");
+
+        let release_run_id = insert_release_run(&connection, repo.repository_id, "v8.1.0", "queued");
+        let build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            repo.primary_build_target_id,
+            BuildStatus::Succeeded.as_str(),
+        );
+        insert_artifact(&connection, build_run_id, "game.zip");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let error = coordinator
+            .plan_build_publish_runs(build_run_id)
+            .expect_err("multiple consuming bindings should be rejected");
+        assert!(error
+            .to_string()
+            .contains("cannot enable more than one consuming publish binding"));
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
     fn publish_execution_plan_and_completion_load_artifact_source_path() {
         let root = test_root("publish-execution-plan");
         let directories = RuntimeDirectories::from_root(&root);
@@ -13392,6 +14032,9 @@ mod tests {
             .expect("publish execution plan should load");
         assert_eq!(plan.publish_target_kind, "filesystem");
         assert_eq!(plan.artifact_path, "artifacts/nested/game.zip");
+        assert_eq!(plan.artifact_active_location_kind, "runtime_artifact");
+        assert_eq!(plan.artifact_active_location_ref, "artifacts/nested/game.zip");
+        assert_eq!(plan.execution_contract_json, "{}");
         assert!(plan.source_path.ends_with("nested\\game.zip") || plan.source_path.ends_with("nested/game.zip"));
 
         let running = coordinator
@@ -13410,6 +14053,8 @@ mod tests {
                 publish_run_id,
                 CompletePublishRunInput {
                     destination_ref: String::from("C:/published/revolutions/v9.0.0/nested/game.zip"),
+                    artifact_active_location_kind: None,
+                    artifact_active_location_ref: None,
                 },
             )
             .expect("publish run should complete");
@@ -13428,6 +14073,228 @@ mod tests {
             ReleaseStatus::Succeeded.as_str()
         );
         assert!(release_after_publish_complete.finished_at.is_some());
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn complete_publish_run_updates_artifact_active_location_when_provided() {
+        let root = test_root("complete-publish-run-active-location");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let fixture = seed_build_execution_fixture(&connection, "complete-publish-active-location");
+        let artifact_id = insert_artifact(
+            &connection,
+            fixture.build_run_id,
+            "players/game.zip",
+        );
+        let publish_target_id: i64 = connection
+            .query_row(
+                "SELECT id FROM publish_targets WHERE repository_id = ? ORDER BY id ASC LIMIT 1",
+                [fixture.repository_id],
+                |row| row.get(0),
+            )
+            .expect("publish target should load");
+        let publish_run_id = insert_publish_run(
+            &connection,
+            fixture.release_run_id,
+            fixture.build_run_id,
+            publish_target_id,
+            artifact_id,
+            PublishStatus::Queued.as_str(),
+        );
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        coordinator
+            .start_publish_run(publish_run_id, StartPublishRunInput::default())
+            .expect("publish run should start");
+        coordinator
+            .complete_publish_run(
+                publish_run_id,
+                CompletePublishRunInput {
+                    destination_ref: String::from("C:/published/revolutions/v10.0.0/game.zip"),
+                    artifact_active_location_kind: Some(String::from("filesystem_absolute")),
+                    artifact_active_location_ref: Some(String::from(
+                        "C:/published/revolutions/v10.0.0/game.zip",
+                    )),
+                },
+            )
+            .expect("publish run should complete with active location update");
+
+        let artifacts = coordinator
+            .list_artifacts_by_build_run(fixture.build_run_id)
+            .expect("artifacts should reload");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].active_location_kind, "filesystem_absolute");
+        assert_eq!(
+            artifacts[0].active_location_ref,
+            "C:/published/revolutions/v10.0.0/game.zip"
+        );
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn replace_build_artifacts_sets_runtime_active_location_defaults() {
+        let root = test_root("artifact-active-location-defaults");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let fixture = seed_build_execution_fixture(&connection, "active-location-defaults");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let artifacts = coordinator
+            .replace_build_artifacts(
+                fixture.build_run_id,
+                vec![CreateArtifactRecordInput {
+                    name: String::from("release.zip"),
+                    kind: String::from("archive"),
+                    path: String::from("releases/release.zip"),
+                    size_bytes: Some(128),
+                    checksum_sha256: None,
+                }],
+            )
+            .expect("artifact replacement should succeed");
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].active_location_kind, "runtime_artifact");
+        assert_eq!(artifacts[0].active_location_ref, "releases/release.zip");
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn plan_build_publish_runs_persists_execution_contract_snapshot() {
+        let root = test_root("publish-run-execution-contract");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repo = seed_repository_fixture(&connection, "publish-contract-repo");
+        connection
+            .execute(
+                "UPDATE publish_targets SET config_json = ? WHERE id = ?",
+                params![
+                    serde_json::json!({"directory_path": "D:/Published/Windows"}).to_string(),
+                    repo.publish_target_id,
+                ],
+            )
+            .expect("publish target config should update");
+        connection
+            .execute(
+                "INSERT INTO build_publish_bindings (build_target_id, publish_target_id, enabled, options_json) VALUES (?, ?, ?, ?)",
+                params![
+                    repo.primary_build_target_id,
+                    repo.publish_target_id,
+                    1,
+                    "{}",
+                ],
+            )
+            .expect("build publish binding should insert");
+        connection
+            .execute(
+                "UPDATE build_publish_bindings SET options_json = ? WHERE build_target_id = ? AND publish_target_id = ?",
+                params![
+                    serde_json::json!({"operation": "move"}).to_string(),
+                    repo.primary_build_target_id,
+                    repo.publish_target_id,
+                ],
+            )
+            .expect("binding options should update");
+        let release_run_id = insert_release_run(&connection, repo.repository_id, "v1.2.3", "queued");
+        let build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            repo.primary_build_target_id,
+            BuildStatus::Succeeded.as_str(),
+        );
+        let artifact_id = insert_artifact(&connection, build_run_id, "game.zip");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let runs = coordinator
+            .plan_build_publish_runs(build_run_id)
+            .expect("publish planning should succeed");
+
+        assert_eq!(runs.len(), 1);
+        let snapshot: serde_json::Value = serde_json::from_str(&runs[0].execution_contract_json)
+            .expect("execution contract snapshot should decode");
+        assert_eq!(snapshot["publish_target_id"], repo.publish_target_id);
+        assert_eq!(snapshot["artifact_id"], artifact_id);
+        assert_eq!(snapshot["publish_target_kind"], "filesystem");
+        assert_eq!(
+            snapshot["binding_options_json"],
+            serde_json::json!({"operation": "move"}).to_string()
+        );
+        assert_eq!(snapshot["artifact_active_location_kind"], "runtime_artifact");
+        assert_eq!(snapshot["artifact_active_location_ref"], "artifacts/game.zip");
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn publish_execution_plan_prefers_active_absolute_location() {
+        let root = test_root("publish-execution-active-location");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let moved_root = root.join("published");
+        std::fs::create_dir_all(&moved_root).expect("published root should create");
+        let moved_path = moved_root.join("game.zip");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repo = seed_repository_fixture(&connection, "publish-active-location-repo");
+        let release_run_id = insert_release_run(&connection, repo.repository_id, "v9.0.1", "queued");
+        let build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            repo.primary_build_target_id,
+            BuildStatus::Succeeded.as_str(),
+        );
+        connection
+            .execute(
+                "UPDATE build_runs SET artifact_root_path = ? WHERE id = ?",
+                params![root.join("artifacts").display().to_string(), build_run_id],
+            )
+            .expect("artifact root path should update");
+        let artifact_id = insert_artifact(&connection, build_run_id, "game.zip");
+        connection
+            .execute(
+                "UPDATE artifacts SET active_location_kind = ?, active_location_ref = ? WHERE id = ?",
+                params![
+                    "filesystem_absolute",
+                    moved_path.display().to_string(),
+                    artifact_id,
+                ],
+            )
+            .expect("artifact active location should update");
+        let publish_run_id = insert_publish_run(
+            &connection,
+            release_run_id,
+            build_run_id,
+            repo.publish_target_id,
+            artifact_id,
+            PublishStatus::Queued.as_str(),
+        );
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let plan = coordinator
+            .get_publish_execution_plan(publish_run_id)
+            .expect("publish execution plan should load");
+
+        assert_eq!(plan.artifact_active_location_kind, "filesystem_absolute");
+        assert_eq!(plan.artifact_active_location_ref, moved_path.display().to_string());
+        assert_eq!(plan.source_path, moved_path.display().to_string());
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -13675,6 +14542,93 @@ mod tests {
         let connection = open_connection(&layout.database_path).expect("connection should open");
         assert!(!queue_message_exists(&connection, stale_message_id));
         assert!(queue_message_exists(&connection, valid_message_id));
+        drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn publish_job_claim_preserves_artifact_order_when_messages_are_out_of_order() {
+        let root = test_root("publish-claim-artifact-order");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repo = seed_repository_fixture(&connection, "publish-claim-order-repo");
+        let release_run_id = insert_release_run(&connection, repo.repository_id, "v2.1.0", "queued");
+        let build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            repo.primary_build_target_id,
+            BuildStatus::Succeeded.as_str(),
+        );
+        let artifact_id = insert_artifact(&connection, build_run_id, "game.zip");
+        let first_publish_run_id = insert_publish_run(
+            &connection,
+            release_run_id,
+            build_run_id,
+            repo.publish_target_id,
+            artifact_id,
+            PublishStatus::Queued.as_str(),
+        );
+        connection
+            .execute(
+                "INSERT INTO publish_targets (repository_id, name, kind) VALUES (?, ?, ?)",
+                params![repo.repository_id, "itch-release", "itch"],
+            )
+            .expect("itch publish target should insert");
+        let second_publish_target_id = connection.last_insert_rowid();
+        let second_publish_run_id = insert_publish_run(
+            &connection,
+            release_run_id,
+            build_run_id,
+            second_publish_target_id,
+            artifact_id,
+            PublishStatus::Queued.as_str(),
+        );
+
+        let newer_message_id = enqueue_message(
+            &connection,
+            PUBLISH_RUN_QUEUE_NAME,
+            format!(r#"{{"publish_run_id":{}}}"#, second_publish_run_id).as_bytes(),
+        );
+        let older_message_id = enqueue_message(
+            &connection,
+            PUBLISH_RUN_QUEUE_NAME,
+            format!(r#"{{"publish_run_id":{}}}"#, first_publish_run_id).as_bytes(),
+        );
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let claimed = coordinator
+            .claim_next_publish_job(
+                "publisher-order",
+                Duration::ZERO,
+                Duration::from_millis(40),
+                &RuntimeConcurrencySettings::development(),
+            )
+            .expect("publish claim should succeed")
+            .expect("older publish run should be claimed first");
+        assert_eq!(claimed.id, older_message_id);
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let newer_leased_by: Option<String> = connection
+            .query_row(
+                "SELECT leased_by FROM worker_queue_messages WHERE id = ?",
+                [newer_message_id],
+                |row| row.get(0),
+            )
+            .expect("newer queue message should load");
+        let older_leased_by: Option<String> = connection
+            .query_row(
+                "SELECT leased_by FROM worker_queue_messages WHERE id = ?",
+                [older_message_id],
+                |row| row.get(0),
+            )
+            .expect("older queue message should load");
+        assert!(newer_leased_by.is_none());
+        assert_eq!(older_leased_by.as_deref(), Some("publisher-order"));
         drop(connection);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
@@ -14709,8 +15663,24 @@ mod tests {
     fn insert_artifact(connection: &Connection, build_run_id: i64, name: &str) -> i64 {
         connection
             .execute(
-                "INSERT INTO artifacts (build_run_id, name, kind, path) VALUES (?, ?, ?, ?)",
-                params![build_run_id, name, "archive", format!("artifacts/{name}")],
+                "
+                INSERT INTO artifacts (
+                    build_run_id,
+                    name,
+                    kind,
+                    path,
+                    active_location_kind,
+                    active_location_ref
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ",
+                params![
+                    build_run_id,
+                    name,
+                    "archive",
+                    format!("artifacts/{name}"),
+                    "runtime_artifact",
+                    format!("artifacts/{name}"),
+                ],
             )
             .expect("artifact should insert");
 
@@ -14761,10 +15731,18 @@ mod tests {
                     build_run_id,
                     publish_target_id,
                     artifact_id,
-                    status
-                ) VALUES (?, ?, ?, ?, ?)
+                    status,
+                    execution_contract_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 ",
-                params![release_run_id, build_run_id, publish_target_id, artifact_id, status],
+                params![
+                    release_run_id,
+                    build_run_id,
+                    publish_target_id,
+                    artifact_id,
+                    status,
+                    "{}",
+                ],
             )
             .expect("publish run should insert");
 

@@ -271,6 +271,8 @@ pub struct ArtifactRecord {
     pub name: String,
     pub kind: String,
     pub path: String,
+    pub active_location_kind: String,
+    pub active_location_ref: String,
     pub size_bytes: Option<i64>,
     pub checksum_sha256: Option<String>,
     pub created_at: String,
@@ -357,6 +359,7 @@ pub struct PublishRunRecord {
     pub artifact_id: Option<i64>,
     pub status: String,
     pub destination_ref: Option<String>,
+    pub execution_contract_json: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub error_message: Option<String>,
@@ -377,10 +380,14 @@ pub struct PublishExecutionPlan {
     pub publish_target_name: String,
     pub publish_target_kind: String,
     pub publish_target_config_json: String,
+    pub publish_target_credentials_id: Option<i64>,
+    pub execution_contract_json: String,
     pub artifact_id: i64,
     pub artifact_name: String,
     pub artifact_kind: String,
     pub artifact_path: String,
+    pub artifact_active_location_kind: String,
+    pub artifact_active_location_ref: String,
     pub artifact_root_path: String,
     pub source_path: String,
     pub status: String,
@@ -524,6 +531,8 @@ pub struct ArtifactInspectionRecord {
     pub artifact_kind: String,
     pub artifact_path: String,
     pub artifact_root_path: Option<String>,
+    pub artifact_active_location_kind: String,
+    pub artifact_active_location_ref: String,
     pub size_bytes: Option<i64>,
     pub checksum_sha256: Option<String>,
     pub publish_run_count: i64,
@@ -557,8 +566,21 @@ pub struct PublishTargetRuntimeSettingsRecord {
     pub repository_name: String,
     pub name: String,
     pub kind: String,
+    pub config_json: String,
     pub credentials_id: Option<i64>,
     pub enabled: bool,
+}
+
+/// Stores one persisted publish binding row exposed to shell inspection views.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishTargetBindingRuntimeSettingsRecord {
+    pub publish_target_id: i64,
+    pub repository_id: i64,
+    pub build_target_id: i64,
+    pub build_target_name: String,
+    pub enabled: bool,
+    pub options_json: String,
+    pub consumption_behavior: String,
 }
 
 /// Defines the persisted execution paths recorded when a build worker claims one queued run.
@@ -763,6 +785,8 @@ pub struct StartPublishRunInput {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletePublishRunInput {
     pub destination_ref: String,
+    pub artifact_active_location_kind: Option<String>,
+    pub artifact_active_location_ref: Option<String>,
 }
 
 /// Defines the terminal failure fields persisted when one publish run fails.

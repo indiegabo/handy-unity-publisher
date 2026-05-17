@@ -951,7 +951,7 @@ fn run_publish_run_next_command(
                 return Err(Box::new(error));
             }
         };
-        let publish_plan = match publish_execution_plan(&resolved.plan) {
+        let publish_plan = match publish_execution_plan(&coordinator, &resolved.plan) {
             Ok(plan) => plan,
             Err(error) => {
                 release_claimed_publish_message(
@@ -980,6 +980,8 @@ fn run_publish_run_next_command(
                 resolved.plan.publish_run_id,
                 CompletePublishRunInput {
                     destination_ref: result.destination_ref,
+                    artifact_active_location_kind: result.artifact_active_location_kind,
+                    artifact_active_location_ref: result.artifact_active_location_ref,
                 },
             )?,
             Err(error) => coordinator.fail_publish_run(
@@ -1052,7 +1054,13 @@ fn resolve_claimed_publish_context(
     Ok(ResolvedPublishContext { plan })
 }
 
-fn publish_execution_plan(plan: &StoredPublishExecutionPlan) -> io::Result<PublishExecutionPlan> {
+fn publish_execution_plan(
+    coordinator: &LocalCoordinator,
+    plan: &StoredPublishExecutionPlan,
+) -> io::Result<PublishExecutionPlan> {
+    let (publish_target_credentials_kind, publish_target_credentials_config_json) =
+        resolve_publish_target_credentials(coordinator, plan.publish_target_credentials_id)?;
+
     Ok(PublishExecutionPlan {
         publish_run_id: plan.publish_run_id,
         release_run_id: plan.release_run_id,
@@ -1064,14 +1072,34 @@ fn publish_execution_plan(plan: &StoredPublishExecutionPlan) -> io::Result<Publi
         publish_target_name: plan.publish_target_name.clone(),
         publish_target_kind: require_cli_value(&plan.publish_target_kind, "publish target kind")?,
         publish_target_config_json: plan.publish_target_config_json.clone(),
+        publish_target_credentials_kind,
+        publish_target_credentials_config_json,
+        execution_contract_json: plan.execution_contract_json.clone(),
         artifact_id: plan.artifact_id,
         artifact_name: plan.artifact_name.clone(),
         artifact_kind: plan.artifact_kind.clone(),
         artifact_path: plan.artifact_path.clone(),
+        artifact_active_location_kind: plan.artifact_active_location_kind.clone(),
+        artifact_active_location_ref: plan.artifact_active_location_ref.clone(),
         artifact_root_path: plan.artifact_root_path.clone(),
         source_path: plan.source_path.clone(),
         status: plan.status.clone(),
     })
+}
+
+fn resolve_publish_target_credentials(
+    coordinator: &LocalCoordinator,
+    credentials_id: Option<i64>,
+) -> io::Result<(Option<String>, Option<String>)> {
+    let Some(credentials_id) = credentials_id else {
+        return Ok((None, None));
+    };
+
+    let credentials = coordinator.get_credential_record(credentials_id)?;
+    let resolved_config_json =
+        resolve_credential_secret_config_json(&credentials.kind, &credentials.config_json)?;
+
+    Ok((Some(credentials.kind), Some(resolved_config_json)))
 }
 
 fn inspect_published_outputs(
@@ -1137,7 +1165,7 @@ fn inspect_publish_run(
             return diagnostic;
         }
     };
-    let publish_plan = match publish_execution_plan(&stored_plan) {
+    let publish_plan = match publish_execution_plan(coordinator, &stored_plan) {
         Ok(plan) => plan,
         Err(error) => {
             diagnostic.plan_error = Some(error.to_string());
@@ -4851,6 +4879,257 @@ mod tests {
     }
 
     #[test]
+    fn publish_run_next_command_moves_filesystem_publish_and_updates_artifact_location() {
+        let root = test_root("runtime-bin-publish-run-next-move");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let artifact_root = root.join("publish-artifacts-move");
+        let publish_root = root.join("published-artifacts-move");
+        let workspace_path = config.directories.runs_dir.join("publish-run-report-move");
+        fs::create_dir_all(artifact_root.join("nested"))
+            .expect("artifact directory should create");
+        fs::create_dir_all(&publish_root).expect("publish directory should create");
+        let source_path = artifact_root.join("nested").join("game.zip");
+        fs::write(&source_path, "artifact").expect("artifact source should write");
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let repository_id = seed_repository(&connection, "runtime-bin-publish-run-next-move");
+        let build_target_id = seed_build_target(&connection, repository_id, "windows-player", "windows");
+        let release_run_id = seed_queued_release(&connection, repository_id, "v14.0.1", "2021.3.33f1");
+        let build_run_id = seed_succeeded_build_run_with_workspace(
+            &connection,
+            release_run_id,
+            build_target_id,
+            &artifact_root,
+            &workspace_path,
+            "2021.3.33f1",
+            "host-native",
+        );
+        let artifact_id = insert_artifact_record(
+            &connection,
+            build_run_id,
+            "nested/game.zip",
+            "archive",
+            "nested/game.zip",
+        );
+        let publish_target_id = seed_publish_target_with_config(
+            &connection,
+            repository_id,
+            "filesystem-move",
+            "filesystem",
+            "{}",
+        );
+        seed_build_publish_binding(&connection, build_target_id, publish_target_id);
+        connection
+            .execute(
+                "
+                UPDATE build_publish_bindings
+                SET options_json = ?
+                WHERE build_target_id = ?
+                  AND publish_target_id = ?
+                ",
+                params![
+                    json!({
+                        "operation": "move",
+                        "directory_path": publish_root.display().to_string(),
+                    })
+                    .to_string(),
+                    build_target_id,
+                    publish_target_id,
+                ],
+            )
+            .expect("move binding options should update");
+        drop(connection);
+
+        let coordinator = runtime_store::LocalCoordinator::new(&storage);
+        let planned = coordinator
+            .plan_build_publish_runs(build_run_id)
+            .expect("publish run should plan");
+        assert_eq!(planned.len(), 1);
+        let publish_run_id = planned[0].id;
+        coordinator
+            .dispatch_publish_run(publish_run_id)
+            .expect("publish run should dispatch");
+
+        let output = run_publish_run_next_command(&[], &config, &storage)
+            .expect("publish run-next command should move the artifact");
+        let record: PublishRunRecord =
+            serde_json::from_str(&output).expect("publish run-next output should decode");
+
+        assert_eq!(record.status, "succeeded");
+        let destination_path = publish_root.join("game.zip");
+        let destination_ref = destination_path.display().to_string();
+        assert_eq!(record.destination_ref.as_deref(), Some(destination_ref.as_str()));
+        assert!(!source_path.exists());
+        assert_eq!(
+            fs::read_to_string(&destination_path).expect("moved artifact should exist"),
+            "artifact"
+        );
+
+        let report = load_build_execution_report(&workspace_path);
+        assert_eq!(report.publish_runs.len(), 1);
+        assert_eq!(report.publish_runs[0].record.status, "succeeded");
+        assert_eq!(
+            report.publish_runs[0].record.destination_ref.as_deref(),
+            Some(destination_ref.as_str())
+        );
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let (active_location_kind, active_location_ref): (String, String) = connection
+            .query_row(
+                "SELECT active_location_kind, active_location_ref FROM artifacts WHERE id = ?",
+                [artifact_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("artifact active location should load");
+        assert_eq!(active_location_kind, "filesystem_absolute");
+        assert_eq!(active_location_ref, destination_ref);
+        assert_eq!(queue_message_count(&connection, "publish-runs"), 0);
+        drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn publish_run_next_command_completes_itch_publish_with_snapshotted_credentials() {
+        let root = test_root("runtime-bin-publish-run-next-itch");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let artifact_root = root.join("publish-artifacts-itch");
+        let workspace_path = config.directories.runs_dir.join("publish-run-report-itch");
+        fs::create_dir_all(&artifact_root).expect("artifact directory should create");
+        let source_path = artifact_root.join("game.zip");
+        fs::write(&source_path, "artifact").expect("artifact source should write");
+        let butler_path = write_fake_butler(&root);
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let repository_id = seed_repository(&connection, "runtime-bin-publish-run-next-itch");
+        let build_target_id = seed_build_target(&connection, repository_id, "windows-player", "windows");
+        let release_run_id = seed_queued_release(&connection, repository_id, "v14.2.0", "2021.3.33f1");
+        let build_run_id = seed_succeeded_build_run_with_workspace(
+            &connection,
+            release_run_id,
+            build_target_id,
+            &artifact_root,
+            &workspace_path,
+            "2021.3.33f1",
+            "host-native",
+        );
+        let artifact_id = insert_artifact_record(
+            &connection,
+            build_run_id,
+            "game.zip",
+            "archive",
+            "game.zip",
+        );
+        let credentials_id = insert_secret_credential_record(
+            &connection,
+            "itch-release-token",
+            "itch-api-key",
+            &json!({"api_key": "itch-secret"}).to_string(),
+        );
+        let publish_target_id = seed_publish_target_with_config(
+            &connection,
+            repository_id,
+            "itch-release",
+            "itch",
+            &json!({
+                "account_name": "indiegabo",
+                "game_slug": "revolutions",
+                "butler_path": butler_path.display().to_string(),
+            })
+            .to_string(),
+        );
+        connection
+            .execute(
+                "UPDATE publish_targets SET credentials_id = ? WHERE id = ?",
+                params![credentials_id, publish_target_id],
+            )
+            .expect("itch credentials binding should persist");
+        seed_build_publish_binding(&connection, build_target_id, publish_target_id);
+        connection
+            .execute(
+                "
+                UPDATE build_publish_bindings
+                SET options_json = ?
+                WHERE build_target_id = ?
+                  AND publish_target_id = ?
+                ",
+                params![
+                    json!({
+                        "channel": "windows-stable",
+                        "userversion_template": "release-{{git_tag}}",
+                    })
+                    .to_string(),
+                    build_target_id,
+                    publish_target_id,
+                ],
+            )
+            .expect("itch binding options should update");
+        drop(connection);
+
+        let coordinator = runtime_store::LocalCoordinator::new(&storage);
+        let planned = coordinator
+            .plan_build_publish_runs(build_run_id)
+            .expect("itch publish run should plan");
+        assert_eq!(planned.len(), 1);
+        let publish_run_id = planned[0].id;
+        coordinator
+            .dispatch_publish_run(publish_run_id)
+            .expect("itch publish run should dispatch");
+
+        let output = run_publish_run_next_command(&[], &config, &storage)
+            .expect("publish run-next command should complete itch upload");
+        let record: PublishRunRecord =
+            serde_json::from_str(&output).expect("publish run-next output should decode");
+
+        assert_eq!(record.status, "succeeded");
+        assert_eq!(
+            record.destination_ref.as_deref(),
+            Some("itch://indiegabo/revolutions:windows-stable@release-v14.2.0")
+        );
+        assert!(source_path.exists());
+
+        let args = fs::read_to_string(root.join("butler-args.txt"))
+            .expect("fake butler args should be captured");
+        assert!(args.contains("push"));
+        assert!(args.contains("windows-stable"));
+        assert!(args.contains("--userversion"));
+        assert!(args.contains("release-v14.2.0"));
+
+        let api_key = fs::read_to_string(root.join("butler-api-key.txt"))
+            .expect("fake butler api key should be captured");
+        assert_eq!(api_key.trim(), "itch-secret");
+
+        let report = load_build_execution_report(&workspace_path);
+        assert_eq!(report.publish_runs.len(), 1);
+        assert_eq!(report.publish_runs[0].record.status, "succeeded");
+        assert_eq!(
+            report.publish_runs[0].record.destination_ref.as_deref(),
+            Some("itch://indiegabo/revolutions:windows-stable@release-v14.2.0")
+        );
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let (active_location_kind, active_location_ref): (String, String) = connection
+            .query_row(
+                "SELECT active_location_kind, active_location_ref FROM artifacts WHERE id = ?",
+                [artifact_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("artifact active location should load");
+        assert_eq!(active_location_kind, "runtime_artifact");
+        assert_eq!(active_location_ref, "game.zip");
+        assert_eq!(queue_message_count(&connection, "publish-runs"), 0);
+        drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
     fn publish_inspect_command_reports_persisted_destination_status() {
         let root = test_root("runtime-bin-publish-inspect");
         let config = RuntimeConfig::from_root(&root);
@@ -5409,8 +5688,24 @@ mod tests {
     ) -> i64 {
         connection
             .execute(
-                "INSERT INTO artifacts (build_run_id, name, kind, path) VALUES (?, ?, ?, ?)",
-                params![build_run_id, name, kind, path],
+                "
+                INSERT INTO artifacts (
+                    build_run_id,
+                    name,
+                    kind,
+                    path,
+                    active_location_kind,
+                    active_location_ref
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ",
+                params![
+                    build_run_id,
+                    name,
+                    kind,
+                    path,
+                    "runtime_artifact",
+                    path,
+                ],
             )
             .expect("artifact record should insert");
 
@@ -5439,6 +5734,22 @@ mod tests {
                 params![release_run_id, build_run_id, publish_target_id, artifact_id, status],
             )
             .expect("publish run should insert");
+
+        connection.last_insert_rowid()
+    }
+
+    fn insert_secret_credential_record(
+        connection: &Connection,
+        name: &str,
+        kind: &str,
+        config_json: &str,
+    ) -> i64 {
+        connection
+            .execute(
+                "INSERT INTO credentials (name, kind, config_json) VALUES (?, ?, ?)",
+                params![name, kind, config_json],
+            )
+            .expect("credential record should insert");
 
         connection.last_insert_rowid()
     }
@@ -5736,6 +6047,47 @@ mod tests {
             permissions.set_mode(0o755);
             fs::set_permissions(&script_path, permissions)
                 .expect("fake unity script permissions should set");
+        }
+
+        script_path
+    }
+
+    fn write_fake_butler(root: &Path) -> PathBuf {
+        let script_path = if cfg!(windows) {
+            root.join("fake-butler.cmd")
+        } else {
+            root.join("fake-butler.sh")
+        };
+        let contents = if cfg!(windows) {
+            String::from(
+                concat!(
+                    "@echo off\r\n",
+                    "set SCRIPT_DIR=%~dp0\r\n",
+                    "> \"%SCRIPT_DIR%butler-args.txt\" echo %*\r\n",
+                    "> \"%SCRIPT_DIR%butler-api-key.txt\" echo %BUTLER_API_KEY%\r\n",
+                    "exit /b 0\r\n"
+                ),
+            )
+        } else {
+            String::from(
+                concat!(
+                    "#!/bin/sh\n",
+                    "SCRIPT_DIR=\"$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\"\n",
+                    "printf '%s' \"$*\" > \"$SCRIPT_DIR/butler-args.txt\"\n",
+                    "printf '%s' \"$BUTLER_API_KEY\" > \"$SCRIPT_DIR/butler-api-key.txt\"\n"
+                ),
+            )
+        };
+        fs::write(&script_path, contents).expect("fake butler script should write");
+
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&script_path)
+                .expect("fake butler script metadata should load")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions)
+                .expect("fake butler script permissions should set");
         }
 
         script_path
