@@ -101,11 +101,6 @@ impl Processor for ExecutionProcessor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-struct FilesystemTargetConfig {
-    root_path: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 struct PublishExecutionContractSnapshot {
     #[serde(default)]
@@ -166,23 +161,12 @@ fn parse_publish_backend(kind: &str) -> io::Result<PublishBackend> {
 fn publish_to_filesystem(plan: &ExecutionPlan) -> io::Result<ExecutionResult> {
     let source_path = require_regular_source_path(&plan.source_path)?;
     let destination_path = resolve_destination_path(plan)?;
-    let binding_options = parse_filesystem_binding_options(plan)?;
-    if binding_requests_filesystem_move(&binding_options) {
-        move_regular_file(&source_path, &destination_path)?;
-
-        return Ok(ExecutionResult {
-            destination_ref: destination_path.display().to_string(),
-            artifact_active_location_kind: Some(String::from("filesystem_absolute")),
-            artifact_active_location_ref: Some(destination_path.display().to_string()),
-        });
-    }
-
-    copy_regular_file(&source_path, &destination_path)?;
+    move_regular_file(&source_path, &destination_path)?;
 
     Ok(ExecutionResult {
         destination_ref: destination_path.display().to_string(),
-        artifact_active_location_kind: None,
-        artifact_active_location_ref: None,
+        artifact_active_location_kind: Some(String::from("filesystem_absolute")),
+        artifact_active_location_ref: Some(destination_path.display().to_string()),
     })
 }
 
@@ -237,20 +221,8 @@ fn publish_to_itch(plan: &ExecutionPlan) -> io::Result<ExecutionResult> {
 }
 
 fn resolve_filesystem_destination_path(plan: &ExecutionPlan) -> io::Result<PathBuf> {
-    let binding_options = parse_filesystem_binding_options(plan)?;
-    if binding_requests_filesystem_move(&binding_options) {
-        return resolve_filesystem_move_destination_path(plan, &binding_options);
-    }
-
-    let config = parse_filesystem_target_config(&plan.publish_target_config_json)?;
-    let repository_segment = sanitize_path_segment(&plan.repository_name, "repository_name")?;
-    let git_tag_segment = sanitize_path_segment(&plan.git_tag, "git_tag")?;
-    let artifact_path = normalize_relative_artifact_path(&plan.artifact_path)?;
-
-    Ok(Path::new(&config.root_path)
-        .join(repository_segment)
-        .join(git_tag_segment)
-        .join(PathBuf::from(artifact_path.replace('/', std::path::MAIN_SEPARATOR_STR))))
+    let binding_options = require_filesystem_move_binding_options(plan)?;
+    resolve_filesystem_move_destination_path(plan, &binding_options)
 }
 
 fn resolve_filesystem_move_destination_path(
@@ -329,36 +301,18 @@ fn parse_itch_binding_options(plan: &ExecutionPlan) -> io::Result<ItchBindingOpt
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
 }
 
-fn binding_requests_filesystem_move(binding_options: &FilesystemBindingOptions) -> bool {
-    binding_options.operation.trim().eq_ignore_ascii_case("move")
-}
-
-fn parse_filesystem_target_config(raw: &str) -> io::Result<FilesystemTargetConfig> {
-    let trimmed = raw.trim();
-    let config: FilesystemTargetConfig = serde_json::from_str(if trimmed.is_empty() {
-        "{}"
-    } else {
-        trimmed
-    })
-    .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-
-    let root_path = PathBuf::from(config.root_path.trim());
-    if config.root_path.trim().is_empty() {
+fn require_filesystem_move_binding_options(
+    plan: &ExecutionPlan,
+) -> io::Result<FilesystemBindingOptions> {
+    let binding_options = parse_filesystem_binding_options(plan)?;
+    if !binding_options.operation.trim().eq_ignore_ascii_case("move") {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
-            "filesystem target root_path must not be empty",
-        ));
-    }
-    if !root_path.is_absolute() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "filesystem target root_path must be absolute",
+            "filesystem publish bindings must use the move operation",
         ));
     }
 
-    Ok(FilesystemTargetConfig {
-        root_path: root_path.display().to_string(),
-    })
+    Ok(binding_options)
 }
 
 fn parse_itch_target_config(raw: &str) -> io::Result<ItchTargetConfig> {
@@ -472,54 +426,6 @@ fn sanitize_itch_command_output(output: &str, api_key: &str) -> String {
     output.trim().replace(api_key, "***")
 }
 
-fn sanitize_path_segment(value: &str, field_name: &str) -> io::Result<String> {
-    let normalized = value
-        .trim()
-        .replace(['/', '\\'], "-")
-        .trim()
-        .to_owned();
-    if normalized.is_empty() || normalized == "." || normalized == ".." {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            format!("{field_name} must not be empty"),
-        ));
-    }
-
-    Ok(normalized)
-}
-
-fn normalize_relative_artifact_path(path: &str) -> io::Result<String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "artifact path must not be empty",
-        ));
-    }
-
-    let normalized = PathBuf::from(trimmed.replace('/', &std::path::MAIN_SEPARATOR.to_string()))
-        .components()
-        .collect::<PathBuf>();
-    if normalized.as_os_str().is_empty() || normalized.is_absolute() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "artifact path must be relative",
-        ));
-    }
-    if normalized == Path::new("..")
-        || normalized
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "artifact path must not escape the artifact root",
-        ));
-    }
-
-    Ok(normalized.to_string_lossy().replace('\\', "/"))
-}
-
 fn require_regular_source_path(source_path: &str) -> io::Result<PathBuf> {
     let path = PathBuf::from(source_path.trim());
     if path.as_os_str().is_empty() {
@@ -601,93 +507,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
-    fn execution_processor_copies_filesystem_artifact_into_release_path() {
-        let root = test_root("filesystem-success");
-        let artifact_root = root.join("artifacts");
-        let publish_root = root.join("published");
-        fs::create_dir_all(artifact_root.join("nested"))
-            .expect("artifact root should create");
-        let source_path = artifact_root.join("nested").join("game.zip");
-        fs::write(&source_path, "artifact").expect("artifact source should write");
-
-        let result = ExecutionProcessor::new()
-            .process(&ExecutionPlan {
-                source_path: source_path.display().to_string(),
-                artifact_root_path: artifact_root.display().to_string(),
-                publish_target_config_json: json!({
-                    "root_path": publish_root.display().to_string()
-                })
-                .to_string(),
-                ..base_execution_plan("filesystem", "v1.2.3", "nested/game.zip")
-            })
-            .expect("filesystem publish should succeed");
-
-        let destination_path = publish_root
-            .join("revolutions")
-            .join("v1.2.3")
-            .join("nested")
-            .join("game.zip");
-        assert_eq!(PathBuf::from(&result.destination_ref), destination_path);
-        assert_eq!(result.artifact_active_location_kind, None);
-        assert_eq!(result.artifact_active_location_ref, None);
-        assert_eq!(
-            fs::read_to_string(destination_path).expect("published artifact should exist"),
-            "artifact"
-        );
-
-        fs::remove_dir_all(root).expect("temporary publish root should be removable");
-    }
-
-    #[test]
-    fn resolve_destination_path_matches_filesystem_publish_layout() {
-        let root = test_root("filesystem-destination");
-        let publish_root = root.join("published");
-        fs::create_dir_all(&root).expect("temporary publish root should create");
-
-        let destination_path = resolve_destination_path(&ExecutionPlan {
-            publish_target_config_json: json!({
-                "root_path": publish_root.display().to_string()
-            })
-            .to_string(),
-            ..base_execution_plan("filesystem", "v1.2.3", "nested/game.zip")
-        })
-        .expect("destination path should resolve");
-
-        let expected_path = publish_root
-            .join("revolutions")
-            .join("v1.2.3")
-            .join("nested")
-            .join("game.zip");
-        assert_eq!(destination_path, expected_path);
-
-        fs::remove_dir_all(root).expect("temporary publish root should be removable");
-    }
-
-    #[test]
-    fn execution_processor_rejects_invalid_filesystem_config() {
-        let root = test_root("filesystem-invalid-config");
-        let artifact_root = root.join("artifacts");
-        fs::create_dir_all(&artifact_root).expect("artifact root should create");
-        let source_path = artifact_root.join("game.zip");
-        fs::write(&source_path, "artifact").expect("artifact source should write");
-
-        let error = ExecutionProcessor::new()
-            .process(&ExecutionPlan {
-                source_path: source_path.display().to_string(),
-                artifact_root_path: artifact_root.display().to_string(),
-                publish_target_config_json: String::from(r#"{"root_path":"relative/output"}"#),
-                ..base_execution_plan("filesystem", "v1.2.3", "game.zip")
-            })
-            .expect_err("relative filesystem roots should be rejected");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("root_path must be absolute"));
-
-        fs::remove_dir_all(root).expect("temporary publish root should be removable");
-    }
-
-    #[test]
-    fn execution_processor_moves_filesystem_artifact_when_binding_requests_move() {
+    fn execution_processor_moves_filesystem_artifact_into_binding_directory() {
         let root = test_root("filesystem-move-success");
         let artifact_root = root.join("artifacts");
         let publish_root = root.join("published");
@@ -699,10 +519,6 @@ mod tests {
             .process(&ExecutionPlan {
                 source_path: source_path.display().to_string(),
                 artifact_root_path: artifact_root.display().to_string(),
-                publish_target_config_json: json!({
-                    "root_path": publish_root.display().to_string()
-                })
-                .to_string(),
                 execution_contract_json: json!({
                     "binding_options_json": json!({
                         "operation": "move",
@@ -711,9 +527,9 @@ mod tests {
                     .to_string()
                 })
                 .to_string(),
-                ..base_execution_plan("filesystem", "v1.2.3", "game.zip")
+                ..base_execution_plan("filesystem", "v1.2.3", "nested/game.zip")
             })
-            .expect("filesystem move publish should succeed");
+            .expect("filesystem publish should succeed");
 
         let destination_path = publish_root.join("game.zip");
         assert_eq!(PathBuf::from(&result.destination_ref), destination_path);
@@ -727,7 +543,7 @@ mod tests {
         );
         assert!(!source_path.exists());
         assert_eq!(
-            fs::read_to_string(destination_path).expect("moved artifact should exist"),
+            fs::read_to_string(destination_path).expect("published artifact should exist"),
             "artifact"
         );
 
@@ -735,16 +551,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_destination_path_uses_move_directory_when_binding_requests_move() {
-        let root = test_root("filesystem-move-destination");
+    fn resolve_destination_path_uses_binding_directory_for_filesystem_moves() {
+        let root = test_root("filesystem-destination");
         let publish_root = root.join("published");
         fs::create_dir_all(&root).expect("temporary publish root should create");
 
         let destination_path = resolve_destination_path(&ExecutionPlan {
-            publish_target_config_json: json!({
-                "root_path": publish_root.display().to_string()
-            })
-            .to_string(),
             execution_contract_json: json!({
                 "binding_options_json": json!({
                     "operation": "move",
@@ -756,9 +568,43 @@ mod tests {
             source_path: root.join("nested").join("game.zip").display().to_string(),
             ..base_execution_plan("filesystem", "v1.2.3", "nested/game.zip")
         })
-        .expect("move destination path should resolve");
+        .expect("destination path should resolve");
 
-        assert_eq!(destination_path, publish_root.join("game.zip"));
+        let expected_path = publish_root.join("game.zip");
+        assert_eq!(destination_path, expected_path);
+
+        fs::remove_dir_all(root).expect("temporary publish root should be removable");
+    }
+
+    #[test]
+    fn execution_processor_rejects_filesystem_bindings_without_move_operation() {
+        let root = test_root("filesystem-invalid-binding-operation");
+        let artifact_root = root.join("artifacts");
+        let publish_root = root.join("published");
+        fs::create_dir_all(&artifact_root).expect("artifact root should create");
+        let source_path = artifact_root.join("game.zip");
+        fs::write(&source_path, "artifact").expect("artifact source should write");
+
+        let error = ExecutionProcessor::new()
+            .process(&ExecutionPlan {
+                source_path: source_path.display().to_string(),
+                artifact_root_path: artifact_root.display().to_string(),
+                execution_contract_json: json!({
+                    "binding_options_json": json!({
+                        "operation": "copy",
+                        "directory_path": publish_root.display().to_string()
+                    })
+                    .to_string()
+                })
+                .to_string(),
+                ..base_execution_plan("filesystem", "v1.2.3", "game.zip")
+            })
+            .expect_err("non-move filesystem bindings should be rejected");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error
+            .to_string()
+            .contains("filesystem publish bindings must use the move operation"));
 
         fs::remove_dir_all(root).expect("temporary publish root should be removable");
     }

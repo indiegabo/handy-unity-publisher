@@ -541,7 +541,21 @@ pub struct ArtifactInspectionRecord {
     pub succeeded_publish_runs: i64,
     pub failed_publish_runs: i64,
     pub canceled_publish_runs: i64,
+    pub publish_runs: Vec<ArtifactPublishRunRecord>,
     pub created_at: String,
+}
+
+/// Reports one persisted publish run attached to an inspected artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactPublishRunRecord {
+    pub publish_run_id: i64,
+    pub publish_target_id: i64,
+    pub publish_target_name: String,
+    pub publish_target_kind: String,
+    pub status: String,
+    pub destination_ref: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Stores one persisted build target row exposed to shell settings and diagnostics.
@@ -707,6 +721,27 @@ pub struct CreateRepositoryProjectBuildTargetInput {
     pub runner_config_json: String,
 }
 
+/// Defines one publish binding that must be attached to a new repository
+/// project destination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateRepositoryProjectPublishBindingInput {
+    pub build_target_name: String,
+    pub enabled: bool,
+    pub options_json: String,
+}
+
+/// Defines one publish destination that must be attached to a new repository
+/// project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateRepositoryProjectPublishTargetInput {
+    pub name: String,
+    pub kind: String,
+    pub enabled: bool,
+    pub config_json: String,
+    pub credentials_id: Option<i64>,
+    pub bindings: Vec<CreateRepositoryProjectPublishBindingInput>,
+}
+
 /// Defines the durable payload required to register one managed repository project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateRepositoryProjectInput {
@@ -720,6 +755,7 @@ pub struct CreateRepositoryProjectInput {
     pub polling_interval_seconds: i64,
     pub enabled: bool,
     pub build_targets: Vec<CreateRepositoryProjectBuildTargetInput>,
+    pub publish_targets: Vec<CreateRepositoryProjectPublishTargetInput>,
 }
 
 /// Defines the durable payload required to update one managed repository
@@ -739,6 +775,29 @@ pub struct UpdateRepositoryProjectBuildTargetInput {
     pub runner_config_json: String,
 }
 
+/// Defines one publish binding that must be synchronized for a managed
+/// repository project destination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateRepositoryProjectPublishBindingInput {
+    pub build_target_id: Option<i64>,
+    pub build_target_name: String,
+    pub enabled: bool,
+    pub options_json: String,
+}
+
+/// Defines one publish destination that must be synchronized for a managed
+/// repository project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateRepositoryProjectPublishTargetInput {
+    pub publish_target_id: Option<i64>,
+    pub name: String,
+    pub kind: String,
+    pub enabled: bool,
+    pub config_json: String,
+    pub credentials_id: Option<i64>,
+    pub bindings: Vec<UpdateRepositoryProjectPublishBindingInput>,
+}
+
 /// Defines the durable payload required to update one managed repository
 /// project together with its active build target configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -753,6 +812,7 @@ pub struct UpdateRepositoryProjectInput {
     pub polling_interval_seconds: i64,
     pub enabled: bool,
     pub build_targets: Vec<UpdateRepositoryProjectBuildTargetInput>,
+    pub publish_targets: Vec<UpdateRepositoryProjectPublishTargetInput>,
 }
 
 /// Defines the durable repository auth assessment that should be persisted for

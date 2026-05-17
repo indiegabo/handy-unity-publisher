@@ -136,77 +136,6 @@ const MIGRATIONS: &[Migration] = &[
 
 const MIGRATION_NO_OP_SQL: &str = "SELECT 1;\n";
 
-const LEGACY_BUILD_TARGET_CONTRACT_MIGRATION_SQL: &str = r#"
-PRAGMA foreign_keys = OFF;
-
-CREATE TABLE build_targets_v2 (
-    id INTEGER PRIMARY KEY,
-    repository_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    build_kind TEXT NOT NULL DEFAULT 'player',
-    runner_type TEXT NOT NULL DEFAULT 'host-native',
-    output_kind TEXT,
-    output_path_template TEXT,
-    timeout_seconds INTEGER NOT NULL DEFAULT 3600 CHECK (timeout_seconds > 0),
-    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-    contract_json TEXT NOT NULL DEFAULT '{}',
-    config_json TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (repository_id) REFERENCES repositories (id) ON DELETE CASCADE,
-    UNIQUE (repository_id, name)
-);
-
-INSERT INTO build_targets_v2 (
-    id,
-    repository_id,
-    name,
-    build_kind,
-    runner_type,
-    output_kind,
-    output_path_template,
-    timeout_seconds,
-    enabled,
-    contract_json,
-    config_json,
-    created_at,
-    updated_at
-)
-SELECT id,
-       repository_id,
-       name,
-       'player',
-       runner_type,
-       output_kind,
-       output_path_template,
-       timeout_seconds,
-       enabled,
-       json_object(
-           'unity',
-           json_object(
-               'targetPlatform', platform,
-               'buildMethod', COALESCE(build_method, ''),
-               'editorVersion', COALESCE(unity_version_override, '')
-           )
-       ),
-       config_json,
-       created_at,
-       updated_at
-FROM build_targets;
-
-DROP TABLE build_targets;
-ALTER TABLE build_targets_v2 RENAME TO build_targets;
-
-CREATE INDEX idx_build_targets_repository_id ON build_targets (repository_id);
-
-PRAGMA foreign_keys = ON;
-"#;
-
-const ENGINE_KIND_ONLY_MIGRATION_SQL: &str = r#"
-ALTER TABLE repositories
-ADD COLUMN engine_kind TEXT NOT NULL DEFAULT 'unity';
-"#;
-
 const RENAME_RELEASE_RUN_ENGINE_VERSION_SQL: &str = r#"
 ALTER TABLE release_runs RENAME COLUMN unity_version TO engine_version;
 "#;
@@ -1129,6 +1058,19 @@ impl LocalCoordinator {
             build_target_ids.push(transaction.last_insert_rowid());
         }
 
+        let active_build_targets =
+            list_active_repository_project_build_targets(&transaction, repository_id)?;
+        sync_repository_project_publish_targets(
+            &transaction,
+            repository_id,
+            normalized
+                .publish_targets
+                .into_iter()
+                .map(promote_create_repository_project_publish_target_input)
+                .collect(),
+            &active_build_targets,
+        )?;
+
         transaction.commit().map_err(sqlite_error)?;
 
         Ok(CreatedRepositoryProjectRecord {
@@ -1377,6 +1319,15 @@ impl LocalCoordinator {
             normalized.repository_id,
             &normalized.engine_kind,
             normalized.build_targets,
+        )?;
+
+        let active_build_targets =
+            list_active_repository_project_build_targets(&transaction, normalized.repository_id)?;
+        sync_repository_project_publish_targets(
+            &transaction,
+            normalized.repository_id,
+            normalized.publish_targets,
+            &active_build_targets,
         )?;
 
         transaction.commit().map_err(sqlite_error)?;
@@ -5313,9 +5264,33 @@ struct ExistingRepositoryProjectBuildTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveRepositoryProjectBuildTarget {
+    id: i64,
+    name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExistingRepositoryProjectPublishTarget {
+    id: i64,
+    name: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExistingRepositoryProjectPublishBinding {
+    build_target_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PlannedRepositoryProjectBuildTargetUpdate {
     existing_target_id: Option<i64>,
     target: UpdateRepositoryProjectBuildTargetInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannedRepositoryProjectPublishTargetUpdate {
+    existing_target_id: Option<i64>,
+    target: UpdateRepositoryProjectPublishTargetInput,
 }
 
 fn sync_repository_project_build_targets(
@@ -5448,6 +5423,652 @@ fn sync_repository_project_build_targets(
 
         disable_repository_project_build_target(transaction, existing_target.id)?;
     }
+
+    Ok(())
+}
+
+fn promote_create_repository_project_publish_target_input(
+    input: CreateRepositoryProjectPublishTargetInput,
+) -> UpdateRepositoryProjectPublishTargetInput {
+    UpdateRepositoryProjectPublishTargetInput {
+        publish_target_id: None,
+        name: input.name,
+        kind: input.kind,
+        enabled: input.enabled,
+        config_json: input.config_json,
+        credentials_id: input.credentials_id,
+        bindings: input
+            .bindings
+            .into_iter()
+            .map(|binding| UpdateRepositoryProjectPublishBindingInput {
+                build_target_id: None,
+                build_target_name: binding.build_target_name,
+                enabled: binding.enabled,
+                options_json: binding.options_json,
+            })
+            .collect(),
+    }
+}
+
+fn sync_repository_project_publish_targets(
+    transaction: &Transaction<'_>,
+    repository_id: i64,
+    publish_targets: Vec<UpdateRepositoryProjectPublishTargetInput>,
+    build_targets: &[ActiveRepositoryProjectBuildTarget],
+) -> io::Result<()> {
+    let build_targets_by_id = build_targets
+        .iter()
+        .cloned()
+        .map(|target| (target.id, target))
+        .collect::<HashMap<_, _>>();
+    let build_targets_by_name = build_targets
+        .iter()
+        .cloned()
+        .map(|target| (target.name.to_ascii_lowercase(), target))
+        .collect::<HashMap<_, _>>();
+
+    validate_repository_project_publish_targets_against_build_targets(
+        &publish_targets,
+        &build_targets_by_id,
+        &build_targets_by_name,
+    )?;
+
+    let existing_targets = list_repository_project_publish_targets(transaction, repository_id)?;
+    let existing_by_id = existing_targets
+        .iter()
+        .cloned()
+        .map(|target| (target.id, target))
+        .collect::<HashMap<_, _>>();
+    let existing_by_name = existing_targets
+        .iter()
+        .cloned()
+        .map(|target| (target.name.to_ascii_lowercase(), target))
+        .collect::<HashMap<_, _>>();
+
+    let mut claimed_existing_ids = HashSet::new();
+    let mut planned_targets = Vec::with_capacity(publish_targets.len());
+
+    for target in publish_targets {
+        let normalized_name = target.name.to_ascii_lowercase();
+        let existing_target_id = if let Some(publish_target_id) = target.publish_target_id {
+            let Some(existing_target) = existing_by_id.get(&publish_target_id) else {
+                return Err(not_found_error(format!(
+                    "publish target {publish_target_id} was not found for repository {repository_id}"
+                )));
+            };
+
+            if !claimed_existing_ids.insert(publish_target_id) {
+                return Err(invalid_input_error(format!(
+                    "publish target {publish_target_id} was provided more than once"
+                )));
+            }
+
+            if let Some(conflicting_target) = existing_by_name.get(&normalized_name) {
+                if conflicting_target.id != existing_target.id
+                    && !claimed_existing_ids.contains(&conflicting_target.id)
+                {
+                    return Err(invalid_input_error(format!(
+                        "repository project publish target name {:?} is already reserved by another target",
+                        target.name
+                    )));
+                }
+            }
+
+            Some(existing_target.id)
+        } else if let Some(existing_target) = existing_by_name.get(&normalized_name) {
+            if claimed_existing_ids.contains(&existing_target.id) {
+                None
+            } else {
+                claimed_existing_ids.insert(existing_target.id);
+                Some(existing_target.id)
+            }
+        } else {
+            None
+        };
+
+        planned_targets.push(PlannedRepositoryProjectPublishTargetUpdate {
+            existing_target_id,
+            target,
+        });
+    }
+
+    let planned_existing_ids = planned_targets
+        .iter()
+        .filter_map(|target| target.existing_target_id)
+        .collect::<HashSet<_>>();
+
+    for planned_target in &planned_targets {
+        let normalized_name = planned_target.target.name.to_ascii_lowercase();
+        if let Some(existing_target_id) = planned_target.existing_target_id {
+            let existing_target = existing_by_id
+                .get(&existing_target_id)
+                .expect("planned publish target ids must resolve against repository targets");
+
+            if !existing_target
+                .name
+                .eq_ignore_ascii_case(&planned_target.target.name)
+            {
+                rename_repository_project_publish_target(
+                    transaction,
+                    existing_target_id,
+                    &temporary_repository_project_publish_target_name(existing_target_id),
+                )?;
+            }
+
+            continue;
+        }
+
+        if let Some(conflicting_target) = existing_by_name.get(&normalized_name) {
+            if !planned_existing_ids.contains(&conflicting_target.id) {
+                return Err(invalid_input_error(format!(
+                    "repository project publish target name {:?} is already reserved by an inactive target",
+                    planned_target.target.name
+                )));
+            }
+        }
+    }
+
+    let mut retained_target_ids = HashSet::new();
+    for planned_target in planned_targets {
+        let publish_target_id = if let Some(existing_target_id) = planned_target.existing_target_id {
+            update_repository_project_publish_target(
+                transaction,
+                existing_target_id,
+                &planned_target.target,
+            )?;
+            existing_target_id
+        } else {
+            create_repository_project_publish_target(
+                transaction,
+                repository_id,
+                &planned_target.target,
+            )?
+        };
+
+        sync_repository_project_publish_target_bindings(
+            transaction,
+            publish_target_id,
+            &planned_target.target.bindings,
+            &build_targets_by_id,
+            &build_targets_by_name,
+        )?;
+        retained_target_ids.insert(publish_target_id);
+    }
+
+    for existing_target in existing_targets {
+        if retained_target_ids.contains(&existing_target.id) || !existing_target.enabled {
+            continue;
+        }
+
+        delete_repository_project_publish_target_bindings(transaction, existing_target.id)?;
+        if publish_target_has_history(transaction, existing_target.id)? {
+            disable_repository_project_publish_target(transaction, existing_target.id)?;
+        } else {
+            delete_repository_project_publish_target(transaction, existing_target.id)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_repository_project_publish_targets_against_build_targets(
+    publish_targets: &[UpdateRepositoryProjectPublishTargetInput],
+    build_targets_by_id: &HashMap<i64, ActiveRepositoryProjectBuildTarget>,
+    build_targets_by_name: &HashMap<String, ActiveRepositoryProjectBuildTarget>,
+) -> io::Result<()> {
+    let mut consuming_binding_count_by_build_target = HashMap::<i64, usize>::new();
+
+    for publish_target in publish_targets {
+        for binding in &publish_target.bindings {
+            let build_target = resolve_repository_project_publish_binding_build_target(
+                binding,
+                build_targets_by_id,
+                build_targets_by_name,
+            )?;
+
+            if !binding.enabled {
+                continue;
+            }
+
+            if classify_publish_binding_consumption(
+                publish_target.kind.as_str(),
+                binding.options_json.as_str(),
+            )? != PublishBindingConsumption::Consuming
+            {
+                continue;
+            }
+
+            let count = consuming_binding_count_by_build_target
+                .entry(build_target.id)
+                .or_default();
+            *count += 1;
+            if *count > 1 {
+                return Err(invalid_input_error(format!(
+                    "build target {:?} cannot enable more than one consuming publish binding",
+                    build_target.name
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_repository_project_publish_binding_build_target<'a>(
+    binding: &UpdateRepositoryProjectPublishBindingInput,
+    build_targets_by_id: &'a HashMap<i64, ActiveRepositoryProjectBuildTarget>,
+    build_targets_by_name: &'a HashMap<String, ActiveRepositoryProjectBuildTarget>,
+) -> io::Result<&'a ActiveRepositoryProjectBuildTarget> {
+    if let Some(build_target_id) = binding.build_target_id {
+        let Some(build_target) = build_targets_by_id.get(&build_target_id) else {
+            return Err(not_found_error(format!(
+                "publish binding build target {build_target_id} was not found for this repository project"
+            )));
+        };
+
+        if !build_target
+            .name
+            .eq_ignore_ascii_case(binding.build_target_name.as_str())
+        {
+            return Err(invalid_input_error(format!(
+                "publish binding build target {:?} does not match build target {build_target_id}",
+                binding.build_target_name
+            )));
+        }
+
+        return Ok(build_target);
+    }
+
+    let normalized_name = binding.build_target_name.to_ascii_lowercase();
+    build_targets_by_name.get(&normalized_name).ok_or_else(|| {
+        not_found_error(format!(
+            "publish binding build target {:?} was not found for this repository project",
+            binding.build_target_name
+        ))
+    })
+}
+
+fn list_active_repository_project_build_targets(
+    connection: &Connection,
+    repository_id: i64,
+) -> io::Result<Vec<ActiveRepositoryProjectBuildTarget>> {
+    Ok(list_repository_project_build_targets(connection, repository_id)?
+        .into_iter()
+        .filter(|target| target.enabled)
+        .map(|target| ActiveRepositoryProjectBuildTarget {
+            id: target.id,
+            name: target.name,
+        })
+        .collect())
+}
+
+fn list_repository_project_publish_targets(
+    connection: &Connection,
+    repository_id: i64,
+) -> io::Result<Vec<ExistingRepositoryProjectPublishTarget>> {
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT id, name, enabled
+            FROM publish_targets
+            WHERE repository_id = ?
+            ORDER BY id
+            ",
+        )
+        .map_err(sqlite_error)?;
+    let rows = statement
+        .query_map([repository_id], |row| {
+            Ok(ExistingRepositoryProjectPublishTarget {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                enabled: row.get::<_, i64>(2)? != 0,
+            })
+        })
+        .map_err(sqlite_error)?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(sqlite_error)
+}
+
+fn temporary_repository_project_publish_target_name(publish_target_id: i64) -> String {
+    format!("__hgp_publish_target_update_{publish_target_id}")
+}
+
+fn rename_repository_project_publish_target(
+    transaction: &Transaction<'_>,
+    publish_target_id: i64,
+    name: &str,
+) -> io::Result<()> {
+    let updated = transaction
+        .execute(
+            "
+            UPDATE publish_targets
+            SET name = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ",
+            params![name.trim(), publish_target_id],
+        )
+        .map_err(sqlite_error)?;
+    if updated == 0 {
+        return Err(not_found_error(format!(
+            "publish target {publish_target_id} was not found"
+        )));
+    }
+
+    Ok(())
+}
+
+fn create_repository_project_publish_target(
+    transaction: &Transaction<'_>,
+    repository_id: i64,
+    target: &UpdateRepositoryProjectPublishTargetInput,
+) -> io::Result<i64> {
+    validate_repository_project_publish_target_credentials_binding(
+        transaction,
+        target.credentials_id,
+        target.kind.as_str(),
+    )?;
+
+    transaction
+        .execute(
+            "
+            INSERT INTO publish_targets (
+                repository_id,
+                name,
+                kind,
+                credentials_id,
+                enabled,
+                config_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ",
+            params![
+                repository_id,
+                target.name.as_str(),
+                target.kind.as_str(),
+                target.credentials_id,
+                target.enabled,
+                target.config_json.as_str(),
+            ],
+        )
+        .map_err(sqlite_error)?;
+
+    Ok(transaction.last_insert_rowid())
+}
+
+fn update_repository_project_publish_target(
+    transaction: &Transaction<'_>,
+    publish_target_id: i64,
+    target: &UpdateRepositoryProjectPublishTargetInput,
+) -> io::Result<()> {
+    validate_repository_project_publish_target_credentials_binding(
+        transaction,
+        target.credentials_id,
+        target.kind.as_str(),
+    )?;
+
+    let updated = transaction
+        .execute(
+            "
+            UPDATE publish_targets
+            SET name = ?,
+                kind = ?,
+                credentials_id = ?,
+                enabled = ?,
+                config_json = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ",
+            params![
+                target.name.as_str(),
+                target.kind.as_str(),
+                target.credentials_id,
+                target.enabled,
+                target.config_json.as_str(),
+                publish_target_id,
+            ],
+        )
+        .map_err(sqlite_error)?;
+    if updated == 0 {
+        return Err(not_found_error(format!(
+            "publish target {publish_target_id} was not found"
+        )));
+    }
+
+    Ok(())
+}
+
+fn disable_repository_project_publish_target(
+    transaction: &Transaction<'_>,
+    publish_target_id: i64,
+) -> io::Result<()> {
+    let updated = transaction
+        .execute(
+            "
+            UPDATE publish_targets
+            SET enabled = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            ",
+            [publish_target_id],
+        )
+        .map_err(sqlite_error)?;
+    if updated == 0 {
+        return Err(not_found_error(format!(
+            "publish target {publish_target_id} was not found"
+        )));
+    }
+
+    Ok(())
+}
+
+fn delete_repository_project_publish_target(
+    transaction: &Transaction<'_>,
+    publish_target_id: i64,
+) -> io::Result<()> {
+    transaction
+        .execute("DELETE FROM publish_targets WHERE id = ?", [publish_target_id])
+        .map_err(sqlite_error)?;
+
+    Ok(())
+}
+
+fn publish_target_has_history(
+    transaction: &Transaction<'_>,
+    publish_target_id: i64,
+) -> io::Result<bool> {
+    let exists = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM publish_runs WHERE publish_target_id = ?)",
+            [publish_target_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(sqlite_error)?;
+
+    Ok(exists != 0)
+}
+
+fn sync_repository_project_publish_target_bindings(
+    transaction: &Transaction<'_>,
+    publish_target_id: i64,
+    bindings: &[UpdateRepositoryProjectPublishBindingInput],
+    build_targets_by_id: &HashMap<i64, ActiveRepositoryProjectBuildTarget>,
+    build_targets_by_name: &HashMap<String, ActiveRepositoryProjectBuildTarget>,
+) -> io::Result<()> {
+    let existing_bindings = list_repository_project_publish_target_bindings(
+        transaction,
+        publish_target_id,
+    )?;
+    let existing_by_build_target_id = existing_bindings
+        .iter()
+        .cloned()
+        .map(|binding| (binding.build_target_id, binding))
+        .collect::<HashMap<_, _>>();
+
+    let mut retained_build_target_ids = HashSet::new();
+    for binding in bindings {
+        let build_target = resolve_repository_project_publish_binding_build_target(
+            binding,
+            build_targets_by_id,
+            build_targets_by_name,
+        )?;
+
+        if !retained_build_target_ids.insert(build_target.id) {
+            return Err(invalid_input_error(format!(
+                "publish target {publish_target_id} cannot bind build target {:?} more than once",
+                build_target.name
+            )));
+        }
+
+        if existing_by_build_target_id.contains_key(&build_target.id) {
+            update_repository_project_publish_target_binding(
+                transaction,
+                publish_target_id,
+                build_target.id,
+                binding,
+            )?;
+        } else {
+            create_repository_project_publish_target_binding(
+                transaction,
+                publish_target_id,
+                build_target.id,
+                binding,
+            )?;
+        }
+    }
+
+    for existing_binding in existing_bindings {
+        if retained_build_target_ids.contains(&existing_binding.build_target_id) {
+            continue;
+        }
+
+        delete_repository_project_publish_target_binding(
+            transaction,
+            publish_target_id,
+            existing_binding.build_target_id,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn list_repository_project_publish_target_bindings(
+    connection: &Connection,
+    publish_target_id: i64,
+) -> io::Result<Vec<ExistingRepositoryProjectPublishBinding>> {
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT build_target_id
+            FROM build_publish_bindings
+            WHERE publish_target_id = ?
+            ORDER BY build_target_id ASC
+            ",
+        )
+        .map_err(sqlite_error)?;
+    let rows = statement
+        .query_map([publish_target_id], |row| {
+            Ok(ExistingRepositoryProjectPublishBinding {
+                build_target_id: row.get(0)?,
+            })
+        })
+        .map_err(sqlite_error)?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(sqlite_error)
+}
+
+fn create_repository_project_publish_target_binding(
+    transaction: &Transaction<'_>,
+    publish_target_id: i64,
+    build_target_id: i64,
+    binding: &UpdateRepositoryProjectPublishBindingInput,
+) -> io::Result<()> {
+    transaction
+        .execute(
+            "
+            INSERT INTO build_publish_bindings (
+                build_target_id,
+                publish_target_id,
+                enabled,
+                options_json
+            )
+            VALUES (?, ?, ?, ?)
+            ",
+            params![
+                build_target_id,
+                publish_target_id,
+                binding.enabled,
+                binding.options_json.as_str(),
+            ],
+        )
+        .map_err(sqlite_error)?;
+
+    Ok(())
+}
+
+fn update_repository_project_publish_target_binding(
+    transaction: &Transaction<'_>,
+    publish_target_id: i64,
+    build_target_id: i64,
+    binding: &UpdateRepositoryProjectPublishBindingInput,
+) -> io::Result<()> {
+    let updated = transaction
+        .execute(
+            "
+            UPDATE build_publish_bindings
+            SET enabled = ?,
+                options_json = ?
+            WHERE build_target_id = ?
+              AND publish_target_id = ?
+            ",
+            params![
+                binding.enabled,
+                binding.options_json.as_str(),
+                build_target_id,
+                publish_target_id,
+            ],
+        )
+        .map_err(sqlite_error)?;
+    if updated == 0 {
+        return Err(not_found_error(format!(
+            "publish binding for build target {build_target_id} and publish target {publish_target_id} was not found"
+        )));
+    }
+
+    Ok(())
+}
+
+fn delete_repository_project_publish_target_binding(
+    transaction: &Transaction<'_>,
+    publish_target_id: i64,
+    build_target_id: i64,
+) -> io::Result<()> {
+    transaction
+        .execute(
+            "
+            DELETE FROM build_publish_bindings
+            WHERE build_target_id = ?
+              AND publish_target_id = ?
+            ",
+            params![build_target_id, publish_target_id],
+        )
+        .map_err(sqlite_error)?;
+
+    Ok(())
+}
+
+fn delete_repository_project_publish_target_bindings(
+    transaction: &Transaction<'_>,
+    publish_target_id: i64,
+) -> io::Result<()> {
+    transaction
+        .execute(
+            "DELETE FROM build_publish_bindings WHERE publish_target_id = ?",
+            [publish_target_id],
+        )
+        .map_err(sqlite_error)?;
 
     Ok(())
 }
@@ -5989,10 +6610,11 @@ fn terminate_orphan_build_process_root(pid: u32) -> io::Result<()> {
 pub fn open_connection(database_path: &Path) -> io::Result<Connection> {
     let connection = Connection::open(database_path).map_err(sqlite_error)?;
     apply_pragmas(&connection)?;
+
     Ok(connection)
 }
 
-/// Lists one paginated release-level process feed for the desktop home view.
+/// Lists one operator-facing page from the process feed.
 pub fn list_process_feed_page(
     storage: &StorageLayout,
     page: u32,
@@ -6238,6 +6860,58 @@ pub fn list_artifact_inspection_records(
         .map_err(sqlite_error)?;
     let rows = statement
         .query_map([], scan_artifact_inspection_record)
+        .map_err(sqlite_error)?;
+
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row.map_err(sqlite_error)?);
+    }
+
+    drop(statement);
+
+    for record in &mut records {
+        record.publish_runs =
+            list_artifact_publish_runs_with_connection(&connection, record.artifact_id)?;
+    }
+
+    Ok(records)
+}
+
+fn list_artifact_publish_runs_with_connection(
+    connection: &Connection,
+    artifact_id: i64,
+) -> io::Result<Vec<ArtifactPublishRunRecord>> {
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT pr.id,
+                   pr.publish_target_id,
+                   pt.name,
+                   pt.kind,
+                   pr.status,
+                   pr.destination_ref,
+                   pr.created_at,
+                   pr.updated_at
+            FROM publish_runs pr
+            JOIN publish_targets pt ON pt.id = pr.publish_target_id
+            WHERE pr.artifact_id = ?
+            ORDER BY pr.id ASC
+            ",
+        )
+        .map_err(sqlite_error)?;
+    let rows = statement
+        .query_map([artifact_id], |row| {
+            Ok(ArtifactPublishRunRecord {
+                publish_run_id: row.get(0)?,
+                publish_target_id: row.get(1)?,
+                publish_target_name: row.get::<_, String>(2)?.trim().to_owned(),
+                publish_target_kind: row.get::<_, String>(3)?.trim().to_owned(),
+                status: row.get::<_, String>(4)?.trim().to_owned(),
+                destination_ref: normalize_optional_string(row.get(5)?),
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })
         .map_err(sqlite_error)?;
 
     let mut records = Vec::new();
@@ -6585,7 +7259,7 @@ fn resolve_migration_sql(
             if table_has_column(connection, "build_targets", "contract_json")? {
                 Ok(Cow::Borrowed(MIGRATION_NO_OP_SQL))
             } else {
-                Ok(Cow::Borrowed(LEGACY_BUILD_TARGET_CONTRACT_MIGRATION_SQL))
+                Err(unsupported_pre_contract_build_target_schema(migration.name))
             }
         }
         "0010_engine_contract_model.sql" => {
@@ -6594,12 +7268,15 @@ fn resolve_migration_sql(
             let repositories_have_engine_kind =
                 table_has_column(connection, "repositories", "engine_kind")?;
 
-            Ok(match (build_targets_have_contract, repositories_have_engine_kind) {
-                (true, true) => Cow::Borrowed(MIGRATION_NO_OP_SQL),
-                (true, false) => Cow::Borrowed(ENGINE_KIND_ONLY_MIGRATION_SQL),
-                (false, true) => Cow::Borrowed(LEGACY_BUILD_TARGET_CONTRACT_MIGRATION_SQL),
-                (false, false) => Cow::Borrowed(migration.sql),
-            })
+            if !build_targets_have_contract {
+                return Err(unsupported_pre_contract_build_target_schema(migration.name));
+            }
+
+            if repositories_have_engine_kind {
+                Ok(Cow::Borrowed(MIGRATION_NO_OP_SQL))
+            } else {
+                Ok(Cow::Borrowed(migration.sql))
+            }
         }
         "0011_runtime_engine_version.sql" => {
             let release_runs_have_engine_version =
@@ -6627,6 +7304,15 @@ fn resolve_migration_sql(
         }
         _ => Ok(Cow::Borrowed(migration.sql)),
     }
+}
+
+fn unsupported_pre_contract_build_target_schema(migration_name: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "unsupported pre-contract build target schema during migration {migration_name}; reset the local runtime state before starting HGP"
+        ),
+    )
 }
 
 fn table_has_column(connection: &Connection, table_name: &str, column_name: &str) -> io::Result<bool> {
@@ -8247,6 +8933,7 @@ fn scan_artifact_inspection_record(
         succeeded_publish_runs: row.get(26)?,
         failed_publish_runs: row.get(27)?,
         canceled_publish_runs: row.get(28)?,
+        publish_runs: Vec::new(),
         created_at: row.get(29)?,
     })
 }
@@ -8581,8 +9268,8 @@ fn scan_publish_execution_plan(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<PublishExecutionPlan> {
     let execution_contract_json = row.get::<_, String>(10)?;
-    let publish_target_credentials_id =
-        scan_publish_target_credentials_id(execution_contract_json.as_str()).map_err(|error| {
+    let target_snapshot =
+        scan_publish_execution_target_snapshot(execution_contract_json.as_str()).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 10,
                 rusqlite::types::Type::Text,
@@ -8687,10 +9374,26 @@ fn scan_publish_execution_plan(
         git_tag: row.get::<_, String>(4)?.trim().to_owned(),
         build_run_id: row.get(5)?,
         publish_target_id: row.get(6)?,
-        publish_target_name: row.get::<_, String>(7)?.trim().to_owned(),
-        publish_target_kind: row.get::<_, String>(8)?.trim().to_owned(),
-        publish_target_config_json: row.get(9)?,
-        publish_target_credentials_id,
+        publish_target_name: if target_snapshot.publish_target_name.trim().is_empty() {
+            row.get::<_, String>(7)?.trim().to_owned()
+        } else {
+            target_snapshot.publish_target_name.trim().to_owned()
+        },
+        publish_target_kind: if target_snapshot.publish_target_kind.trim().is_empty() {
+            row.get::<_, String>(8)?.trim().to_owned()
+        } else {
+            target_snapshot.publish_target_kind.trim().to_owned()
+        },
+        publish_target_config_json: if target_snapshot
+            .publish_target_config_json
+            .trim()
+            .is_empty()
+        {
+            row.get(9)?
+        } else {
+            target_snapshot.publish_target_config_json.clone()
+        },
+        publish_target_credentials_id: target_snapshot.publish_target_credentials_id,
         execution_contract_json,
         status: row.get(11)?,
         artifact_id,
@@ -8704,17 +9407,29 @@ fn scan_publish_execution_plan(
     })
 }
 
-fn scan_publish_target_credentials_id(execution_contract_json: &str) -> io::Result<Option<i64>> {
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+struct PublishExecutionTargetSnapshot {
+    #[serde(default)]
+    publish_target_name: String,
+    #[serde(default)]
+    publish_target_kind: String,
+    #[serde(default)]
+    publish_target_config_json: String,
+    #[serde(default)]
+    publish_target_credentials_id: Option<i64>,
+}
+
+fn scan_publish_execution_target_snapshot(
+    execution_contract_json: &str,
+) -> io::Result<PublishExecutionTargetSnapshot> {
     let trimmed = execution_contract_json.trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return Ok(PublishExecutionTargetSnapshot::default());
     }
 
-    let parsed = serde_json::from_str::<serde_json::Value>(trimmed)
+    let parsed = serde_json::from_str::<PublishExecutionTargetSnapshot>(trimmed)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    Ok(parsed
-        .get("publish_target_credentials_id")
-        .and_then(serde_json::Value::as_i64))
+    Ok(parsed)
 }
 
 fn scan_artifact_active_location_columns(
@@ -9048,6 +9763,22 @@ fn normalize_create_repository_project_input(
         build_targets.push(normalized);
     }
 
+    let mut publish_target_names = HashSet::new();
+    let mut publish_targets = Vec::with_capacity(input.publish_targets.len());
+    for target in input.publish_targets {
+        let normalized = normalize_create_repository_project_publish_target_input(
+            target,
+            &build_target_names,
+        )?;
+        let duplicate_key = normalized.name.to_ascii_lowercase();
+        if !publish_target_names.insert(duplicate_key) {
+            return Err(invalid_input_error(
+                "repository project publish target names must be unique",
+            ));
+        }
+        publish_targets.push(normalized);
+    }
+
     Ok(CreateRepositoryProjectInput {
         name,
         engine_kind,
@@ -9059,6 +9790,7 @@ fn normalize_create_repository_project_input(
         polling_interval_seconds: input.polling_interval_seconds,
         enabled: input.enabled,
         build_targets,
+        publish_targets,
     })
 }
 
@@ -9110,6 +9842,32 @@ fn normalize_update_repository_project_input(
         build_targets.push(normalized);
     }
 
+    let build_target_names_by_id = build_targets
+        .iter()
+        .filter_map(|target| {
+            target
+                .build_target_id
+                .map(|build_target_id| (build_target_id, target.name.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut publish_target_names = HashSet::new();
+    let mut publish_targets = Vec::with_capacity(input.publish_targets.len());
+    for target in input.publish_targets {
+        let normalized = normalize_update_repository_project_publish_target_input(
+            target,
+            &build_target_ids,
+            &build_target_names,
+            &build_target_names_by_id,
+        )?;
+        let duplicate_key = normalized.name.to_ascii_lowercase();
+        if !publish_target_names.insert(duplicate_key) {
+            return Err(invalid_input_error(
+                "repository project publish target names must be unique",
+            ));
+        }
+        publish_targets.push(normalized);
+    }
+
     Ok(UpdateRepositoryProjectInput {
         repository_id: input.repository_id,
         name,
@@ -9121,6 +9879,7 @@ fn normalize_update_repository_project_input(
         polling_interval_seconds: input.polling_interval_seconds,
         enabled: input.enabled,
         build_targets,
+        publish_targets,
     })
 }
 
@@ -9175,6 +9934,82 @@ fn normalize_create_repository_project_build_target_input(
     })
 }
 
+fn normalize_create_repository_project_publish_target_input(
+    input: CreateRepositoryProjectPublishTargetInput,
+    build_target_names: &HashSet<String>,
+) -> io::Result<CreateRepositoryProjectPublishTargetInput> {
+    if let Some(credentials_id) = input.credentials_id {
+        require_positive_identifier(credentials_id, "repository project publish target credentials id")?;
+    }
+
+    let name = require_non_empty(&input.name, "repository project publish target name")?;
+    let kind = normalize_repository_project_publish_target_kind(&input.kind)?;
+    let config_json = normalize_required_object_json_string(
+        &input.config_json,
+        "repository project publish target config_json",
+    )?;
+    validate_repository_project_publish_target_config(kind.as_str(), config_json.as_str())?;
+
+    let mut claimed_build_targets = HashSet::new();
+    let mut bindings = Vec::with_capacity(input.bindings.len());
+    for binding in input.bindings {
+        let normalized = normalize_create_repository_project_publish_binding_input(
+            binding,
+            kind.as_str(),
+            build_target_names,
+        )?;
+        let duplicate_key = normalized.build_target_name.to_ascii_lowercase();
+        if !claimed_build_targets.insert(duplicate_key) {
+            return Err(invalid_input_error(format!(
+                "repository project publish target {:?} cannot bind the same build target more than once",
+                name
+            )));
+        }
+        bindings.push(normalized);
+    }
+
+    Ok(CreateRepositoryProjectPublishTargetInput {
+        name,
+        kind,
+        enabled: input.enabled,
+        config_json,
+        credentials_id: input.credentials_id,
+        bindings,
+    })
+}
+
+fn normalize_create_repository_project_publish_binding_input(
+    input: CreateRepositoryProjectPublishBindingInput,
+    publish_target_kind: &str,
+    build_target_names: &HashSet<String>,
+) -> io::Result<CreateRepositoryProjectPublishBindingInput> {
+    let build_target_name = require_non_empty(
+        &input.build_target_name,
+        "repository project publish binding build_target_name",
+    )?;
+    if !build_target_names.contains(&build_target_name.to_ascii_lowercase()) {
+        return Err(not_found_error(format!(
+            "repository project publish binding build target {:?} was not declared by this project",
+            build_target_name
+        )));
+    }
+
+    let options_json = normalize_required_object_json_string(
+        &input.options_json,
+        "repository project publish binding options_json",
+    )?;
+    validate_repository_project_publish_binding_options(
+        publish_target_kind,
+        options_json.as_str(),
+    )?;
+
+    Ok(CreateRepositoryProjectPublishBindingInput {
+        build_target_name,
+        enabled: input.enabled,
+        options_json,
+    })
+}
+
 fn normalize_update_repository_project_build_target_input(
     input: UpdateRepositoryProjectBuildTargetInput,
     engine_kind: &str,
@@ -9210,6 +10045,266 @@ fn normalize_update_repository_project_build_target_input(
         contract_json: normalized_target.contract_json,
         runner_config_json: normalized_target.runner_config_json,
     })
+}
+
+fn normalize_update_repository_project_publish_target_input(
+    input: UpdateRepositoryProjectPublishTargetInput,
+    build_target_ids: &HashSet<i64>,
+    build_target_names: &HashSet<String>,
+    build_target_names_by_id: &HashMap<i64, String>,
+) -> io::Result<UpdateRepositoryProjectPublishTargetInput> {
+    if let Some(publish_target_id) = input.publish_target_id {
+        require_positive_identifier(publish_target_id, "repository project publish target id")?;
+    }
+    if let Some(credentials_id) = input.credentials_id {
+        require_positive_identifier(credentials_id, "repository project publish target credentials id")?;
+    }
+
+    let name = require_non_empty(&input.name, "repository project publish target name")?;
+    let kind = normalize_repository_project_publish_target_kind(&input.kind)?;
+    let config_json = normalize_required_object_json_string(
+        &input.config_json,
+        "repository project publish target config_json",
+    )?;
+    validate_repository_project_publish_target_config(kind.as_str(), config_json.as_str())?;
+
+    let mut claimed_build_targets = HashSet::new();
+    let mut bindings = Vec::with_capacity(input.bindings.len());
+    for binding in input.bindings {
+        let normalized = normalize_update_repository_project_publish_binding_input(
+            binding,
+            kind.as_str(),
+            build_target_ids,
+            build_target_names,
+            build_target_names_by_id,
+        )?;
+        let duplicate_key = normalized
+            .build_target_id
+            .map(|build_target_id| format!("id:{build_target_id}"))
+            .unwrap_or_else(|| normalized.build_target_name.to_ascii_lowercase());
+        if !claimed_build_targets.insert(duplicate_key) {
+            return Err(invalid_input_error(format!(
+                "repository project publish target {:?} cannot bind the same build target more than once",
+                name
+            )));
+        }
+        bindings.push(normalized);
+    }
+
+    Ok(UpdateRepositoryProjectPublishTargetInput {
+        publish_target_id: input.publish_target_id,
+        name,
+        kind,
+        enabled: input.enabled,
+        config_json,
+        credentials_id: input.credentials_id,
+        bindings,
+    })
+}
+
+fn normalize_update_repository_project_publish_binding_input(
+    input: UpdateRepositoryProjectPublishBindingInput,
+    publish_target_kind: &str,
+    build_target_ids: &HashSet<i64>,
+    build_target_names: &HashSet<String>,
+    build_target_names_by_id: &HashMap<i64, String>,
+) -> io::Result<UpdateRepositoryProjectPublishBindingInput> {
+    if let Some(build_target_id) = input.build_target_id {
+        require_positive_identifier(build_target_id, "repository project publish binding build_target_id")?;
+        if !build_target_ids.contains(&build_target_id) {
+            return Err(not_found_error(format!(
+                "repository project publish binding build target {build_target_id} was not declared by this project"
+            )));
+        }
+    }
+
+    let build_target_name = require_non_empty(
+        &input.build_target_name,
+        "repository project publish binding build_target_name",
+    )?;
+    if let Some(build_target_id) = input.build_target_id {
+        if let Some(expected_name) = build_target_names_by_id.get(&build_target_id) {
+            if !expected_name.eq_ignore_ascii_case(build_target_name.as_str()) {
+                return Err(invalid_input_error(format!(
+                    "repository project publish binding build target {:?} does not match build target {build_target_id}",
+                    build_target_name
+                )));
+            }
+        }
+    } else if !build_target_names.contains(&build_target_name.to_ascii_lowercase()) {
+        return Err(not_found_error(format!(
+            "repository project publish binding build target {:?} was not declared by this project",
+            build_target_name
+        )));
+    }
+
+    let options_json = normalize_required_object_json_string(
+        &input.options_json,
+        "repository project publish binding options_json",
+    )?;
+    validate_repository_project_publish_binding_options(
+        publish_target_kind,
+        options_json.as_str(),
+    )?;
+
+    Ok(UpdateRepositoryProjectPublishBindingInput {
+        build_target_id: input.build_target_id,
+        build_target_name,
+        enabled: input.enabled,
+        options_json,
+    })
+}
+
+fn normalize_repository_project_publish_target_kind(kind: &str) -> io::Result<String> {
+    let normalized = require_non_empty(kind, "repository project publish target kind")?
+        .to_ascii_lowercase();
+    if normalized == "filesystem" || normalized == "itch" {
+        return Ok(normalized);
+    }
+
+    Err(invalid_input_error(format!(
+        "repository project publish target kind {:?} is not supported",
+        normalized
+    )))
+}
+
+fn validate_repository_project_publish_target_config(
+    publish_target_kind: &str,
+    config_json: &str,
+) -> io::Result<()> {
+    let parsed = serde_json::from_str::<serde_json::Value>(config_json)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    let object = parsed.as_object().ok_or_else(|| {
+        invalid_input_error("repository project publish target config_json must decode to a JSON object")
+    })?;
+
+    match publish_target_kind.trim() {
+        "filesystem" => {
+            if !object.is_empty() {
+                return Err(invalid_input_error(
+                    "filesystem publish target config_json must be an empty JSON object in the current slice",
+                ));
+            }
+            Ok(())
+        }
+        "itch" => {
+            require_json_object_string_field(
+                object,
+                "account_name",
+                "itch publish target config_json account_name",
+            )?;
+            require_json_object_string_field(
+                object,
+                "game_slug",
+                "itch publish target config_json game_slug",
+            )?;
+            if let Some(butler_path) = object.get("butler_path").and_then(serde_json::Value::as_str) {
+                require_non_empty(butler_path, "itch publish target config_json butler_path")?;
+            }
+            Ok(())
+        }
+        _ => Err(invalid_input_error(format!(
+            "repository project publish target kind {:?} is not supported",
+            publish_target_kind
+        ))),
+    }
+}
+
+fn validate_repository_project_publish_binding_options(
+    publish_target_kind: &str,
+    options_json: &str,
+) -> io::Result<()> {
+    let parsed = serde_json::from_str::<serde_json::Value>(options_json)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    let object = parsed.as_object().ok_or_else(|| {
+        invalid_input_error("repository project publish binding options_json must decode to a JSON object")
+    })?;
+
+    match publish_target_kind.trim() {
+        "filesystem" => {
+            let operation = require_json_object_string_field(
+                object,
+                "operation",
+                "filesystem publish binding operation",
+            )?;
+            if !operation.eq_ignore_ascii_case("move") {
+                return Err(invalid_input_error(
+                    "filesystem publish bindings only support the move operation in the current slice",
+                ));
+            }
+            let directory_path = require_json_object_string_field(
+                object,
+                "directory_path",
+                "filesystem publish binding directory_path",
+            )?;
+            if !Path::new(directory_path.as_str()).is_absolute() {
+                return Err(invalid_input_error(
+                    "filesystem publish binding directory_path must be an absolute path",
+                ));
+            }
+            Ok(())
+        }
+        "itch" => {
+            let channel = require_json_object_string_field(
+                object,
+                "channel",
+                "itch publish binding channel",
+            )?;
+            if channel.contains(':') {
+                return Err(invalid_input_error(
+                    "itch publish binding channel must not contain ':'",
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(invalid_input_error(format!(
+            "repository project publish target kind {:?} is not supported",
+            publish_target_kind
+        ))),
+    }
+}
+
+fn require_json_object_string_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field_name: &str,
+    label: &str,
+) -> io::Result<String> {
+    let value = object
+        .get(field_name)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_input_error(format!("{label} is required")))?;
+
+    require_non_empty(value, label)
+}
+
+fn validate_repository_project_publish_target_credentials_binding(
+    connection: &Connection,
+    credentials_id: Option<i64>,
+    publish_target_kind: &str,
+) -> io::Result<()> {
+    validate_optional_credentials_binding(connection, credentials_id)?;
+    let Some(credentials_id) = credentials_id else {
+        return Ok(());
+    };
+
+    if !publish_target_kind.trim().eq_ignore_ascii_case("itch") {
+        return Ok(());
+    }
+
+    let credentials_kind = connection
+        .query_row(
+            "SELECT kind FROM credentials WHERE id = ?",
+            [credentials_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(sqlite_error)?;
+    if credentials_kind.trim() != KIND_ITCH_API_KEY {
+        return Err(invalid_input_error(format!(
+            "itch publish targets require credentials kind {KIND_ITCH_API_KEY:?}"
+        )));
+    }
+
+    Ok(())
 }
 
 fn normalize_credential_config_json(config_json: &str) -> io::Result<String> {
@@ -9829,6 +10924,8 @@ mod tests {
                 "0009_build_target_runner_model_cleanup.sql",
                 "0010_engine_contract_model.sql",
                 "0011_runtime_engine_version.sql",
+                "0012_repository_auth_state.sql",
+                "0013_publish_destination_execution_contract.sql",
             ]
         );
 
@@ -10023,6 +11120,7 @@ mod tests {
                         ),
                     },
                 ],
+                publish_targets: Vec::new(),
             })
             .expect("repository project should persist");
 
@@ -10204,6 +11302,7 @@ mod tests {
                         r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
                     ),
                 }],
+                publish_targets: Vec::new(),
             })
             .expect("repository project should persist");
 
@@ -10239,6 +11338,7 @@ mod tests {
                         r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
                     ),
                 }],
+                publish_targets: Vec::new(),
             })
             .expect("repository project should update");
 
@@ -10375,6 +11475,7 @@ mod tests {
                         r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
                     ),
                 }],
+                publish_targets: Vec::new(),
             })
             .expect("repository project should persist");
 
@@ -10522,6 +11623,7 @@ mod tests {
                         r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
                     ),
                 }],
+                publish_targets: Vec::new(),
             })
             .expect("repository project should persist");
 
@@ -10642,6 +11744,7 @@ mod tests {
                         ),
                     },
                 ],
+                publish_targets: Vec::new(),
             })
             .expect("repository project should persist");
 
@@ -10715,6 +11818,7 @@ mod tests {
                         ),
                     },
                 ],
+                publish_targets: Vec::new(),
             })
             .expect("repository project should sync build targets");
 
@@ -10869,7 +11973,7 @@ mod tests {
                 params![
                     serde_json::json!({
                         "unity": {
-                            "targetPlatform": "windows",
+                            "targetPlatform": "StandaloneWindows64",
                             "buildMethod": "CI.Build.Perform",
                             "editorVersion": ""
                         }
@@ -10899,7 +12003,7 @@ mod tests {
                 repository_id: fixture.repository_id,
                 repository_name: String::from("runtime-settings"),
                 name: String::from("runtime-settings-windows"),
-                unity_target_platform: String::from("windows"),
+                unity_target_platform: String::from("StandaloneWindows64"),
                 runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
                 unity_build_method: Some(String::from("CI.Build.Perform")),
                 enabled: true,
@@ -10912,7 +12016,7 @@ mod tests {
         assert_eq!(targets[1].repository_id, fixture.repository_id);
         assert_eq!(targets[1].repository_name, "runtime-settings");
         assert_eq!(targets[1].name, "runtime-settings-linux");
-        assert_eq!(targets[1].unity_target_platform, "linux");
+        assert_eq!(targets[1].unity_target_platform, "StandaloneLinux64");
         assert_eq!(targets[1].runner_type, DEFAULT_HOST_NATIVE_RUNNER_TYPE);
         assert_eq!(
             targets[1].unity_build_method.as_deref(),
@@ -10961,7 +12065,7 @@ mod tests {
                 params![
                     serde_json::json!({
                         "unity": {
-                            "targetPlatform": "windows",
+                            "targetPlatform": "StandaloneWindows64",
                             "buildMethod": "CI.Build.Perform",
                             "editorVersion": ""
                         }
@@ -11259,7 +12363,7 @@ mod tests {
                 params![
                     serde_json::json!({
                         "unity": {
-                            "targetPlatform": "windows",
+                            "targetPlatform": "StandaloneWindows64",
                             "buildMethod": "CI.Build.Perform",
                             "editorVersion": ""
                         }
@@ -11299,12 +12403,14 @@ mod tests {
                 UPDATE artifacts
                 SET kind = ?,
                     path = ?,
+                    active_location_ref = ?,
                     size_bytes = ?,
                     checksum_sha256 = ?
                 WHERE id = ?
                 ",
                 params![
                     "archive",
+                    "builds/windows/artifact-inspection.zip",
                     "builds/windows/artifact-inspection.zip",
                     4096_i64,
                     "abc123",
@@ -11360,7 +12466,7 @@ mod tests {
         assert_eq!(record.git_commit.as_deref(), Some("facefeed"));
         assert_eq!(record.build_target_id, fixture.primary_build_target_id);
         assert_eq!(record.build_target_name, "artifact-inspection-windows");
-        assert_eq!(record.unity_target_platform, "windows");
+        assert_eq!(record.unity_target_platform, "StandaloneWindows64");
         assert_eq!(record.runner_type, DEFAULT_HOST_NATIVE_RUNNER_TYPE);
         assert_eq!(record.build_status, BuildStatus::Succeeded.as_str());
         assert_eq!(record.artifact_name, "artifact-inspection.zip");
@@ -11373,6 +12479,11 @@ mod tests {
             record.artifact_root_path.as_deref(),
             Some("C:/artifacts/artifact-inspection")
         );
+        assert_eq!(record.artifact_active_location_kind, "runtime_artifact");
+        assert_eq!(
+            record.artifact_active_location_ref,
+            "builds/windows/artifact-inspection.zip"
+        );
         assert_eq!(record.size_bytes, Some(4096));
         assert_eq!(record.checksum_sha256.as_deref(), Some("abc123"));
         assert_eq!(record.publish_run_count, 2);
@@ -11381,6 +12492,20 @@ mod tests {
         assert_eq!(record.succeeded_publish_runs, 1);
         assert_eq!(record.failed_publish_runs, 0);
         assert_eq!(record.canceled_publish_runs, 0);
+        assert_eq!(record.publish_runs.len(), 2);
+        assert_eq!(record.publish_runs[0].status, PublishStatus::Queued.as_str());
+        assert_eq!(record.publish_runs[0].publish_target_id, fixture.publish_target_id);
+        assert_eq!(record.publish_runs[0].publish_target_kind, "filesystem");
+        assert_eq!(
+            record.publish_runs[0].publish_target_name,
+            "artifact-inspection-publish"
+        );
+        assert_eq!(record.publish_runs[0].destination_ref, None);
+        assert_eq!(record.publish_runs[1].status, PublishStatus::Succeeded.as_str());
+        assert_eq!(
+            record.publish_runs[1].destination_ref.as_deref(),
+            Some("releases/windows/artifact-inspection.zip")
+        );
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -11777,7 +12902,9 @@ mod tests {
                 "0008_build_run_stage_tracking.sql",
                 "0009_build_target_runner_model_cleanup.sql",
                 "0010_engine_contract_model.sql",
-                "0011_runtime_engine_version.sql"
+                "0011_runtime_engine_version.sql",
+                "0012_repository_auth_state.sql",
+                "0013_publish_destination_execution_contract.sql"
             ]
         );
 
@@ -12807,7 +13934,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_release_builds_prefers_contract_editor_version_over_legacy_override() {
+    fn plan_release_builds_prefers_contract_editor_version_over_release_engine_version() {
         let root = test_root("plan-release-builds-contract-editor-version");
         let directories = RuntimeDirectories::from_root(&root);
         let layout = StorageLayout::from_directories(&directories);
@@ -12827,7 +13954,7 @@ mod tests {
                     "player",
                     serde_json::json!({
                         "unity": {
-                            "targetPlatform": "windows",
+                            "targetPlatform": "StandaloneWindows64",
                             "buildMethod": "Builder.Perform",
                             "editorVersion": "6000.1.5f1"
                         }
@@ -12955,7 +14082,7 @@ mod tests {
                 build_kind: BuildKind::Player,
                 contract_json: serde_json::json!({
                     "unity": {
-                        "targetPlatform": "windows",
+                        "targetPlatform": "StandaloneWindows64",
                         "buildMethod": "CI.Build.Perform",
                         "editorVersion": ""
                     }
@@ -13514,7 +14641,7 @@ mod tests {
                     1,
                     serde_json::json!({
                         "unity": {
-                            "targetPlatform": "windows",
+                            "targetPlatform": "StandaloneWindows64",
                             "buildMethod": "Builder.BuildWindows",
                             "editorVersion": ""
                         }
@@ -13543,7 +14670,7 @@ mod tests {
                     "filesystem",
                     publish_credentials_id,
                     1,
-                    r#"{"root_path":"D:/exports"}"#,
+                    "{}",
                 ],
             )
             .expect("source publish target should insert");
@@ -13558,7 +14685,12 @@ mod tests {
                     options_json
                 ) VALUES (?, ?, ?, ?)
                 ",
-                params![build_target_id, publish_target_id, 1, "{}"],
+                params![
+                    build_target_id,
+                    publish_target_id,
+                    1,
+                    r#"{"operation":"move","directory_path":"D:/exports"}"#,
+                ],
             )
             .expect("source binding should insert");
         source
@@ -13861,7 +14993,11 @@ mod tests {
             .execute(
                 "UPDATE build_publish_bindings SET options_json = ? WHERE build_target_id = ? AND publish_target_id = ?",
                 params![
-                    serde_json::json!({"operation": "move"}).to_string(),
+                    serde_json::json!({
+                        "operation": "move",
+                        "directory_path": "D:/Published/Primary",
+                    })
+                    .to_string(),
                     repo.primary_build_target_id,
                     repo.publish_target_id,
                 ],
@@ -13928,7 +15064,11 @@ mod tests {
             .execute(
                 "UPDATE build_publish_bindings SET options_json = ? WHERE build_target_id = ? AND publish_target_id = ?",
                 params![
-                    serde_json::json!({"operation": "move"}).to_string(),
+                    serde_json::json!({
+                        "operation": "move",
+                        "directory_path": "D:/Published/Primary",
+                    })
+                    .to_string(),
                     repo.primary_build_target_id,
                     repo.publish_target_id,
                 ],
@@ -13951,7 +15091,11 @@ mod tests {
             .execute(
                 "UPDATE build_publish_bindings SET options_json = ? WHERE build_target_id = ? AND publish_target_id = ?",
                 params![
-                    serde_json::json!({"operation": "move"}).to_string(),
+                    serde_json::json!({
+                        "operation": "move",
+                        "directory_path": "E:/Published/Secondary",
+                    })
+                    .to_string(),
                     repo.primary_build_target_id,
                     second_publish_target_id,
                 ],
@@ -13992,16 +15136,6 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let repo = seed_repository_fixture(&connection, "publish-plan-repo");
-        connection
-            .execute(
-                "UPDATE publish_targets SET config_json = ? WHERE id = ?",
-                params![
-                    serde_json::json!({"root_path": root.join("published").display().to_string()})
-                        .to_string(),
-                    repo.publish_target_id,
-                ],
-            )
-            .expect("publish target config should update");
         let release_run_id = insert_release_run(&connection, repo.repository_id, "v9.0.0", "queued");
         let build_run_id = insert_build_run(
             &connection,
@@ -14203,7 +15337,11 @@ mod tests {
             .execute(
                 "UPDATE build_publish_bindings SET options_json = ? WHERE build_target_id = ? AND publish_target_id = ?",
                 params![
-                    serde_json::json!({"operation": "move"}).to_string(),
+                    serde_json::json!({
+                        "operation": "move",
+                        "directory_path": "D:/Published/Windows",
+                    })
+                    .to_string(),
                     repo.primary_build_target_id,
                     repo.publish_target_id,
                 ],
@@ -14232,10 +15370,81 @@ mod tests {
         assert_eq!(snapshot["publish_target_kind"], "filesystem");
         assert_eq!(
             snapshot["binding_options_json"],
-            serde_json::json!({"operation": "move"}).to_string()
+            serde_json::json!({
+                "operation": "move",
+                "directory_path": "D:/Published/Windows",
+            })
+            .to_string()
         );
         assert_eq!(snapshot["artifact_active_location_kind"], "runtime_artifact");
         assert_eq!(snapshot["artifact_active_location_ref"], "artifacts/game.zip");
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn get_publish_execution_plan_uses_snapshotted_target_metadata_after_destination_edit() {
+        let root = test_root("publish-run-snapshot-after-edit");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repo = seed_repository_fixture(&connection, "publish-snapshot-edit");
+        connection
+            .execute(
+                "UPDATE publish_targets SET name = ? WHERE id = ?",
+                params!["windows-original", repo.publish_target_id],
+            )
+            .expect("original publish target metadata should persist");
+        insert_build_publish_binding(
+            &connection,
+            repo.primary_build_target_id,
+            repo.publish_target_id,
+            true,
+        );
+        let release_run_id = insert_release_run(
+            &connection,
+            repo.repository_id,
+            "v1.2.4",
+            ReleaseStatus::Queued.as_str(),
+        );
+        let build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            repo.primary_build_target_id,
+            BuildStatus::Succeeded.as_str(),
+        );
+        connection
+            .execute(
+                "UPDATE build_runs SET artifact_root_path = ? WHERE id = ?",
+                params!["C:/artifacts/publish-snapshot-edit", build_run_id],
+            )
+            .expect("build artifact root should persist");
+        insert_artifact(&connection, build_run_id, "game.zip");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let publish_runs = coordinator
+            .plan_build_publish_runs(build_run_id)
+            .expect("publish planning should succeed");
+        assert_eq!(publish_runs.len(), 1);
+
+        let connection = open_connection(&layout.database_path).expect("connection should reopen");
+        connection
+            .execute(
+                "UPDATE publish_targets SET name = ? WHERE id = ?",
+                params!["windows-edited", repo.publish_target_id],
+            )
+            .expect("edited publish target metadata should persist");
+        drop(connection);
+
+        let plan = coordinator
+            .get_publish_execution_plan(publish_runs[0].id)
+            .expect("publish execution plan should load");
+        assert_eq!(plan.publish_target_name, "windows-original");
+        assert_eq!(plan.publish_target_kind, "filesystem");
+        assert_eq!(plan.publish_target_config_json, "{}");
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -15183,7 +16392,7 @@ mod tests {
                     "player",
                     serde_json::json!({
                         "unity": {
-                            "targetPlatform": "windows",
+                            "targetPlatform": "StandaloneWindows64",
                             "buildMethod": "Builder.Perform",
                             "editorVersion": ""
                         }
@@ -15210,7 +16419,7 @@ mod tests {
                     "player",
                     serde_json::json!({
                         "unity": {
-                            "targetPlatform": "linux",
+                            "targetPlatform": "StandaloneLinux64",
                             "buildMethod": "Builder.Perform",
                             "editorVersion": ""
                         }
@@ -15265,7 +16474,7 @@ mod tests {
                     "player",
                     serde_json::json!({
                         "unity": {
-                            "targetPlatform": "windows",
+                            "targetPlatform": "StandaloneWindows64",
                             "buildMethod": "CI.Build.Perform",
                             "editorVersion": ""
                         }
@@ -15796,7 +17005,7 @@ mod tests {
                     "player",
                     serde_json::json!({
                         "unity": {
-                            "targetPlatform": "windows",
+                            "targetPlatform": "StandaloneWindows64",
                             "buildMethod": "Builder.Perform",
                             "editorVersion": ""
                         }

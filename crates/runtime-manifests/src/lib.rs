@@ -2049,13 +2049,13 @@ mod tests {
                 "    targets:\n",
                 "      - name: filesystem-release\n",
                 "        kind: filesystem\n",
-                "        config:\n",
-                "          root_path: /exports/releases\n",
+                "        config: {}\n",
                 "  bindings:\n",
                 "    - buildTarget: linux64\n",
                 "      publishTarget: filesystem-release\n",
                 "      options:\n",
-                "        channel: stable\n"
+                "        operation: move\n",
+                "        directory_path: /exports/releases\n"
             ),
         );
 
@@ -2157,7 +2157,7 @@ mod tests {
             )
             .expect("publish target fields should load");
         assert_eq!(publish_target.0, "filesystem");
-        assert_eq!(publish_target.1, r#"{"root_path":"/exports/releases"}"#);
+        assert_eq!(publish_target.1, "{}");
 
         let binding = connection
             .query_row(
@@ -2166,7 +2166,10 @@ mod tests {
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
             .expect("binding should exist");
-        assert_eq!(binding.0, r#"{"channel":"stable"}"#);
+        assert_eq!(
+            binding.0,
+            r#"{"directory_path":"/exports/releases","operation":"move"}"#
+        );
         assert_eq!(binding.1, 1);
     }
 
@@ -2335,8 +2338,7 @@ mod tests {
                     "      - name: releases\n",
                     "        kind: filesystem\n",
                     "        credentials: publish-token\n",
-                    "        config:\n",
-                    "          root_path: /exports/releases\n",
+                    "        config: {{}}\n",
                     "  bindings: []\n"
                 ),
                 token_path.display()

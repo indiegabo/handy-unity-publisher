@@ -1154,15 +1154,7 @@ fn build_host_native_runner_diagnostics(
 
 fn platform_to_unity_build_target(platform: &str) -> io::Result<String> {
     let platform = require_non_empty(platform, "Unity platform")?;
-    match platform.to_ascii_lowercase().as_str() {
-        "linux" | "linux64" => Ok(String::from("StandaloneLinux64")),
-        "windows" | "windows64" => Ok(String::from("StandaloneWindows64")),
-        "macos" | "osx" => Ok(String::from("StandaloneOSX")),
-        "webgl" => Ok(String::from("WebGL")),
-        "android" => Ok(String::from("Android")),
-        "ios" => Ok(String::from("iOS")),
-        _ => Ok(platform),
-    }
+    Ok(platform)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1370,14 +1362,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn platform_to_unity_build_target_supports_legacy_aliases_and_canonical_values() {
+    fn platform_to_unity_build_target_requires_canonical_values() {
         let cases = [
-            ("linux", "StandaloneLinux64"),
-            ("windows", "StandaloneWindows64"),
-            ("macos", "StandaloneOSX"),
-            ("webgl", "WebGL"),
-            ("android", "Android"),
-            ("ios", "iOS"),
             ("StandaloneLinux64", "StandaloneLinux64"),
             ("StandaloneWindows64", "StandaloneWindows64"),
             ("StandaloneOSX", "StandaloneOSX"),

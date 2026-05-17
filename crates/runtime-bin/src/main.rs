@@ -1740,11 +1740,13 @@ mod tests {
                 "    targets:\n",
                 "      - name: filesystem-release\n",
                 "        kind: filesystem\n",
-                "        config:\n",
-                "          root_path: C:/exports/releases\n",
+                "        config: {}\n",
                 "  bindings:\n",
                 "    - buildTarget: windows64\n",
-                "      publishTarget: filesystem-release\n"
+                "      publishTarget: filesystem-release\n",
+                "      options:\n",
+                "        operation: move\n",
+                "        directory_path: C:/exports/releases\n"
             ),
         )
         .expect("manifest should write");
@@ -3700,7 +3702,7 @@ mod tests {
                     enabled: true,
                     contract_json: json!({
                         "unity": {
-                            "targetPlatform": "webgl",
+                            "targetPlatform": "WebGL",
                             "buildMethod": "Builder.PerformWebGL",
                             "editorVersion": ""
                         }
@@ -3711,6 +3713,7 @@ mod tests {
                     })
                     .to_string(),
                 }],
+                publish_targets: vec![],
             })
             .expect("repository project should persist through the public coordinator API");
 
@@ -4171,7 +4174,7 @@ mod tests {
             build_kind: BuildKind::Player,
             contract_json: json!({
                 "unity": {
-                    "targetPlatform": "windows",
+                    "targetPlatform": "StandaloneWindows64",
                     "buildMethod": "Builder.PerformWindows",
                     "editorVersion": ""
                 }
@@ -4815,7 +4818,7 @@ mod tests {
             "2021.3.33f1",
             "host-native",
         );
-        let artifact_id = insert_artifact_record(
+        let _artifact_id = insert_artifact_record(
             &connection,
             build_run_id,
             "nested/game.zip",
@@ -4827,19 +4830,38 @@ mod tests {
             repository_id,
             "filesystem-release",
             "filesystem",
-            &json!({"root_path": publish_root.display().to_string()}).to_string(),
+            "{}",
         );
-        let publish_run_id = insert_publish_run_record(
-            &connection,
-            release_run_id,
-            build_run_id,
-            publish_target_id,
-            artifact_id,
-            "queued",
-        );
+        seed_build_publish_binding(&connection, build_target_id, publish_target_id);
+        connection
+            .execute(
+                "
+                UPDATE build_publish_bindings
+                SET options_json = ?
+                WHERE build_target_id = ?
+                  AND publish_target_id = ?
+                ",
+                params![
+                    json!({
+                        "operation": "move",
+                        "directory_path": publish_root.display().to_string(),
+                    })
+                    .to_string(),
+                    build_target_id,
+                    publish_target_id,
+                ],
+            )
+            .expect("move binding options should update");
         drop(connection);
 
-        runtime_store::LocalCoordinator::new(&storage)
+        let coordinator = runtime_store::LocalCoordinator::new(&storage);
+        let planned = coordinator
+            .plan_build_publish_runs(build_run_id)
+            .expect("publish run should plan");
+        assert_eq!(planned.len(), 1);
+        let publish_run_id = planned[0].id;
+
+        coordinator
             .dispatch_publish_run(publish_run_id)
             .expect("publish run should dispatch");
 
@@ -4849,16 +4871,13 @@ mod tests {
             serde_json::from_str(&output).expect("publish run-next output should decode");
 
         assert_eq!(record.status, "succeeded");
-        let destination_path = publish_root
-            .join("runtime-bin-publish-run-next-success")
-            .join("v14.0.0")
-            .join("nested")
-            .join("game.zip");
+        let destination_path = publish_root.join("game.zip");
         let destination_ref = destination_path.display().to_string();
         assert_eq!(
             record.destination_ref.as_deref(),
             Some(destination_ref.as_str())
         );
+        assert!(!source_path.exists());
         assert_eq!(
             fs::read_to_string(destination_path).expect("published artifact should exist"),
             "artifact"
@@ -5148,7 +5167,7 @@ mod tests {
         let build_target_id = seed_build_target(&connection, repository_id, "windows-player", "windows");
         let release_run_id = seed_queued_release(&connection, repository_id, "v15.0.0", "2021.3.33f1");
         let build_run_id = seed_succeeded_build_run(&connection, release_run_id, build_target_id, &artifact_root);
-        let artifact_id = insert_artifact_record(
+        let _artifact_id = insert_artifact_record(
             &connection,
             build_run_id,
             "nested/game.zip",
@@ -5160,19 +5179,38 @@ mod tests {
             repository_id,
             "filesystem-release",
             "filesystem",
-            &json!({"root_path": publish_root.display().to_string()}).to_string(),
+            "{}",
         );
-        let publish_run_id = insert_publish_run_record(
-            &connection,
-            release_run_id,
-            build_run_id,
-            publish_target_id,
-            artifact_id,
-            "queued",
-        );
+        seed_build_publish_binding(&connection, build_target_id, publish_target_id);
+        connection
+            .execute(
+                "
+                UPDATE build_publish_bindings
+                SET options_json = ?
+                WHERE build_target_id = ?
+                  AND publish_target_id = ?
+                ",
+                params![
+                    json!({
+                        "operation": "move",
+                        "directory_path": publish_root.display().to_string(),
+                    })
+                    .to_string(),
+                    build_target_id,
+                    publish_target_id,
+                ],
+            )
+            .expect("move binding options should update");
         drop(connection);
 
-        runtime_store::LocalCoordinator::new(&storage)
+        let coordinator = runtime_store::LocalCoordinator::new(&storage);
+        let planned = coordinator
+            .plan_build_publish_runs(build_run_id)
+            .expect("publish run should plan");
+        assert_eq!(planned.len(), 1);
+        let publish_run_id = planned[0].id;
+
+        coordinator
             .dispatch_publish_run(publish_run_id)
             .expect("publish run should dispatch");
 
@@ -5283,7 +5321,7 @@ mod tests {
             "2021.3.33f1",
             "host-native",
         );
-        let artifact_id = insert_artifact_record(
+        let _artifact_id = insert_artifact_record(
             &connection,
             build_run_id,
             "game.zip",
@@ -5295,19 +5333,38 @@ mod tests {
             repository_id,
             "filesystem-release",
             "filesystem",
-            r#"{"root_path":"relative-output"}"#,
+            "{}",
         );
-        let publish_run_id = insert_publish_run_record(
-            &connection,
-            release_run_id,
-            build_run_id,
-            publish_target_id,
-            artifact_id,
-            "queued",
-        );
+        seed_build_publish_binding(&connection, build_target_id, publish_target_id);
+        connection
+            .execute(
+                "
+                UPDATE build_publish_bindings
+                SET options_json = ?
+                WHERE build_target_id = ?
+                  AND publish_target_id = ?
+                ",
+                params![
+                    json!({
+                        "operation": "move",
+                        "directory_path": "relative-output",
+                    })
+                    .to_string(),
+                    build_target_id,
+                    publish_target_id,
+                ],
+            )
+            .expect("invalid move binding options should update");
         drop(connection);
 
-        runtime_store::LocalCoordinator::new(&storage)
+        let coordinator = runtime_store::LocalCoordinator::new(&storage);
+        let planned = coordinator
+            .plan_build_publish_runs(build_run_id)
+            .expect("publish run should plan");
+        assert_eq!(planned.len(), 1);
+        let publish_run_id = planned[0].id;
+
+        coordinator
             .dispatch_publish_run(publish_run_id)
             .expect("publish run should dispatch");
 
@@ -5321,7 +5378,7 @@ mod tests {
             .error_message
             .as_deref()
             .unwrap_or_default()
-            .contains("root_path must be absolute"));
+            .contains("directory_path must be absolute"));
         let report = load_build_execution_report(&workspace_path);
         assert_eq!(report.publish_runs.len(), 1);
         assert_eq!(report.publish_runs[0].record.status, "failed");
@@ -5330,7 +5387,7 @@ mod tests {
             .error_message
             .as_deref()
             .unwrap_or_default()
-            .contains("root_path must be absolute"));
+            .contains("directory_path must be absolute"));
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         assert_eq!(queue_message_count(&connection, "publish-runs"), 0);

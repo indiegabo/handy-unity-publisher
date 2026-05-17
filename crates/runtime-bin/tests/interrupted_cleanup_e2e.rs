@@ -401,7 +401,7 @@ fn seed_interrupted_build_fixture(root: &Path, case_name: &str) -> InterruptedBu
                 "windows-player",
                 "player",
                 "host-native",
-                r#"{"unity":{"targetPlatform":"windows","buildMethod":"Builder.PerformWindows"}}"#,
+                r#"{"unity":{"targetPlatform":"StandaloneWindows64","buildMethod":"Builder.PerformWindows"}}"#,
                 "{}",
             ],
         )

@@ -29,6 +29,8 @@ const cargoArguments = [
     "runtime-bin",
     "--test",
     "interrupted_cleanup_e2e",
+    "--test",
+    "publish_destinations_e2e",
     "--",
     "--nocapture",
     ...runnerArguments,
@@ -44,7 +46,7 @@ if (dryRun) {
 }
 
 console.log(
-    `Running runtime interrupted-recovery smoke tests with CARGO_TARGET_DIR=${cargoTargetDir}`,
+    `Running runtime smoke tests with CARGO_TARGET_DIR=${cargoTargetDir}`,
 );
 
 const result = spawnSync(cargoCommand, cargoArguments, {

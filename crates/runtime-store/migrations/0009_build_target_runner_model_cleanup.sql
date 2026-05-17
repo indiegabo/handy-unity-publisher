@@ -1,7 +1,8 @@
 -- Fresh databases already receive the contract-first build target schema from
 -- 0002_pipeline_definitions.sql.
 --
--- Legacy databases created before that consolidation are upgraded through a
--- schema-aware SQL path selected by runtime-store during migration execution.
+-- Databases created before that consolidation are no longer migrated in place.
+-- Operators must reset local runtime state instead of carrying forward the
+-- pre-contract build target schema.
 
 SELECT 1;
