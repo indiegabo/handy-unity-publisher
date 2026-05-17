@@ -772,8 +772,8 @@ pub(crate) fn run_build_run_next_command(
     );
     let mut build_event_context = None;
     let record_result = (|| -> Result<BuildRunRecord, Box<dyn Error>> {
-        let resolved = match resolve_claimed_build_context(&coordinator, &message.payload) {
-            Ok(resolved) => resolved,
+        let plan = match load_claimed_build_plan(&coordinator, &message.payload) {
+            Ok(plan) => plan,
             Err(error) => {
                 release_claimed_build_message(
                     &coordinator,
@@ -784,10 +784,11 @@ pub(crate) fn run_build_run_next_command(
                 return Err(Box::new(error));
             }
         };
-        let event_context = build_run_event_context(&coordinator, &resolved.plan);
+        let event_context = build_run_event_context(&coordinator, &plan);
         build_event_context = Some(event_context.clone());
 
-        let planned = match WorkspacePreparer::new(&config.directories).plan(&resolved.preparation)
+        let planned_preparation = build_workspace_preparation(&plan, GitAuthOptions::default());
+        let planned = match WorkspacePreparer::new(&config.directories).plan(&planned_preparation)
         {
             Ok(planned) => planned,
             Err(error) => {
@@ -803,7 +804,7 @@ pub(crate) fn run_build_run_next_command(
 
         let validation_log_path = process_validation_log_path(&planned.root_path);
         coordinator.start_build_run(
-            resolved.plan.build_run_id,
+            plan.build_run_id,
             StartBuildRunInput {
                 workspace_path: planned.root_path.display().to_string(),
                 log_path: validation_log_path.display().to_string(),
@@ -813,10 +814,34 @@ pub(crate) fn run_build_run_next_command(
         if let Err(error) = emit_build_run_started_event(storage, &event_context) {
             log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STARTED, &error);
         }
-        if let Err(error) = ensure_release_process_checkout(&config.directories, &resolved.preparation)
-        {
+        let preparation = match resolve_build_workspace_preparation(&coordinator, &plan) {
+            Ok(preparation) => preparation,
+            Err(error) => {
+                if error_indicates_authentication_failure(&error) {
+                    persist_repository_auth_runtime_failure(
+                        &coordinator,
+                        plan.repository_id,
+                        &error,
+                    );
+                }
+                let record = coordinator.fail_build_run(
+                    plan.build_run_id,
+                    FailBuildRunInput {
+                        workspace_path: planned.root_path.display().to_string(),
+                        log_path: validation_log_path.display().to_string(),
+                        artifact_root_path: planned.artifact_root_path.display().to_string(),
+                        error_message: error.to_string(),
+                    },
+                )?;
+                return Ok(record);
+            }
+        };
+        if let Err(error) = ensure_release_process_checkout(&config.directories, &preparation) {
+            if error_indicates_authentication_failure(&error) {
+                persist_repository_auth_runtime_failure(&coordinator, plan.repository_id, &error);
+            }
             let record = coordinator.fail_build_run(
-                resolved.plan.build_run_id,
+                plan.build_run_id,
                 FailBuildRunInput {
                     workspace_path: planned.root_path.display().to_string(),
                     log_path: process_checkout_log_path(&planned.root_path).display().to_string(),
@@ -829,7 +854,7 @@ pub(crate) fn run_build_run_next_command(
         let stage_sequence = Rc::new(RefCell::new(BuildRunStageSequence::default()));
         let validation_tracker = BuildRunStageTracker::new(
             &coordinator,
-            resolved.plan.build_run_id,
+            plan.build_run_id,
             planned.root_path.clone(),
             planned.build_root_path.clone(),
             planned.artifact_root_path.clone(),
@@ -841,17 +866,17 @@ pub(crate) fn run_build_run_next_command(
         } else {
             event_context.unity_target_platform.as_str()
         };
-        let repository_engine_kind = resolved.plan.engine_kind.as_str();
-        let engine_version = if resolved.plan.engine_version.trim().is_empty() {
+        let repository_engine_kind = plan.engine_kind.as_str();
+        let engine_version = if plan.engine_version.trim().is_empty() {
             "unknown"
         } else {
-            resolved.plan.engine_version.as_str()
+            plan.engine_version.as_str()
         };
         let validation_message = format!(
             "Validating build context for repository '{}' tag '{}' target '{}' ({}) using engine '{}' version '{}'.",
-            resolved.plan.repository_name,
-            resolved.plan.git_tag,
-            resolved.plan.target_name,
+            plan.repository_name,
+            plan.git_tag,
+            plan.target_name,
             target_platform,
             repository_engine_kind,
             engine_version,
@@ -868,7 +893,7 @@ pub(crate) fn run_build_run_next_command(
             &validation_message,
         );
 
-        let dispatch_plan = match resolve_build_execution_dispatch_plan(config, &resolved.plan) {
+        let dispatch_plan = match resolve_build_execution_dispatch_plan(config, &plan) {
             Ok(plan) => {
                 validation_tracker.complete_stage(
                     BuildProcessStage::ValidateContext,
@@ -882,7 +907,7 @@ pub(crate) fn run_build_run_next_command(
                     &error.to_string(),
                 )?;
                 let record = coordinator.fail_build_run(
-                    resolved.plan.build_run_id,
+                    plan.build_run_id,
                     FailBuildRunInput {
                         workspace_path: planned.root_path.display().to_string(),
                         log_path: validation_log_path.display().to_string(),
@@ -906,8 +931,8 @@ pub(crate) fn run_build_run_next_command(
                     &config.directories,
                     &processor,
                     &unity_plan,
-                    &resolved.preparation,
-                    resolved.plan.build_run_id,
+                    &preparation,
+                    plan.build_run_id,
                     &event_context,
                     stage_sequence,
                     validation_log_path,
@@ -960,11 +985,12 @@ fn stage_claimed_build_job(
     storage: &StorageLayout,
     payload: &[u8],
 ) -> io::Result<BuildRunRecord> {
-    let resolved = resolve_claimed_build_context(coordinator, payload)?;
-    let planned = WorkspacePreparer::new(&config.directories).plan(&resolved.preparation)?;
-    let event_context = build_run_event_context(coordinator, &resolved.plan);
+    let plan = load_claimed_build_plan(coordinator, payload)?;
+    let planned = WorkspacePreparer::new(&config.directories)
+        .plan(&build_workspace_preparation(&plan, GitAuthOptions::default()))?;
+    let event_context = build_run_event_context(coordinator, &plan);
     let started = coordinator.start_build_run(
-        resolved.plan.build_run_id,
+        plan.build_run_id,
         StartBuildRunInput {
             workspace_path: planned.root_path.display().to_string(),
             log_path: process_validation_log_path(&planned.root_path).display().to_string(),
@@ -975,17 +1001,40 @@ fn stage_claimed_build_job(
         log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STARTED, &error);
     }
 
-    match ensure_release_process_checkout(&config.directories, &resolved.preparation) {
+    let preparation = match resolve_build_workspace_preparation(coordinator, &plan) {
+        Ok(preparation) => preparation,
+        Err(error) => {
+            if error_indicates_authentication_failure(&error) {
+                persist_repository_auth_runtime_failure(coordinator, plan.repository_id, &error);
+            }
+            return coordinator.fail_build_run(
+                plan.build_run_id,
+                FailBuildRunInput {
+                    workspace_path: planned.root_path.display().to_string(),
+                    log_path: process_validation_log_path(&planned.root_path).display().to_string(),
+                    artifact_root_path: planned.artifact_root_path.display().to_string(),
+                    error_message: error.to_string(),
+                },
+            );
+        }
+    };
+
+    match ensure_release_process_checkout(&config.directories, &preparation) {
         Ok(_) => Ok(started),
-        Err(error) => coordinator.fail_build_run(
-            resolved.plan.build_run_id,
-            FailBuildRunInput {
-                workspace_path: planned.root_path.display().to_string(),
-                log_path: process_checkout_log_path(&planned.root_path).display().to_string(),
-                artifact_root_path: planned.artifact_root_path.display().to_string(),
-                error_message: error.to_string(),
-            },
-        ),
+        Err(error) => {
+            if error_indicates_authentication_failure(&error) {
+                persist_repository_auth_runtime_failure(coordinator, plan.repository_id, &error);
+            }
+            coordinator.fail_build_run(
+                plan.build_run_id,
+                FailBuildRunInput {
+                    workspace_path: planned.root_path.display().to_string(),
+                    log_path: process_checkout_log_path(&planned.root_path).display().to_string(),
+                    artifact_root_path: planned.artifact_root_path.display().to_string(),
+                    error_message: error.to_string(),
+                },
+            )
+        }
     }
 }
 
@@ -1921,35 +1970,50 @@ fn register_build_artifacts(
     Ok(())
 }
 
-fn resolve_claimed_build_context(
+fn load_claimed_build_plan(
     coordinator: &LocalCoordinator,
     payload: &[u8],
-) -> io::Result<ResolvedBuildContext> {
+) -> io::Result<StoredBuildExecutionPlan> {
     let job: BuildDispatchJob = serde_json::from_slice(payload)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    let plan = coordinator.get_build_execution_plan(job.build_run_id)?;
+
+    coordinator.get_build_execution_plan(job.build_run_id)
+}
+
+fn resolve_build_workspace_preparation(
+    coordinator: &LocalCoordinator,
+    plan: &StoredBuildExecutionPlan,
+) -> io::Result<WorkspacePreparationInput> {
     let git_auth = match plan.repository_credentials_id {
         Some(credentials_id) => {
             let credentials = coordinator.get_credential_record(credentials_id)?;
-            git_auth_options_from_credentials(&credentials.kind, &credentials.config_json)?
+            let config_json = resolve_credential_secret_config_json(
+                &credentials.kind,
+                &credentials.config_json,
+            )?;
+            git_auth_options_from_credentials(&credentials.kind, &config_json)?
         }
         None => GitAuthOptions::default(),
     };
 
-    Ok(ResolvedBuildContext {
-        preparation: WorkspacePreparationInput {
-            build_run_id: plan.build_run_id,
-            release_run_id: plan.release_run_id,
-            attempt_token: String::new(),
-            repository_name: plan.repository_name.clone(),
-            repository_url: plan.repository_url.clone(),
-            git_auth,
-            git_tag: plan.git_tag.clone(),
-            workspace_root_override: plan.workspace_root_override.clone(),
-            artifacts_root_override: plan.artifacts_root_override.clone(),
-        },
-        plan,
-    })
+    Ok(build_workspace_preparation(plan, git_auth))
+}
+
+fn build_workspace_preparation(
+    plan: &StoredBuildExecutionPlan,
+    git_auth: GitAuthOptions,
+) -> WorkspacePreparationInput {
+    WorkspacePreparationInput {
+        build_run_id: plan.build_run_id,
+        release_run_id: plan.release_run_id,
+        attempt_token: String::new(),
+        repository_name: plan.repository_name.clone(),
+        repository_url: plan.repository_url.clone(),
+        git_auth,
+        git_tag: plan.git_tag.clone(),
+        workspace_root_override: plan.workspace_root_override.clone(),
+        artifacts_root_override: plan.artifacts_root_override.clone(),
+    }
 }
 
 fn unity_runner_execution_plan(

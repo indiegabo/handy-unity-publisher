@@ -45,6 +45,7 @@ const DEFAULT_HOST_NATIVE_RUNNER_TYPE: &str = "host-native";
 const DEFAULT_REPOSITORY_POLL_TRIGGER_RULE_NAME: &str = "poll-release-tags";
 pub const HOST_KEYRING_SERVICE: &str = "handy-games-publisher";
 pub const KEYRING_SECRET_REF_PREFIX: &str = "keyring://";
+const REPOSITORY_AUTH_BINDING_STATUS_REAUTH_REQUIRED: &str = "reauth_required";
 const SUPPORTED_REPOSITORY_ENGINE_UNITY: &str = "unity";
 const SUPPORTED_REPOSITORY_BUILD_KIND_PLAYER: &str = "player";
 const TRIGGER_SOURCE_MANUAL: &str = "manual";
@@ -118,6 +119,11 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0011_runtime_engine_version.sql",
         sql: include_str!("../migrations/0011_runtime_engine_version.sql"),
+        transactional: true,
+    },
+    Migration {
+        name: "0012_repository_auth_state.sql",
+        sql: include_str!("../migrations/0012_repository_auth_state.sql"),
         transactional: true,
     },
 ];
@@ -1141,10 +1147,138 @@ impl LocalCoordinator {
                 "
                 UPDATE repositories
                 SET credentials_id = ?,
+                    auth_binding_status = CASE
+                        WHEN auth_binding_status = 'unsupported' THEN 'unsupported'
+                        WHEN auth_requirement_status = 'none' THEN 'not_required'
+                        WHEN auth_requirement_status = 'required' AND ? IS NOT NULL THEN 'bound_ready'
+                        WHEN auth_requirement_status = 'required' THEN 'required_unbound'
+                        ELSE 'unknown'
+                    END,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 ",
-                params![credentials_id, repository_id],
+                params![credentials_id, credentials_id, repository_id],
+            )
+            .map_err(sqlite_error)?;
+        if updated == 0 {
+            return Err(not_found_error(format!(
+                "repository {repository_id} was not found"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Persists the latest repository access assessment snapshot for one
+    /// managed repository row.
+    pub fn update_repository_auth_state(
+        &self,
+        input: UpdateRepositoryAuthStateInput,
+    ) -> io::Result<()> {
+        require_positive_identifier(input.repository_id, "repository id")?;
+        let source_provider_id =
+            require_non_empty(&input.source_provider_id, "repository source_provider_id")?;
+        let source_instance_url =
+            require_non_empty(&input.source_instance_url, "repository source_instance_url")?;
+        let visibility_status =
+            require_non_empty(&input.visibility_status, "repository visibility_status")?;
+        let auth_requirement_status = require_non_empty(
+            &input.auth_requirement_status,
+            "repository auth_requirement_status",
+        )?;
+        let auth_status_message =
+            require_non_empty(&input.auth_status_message, "repository auth_status_message")?;
+
+        let connection = open_connection(&self.database_path)?;
+        let supports_interactive_login = if input.supports_interactive_login {
+            1_i64
+        } else {
+            0_i64
+        };
+        let updated = connection
+            .execute(
+                "
+                UPDATE repositories
+                SET source_provider_id = ?,
+                    source_instance_url = ?,
+                    visibility_status = ?,
+                    auth_requirement_status = ?,
+                    credentials_id = CASE
+                        WHEN ? = 'none' THEN NULL
+                        ELSE credentials_id
+                    END,
+                    auth_binding_status = CASE
+                        WHEN ? = 'none' THEN 'not_required'
+                        WHEN ? = 'required' AND ? = 0 THEN 'unsupported'
+                        WHEN ? = 'required' AND credentials_id IS NOT NULL THEN 'bound_ready'
+                        WHEN ? = 'required' THEN 'required_unbound'
+                        ELSE 'unknown'
+                    END,
+                    auth_status_message = ?,
+                    auth_last_verified_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                ",
+                params![
+                    source_provider_id,
+                    source_instance_url,
+                    visibility_status,
+                    auth_requirement_status,
+                    auth_requirement_status,
+                    auth_requirement_status,
+                    auth_requirement_status,
+                    supports_interactive_login,
+                    auth_requirement_status,
+                    auth_requirement_status,
+                    auth_status_message,
+                    input.repository_id,
+                ],
+            )
+            .map_err(sqlite_error)?;
+        if updated == 0 {
+            return Err(not_found_error(format!(
+                "repository {} was not found",
+                input.repository_id
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Marks one repository as needing operator reauthentication after a
+    /// runtime Git operation fails with an authentication error.
+    pub fn mark_repository_auth_runtime_failure(
+        &self,
+        repository_id: i64,
+        error_message: &str,
+    ) -> io::Result<()> {
+        require_positive_identifier(repository_id, "repository id")?;
+        let error_message = require_non_empty(error_message, "error message")?;
+
+        let connection = open_connection(&self.database_path)?;
+        let updated = connection
+            .execute(
+                "
+                UPDATE repositories
+                SET auth_requirement_status = CASE
+                        WHEN auth_binding_status = 'unsupported' THEN auth_requirement_status
+                        ELSE 'required'
+                    END,
+                    auth_binding_status = CASE
+                        WHEN auth_binding_status = 'unsupported' THEN 'unsupported'
+                        WHEN credentials_id IS NOT NULL THEN ?
+                        ELSE 'required_unbound'
+                    END,
+                    auth_status_message = ?,
+                    auth_last_verified_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                ",
+                params![
+                    REPOSITORY_AUTH_BINDING_STATUS_REAUTH_REQUIRED,
+                    error_message,
+                    repository_id,
+                ],
             )
             .map_err(sqlite_error)?;
         if updated == 0 {
@@ -1284,6 +1418,13 @@ impl LocalCoordinator {
                        r.repo_url,
                       r.engine_kind,
                        r.credentials_id,
+                      r.source_provider_id,
+                      r.source_instance_url,
+                      r.visibility_status,
+                      r.auth_requirement_status,
+                      r.auth_binding_status,
+                      r.auth_status_message,
+                      r.auth_last_verified_at,
                        r.enabled,
                        r.polling_interval_seconds,
                        r.last_seen_tag,
@@ -1301,10 +1442,14 @@ impl LocalCoordinator {
                   ON bt.repository_id = r.id
                  AND bt.enabled = 1
                                 WHERE r.source_mode = 'managed_repository'
-                GROUP BY r.id, r.name, r.repo_url, r.engine_kind, r.credentials_id, r.enabled,
-                                                 r.polling_interval_seconds, r.last_seen_tag,
-                                                 r.default_branch, r.artifacts_root_override,
-                                                 r.workspace_root_override
+                GROUP BY r.id, r.name, r.repo_url, r.engine_kind, r.credentials_id,
+                         r.source_provider_id, r.source_instance_url,
+                         r.visibility_status, r.auth_requirement_status,
+                         r.auth_binding_status, r.auth_status_message,
+                         r.auth_last_verified_at, r.enabled,
+                         r.polling_interval_seconds, r.last_seen_tag,
+                         r.default_branch, r.artifacts_root_override,
+                         r.workspace_root_override
                 ORDER BY r.id ASC
                 ",
             )
@@ -1317,14 +1462,21 @@ impl LocalCoordinator {
                     repo_url: row.get(2)?,
                     engine_kind: row.get(3)?,
                     credentials_id: row.get(4)?,
-                    enabled: row.get::<_, i64>(5)? != 0,
-                    polling_interval_seconds: row.get(6)?,
-                    last_seen_tag: normalize_optional_string(row.get(7)?),
-                    default_branch: normalize_optional_string(row.get(8)?),
-                    artifacts_root_override: normalize_optional_string(row.get(9)?),
-                    workspace_root_override: normalize_optional_string(row.get(10)?),
-                    enabled_build_target_count: row.get(11)?,
-                    has_release_history: row.get::<_, i64>(12)? != 0,
+                    source_provider_id: normalize_optional_string(row.get(5)?),
+                    source_instance_url: normalize_optional_string(row.get(6)?),
+                    visibility_status: row.get(7)?,
+                    auth_requirement_status: row.get(8)?,
+                    auth_binding_status: row.get(9)?,
+                    auth_status_message: row.get(10)?,
+                    auth_last_verified_at: normalize_optional_string(row.get(11)?),
+                    enabled: row.get::<_, i64>(12)? != 0,
+                    polling_interval_seconds: row.get(13)?,
+                    last_seen_tag: normalize_optional_string(row.get(14)?),
+                    default_branch: normalize_optional_string(row.get(15)?),
+                    artifacts_root_override: normalize_optional_string(row.get(16)?),
+                    workspace_root_override: normalize_optional_string(row.get(17)?),
+                    enabled_build_target_count: row.get(18)?,
+                    has_release_history: row.get::<_, i64>(19)? != 0,
                 })
             })
             .map_err(sqlite_error)?;
@@ -4524,6 +4676,103 @@ fn remove_release_run_rebuild_cleanup_paths(
         Ok(runs)
     }
 
+    fn list_process_feed_build_run_contexts(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        release_run_id: i64,
+        repository_engine_kind: &str,
+    ) -> io::Result<HashMap<i64, ProcessFeedBuildRunContext>> {
+        let mut statement = transaction
+            .prepare(
+                "
+                SELECT br.id,
+                       COALESCE(bt.name, ''),
+                       COALESCE(bt.build_kind, ''),
+                       COALESCE(bt.contract_json, '')
+                FROM build_runs br
+                INNER JOIN build_targets bt ON bt.id = br.build_target_id
+                WHERE br.release_run_id = ?
+                ORDER BY br.id ASC
+                ",
+            )
+            .map_err(sqlite_error)?;
+        let mut rows = statement.query([release_run_id]).map_err(sqlite_error)?;
+        let mut contexts = HashMap::new();
+
+        while let Some(row) = rows.next().map_err(sqlite_error)? {
+            let build_run_id = row.get::<_, i64>(0).map_err(sqlite_error)?;
+            let target_name = row
+                .get::<_, String>(1)
+                .map_err(sqlite_error)?
+                .trim()
+                .to_owned();
+            let build_kind = row.get::<_, String>(2).map_err(sqlite_error)?;
+            let contract_json = row.get::<_, String>(3).map_err(sqlite_error)?;
+            let unity_target_platform = resolve_build_target_read_model_projection(
+                repository_engine_kind,
+                build_kind.trim(),
+                contract_json.as_str(),
+            )
+            .map(|projection| projection.unity_target_platform)
+            .unwrap_or_default();
+
+            contexts.insert(
+                build_run_id,
+                ProcessFeedBuildRunContext {
+                    target_name,
+                    unity_target_platform,
+                },
+            );
+        }
+
+        Ok(contexts)
+    }
+
+    fn list_process_feed_publish_run_contexts(
+        &self,
+        transaction: &rusqlite::Transaction<'_>,
+        release_run_id: i64,
+    ) -> io::Result<HashMap<i64, ProcessFeedPublishRunContext>> {
+        let mut statement = transaction
+            .prepare(
+                "
+                SELECT pr.id,
+                       COALESCE(pt.name, ''),
+                       a.name
+                FROM publish_runs pr
+                INNER JOIN publish_targets pt ON pt.id = pr.publish_target_id
+                LEFT JOIN artifacts a ON a.id = pr.artifact_id
+                WHERE pr.release_run_id = ?
+                ORDER BY pr.id ASC
+                ",
+            )
+            .map_err(sqlite_error)?;
+        let mut rows = statement.query([release_run_id]).map_err(sqlite_error)?;
+        let mut contexts = HashMap::new();
+
+        while let Some(row) = rows.next().map_err(sqlite_error)? {
+            let publish_run_id = row.get::<_, i64>(0).map_err(sqlite_error)?;
+            let publish_target_name = row
+                .get::<_, String>(1)
+                .map_err(sqlite_error)?
+                .trim()
+                .to_owned();
+            let artifact_name = normalize_optional_string(
+                row.get::<_, Option<String>>(2).map_err(sqlite_error)?,
+            );
+
+            contexts.insert(
+                publish_run_id,
+                ProcessFeedPublishRunContext {
+                    publish_target_name,
+                    artifact_name,
+                },
+            );
+        }
+
+        Ok(contexts)
+    }
+
     fn list_repository_automation_releases(
         &self,
         transaction: &rusqlite::Transaction<'_>,
@@ -5720,13 +5969,23 @@ pub fn list_process_feed_page(
     let mut items = Vec::with_capacity(page_rows.len());
 
     for row in page_rows {
+        let repository_engine_kind = row.repository_engine_kind.clone();
         let build_runs = coordinator.list_build_runs_by_release(&transaction, row.release.id)?;
         let publish_runs =
             coordinator.list_publish_runs_by_release(&transaction, row.release.id)?;
+        let build_run_contexts = coordinator.list_process_feed_build_run_contexts(
+            &transaction,
+            row.release.id,
+            repository_engine_kind.as_str(),
+        )?;
+        let publish_run_contexts =
+            coordinator.list_process_feed_publish_run_contexts(&transaction, row.release.id)?;
         items.push(summarize_process_feed_record(
             row,
             &build_runs,
             &publish_runs,
+            &build_run_contexts,
+            &publish_run_contexts,
         ));
     }
 
@@ -6068,6 +6327,18 @@ struct RunStatusCounts {
     succeeded: i64,
     failed: i64,
     canceled: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessFeedBuildRunContext {
+    target_name: String,
+    unity_target_platform: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessFeedPublishRunContext {
+    publish_target_name: String,
+    artifact_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6819,6 +7090,8 @@ fn summarize_process_feed_record(
     row: ProcessFeedReleaseRow,
     build_runs: &[BuildRunRecord],
     publish_runs: &[PublishRunRecord],
+    build_run_contexts: &HashMap<i64, ProcessFeedBuildRunContext>,
+    publish_run_contexts: &HashMap<i64, ProcessFeedPublishRunContext>,
 ) -> ProcessFeedRecord {
     let ProcessFeedReleaseRow {
         release,
@@ -6836,6 +7109,8 @@ fn summarize_process_feed_record(
             &release,
             build_runs,
             publish_runs,
+            build_run_contexts,
+            publish_run_contexts,
             build_counts,
             publish_counts,
         );
@@ -6878,14 +7153,18 @@ fn summarize_process_feed_step(
     release: &ReleaseRunRecord,
     build_runs: &[BuildRunRecord],
     publish_runs: &[PublishRunRecord],
+    build_run_contexts: &HashMap<i64, ProcessFeedBuildRunContext>,
+    publish_run_contexts: &HashMap<i64, ProcessFeedPublishRunContext>,
     build_counts: RunStatusCounts,
     publish_counts: RunStatusCounts,
 ) -> (String, String, Option<String>) {
     if let Some(run) = latest_build_run_by_status(build_runs, BuildStatus::Running.as_str()) {
         return (
-            run.current_stage_label
-                .clone()
-                .unwrap_or_else(|| String::from("Build running")),
+            format_process_feed_running_build_label(
+                run,
+                build_run_contexts,
+                build_counts.running,
+            ),
             run.current_stage_status
                 .clone()
                 .unwrap_or_else(|| String::from(BuildStatus::Running.as_str())),
@@ -6898,9 +7177,14 @@ fn summarize_process_feed_step(
         );
     }
 
-    if publish_counts.running > 0 {
+    if let Some(run) = latest_publish_run_by_status(publish_runs, PublishStatus::Running.as_str()) {
         return (
-            String::from("Publishing"),
+            format_process_feed_publish_label(
+                "Publishing",
+                publish_run_contexts,
+                run.id,
+                publish_counts.running,
+            ),
             String::from(PublishStatus::Running.as_str()),
             Some(format!(
                 "{} publish task(s) are currently running",
@@ -6909,9 +7193,14 @@ fn summarize_process_feed_step(
         );
     }
 
-    if build_counts.queued > 0 {
+    if let Some(run) = latest_build_run_by_status(build_runs, BuildStatus::Queued.as_str()) {
         return (
-            String::from("Queued for build"),
+            format_process_feed_build_label(
+                "Queued build:",
+                build_run_contexts,
+                run.id,
+                build_counts.queued,
+            ),
             String::from(BuildStatus::Queued.as_str()),
             Some(format!(
                 "{} build target(s) are waiting to start",
@@ -6920,9 +7209,14 @@ fn summarize_process_feed_step(
         );
     }
 
-    if publish_counts.queued > 0 {
+    if let Some(run) = latest_publish_run_by_status(publish_runs, PublishStatus::Queued.as_str()) {
         return (
-            String::from("Queued for publishing"),
+            format_process_feed_publish_label(
+                "Queued publish:",
+                publish_run_contexts,
+                run.id,
+                publish_counts.queued,
+            ),
             String::from(PublishStatus::Queued.as_str()),
             Some(format!(
                 "{} publish task(s) are waiting to start",
@@ -6933,51 +7227,63 @@ fn summarize_process_feed_step(
 
     if let Some(run) = latest_build_run_by_status(build_runs, BuildStatus::Failed.as_str()) {
         return (
-            run.current_stage_label
-                .clone()
-                .unwrap_or_else(|| String::from("Build failed")),
+            format_process_feed_build_label(
+                "Build failed:",
+                build_run_contexts,
+                run.id,
+                build_counts.failed,
+            ),
             String::from(BuildStatus::Failed.as_str()),
             run.error_message.clone().or(run.last_progress_message.clone()),
         );
     }
 
-    if publish_counts.failed > 0 {
+    if let Some(run) = latest_publish_run_by_status(publish_runs, PublishStatus::Failed.as_str()) {
         return (
-            String::from("Publishing failed"),
+            format_process_feed_publish_label(
+                "Publish failed:",
+                publish_run_contexts,
+                run.id,
+                publish_counts.failed,
+            ),
             String::from(PublishStatus::Failed.as_str()),
-            latest_publish_run_by_status(publish_runs, PublishStatus::Failed.as_str())
-                .and_then(|run| run.error_message.clone())
-                .or_else(|| {
-                    Some(format!(
-                        "{} publish task(s) failed",
-                        publish_counts.failed
-                    ))
-                }),
+            run.error_message.clone().or_else(|| {
+                Some(format!(
+                    "{} publish task(s) failed",
+                    publish_counts.failed
+                ))
+            }),
         );
     }
 
     if let Some(run) = latest_build_run_by_status(build_runs, BuildStatus::Canceled.as_str()) {
         return (
-            run.current_stage_label
-                .clone()
-                .unwrap_or_else(|| String::from("Build canceled")),
+            format_process_feed_build_label(
+                "Build canceled:",
+                build_run_contexts,
+                run.id,
+                build_counts.canceled,
+            ),
             String::from(BuildStatus::Canceled.as_str()),
             run.error_message.clone().or(run.last_progress_message.clone()),
         );
     }
 
-    if publish_counts.canceled > 0 {
+    if let Some(run) = latest_publish_run_by_status(publish_runs, PublishStatus::Canceled.as_str()) {
         return (
-            String::from("Publishing canceled"),
+            format_process_feed_publish_label(
+                "Publish canceled:",
+                publish_run_contexts,
+                run.id,
+                publish_counts.canceled,
+            ),
             String::from(PublishStatus::Canceled.as_str()),
-            latest_publish_run_by_status(publish_runs, PublishStatus::Canceled.as_str())
-                .and_then(|run| run.error_message.clone())
-                .or_else(|| {
-                    Some(format!(
-                        "{} publish task(s) were canceled",
-                        publish_counts.canceled
-                    ))
-                }),
+            run.error_message.clone().or_else(|| {
+                Some(format!(
+                    "{} publish task(s) were canceled",
+                    publish_counts.canceled
+                ))
+            }),
         );
     }
 
@@ -7024,7 +7330,18 @@ fn summarize_process_feed_step(
 
     if publish_counts.total > 0 {
         return (
-            String::from("Publishing completed"),
+            latest_publish_run_by_status(publish_runs, PublishStatus::Succeeded.as_str())
+                .map(|run| {
+                    format_process_feed_publish_label(
+                        "Published",
+                        publish_run_contexts,
+                        run.id,
+                        publish_counts.succeeded,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    format_process_feed_publish_count_label("Published", publish_counts.succeeded)
+                }),
             String::from(PublishStatus::Succeeded.as_str()),
             Some(format!(
                 "{} publish task(s) completed",
@@ -7033,14 +7350,281 @@ fn summarize_process_feed_step(
         );
     }
 
+    if let Some(run) = latest_build_run_by_status(build_runs, BuildStatus::Succeeded.as_str()) {
+        return (
+            format_process_feed_build_label(
+                "Built",
+                build_run_contexts,
+                run.id,
+                build_counts.succeeded,
+            ),
+            String::from(BuildStatus::Succeeded.as_str()),
+            Some(format!(
+                "{} build target(s) completed",
+                build_counts.succeeded
+            )),
+        );
+    }
+
     (
-        String::from("Build completed"),
+        format_process_feed_build_count_label("Built", build_counts.succeeded),
         String::from(BuildStatus::Succeeded.as_str()),
         Some(format!(
             "{} build target(s) completed",
             build_counts.succeeded
         )),
     )
+}
+
+fn format_process_feed_running_build_label(
+    run: &BuildRunRecord,
+    build_run_contexts: &HashMap<i64, ProcessFeedBuildRunContext>,
+    running_count: i64,
+) -> String {
+    let prefix = resolve_process_feed_build_stage_prefix(run.current_stage_key.as_deref())
+        .unwrap_or("Building");
+    format_process_feed_build_label(prefix, build_run_contexts, run.id, running_count)
+}
+
+fn format_process_feed_build_label(
+    prefix: &str,
+    build_run_contexts: &HashMap<i64, ProcessFeedBuildRunContext>,
+    build_run_id: i64,
+    count: i64,
+) -> String {
+    let subject = resolve_process_feed_build_subject(build_run_contexts, build_run_id);
+    format_process_feed_subject_label(prefix, subject.as_deref(), count, "target", "targets")
+}
+
+fn format_process_feed_publish_label(
+    prefix: &str,
+    publish_run_contexts: &HashMap<i64, ProcessFeedPublishRunContext>,
+    publish_run_id: i64,
+    count: i64,
+) -> String {
+    let subject = resolve_process_feed_publish_subject(publish_run_contexts, publish_run_id);
+    format_process_feed_subject_label(
+        prefix,
+        subject.as_deref(),
+        count,
+        "destination",
+        "destinations",
+    )
+}
+
+fn format_process_feed_build_count_label(prefix: &str, count: i64) -> String {
+    format_process_feed_count_label(prefix, count, "target", "targets")
+}
+
+fn format_process_feed_publish_count_label(prefix: &str, count: i64) -> String {
+    format_process_feed_count_label(prefix, count, "destination", "destinations")
+}
+
+fn format_process_feed_subject_label(
+    prefix: &str,
+    subject: Option<&str>,
+    count: i64,
+    singular: &str,
+    plural: &str,
+) -> String {
+    if let Some(subject) = subject.map(str::trim).filter(|subject| !subject.is_empty()) {
+        if count > 1 {
+            return format!("{prefix} {subject} +{} more", count - 1);
+        }
+
+        return format!("{prefix} {subject}");
+    }
+
+    format_process_feed_count_label(prefix, count, singular, plural)
+}
+
+fn format_process_feed_count_label(
+    prefix: &str,
+    count: i64,
+    singular: &str,
+    plural: &str,
+) -> String {
+    if count <= 1 {
+        return format!("{prefix} {singular}");
+    }
+
+    format!("{prefix} {count} {plural}")
+}
+
+fn resolve_process_feed_build_stage_prefix(stage_key: Option<&str>) -> Option<&'static str> {
+    let stage_key = stage_key?.trim().to_ascii_lowercase();
+
+    if stage_key.contains("validate") {
+        return Some("Preparing");
+    }
+
+    if stage_key.contains("package") {
+        return Some("Packaging");
+    }
+
+    if stage_key.contains("register") {
+        return Some("Registering");
+    }
+
+    if stage_key.contains("build") {
+        return Some("Building");
+    }
+
+    None
+}
+
+fn resolve_process_feed_build_subject(
+    build_run_contexts: &HashMap<i64, ProcessFeedBuildRunContext>,
+    build_run_id: i64,
+) -> Option<String> {
+    let context = build_run_contexts.get(&build_run_id)?;
+    let target_name = context.target_name.trim();
+    let platform = humanize_unity_target_platform(&context.unity_target_platform);
+    if !target_name.is_empty() {
+        let alias = format_process_feed_build_target_alias(target_name, platform.as_str());
+        if !alias.is_empty() {
+            return Some(alias);
+        }
+    }
+
+    if platform.is_empty() {
+        None
+    } else {
+        Some(platform)
+    }
+}
+
+fn format_process_feed_build_target_alias(target_name: &str, platform: &str) -> String {
+    let normalized_target_name = target_name.trim();
+    if normalized_target_name.is_empty() {
+        return platform.to_owned();
+    }
+
+    if platform.is_empty() {
+        return truncate_process_feed_label(normalized_target_name, 26);
+    }
+
+    let target_tokens = tokenize_process_feed_label(normalized_target_name);
+    if target_tokens.is_empty() {
+        return platform.to_owned();
+    }
+
+    let mentions_platform = target_tokens
+        .iter()
+        .any(|token| token_matches_unity_target_platform(token, platform));
+
+    if mentions_platform {
+        if target_tokens.len() >= 3 {
+            return platform.to_owned();
+        }
+
+        if target_tokens.len() == 2
+            && target_tokens
+                .iter()
+                .any(|token| is_generic_process_feed_build_token(token))
+        {
+            return platform.to_owned();
+        }
+
+        return truncate_process_feed_label(normalized_target_name, 26);
+    }
+
+    if normalized_target_name.chars().count() > 26 {
+        return format!(
+            "{} ({platform})",
+            truncate_process_feed_label(normalized_target_name, 18)
+        );
+    }
+
+    format!("{normalized_target_name} ({platform})")
+}
+
+fn tokenize_process_feed_label(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| {
+            matches!(character, '-' | '_' | '/' | '\\' | ' ' | '.' | ':')
+        })
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+fn token_matches_unity_target_platform(token: &str, platform: &str) -> bool {
+    let normalized_token = token.trim().to_ascii_lowercase();
+
+    match platform.trim().to_ascii_lowercase().as_str() {
+        "windows" => matches!(
+            normalized_token.as_str(),
+            "windows" | "win" | "win64" | "standalonewindows" | "standalonewindows64"
+        ),
+        "linux" => matches!(
+            normalized_token.as_str(),
+            "linux" | "linux64" | "standalonelinux" | "standalonelinux64"
+        ),
+        "macos" => matches!(
+            normalized_token.as_str(),
+            "mac" | "macos" | "osx" | "standaloneosx"
+        ),
+        "webgl" => matches!(normalized_token.as_str(), "webgl"),
+        "android" => matches!(normalized_token.as_str(), "android"),
+        other => normalized_token == other,
+    }
+}
+
+fn is_generic_process_feed_build_token(token: &str) -> bool {
+    matches!(
+        token,
+        "build"
+            | "builds"
+            | "player"
+            | "players"
+            | "target"
+            | "targets"
+            | "release"
+            | "runtime"
+            | "standalone"
+            | "artifact"
+            | "artifacts"
+            | "output"
+            | "outputs"
+    )
+}
+
+fn truncate_process_feed_label(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_owned();
+    }
+
+    let truncated = trimmed.chars().take(max_chars.saturating_sub(3)).collect::<String>();
+    format!("{truncated}...")
+}
+
+fn resolve_process_feed_publish_subject(
+    publish_run_contexts: &HashMap<i64, ProcessFeedPublishRunContext>,
+    publish_run_id: i64,
+) -> Option<String> {
+    let context = publish_run_contexts.get(&publish_run_id)?;
+    let publish_target_name = context.publish_target_name.trim();
+    if !publish_target_name.is_empty() {
+        return Some(publish_target_name.to_owned());
+    }
+
+    context.artifact_name.clone()
+}
+
+fn humanize_unity_target_platform(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "windows" | "standalonewindows" | "standalonewindows64" => {
+            String::from("Windows")
+        }
+        "linux" | "standalonelinux64" => String::from("Linux"),
+        "mac" | "macos" | "osx" | "standaloneosx" => String::from("macOS"),
+        "webgl" => String::from("WebGL"),
+        "android" => String::from("Android"),
+        _ => value.trim().to_owned(),
+    }
 }
 
 fn classify_process_feed_status(
@@ -8683,6 +9267,7 @@ mod tests {
         CreateRepositoryProjectBuildTargetInput,
         CreateRepositoryProjectCredentialInput,
         CreateRepositoryProjectInput,
+        UpdateRepositoryAuthStateInput,
         UpdateRepositoryProjectBuildTargetInput,
         UpdateRepositoryProjectInput,
         list_credential_records,
@@ -9336,6 +9921,250 @@ mod tests {
     }
 
     #[test]
+    fn repository_auth_state_tracks_binding_transitions() {
+        let root = test_root("repository-auth-state-binding-transitions");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let created = LocalCoordinator::new(&layout)
+            .create_repository_project(CreateRepositoryProjectInput {
+                name: String::from("Night Shift"),
+                engine_kind: String::from("unity"),
+                repo_url: String::from("https://github.com/indiegabo/night-shift.git"),
+                credentials: None,
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                enabled: true,
+                build_targets: vec![CreateRepositoryProjectBuildTargetInput {
+                    name: String::from("Windows"),
+                    build_kind: String::from("player"),
+                    runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
+                    output_kind: Some(String::from("archive")),
+                    output_path_template: None,
+                    timeout_seconds: 3600,
+                    enabled: true,
+                    contract_json: serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "StandaloneWindows64",
+                            "buildMethod": "Builder.PerformWindows"
+                        }
+                    })
+                    .to_string(),
+                    runner_config_json: String::from(
+                        r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
+                    ),
+                }],
+            })
+            .expect("repository project should persist");
+
+        let coordinator = LocalCoordinator::new(&layout);
+        coordinator
+            .update_repository_auth_state(UpdateRepositoryAuthStateInput {
+                repository_id: created.repository_id,
+                source_provider_id: String::from("github"),
+                source_instance_url: String::from("https://github.com"),
+                visibility_status: String::from("private"),
+                auth_requirement_status: String::from("required"),
+                supports_interactive_login: true,
+                auth_status_message: String::from(
+                    "GitHub repository requires authentication before HGP can access it.",
+                ),
+            })
+            .expect("repository auth state should persist");
+
+        let unbound = coordinator
+            .list_polling_repositories()
+            .expect("managed polling repositories should load");
+        assert_eq!(unbound.len(), 1);
+        assert_eq!(unbound[0].auth_binding_status, "required_unbound");
+        assert_eq!(unbound[0].visibility_status, "private");
+        assert_eq!(unbound[0].auth_requirement_status, "required");
+        assert_eq!(unbound[0].source_provider_id.as_deref(), Some("github"));
+        assert!(unbound[0].auth_last_verified_at.is_some());
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO credentials (name, kind, config_json) VALUES (?, ?, ?)",
+                params![
+                    "GitHub.com",
+                    KIND_GIT_HTTP_BASIC,
+                    r#"{"username":"git","password":"secret"}"#,
+                ],
+            )
+            .expect("credential row should insert");
+        let credentials_id = connection.last_insert_rowid();
+        drop(connection);
+
+        coordinator
+            .update_repository_credentials_binding(
+                created.repository_id,
+                Some(credentials_id),
+            )
+            .expect("repository credentials should bind");
+
+        let bound = coordinator
+            .list_polling_repositories()
+            .expect("managed polling repositories should load after binding");
+        assert_eq!(bound[0].auth_binding_status, "bound_ready");
+        assert_eq!(bound[0].credentials_id, Some(credentials_id));
+
+        coordinator
+            .update_repository_auth_state(UpdateRepositoryAuthStateInput {
+                repository_id: created.repository_id,
+                source_provider_id: String::from("github"),
+                source_instance_url: String::from("https://github.com"),
+                visibility_status: String::from("public"),
+                auth_requirement_status: String::from("none"),
+                supports_interactive_login: true,
+                auth_status_message: String::from(
+                    "Public repository detected through anonymous remote access.",
+                ),
+            })
+            .expect("public repository auth state should clear incompatible binding");
+
+        let public = coordinator
+            .list_polling_repositories()
+            .expect("managed polling repositories should load after public recheck");
+        assert_eq!(public[0].auth_binding_status, "not_required");
+        assert_eq!(public[0].credentials_id, None);
+        assert_eq!(public[0].visibility_status, "public");
+
+        coordinator
+            .update_repository_auth_state(UpdateRepositoryAuthStateInput {
+                repository_id: created.repository_id,
+                source_provider_id: String::from("github"),
+                source_instance_url: String::from("https://github.com"),
+                visibility_status: String::from("private"),
+                auth_requirement_status: String::from("required"),
+                supports_interactive_login: true,
+                auth_status_message: String::from(
+                    "GitHub repository requires authentication before HGP can access it.",
+                ),
+            })
+            .expect("private repository auth state should re-enter required binding flow");
+
+        coordinator
+            .update_repository_credentials_binding(
+                created.repository_id,
+                Some(credentials_id),
+            )
+            .expect("repository credentials should rebind after private recheck");
+
+        coordinator
+            .update_repository_credentials_binding(created.repository_id, None)
+            .expect("repository credentials should clear");
+
+        let cleared = coordinator
+            .list_polling_repositories()
+            .expect("managed polling repositories should load after clearing");
+        assert_eq!(cleared[0].auth_binding_status, "required_unbound");
+        assert_eq!(cleared[0].credentials_id, None);
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn repository_auth_runtime_failure_marks_reauth_required_for_bound_private_repository() {
+        let root = test_root("repository-auth-runtime-failure");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let created = LocalCoordinator::new(&layout)
+            .create_repository_project(CreateRepositoryProjectInput {
+                name: String::from("Night Shift"),
+                engine_kind: String::from("unity"),
+                repo_url: String::from("https://github.com/indiegabo/night-shift.git"),
+                credentials: None,
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                enabled: true,
+                build_targets: vec![CreateRepositoryProjectBuildTargetInput {
+                    name: String::from("Windows"),
+                    build_kind: String::from("player"),
+                    runner_type: String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE),
+                    output_kind: Some(String::from("archive")),
+                    output_path_template: None,
+                    timeout_seconds: 3600,
+                    enabled: true,
+                    contract_json: serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "StandaloneWindows64",
+                            "buildMethod": "Builder.PerformWindows"
+                        }
+                    })
+                    .to_string(),
+                    runner_config_json: String::from(
+                        r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
+                    ),
+                }],
+            })
+            .expect("repository project should persist");
+
+        let coordinator = LocalCoordinator::new(&layout);
+        coordinator
+            .update_repository_auth_state(UpdateRepositoryAuthStateInput {
+                repository_id: created.repository_id,
+                source_provider_id: String::from("github"),
+                source_instance_url: String::from("https://github.com"),
+                visibility_status: String::from("private"),
+                auth_requirement_status: String::from("required"),
+                supports_interactive_login: true,
+                auth_status_message: String::from(
+                    "GitHub repository requires authentication before HGP can access it.",
+                ),
+            })
+            .expect("repository auth state should persist");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO credentials (name, kind, config_json) VALUES (?, ?, ?)",
+                params![
+                    "GitHub.com",
+                    KIND_GIT_HTTP_BASIC,
+                    r#"{"username":"git","password":"secret"}"#,
+                ],
+            )
+            .expect("credential row should insert");
+        let credentials_id = connection.last_insert_rowid();
+        drop(connection);
+
+        coordinator
+            .update_repository_credentials_binding(
+                created.repository_id,
+                Some(credentials_id),
+            )
+            .expect("repository credentials should bind");
+
+        coordinator
+            .mark_repository_auth_runtime_failure(
+                created.repository_id,
+                "Authentication failed for https://github.com/indiegabo/night-shift.git",
+            )
+            .expect("runtime auth failure should persist");
+
+        let repositories = coordinator
+            .list_polling_repositories()
+            .expect("managed polling repositories should load");
+        assert_eq!(repositories.len(), 1);
+        assert_eq!(repositories[0].auth_binding_status, "reauth_required");
+        assert_eq!(repositories[0].credentials_id, Some(credentials_id));
+        assert!(repositories[0]
+            .auth_status_message
+            .contains("Authentication failed"));
+        assert!(repositories[0].auth_last_verified_at.is_some());
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
     fn update_repository_project_syncs_active_build_targets_without_deleting_history() {
         let root = test_root("update-repository-project-build-target-sync");
         let directories = RuntimeDirectories::from_root(&root);
@@ -9949,7 +10778,7 @@ mod tests {
         assert_eq!(first_page.items[0].repository_engine_kind, "unity");
         assert_eq!(first_page.items[0].git_tag, "v1.1.0");
         assert_eq!(first_page.items[0].display_status, "running");
-        assert_eq!(first_page.items[0].current_step_label, "Build player");
+        assert_eq!(first_page.items[0].current_step_label, "Building Linux");
         assert_eq!(first_page.items[0].current_step_status, "running");
         assert_eq!(
             first_page.items[0].current_step_detail.as_deref(),
@@ -9967,7 +10796,7 @@ mod tests {
         assert_eq!(second_page.items.len(), 1);
         assert_eq!(second_page.items[0].release_run_id, completed_release_run_id);
         assert_eq!(second_page.items[0].display_status, "succeeded");
-        assert_eq!(second_page.items[0].current_step_label, "Build completed");
+        assert_eq!(second_page.items[0].current_step_label, "Built Windows");
         assert_eq!(second_page.items[0].current_step_status, "succeeded");
         assert_eq!(second_page.items[0].succeeded_build_runs, 1);
         assert_eq!(second_page.items[0].total_publish_runs, 0);
@@ -10174,10 +11003,75 @@ mod tests {
         assert_eq!(page.items[0].release_run_id, release_run_id);
         assert_eq!(page.items[0].repository_engine_kind, "unity");
         assert_eq!(page.items[0].display_status, "queued");
-        assert_eq!(page.items[0].current_step_label, "Queued for build");
+        assert_eq!(page.items[0].current_step_label, "Queued build: Windows");
         assert_eq!(page.items[0].current_step_status, "queued");
         assert_eq!(page.items[0].queued_build_runs, 1);
         assert_eq!(page.items[0].running_build_runs, 0);
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn list_process_feed_page_surfaces_publish_target_names() {
+        let root = test_root("list-process-feed-page-publish-running");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let fixture = seed_repository_fixture(&connection, "process-feed-publish");
+        let release_run_id = insert_release_run(
+            &connection,
+            fixture.repository_id,
+            "v1.3.0",
+            ReleaseStatus::Queued.as_str(),
+        );
+        let build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            fixture.primary_build_target_id,
+            BuildStatus::Succeeded.as_str(),
+        );
+        update_build_run_plan(
+            &connection,
+            build_run_id,
+            "2022.3.22f1",
+            DEFAULT_HOST_NATIVE_RUNNER_TYPE,
+        );
+        let artifact_id = insert_artifact(&connection, build_run_id, "publishable.zip");
+        let publish_run_id = insert_publish_run(
+            &connection,
+            release_run_id,
+            build_run_id,
+            fixture.publish_target_id,
+            artifact_id,
+            PublishStatus::Running.as_str(),
+        );
+        connection
+            .execute(
+                "
+                UPDATE publish_runs
+                SET started_at = ?
+                WHERE id = ?
+                ",
+                params!["2026-01-12T09:00:00Z", publish_run_id],
+            )
+            .expect("running publish metadata should update");
+        drop(connection);
+
+        let page = list_process_feed_page(&layout, 1, 10)
+            .expect("publish process feed page should load");
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].release_run_id, release_run_id);
+        assert_eq!(page.items[0].display_status, "running");
+        assert_eq!(
+            page.items[0].current_step_label,
+            "Publishing process-feed-publish-publish"
+        );
+        assert_eq!(page.items[0].current_step_status, "running");
+        assert_eq!(page.items[0].running_publish_runs, 1);
+        assert_eq!(page.items[0].total_publish_runs, 1);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -10450,232 +11344,6 @@ mod tests {
         assert_eq!(repository_row.6, 900);
         assert_eq!(repository_row.7.as_deref(), Some("v1.2.3"));
         assert_eq!(repository_row.8, 1);
-        drop(connection);
-
-        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
-    }
-
-    #[test]
-    fn revolutions_managed_repository_seed_sql_registers_minimal_runtime_configuration() {
-        let root = test_root("revolutions-seed-sql");
-        let directories = RuntimeDirectories::from_root(&root);
-        let layout = StorageLayout::from_directories(&directories);
-        initialize_database(&layout).expect("database bootstrap should succeed");
-
-        let seed_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../scripts/revolutions-managed-repository.sql");
-        let seed_sql = std::fs::read_to_string(&seed_path)
-            .expect("revolutions managed repository seed SQL should exist");
-
-        let connection = open_connection(&layout.database_path).expect("connection should open");
-        connection
-            .execute_batch(&seed_sql)
-            .expect("seed SQL should apply once");
-        connection
-            .execute_batch(&seed_sql)
-            .expect("seed SQL should remain idempotent on the second apply");
-
-        let repository_row: (
-            Option<i64>,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            i64,
-            i64,
-        ) = connection
-            .query_row(
-                "
-                SELECT credentials_id,
-                       source_mode,
-                       workspace_strategy,
-                       repo_url,
-                       local_path,
-                       default_branch,
-                       artifacts_root_override,
-                      workspace_root_override,
-                       polling_interval_seconds,
-                       enabled
-                FROM repositories
-                WHERE name = ?
-                ",
-                ["Revolutions"],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                        row.get(8)?,
-                        row.get(9)?,
-                    ))
-                },
-            )
-            .expect("seeded repository should load");
-
-        assert!(repository_row.0.is_some());
-        assert_eq!(repository_row.1, "managed_repository");
-        assert_eq!(repository_row.2, "managed_checkout");
-        assert_eq!(
-            repository_row.3.as_deref(),
-            Some("https://github.com/indiegabo/revolutions.git")
-        );
-        assert!(repository_row.4.is_none());
-        assert_eq!(repository_row.5.as_deref(), Some("main"));
-        assert_eq!(
-            repository_row.6.as_deref(),
-            Some("D:\\Users\\gabao\\Revolutions\\builds-output")
-        );
-        assert_eq!(
-            repository_row.7.as_deref(),
-            Some("D:\\Users\\gabao\\RevolutionsHandyUnityBuilderWorkspace")
-        );
-        assert_eq!(repository_row.8, 300);
-        assert_eq!(repository_row.9, 1);
-
-        let credential_row: (String, String, String) = connection
-            .query_row(
-                "
-                SELECT name, kind, config_json
-                FROM credentials
-                WHERE id = (SELECT credentials_id FROM repositories WHERE name = ?)
-                ",
-                ["Revolutions"],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("seeded credentials should load");
-        assert_eq!(credential_row.0, "Revolutions/origin");
-        assert_eq!(credential_row.1, "git-http-basic");
-        assert_eq!(
-            credential_row.2,
-            r#"{"username":"indiegabo","password":"__REVOLUTIONS_PROJECT_PAT__"}"#
-        );
-
-        let trigger_rule_count: i64 = connection
-            .query_row(
-                "
-                SELECT COUNT(1)
-                FROM trigger_rules
-                WHERE repository_id = (SELECT id FROM repositories WHERE name = ?)
-                ",
-                ["Revolutions"],
-                |row| row.get(0),
-            )
-            .expect("trigger rule count should load");
-        assert_eq!(trigger_rule_count, 1);
-
-        let trigger_rule_row: (String, String, i64, String) = connection
-            .query_row(
-                "
-                SELECT name, source, enabled, config_json
-                FROM trigger_rules
-                WHERE repository_id = (SELECT id FROM repositories WHERE name = ?)
-                ",
-                ["Revolutions"],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .expect("manual trigger rule should load");
-        assert_eq!(trigger_rule_row.0, "manual-build-now");
-        assert_eq!(trigger_rule_row.1, "manual");
-        assert_eq!(trigger_rule_row.2, 1);
-        assert_eq!(trigger_rule_row.3, "{}");
-
-        let build_target_count: i64 = connection
-            .query_row(
-                "
-                SELECT COUNT(1)
-                FROM build_targets
-                WHERE repository_id = (SELECT id FROM repositories WHERE name = ?)
-                ",
-                ["Revolutions"],
-                |row| row.get(0),
-            )
-            .expect("build target count should load");
-        assert_eq!(build_target_count, 1);
-
-        let build_target_row: (
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            i64,
-            i64,
-            String,
-            String,
-        ) = connection
-            .query_row(
-                "
-                SELECT name,
-                       build_kind,
-                       runner_type,
-                       output_kind,
-                       output_path_template,
-                       timeout_seconds,
-                       enabled,
-                       contract_json,
-                       config_json
-                FROM build_targets
-                WHERE repository_id = (SELECT id FROM repositories WHERE name = ?)
-                ",
-                ["Revolutions"],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                        row.get(8)?,
-                    ))
-                },
-            )
-            .expect("seeded build target should load");
-        assert_eq!(build_target_row.0, "windows-player");
-        assert_eq!(build_target_row.1, "player");
-        assert_eq!(build_target_row.2, DEFAULT_HOST_NATIVE_RUNNER_TYPE);
-        assert_eq!(build_target_row.3.as_deref(), Some("archive"));
-        assert_eq!(build_target_row.4.as_deref(), Some("Builds/Players"));
-        assert_eq!(build_target_row.5, 5400);
-        assert_eq!(build_target_row.6, 1);
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&build_target_row.7)
-                .expect("contract_json should decode"),
-            serde_json::json!({
-                "unity": {
-                    "targetPlatform": "windows",
-                    "buildMethod": "Builder.PerformWindows",
-                    "editorVersion": "6000.4.3f1"
-                }
-            })
-        );
-        assert_eq!(
-            build_target_row.8,
-            r#"{"unity_executable_path":"C:\\Program Files\\Unity\\Hub\\Editor\\6000.4.3f1\\Editor\\Unity.exe"}"#
-        );
-
-        let publish_target_count: i64 = connection
-            .query_row(
-                "
-                SELECT COUNT(1)
-                FROM publish_targets
-                WHERE repository_id = (SELECT id FROM repositories WHERE name = ?)
-                ",
-                ["Revolutions"],
-                |row| row.get(0),
-            )
-            .expect("publish target count should load");
-        assert_eq!(publish_target_count, 0);
         drop(connection);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
@@ -12081,7 +12749,7 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].release_run_id, release_run_id);
         assert_eq!(page.items[0].display_status, "succeeded");
-        assert_eq!(page.items[0].current_step_label, "Build completed");
+        assert_eq!(page.items[0].current_step_label, "Built Windows");
         assert_eq!(page.items[0].current_step_status, "succeeded");
 
         let coordinator = LocalCoordinator::new(&layout);

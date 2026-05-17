@@ -10,17 +10,6 @@ const POLL_FAILURE_STAGE_ADVANCE_RELEASE_QUEUE_PRECHECK: &str =
 const POLL_FAILURE_STAGE_POLL_REMOTE: &str = "poll_remote";
 const POLL_FAILURE_STAGE_ADVANCE_RELEASE_QUEUE_POST_POLL: &str =
     "advance_release_queue_post_poll";
-const AUTHENTICATION_FAILURE_PATTERNS: &[&str] = &[
-    "authentication failed",
-    "invalid username or token",
-    "could not read username",
-    "could not read password",
-    "host keyring error",
-    "no matching entry found in secure storage",
-    "access denied",
-    "permission denied",
-    "unauthorized",
-];
 
 #[derive(Debug, Serialize)]
 struct FailedPollAttemptLogRecord<'a> {
@@ -193,6 +182,26 @@ fn run_repository_poll_cycle_with_forced_repositories(
         seen_repositories.insert(repository.id);
         let force_poll = forced_repository_ids.contains(&repository.id);
 
+        if repository.auth_binding_status == REPOSITORY_AUTH_BINDING_STATUS_REQUIRED_UNBOUND
+            && !force_poll
+        {
+            results.push(skipped_poll_result(
+                &repository,
+                POLL_STATUS_SKIPPED_REQUIRED_UNBOUND,
+            ));
+            continue;
+        }
+
+        if repository.auth_binding_status == REPOSITORY_AUTH_BINDING_STATUS_REAUTH_REQUIRED
+            && !force_poll
+        {
+            results.push(skipped_poll_result(
+                &repository,
+                POLL_STATUS_SKIPPED_REAUTH_REQUIRED,
+            ));
+            continue;
+        }
+
         if !repository.enabled {
             if let Some(schedule) = poll_schedule.as_deref_mut() {
                 schedule.delete_repository(repository.id);
@@ -274,6 +283,7 @@ fn run_repository_poll_cycle_with_forced_repositories(
                     &error,
                 );
                 if is_authentication_poll_error(&error) {
+                    persist_repository_auth_runtime_failure(coordinator, repository.id, &error);
                     log_poll_auth_failure_event(
                         storage,
                         &repository,
@@ -547,10 +557,7 @@ fn log_failed_poll_attempt(
 }
 
 fn is_authentication_poll_error(error: &io::Error) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    AUTHENTICATION_FAILURE_PATTERNS
-        .iter()
-        .any(|pattern| message.contains(pattern))
+    error_indicates_authentication_failure(error)
 }
 
 fn fatal_poll_auth_failure(

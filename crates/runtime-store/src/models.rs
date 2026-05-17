@@ -303,6 +303,13 @@ pub struct PollingRepositoryRecord {
     pub repo_url: String,
     pub engine_kind: String,
     pub credentials_id: Option<i64>,
+    pub source_provider_id: Option<String>,
+    pub source_instance_url: Option<String>,
+    pub visibility_status: String,
+    pub auth_requirement_status: String,
+    pub auth_binding_status: String,
+    pub auth_status_message: String,
+    pub auth_last_verified_at: Option<String>,
     pub enabled: bool,
     pub polling_interval_seconds: i64,
     pub last_seen_tag: Option<String>,
@@ -724,6 +731,19 @@ pub struct UpdateRepositoryProjectInput {
     pub polling_interval_seconds: i64,
     pub enabled: bool,
     pub build_targets: Vec<UpdateRepositoryProjectBuildTargetInput>,
+}
+
+/// Defines the durable repository auth assessment that should be persisted for
+/// one managed repository project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateRepositoryAuthStateInput {
+    pub repository_id: i64,
+    pub source_provider_id: String,
+    pub source_instance_url: String,
+    pub visibility_status: String,
+    pub auth_requirement_status: String,
+    pub supports_interactive_login: bool,
+    pub auth_status_message: String,
 }
 
 /// Reports one repository project created through the operator wizard.

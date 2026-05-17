@@ -89,6 +89,13 @@ export type RepositoryInspectionEntry = {
     last_seen_tag: string | null;
     enabled_build_target_count: number;
     credentials: RepositoryCredentialReference | null;
+    source_provider_id: string | null;
+    source_instance_url: string | null;
+    visibility_status: string;
+    auth_requirement_status: string;
+    auth_binding_status: string;
+    auth_status_message: string;
+    auth_last_verified_at: string | null;
     build_targets: UnityAdapterBuildTargetSettings[];
     publish_targets: RepositoryPublishTargetInspection[];
     pending_release_count: number;
@@ -102,6 +109,62 @@ export type RepositoryInspectionEntry = {
 export type RepositoryInspectionSettings = {
     generated_at: string;
     repositories: RepositoryInspectionEntry[];
+};
+
+export type RepositoryAccessAssessment = {
+    provider_id: string;
+    provider_label: string;
+    instance_url: string;
+    normalized_url: string;
+    visibility: string;
+    auth_requirement: string;
+    auth_status: string;
+    supports_interactive_login: boolean;
+    message: string;
+};
+
+export type RepositoryProviderDetection = {
+    provider_id: string;
+    provider_label: string;
+    instance_url: string;
+    normalized_url: string;
+    supports_interactive_login: boolean;
+};
+
+export type CredentialConfigSummary = {
+    status: string;
+    message: string;
+    top_level_keys: string[];
+    missing_required_keys: string[];
+};
+
+export type SecretCredentialSetting = {
+    credential_id: number;
+    name: string;
+    kind: string;
+    created_at: string;
+    updated_at: string;
+    storage_model: string;
+    config_summary: CredentialConfigSummary;
+};
+
+export type SecretSettings = {
+    storage_model: string;
+    supported_credential_kinds: string[];
+    warnings: string[];
+    credentials: SecretCredentialSetting[];
+};
+
+export type SecretCredentialKind =
+    | "git-http-basic"
+    | "git-http-bearer"
+    | "git-http-github-host-login";
+
+export type SaveSecretCredentialInput = {
+    credential_id?: number | null;
+    name: string;
+    kind: SecretCredentialKind;
+    config_json: string;
 };
 
 export type HostPathSelectionKind = "file" | "directory";
@@ -127,6 +190,8 @@ export type CreateRepositoryProjectInput = {
     name: string;
     engine_kind: RepositoryEngineKind;
     repository_url: string;
+    repository_access_assessment?: RepositoryAccessAssessment | null;
+    repository_credentials_id?: number | null;
     default_branch?: string | null;
     artifacts_root_override?: string | null;
     workspace_root_override?: string | null;
@@ -153,6 +218,7 @@ export type UpdateRepositoryProjectInput = {
     name: string;
     engine_kind: RepositoryEngineKind;
     repository_url: string;
+    repository_access_assessment?: RepositoryAccessAssessment | null;
     default_branch?: string | null;
     artifacts_root_override?: string | null;
     workspace_root_override?: string | null;
@@ -163,6 +229,38 @@ export type UpdateRepositoryProjectInput = {
 
 export async function loadRepositoryInspection(): Promise<RepositoryInspectionSettings> {
     return invoke<RepositoryInspectionSettings>("repository_inspection");
+}
+
+export async function assessRepositoryAccess(
+    repositoryUrl: string,
+): Promise<RepositoryAccessAssessment> {
+    return invoke<RepositoryAccessAssessment>("assess_repository_access", {
+        input: {
+            repository_url: repositoryUrl,
+        },
+    });
+}
+
+export async function detectRepositoryProvider(
+    repositoryUrl: string,
+): Promise<RepositoryProviderDetection> {
+    return invoke<RepositoryProviderDetection>("detect_repository_provider", {
+        input: {
+            repository_url: repositoryUrl,
+        },
+    });
+}
+
+export async function loadSecretSettings(): Promise<SecretSettings> {
+    return invoke<SecretSettings>("secret_settings");
+}
+
+export async function saveSecretCredential(
+    input: SaveSecretCredentialInput,
+): Promise<void> {
+    return invoke<void>("save_secret_credential", {
+        input,
+    });
 }
 
 export async function pickHostPath(
@@ -198,5 +296,51 @@ export async function updateRepositoryProject(
 ): Promise<void> {
     return invoke<void>("update_repository_project", {
         input,
+    });
+}
+
+export async function connectRepositoryAuth(
+    repositoryId: number,
+    credentialsId: number,
+): Promise<void> {
+    return invoke<void>("connect_repository_auth", {
+        input: {
+            repository_id: repositoryId,
+            credentials_id: credentialsId,
+        },
+    });
+}
+
+export async function reconnectRepositoryAuth(
+    repositoryId: number,
+    credentialsId: number,
+): Promise<void> {
+    return invoke<void>("reconnect_repository_auth", {
+        input: {
+            repository_id: repositoryId,
+            credentials_id: credentialsId,
+        },
+    });
+}
+
+export async function disconnectRepositoryAuth(
+    repositoryId: number,
+): Promise<void> {
+    return invoke<void>("disconnect_repository_auth", {
+        input: {
+            repository_id: repositoryId,
+        },
+    });
+}
+
+export async function syncRepositoryAuthAssessment(
+    repositoryId: number,
+    repositoryAccessAssessment: RepositoryAccessAssessment,
+): Promise<void> {
+    return invoke<void>("sync_repository_auth_assessment", {
+        input: {
+            repository_id: repositoryId,
+            repository_access_assessment: repositoryAccessAssessment,
+        },
     });
 }

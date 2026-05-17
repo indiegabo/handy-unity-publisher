@@ -28,9 +28,28 @@ const GIT_TERMINAL_PROMPT_ENV: &str = "GIT_TERMINAL_PROMPT";
 const GIT_TERMINAL_PROMPT_DISABLED: &str = "0";
 const GCM_INTERACTIVE_ENV: &str = "GCM_INTERACTIVE";
 const GCM_INTERACTIVE_NEVER: &str = "never";
+const GIT_ASKPASS_ENV: &str = "GIT_ASKPASS";
+const SSH_ASKPASS_ENV: &str = "SSH_ASKPASS";
 const GIT_CREDENTIAL_HELPER_RESET: &str = "credential.helper=";
+const GIT_CORE_ASKPASS_RESET: &str = "core.askPass=";
+const GIT_CREDENTIAL_INTERACTIVE_DISABLED: &str = "credential.interactive=false";
 const GIT_CREDENTIAL_MANAGER_HELPER: &str = "manager";
 const DEFAULT_GITHUB_INSTANCE_URL: &str = "https://github.com";
+const REPOSITORY_PROVIDER_GITHUB: &str = "github";
+const REPOSITORY_PROVIDER_GITLAB: &str = "gitlab";
+const REPOSITORY_PROVIDER_BITBUCKET: &str = "bitbucket";
+const REPOSITORY_PROVIDER_UNKNOWN: &str = "unknown";
+const REPOSITORY_VISIBILITY_PUBLIC: &str = "public";
+const REPOSITORY_VISIBILITY_PRIVATE: &str = "private";
+const REPOSITORY_VISIBILITY_INVALID: &str = "invalid";
+const REPOSITORY_VISIBILITY_UNKNOWN: &str = "unknown";
+const REPOSITORY_AUTH_REQUIREMENT_NONE: &str = "none";
+const REPOSITORY_AUTH_REQUIREMENT_REQUIRED: &str = "required";
+const REPOSITORY_AUTH_REQUIREMENT_UNKNOWN: &str = "unknown";
+const REPOSITORY_AUTH_STATUS_NOT_REQUIRED: &str = "not_required";
+const REPOSITORY_AUTH_STATUS_REQUIRED_UNBOUND: &str = "required_unbound";
+const REPOSITORY_AUTH_STATUS_UNSUPPORTED: &str = "unsupported";
+const REPOSITORY_AUTH_STATUS_UNKNOWN: &str = "unknown";
 #[cfg(test)]
 const TEST_GIT_EXECUTABLE_ENV: &str =
     "HANDY_GAMES_PUBLISHER_TEST_GIT_EXECUTABLE";
@@ -82,6 +101,148 @@ impl GitAuthOptions {
 
         resolved
     }
+}
+
+/// Reports the access classification produced from one repository URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryAccessAssessment {
+    pub provider_id: String,
+    pub provider_label: String,
+    pub instance_url: String,
+    pub normalized_url: String,
+    pub visibility: String,
+    pub auth_requirement: String,
+    pub auth_status: String,
+    pub supports_interactive_login: bool,
+    pub message: String,
+}
+
+/// Reports the provider identity inferred from one repository URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryProviderDetection {
+    pub provider_id: String,
+    pub provider_label: String,
+    pub instance_url: String,
+    pub normalized_url: String,
+    pub supports_interactive_login: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DetectedRepositoryProvider {
+    provider_id: &'static str,
+    provider_label: &'static str,
+    supports_interactive_login: bool,
+    instance_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedRepositoryUrl {
+    normalized_url: String,
+    host: String,
+    instance_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnonymousProbeClassification {
+    AuthRequired,
+    Invalid,
+    Unknown,
+}
+
+/// Assesses repository provider identity and anonymous access requirements.
+pub fn assess_repository_access(repository_url: &str) -> io::Result<RepositoryAccessAssessment> {
+    let normalized = normalize_repository_url(repository_url)?;
+    let provider = detect_repository_provider(&normalized);
+
+    match probe_repository_anonymously(&normalized.normalized_url) {
+        Ok(()) => Ok(RepositoryAccessAssessment {
+            provider_id: String::from(provider.provider_id),
+            provider_label: String::from(provider.provider_label),
+            instance_url: provider.instance_url,
+            normalized_url: normalized.normalized_url,
+            visibility: String::from(REPOSITORY_VISIBILITY_PUBLIC),
+            auth_requirement: String::from(REPOSITORY_AUTH_REQUIREMENT_NONE),
+            auth_status: String::from(REPOSITORY_AUTH_STATUS_NOT_REQUIRED),
+            supports_interactive_login: provider.supports_interactive_login,
+            message: String::from(
+                "Public repository detected through anonymous remote access.",
+            ),
+        }),
+        Err(error) => match classify_anonymous_probe_failure(&error) {
+            AnonymousProbeClassification::AuthRequired => {
+                let auth_status = if provider.supports_interactive_login {
+                    REPOSITORY_AUTH_STATUS_REQUIRED_UNBOUND
+                } else {
+                    REPOSITORY_AUTH_STATUS_UNSUPPORTED
+                };
+                let message = if provider.supports_interactive_login {
+                    format!(
+                        "{} repository requires authentication before HGP can access it.",
+                        provider.provider_label
+                    )
+                } else {
+                    format!(
+                        "Repository requires authentication, but the current shell does not provide interactive login for {} yet.",
+                        provider.provider_label
+                    )
+                };
+
+                Ok(RepositoryAccessAssessment {
+                    provider_id: String::from(provider.provider_id),
+                    provider_label: String::from(provider.provider_label),
+                    instance_url: provider.instance_url,
+                    normalized_url: normalized.normalized_url,
+                    visibility: String::from(REPOSITORY_VISIBILITY_PRIVATE),
+                    auth_requirement: String::from(REPOSITORY_AUTH_REQUIREMENT_REQUIRED),
+                    auth_status: String::from(auth_status),
+                    supports_interactive_login: provider.supports_interactive_login,
+                    message,
+                })
+            }
+            AnonymousProbeClassification::Invalid => Ok(RepositoryAccessAssessment {
+                provider_id: String::from(provider.provider_id),
+                provider_label: String::from(provider.provider_label),
+                instance_url: provider.instance_url,
+                normalized_url: normalized.normalized_url,
+                visibility: String::from(REPOSITORY_VISIBILITY_INVALID),
+                auth_requirement: String::from(REPOSITORY_AUTH_REQUIREMENT_UNKNOWN),
+                auth_status: String::from(REPOSITORY_AUTH_STATUS_UNKNOWN),
+                supports_interactive_login: provider.supports_interactive_login,
+                message: format!(
+                    "Repository URL could not be resolved as a reachable Git remote: {error}"
+                ),
+            }),
+            AnonymousProbeClassification::Unknown => Ok(RepositoryAccessAssessment {
+                provider_id: String::from(provider.provider_id),
+                provider_label: String::from(provider.provider_label),
+                instance_url: provider.instance_url,
+                normalized_url: normalized.normalized_url,
+                visibility: String::from(REPOSITORY_VISIBILITY_UNKNOWN),
+                auth_requirement: String::from(REPOSITORY_AUTH_REQUIREMENT_UNKNOWN),
+                auth_status: String::from(REPOSITORY_AUTH_STATUS_UNKNOWN),
+                supports_interactive_login: provider.supports_interactive_login,
+                message: format!(
+                    "HGP could not determine whether the repository is public or private from anonymous access: {error}"
+                ),
+            }),
+        },
+    }
+}
+
+/// Detects the repository provider from URL heuristics without probing visibility.
+pub fn detect_repository_provider_from_url(
+    repository_url: &str,
+) -> io::Result<RepositoryProviderDetection> {
+    let normalized = normalize_repository_url(repository_url)?;
+    let provider = detect_repository_provider(&normalized);
+
+    Ok(RepositoryProviderDetection {
+        provider_id: String::from(provider.provider_id),
+        provider_label: String::from(provider.provider_label),
+        instance_url: provider.instance_url,
+        normalized_url: normalized.normalized_url,
+        supports_interactive_login: provider.supports_interactive_login,
+    })
 }
 
 /// Receives coarse checkout progress updates emitted by the Git workspace syncer.
@@ -375,6 +536,142 @@ fn normalized_optional_string(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn normalize_repository_url(repository_url: &str) -> io::Result<NormalizedRepositoryUrl> {
+    let trimmed = require_non_empty(repository_url, "repository url")?;
+    let (scheme, remainder) = trimmed.split_once("://").ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository url must use http:// or https://",
+        )
+    })?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository url must use http:// or https://",
+        ));
+    }
+
+    let (host, raw_path) = remainder.split_once('/').ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository url must include a host and repository path",
+        )
+    })?;
+    let host = require_non_empty(host, "repository host")?.to_ascii_lowercase();
+    let path = raw_path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_matches('/');
+    if path.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository url must include a repository path",
+        ));
+    }
+
+    let segments = path
+        .split('/')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let requires_owner_and_repository = matches!(
+        host.as_str(),
+        "github.com" | "gitlab.com" | "bitbucket.org"
+    );
+    if requires_owner_and_repository && segments.len() < 2 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository url must include owner and repository segments",
+        ));
+    }
+
+    let scheme = scheme.to_ascii_lowercase();
+    let normalized_path = segments.join("/");
+    Ok(NormalizedRepositoryUrl {
+        normalized_url: format!("{scheme}://{host}/{normalized_path}"),
+        host: host.clone(),
+        instance_url: format!("{scheme}://{host}"),
+    })
+}
+
+fn detect_repository_provider(
+    normalized: &NormalizedRepositoryUrl,
+) -> DetectedRepositoryProvider {
+    let (provider_id, provider_label, supports_interactive_login) =
+        if normalized.host.eq_ignore_ascii_case("github.com") {
+            (REPOSITORY_PROVIDER_GITHUB, "GitHub", true)
+        } else if normalized.host.eq_ignore_ascii_case("gitlab.com") {
+            (REPOSITORY_PROVIDER_GITLAB, "GitLab", false)
+        } else if normalized.host.eq_ignore_ascii_case("bitbucket.org") {
+            (REPOSITORY_PROVIDER_BITBUCKET, "Bitbucket", false)
+        } else {
+            (REPOSITORY_PROVIDER_UNKNOWN, "Unknown", false)
+        };
+
+    DetectedRepositoryProvider {
+        provider_id,
+        provider_label,
+        supports_interactive_login,
+        instance_url: normalized.instance_url.clone(),
+    }
+}
+
+fn probe_repository_anonymously(repository_url: &str) -> io::Result<()> {
+    let repository_url = require_non_empty(repository_url, "repository url")?;
+    let _ = run_git_command_with_output(
+        None,
+        vec![
+            String::from("ls-remote"),
+            String::from("--symref"),
+            repository_url,
+            String::from("HEAD"),
+        ],
+        None,
+        false,
+    )?;
+
+    Ok(())
+}
+
+fn classify_anonymous_probe_failure(error: &io::Error) -> AnonymousProbeClassification {
+    let message = error.to_string().to_ascii_lowercase();
+
+    let auth_indicators = [
+        "authentication failed",
+        "access denied",
+        "terminal prompts disabled",
+        "could not read username",
+        "http basic",
+        " 401",
+        " 403",
+        "403 forbidden",
+        "401 unauthorized",
+    ];
+    if auth_indicators.iter().any(|indicator| message.contains(indicator)) {
+        return AnonymousProbeClassification::AuthRequired;
+    }
+
+    let invalid_indicators = [
+        "repository not found",
+        "not found",
+        "does not appear to be a git repository",
+        "not a git repository",
+        "requested url returned error: 404",
+        "unable to access",
+        "fatal: '/",
+        "no such file or directory",
+    ];
+    if invalid_indicators
+        .iter()
+        .any(|indicator| message.contains(indicator))
+    {
+        return AnonymousProbeClassification::Invalid;
+    }
+
+    AnonymousProbeClassification::Unknown
 }
 
 /// Defines the repository snapshot that must be materialized into one local workspace.
@@ -724,7 +1021,9 @@ fn prepare_git_command(
 fn configure_non_interactive_git_command(command: &mut Command) {
     command
         .env(GIT_TERMINAL_PROMPT_ENV, GIT_TERMINAL_PROMPT_DISABLED)
-        .env(GCM_INTERACTIVE_ENV, GCM_INTERACTIVE_NEVER);
+    .env(GCM_INTERACTIVE_ENV, GCM_INTERACTIVE_NEVER)
+    .env_remove(GIT_ASKPASS_ENV)
+    .env_remove(SSH_ASKPASS_ENV);
 }
 
 fn git_command() -> Command {
@@ -782,6 +1081,10 @@ fn platform_git_command_args(
     preserve_credential_helper: bool,
 ) -> Vec<String> {
     let mut platform_args = Vec::new();
+    platform_args.push(String::from("-c"));
+    platform_args.push(String::from(GIT_CORE_ASKPASS_RESET));
+    platform_args.push(String::from("-c"));
+    platform_args.push(String::from(GIT_CREDENTIAL_INTERACTIVE_DISABLED));
     if let Some(credential_helper) = credential_helper {
         platform_args.push(String::from("-c"));
         platform_args.push(format!("credential.helper={credential_helper}"));
@@ -839,8 +1142,11 @@ fn parse_git_tags(output: &str) -> io::Result<Vec<GitTag>> {
 #[cfg(test)]
 mod tests {
     use super::{
+        assess_repository_access,
+        detect_repository_provider_from_url,
         format_git_command_failure, git_auth_options_from_credentials,
         git_auth_options_from_credentials_with_github_header_resolver,
+        normalize_repository_url, detect_repository_provider,
         parse_git_credential_fill_output, platform_git_command_args,
         prepare_git_command, GitAuthOptions, GitTagListRequest,
         GitTagLister, GitWorkspaceSyncRefRequest, GitWorkspaceSyncRequest,
@@ -944,6 +1250,128 @@ mod tests {
         )
         .expect_err("blank username should fail");
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn detect_repository_provider_classifies_supported_hosts() {
+        let github = normalize_repository_url("https://github.com/indiegabo/hgp.git")
+            .expect("GitHub url should normalize");
+        let gitlab = normalize_repository_url("https://gitlab.com/collective/hgp.git")
+            .expect("GitLab url should normalize");
+        let bitbucket =
+            normalize_repository_url("https://bitbucket.org/collective/hgp.git")
+                .expect("Bitbucket url should normalize");
+        let unknown = normalize_repository_url("https://forge.example.com/collective/hgp.git")
+            .expect("unknown host url should normalize");
+
+        assert_eq!(detect_repository_provider(&github).provider_id, "github");
+        assert_eq!(detect_repository_provider(&gitlab).provider_id, "gitlab");
+        assert_eq!(detect_repository_provider(&bitbucket).provider_id, "bitbucket");
+        assert_eq!(detect_repository_provider(&unknown).provider_id, "unknown");
+    }
+
+    #[test]
+    fn detect_repository_provider_from_url_returns_normalized_provider_metadata() {
+        let detection = detect_repository_provider_from_url(
+            "https://github.com/indiegabo/hgp.git",
+        )
+        .expect("GitHub provider detection should succeed");
+
+        assert_eq!(detection.provider_id, "github");
+        assert_eq!(detection.provider_label, "GitHub");
+        assert_eq!(detection.instance_url, "https://github.com");
+        assert_eq!(
+            detection.normalized_url,
+            "https://github.com/indiegabo/hgp.git",
+        );
+        assert!(detection.supports_interactive_login);
+    }
+
+    #[test]
+    fn assess_repository_access_reports_public_repository_without_auth() {
+        let root = test_root("access-assessment-public");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("existing public assessment root should be removable");
+        }
+
+        let project_root = root.join("http-root");
+        create_bare_repository_with_tags(
+            &project_root,
+            "public-tags.git",
+            "2022.3.20f1",
+            &["v1.0.0"],
+        );
+        let server = AuthenticatedGitHttpServer::start_public(&project_root);
+
+        let assessment = assess_repository_access(&server.repository_url("public-tags.git"))
+            .expect("public repository assessment should succeed");
+
+        assert_eq!(assessment.provider_id, "unknown");
+        assert_eq!(assessment.visibility, "public");
+        assert_eq!(assessment.auth_requirement, "none");
+        assert_eq!(assessment.auth_status, "not_required");
+        assert!(!assessment.supports_interactive_login);
+
+        drop(server);
+        fs::remove_dir_all(root).expect("temporary git test root should be removable");
+    }
+
+    #[test]
+    fn assess_repository_access_reports_private_repository_when_auth_is_required() {
+        let root = test_root("access-assessment-private");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("existing private assessment root should be removable");
+        }
+
+        let project_root = root.join("http-root");
+        create_bare_repository_with_tags(
+            &project_root,
+            "private-tags.git",
+            "2022.3.20f1",
+            &["v2.0.0"],
+        );
+        let auth = git_auth_options_from_credentials(
+            KIND_GIT_HTTP_BASIC,
+            r#"{"username":"comrade","password":"sickle"}"#,
+        )
+        .expect("basic credentials should parse");
+        let server = AuthenticatedGitHttpServer::start(
+            &project_root,
+            authorization_header_value(&auth),
+        );
+
+        let assessment = assess_repository_access(&server.repository_url("private-tags.git"))
+            .expect("private repository assessment should classify auth requirement");
+
+        assert_eq!(assessment.provider_id, "unknown");
+        assert_eq!(assessment.visibility, "private");
+        assert_eq!(assessment.auth_requirement, "required");
+        assert_eq!(assessment.auth_status, "unsupported");
+
+        drop(server);
+        fs::remove_dir_all(root).expect("temporary git test root should be removable");
+    }
+
+    #[test]
+    fn assess_repository_access_reports_invalid_repository_for_missing_remote() {
+        let root = test_root("access-assessment-invalid");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("existing invalid assessment root should be removable");
+        }
+
+        let project_root = root.join("http-root");
+        fs::create_dir_all(&project_root).expect("http root should create");
+        let server = AuthenticatedGitHttpServer::start_public(&project_root);
+
+        let assessment = assess_repository_access(&server.repository_url("missing.git"))
+            .expect("invalid repository assessment should classify without raising shell error");
+
+        assert_eq!(assessment.visibility, "invalid");
+        assert_eq!(assessment.auth_requirement, "unknown");
+        assert_eq!(assessment.auth_status, "unknown");
+
+        drop(server);
+        fs::remove_dir_all(root).expect("temporary git test root should be removable");
     }
 
     #[test]
@@ -1187,15 +1615,19 @@ mod tests {
         );
 
         assert_eq!(args[0], "-c");
-        assert_eq!(args[1], "credential.helper=");
+        assert_eq!(args[1], "core.askPass=");
+        assert_eq!(args[2], "-c");
+        assert_eq!(args[3], "credential.interactive=false");
+        assert_eq!(args[4], "-c");
+        assert_eq!(args[5], "credential.helper=");
         if cfg!(windows) {
-            assert_eq!(args[2], "-c");
-            assert_eq!(args[3], "core.longpaths=true");
-            assert_eq!(args[4], "clean");
-            assert_eq!(args[5], "-fdx");
+            assert_eq!(args[6], "-c");
+            assert_eq!(args[7], "core.longpaths=true");
+            assert_eq!(args[8], "clean");
+            assert_eq!(args[9], "-fdx");
         } else {
-            assert_eq!(args[2], "clean");
-            assert_eq!(args[3], "-fdx");
+            assert_eq!(args[6], "clean");
+            assert_eq!(args[7], "-fdx");
         }
     }
 
@@ -1208,13 +1640,17 @@ mod tests {
         );
 
         assert_eq!(args[0], "-c");
-        assert_eq!(args[1], "credential.helper=manager");
+        assert_eq!(args[1], "core.askPass=");
+        assert_eq!(args[2], "-c");
+        assert_eq!(args[3], "credential.interactive=false");
+        assert_eq!(args[4], "-c");
+        assert_eq!(args[5], "credential.helper=manager");
         if cfg!(windows) {
-            assert_eq!(args[2], "-c");
-            assert_eq!(args[3], "core.longpaths=true");
-            assert_eq!(args[4], "ls-remote");
+            assert_eq!(args[6], "-c");
+            assert_eq!(args[7], "core.longpaths=true");
+            assert_eq!(args[8], "ls-remote");
         } else {
-            assert_eq!(args[2], "ls-remote");
+            assert_eq!(args[6], "ls-remote");
         }
     }
 
@@ -1235,6 +1671,8 @@ mod tests {
             command_env_value(&command, "GCM_INTERACTIVE").as_deref(),
             Some("never")
         );
+        assert!(command_env_is_removed(&command, "GIT_ASKPASS"));
+        assert!(command_env_is_removed(&command, "SSH_ASKPASS"));
     }
 
     #[test]
@@ -1264,6 +1702,12 @@ mod tests {
         })
     }
 
+    fn command_env_is_removed(command: &Command, key: &str) -> bool {
+        command
+            .get_envs()
+            .any(|(name, value)| name == OsStr::new(key) && value.is_none())
+    }
+
     #[derive(Debug)]
     struct AuthenticatedGitHttpServer {
         address: SocketAddr,
@@ -1273,6 +1717,20 @@ mod tests {
 
     impl AuthenticatedGitHttpServer {
         fn start(project_root: &Path, expected_authorization_value: String) -> Self {
+            Self::start_with_optional_auth(
+                project_root,
+                Some(expected_authorization_value),
+            )
+        }
+
+        fn start_public(project_root: &Path) -> Self {
+            Self::start_with_optional_auth(project_root, None)
+        }
+
+        fn start_with_optional_auth(
+            project_root: &Path,
+            expected_authorization_value: Option<String>,
+        ) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0")
                 .expect("git http test listener should bind");
             let address = listener
@@ -1332,7 +1790,7 @@ mod tests {
     struct GitHttpServerConfig {
         git_http_backend_path: PathBuf,
         project_root: PathBuf,
-        expected_authorization_value: String,
+        expected_authorization_value: Option<String>,
     }
 
     #[derive(Debug, Clone)]
@@ -1402,11 +1860,15 @@ mod tests {
             return Ok(());
         };
 
-        let Some(authorization) = request.header("authorization") else {
-            return write_forbidden_response(stream);
-        };
-        if authorization != config.expected_authorization_value {
-            return write_forbidden_response(stream);
+        if let Some(expected_authorization_value) =
+            config.expected_authorization_value.as_deref()
+        {
+            let Some(authorization) = request.header("authorization") else {
+                return write_forbidden_response(stream);
+            };
+            if authorization != expected_authorization_value {
+                return write_forbidden_response(stream);
+            }
         }
 
         let output = run_git_http_backend(config, &request)?;

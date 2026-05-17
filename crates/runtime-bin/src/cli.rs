@@ -57,11 +57,6 @@ pub(crate) struct ManifestSyncCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SeedRevolutionsRegistrationCommand {
-    pub(crate) project_pat_env: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegistrationCheckoutCommand {
     pub(crate) repository_id: i64,
     pub(crate) git_ref: Option<String>,
@@ -200,17 +195,6 @@ pub(crate) struct RepositoryPollResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RegistrationSeedReport {
-    pub(crate) registration_name: String,
-    pub(crate) repository_id: i64,
-    pub(crate) build_target_count: i64,
-    pub(crate) workspace_root_override: Option<String>,
-    pub(crate) artifacts_root_override: Option<String>,
-    pub(crate) project_pat_env: String,
-    pub(crate) seed_path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RegistrationCheckoutReport {
     pub(crate) repository_id: i64,
     pub(crate) repository_name: String,
@@ -221,11 +205,6 @@ pub(crate) struct RegistrationCheckoutReport {
     pub(crate) workspace_root_path: String,
     pub(crate) checkout_path: String,
     pub(crate) head_commit: String,
-}
-
-pub(crate) struct ResolvedBuildContext {
-    pub(crate) plan: StoredBuildExecutionPlan,
-    pub(crate) preparation: WorkspacePreparationInput,
 }
 
 pub(crate) struct ResolvedPublishContext {
@@ -426,33 +405,6 @@ pub(crate) fn parse_manifest_sync_command(arguments: &[String]) -> io::Result<Ma
     })
 }
 
-pub(crate) fn parse_seed_revolutions_registration_command(
-    arguments: &[String],
-) -> io::Result<SeedRevolutionsRegistrationCommand> {
-    let mut project_pat_env = String::from(DEFAULT_REVOLUTIONS_PROJECT_PAT_ENV);
-    let mut index = 0;
-
-    while index < arguments.len() {
-        match arguments[index].as_str() {
-            "--project-pat-env" => {
-                project_pat_env = require_cli_value(
-                    &read_flag_value(arguments, index, arguments[index].as_str())?,
-                    "project-pat-env",
-                )?;
-                index += 2;
-            }
-            flag => {
-                return Err(cli_usage_error(format!(
-                    "unknown registrations seed-revolutions flag {flag:?}\n\n{}",
-                    registrations_seed_revolutions_usage()
-                )));
-            }
-        }
-    }
-
-    Ok(SeedRevolutionsRegistrationCommand { project_pat_env })
-}
-
 pub(crate) fn parse_registration_checkout_command(
     arguments: &[String],
 ) -> io::Result<RegistrationCheckoutCommand> {
@@ -586,18 +538,6 @@ pub(crate) fn default_manifest_directory() -> PathBuf {
         .join("pipelines")
 }
 
-pub(crate) fn revolutions_managed_repository_seed_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("scripts")
-        .join("revolutions-managed-repository.sql")
-}
-
-pub(crate) fn escape_sql_literal(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
 pub(crate) fn read_flag_value(arguments: &[String], index: usize, flag: &str) -> io::Result<String> {
     arguments
         .get(index + 1)
@@ -644,7 +584,7 @@ pub(crate) fn automation_usage() -> &'static str {
 }
 
 pub(crate) fn registrations_usage() -> &'static str {
-    "HGP runtime registrations commands\n\nUsage:\n  registrations checkout --repository-id <id> [--ref <git-ref>]\n  registrations import-runtime-db --source-db <path> --repository-name <name>\n  registrations seed-revolutions [--project-pat-env <env>]\n"
+    "HGP runtime registrations commands\n\nUsage:\n  registrations checkout --repository-id <id> [--ref <git-ref>]\n  registrations import-runtime-db --source-db <path> --repository-name <name>\n"
 }
 
 pub(crate) fn registrations_checkout_usage() -> &'static str {
@@ -685,10 +625,6 @@ pub(crate) fn automation_inspect_usage() -> &'static str {
 
 pub(crate) fn automation_poll_once_usage() -> &'static str {
     "HGP runtime automation poll-once\n\nUsage:\n  automation poll-once\n"
-}
-
-pub(crate) fn registrations_seed_revolutions_usage() -> &'static str {
-    "HGP runtime registrations seed-revolutions\n\nUsage:\n  registrations seed-revolutions [--project-pat-env <env>]\n\nDefaults:\n  --project-pat-env defaults to REVOLUTIONS_PROJECT_PAT\n"
 }
 
 pub(crate) fn manifest_sync_usage() -> &'static str {

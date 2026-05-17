@@ -23,6 +23,10 @@ use runtime_core::{
     RuntimeStatus, RuntimeSupervisorStatus,
 };
 use runtime_git::{
+    assess_repository_access as assess_git_repository_access,
+    detect_repository_provider_from_url as detect_git_repository_provider,
+    RepositoryAccessAssessment,
+    RepositoryProviderDetection,
     KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER,
     KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
 };
@@ -41,6 +45,7 @@ use runtime_store::{
     CreateRepositoryProjectBuildTargetInput,
     CreateRepositoryProjectInput as StoreCreateRepositoryProjectInput,
     CreatedRepositoryProjectRecord,
+    UpdateRepositoryAuthStateInput as StoreUpdateRepositoryAuthStateInput,
     UpdateRepositoryProjectBuildTargetInput as StoreUpdateRepositoryProjectBuildTargetInput,
     UpdateRepositoryProjectInput as StoreUpdateRepositoryProjectInput,
     RuntimeControlRequest,
@@ -355,15 +360,37 @@ struct SaveSecretCredentialInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-struct UpdateRepositorySecretBindingInput {
+struct ConnectRepositoryAuthInput {
     repository_id: i64,
-    credentials_id: Option<i64>,
+    credentials_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct ReconnectRepositoryAuthInput {
+    repository_id: i64,
+    credentials_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct DisconnectRepositoryAuthInput {
+    repository_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct SyncRepositoryAuthAssessmentInput {
+    repository_id: i64,
+    repository_access_assessment: RepositoryAccessAssessment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct UpdatePublishTargetSecretBindingInput {
     publish_target_id: i64,
     credentials_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct RepositoryAccessAssessmentInput {
+    repository_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -422,6 +449,8 @@ struct CreateRepositoryProjectCommandInput {
     name: String,
     engine_kind: String,
     repository_url: String,
+    repository_access_assessment: Option<RepositoryAccessAssessment>,
+    repository_credentials_id: Option<i64>,
     personal_access_token: Option<String>,
     default_branch: Option<String>,
     artifacts_root_override: Option<String>,
@@ -444,6 +473,7 @@ struct UpdateRepositoryProjectCommandInput {
     name: String,
     engine_kind: String,
     repository_url: String,
+    repository_access_assessment: Option<RepositoryAccessAssessment>,
     default_branch: Option<String>,
     artifacts_root_override: Option<String>,
     workspace_root_override: Option<String>,
@@ -470,6 +500,8 @@ struct NormalizedCreateRepositoryProjectCommandInput {
     name: String,
     engine_kind: String,
     repository_url: String,
+    repository_access_assessment: Option<RepositoryAccessAssessment>,
+    repository_credentials_id: Option<i64>,
     default_branch: Option<String>,
     artifacts_root_override: Option<String>,
     workspace_root_override: Option<String>,
@@ -492,6 +524,7 @@ struct NormalizedUpdateRepositoryProjectCommandInput {
     name: String,
     engine_kind: String,
     repository_url: String,
+    repository_access_assessment: Option<RepositoryAccessAssessment>,
     default_branch: Option<String>,
     artifacts_root_override: Option<String>,
     workspace_root_override: Option<String>,
@@ -571,6 +604,13 @@ struct RepositoryInspectionEntry {
     last_seen_tag: Option<String>,
     enabled_build_target_count: i64,
     credentials: Option<RepositoryCredentialReference>,
+    source_provider_id: Option<String>,
+    source_instance_url: Option<String>,
+    visibility_status: String,
+    auth_requirement_status: String,
+    auth_binding_status: String,
+    auth_status_message: String,
+    auth_last_verified_at: Option<String>,
     build_targets: Vec<UnityAdapterBuildTargetSettings>,
     publish_targets: Vec<RepositoryPublishTargetInspection>,
     pending_release_count: i64,
@@ -845,11 +885,16 @@ pub fn run() {
             artifact_inspection,
             build_execution_report,
             purge_build_execution_retention,
+            detect_repository_provider,
+            assess_repository_access,
             auth_providers,
             login_github_auth,
             secret_settings,
             save_secret_credential,
-            update_repository_secret_binding,
+            connect_repository_auth,
+            reconnect_repository_auth,
+            disconnect_repository_auth,
+            sync_repository_auth_assessment,
             update_publish_target_secret_binding,
             start_runtime,
             stop_runtime,
@@ -1099,6 +1144,21 @@ fn auth_providers() -> Result<Vec<AuthProviderStatus>, String> {
 }
 
 #[tauri::command]
+fn detect_repository_provider(
+    input: RepositoryAccessAssessmentInput,
+) -> Result<RepositoryProviderDetection, String> {
+    detect_git_repository_provider(&input.repository_url)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn assess_repository_access(
+    input: RepositoryAccessAssessmentInput,
+) -> Result<RepositoryAccessAssessment, String> {
+    assess_git_repository_access(&input.repository_url).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn login_github_auth() -> Result<AuthProviderStatus, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     persist_github_auth_login(&config).map_err(|error| error.to_string())
@@ -1117,11 +1177,33 @@ fn save_secret_credential(input: SaveSecretCredentialInput) -> Result<(), String
 }
 
 #[tauri::command]
-fn update_repository_secret_binding(
-    input: UpdateRepositorySecretBindingInput,
+fn connect_repository_auth(input: ConnectRepositoryAuthInput) -> Result<(), String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    persist_repository_auth_connect(&config, input).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn reconnect_repository_auth(input: ReconnectRepositoryAuthInput) -> Result<(), String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    persist_repository_auth_reconnect(&config, input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn disconnect_repository_auth(
+    input: DisconnectRepositoryAuthInput,
 ) -> Result<(), String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    persist_repository_secret_binding(&config, input)
+    persist_repository_auth_disconnect(&config, input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn sync_repository_auth_assessment(
+    input: SyncRepositoryAuthAssessmentInput,
+) -> Result<(), String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    persist_repository_auth_assessment(&config, input)
         .map_err(|error| error.to_string())
 }
 
@@ -1462,6 +1544,13 @@ fn load_repository_inspection(
                     &credential_by_id,
                     repository.credentials_id,
                 ),
+                source_provider_id: repository.source_provider_id,
+                source_instance_url: repository.source_instance_url,
+                visibility_status: repository.visibility_status,
+                auth_requirement_status: repository.auth_requirement_status,
+                auth_binding_status: repository.auth_binding_status,
+                auth_status_message: repository.auth_status_message,
+                auth_last_verified_at: repository.auth_last_verified_at,
                 build_targets: build_targets_by_repository
                     .remove(&repository.id)
                     .unwrap_or_default(),
@@ -1719,7 +1808,7 @@ fn load_github_auth_provider_status(
     Ok(build_auth_provider_status(
         AUTH_PROVIDER_STATUS_CONNECTED,
         format!(
-            "Git Credential Manager has an active GitHub login. {bound_repository_count} repository project(s) currently use it by default."
+            "Git Credential Manager has an active GitHub login. {bound_repository_count} repository project(s) currently connect to it explicitly."
         ),
         Some(&credential),
         bound_repository_count,
@@ -1731,14 +1820,18 @@ fn persist_github_auth_login(config: &RuntimeConfig) -> io::Result<AuthProviderS
     run_github_browser_login_command()?;
 
     let storage = writable_secret_storage(config)?;
-    let credential = ensure_github_auth_credential(&storage)?;
-    let _ = bind_github_auth_to_repositories(&storage, credential.id)?;
-    let bound_repository_count = count_repository_bindings(&storage, credential.id)?;
+
+    finalize_github_auth_login(&storage)
+}
+
+fn finalize_github_auth_login(storage: &StorageLayout) -> io::Result<AuthProviderStatus> {
+    let credential = ensure_github_auth_credential(storage)?;
+    let bound_repository_count = count_repository_bindings(storage, credential.id)?;
 
     Ok(build_auth_provider_status(
         AUTH_PROVIDER_STATUS_CONNECTED,
         format!(
-            "GitHub login connected through Git Credential Manager. {bound_repository_count} repository project(s) now use it by default."
+            "GitHub login connected through Git Credential Manager. {bound_repository_count} repository project(s) currently connect to it explicitly."
         ),
         Some(&credential),
         bound_repository_count,
@@ -1883,32 +1976,6 @@ fn github_auth_credential_config_json() -> String {
     .to_string()
 }
 
-fn bind_github_auth_to_repositories(
-    storage: &StorageLayout,
-    credential_id: i64,
-) -> io::Result<usize> {
-    let coordinator = LocalCoordinator::new(storage);
-    let repositories = coordinator.list_polling_repositories()?;
-    let mut updated_bindings = 0;
-
-    for repository in repositories {
-        if !is_github_repository_url(&repository.repo_url) {
-            continue;
-        }
-        if repository.credentials_id == Some(credential_id) {
-            continue;
-        }
-
-        coordinator.update_repository_credentials_binding(
-            repository.id,
-            Some(credential_id),
-        )?;
-        updated_bindings += 1;
-    }
-
-    Ok(updated_bindings)
-}
-
 fn count_repository_bindings(
     storage: &StorageLayout,
     credential_id: i64,
@@ -1918,37 +1985,6 @@ fn count_repository_bindings(
         .into_iter()
         .filter(|repository| repository.credentials_id == Some(credential_id))
         .count())
-}
-
-fn resolve_default_github_auth_credential(
-    storage: &StorageLayout,
-    repository_url: &str,
-) -> io::Result<Option<CredentialRecord>> {
-    if !is_github_repository_url(repository_url) {
-        return Ok(None);
-    }
-
-    if let Some(credential) = resolve_github_auth_credential(storage)? {
-        return Ok(Some(credential));
-    }
-
-    if !git_credential_manager_available() {
-        return Ok(None);
-    }
-
-    let known_accounts = match load_known_github_accounts() {
-        Ok(accounts) => accounts,
-        Err(_) => return Ok(None),
-    };
-    if known_accounts.is_empty() {
-        return Ok(None);
-    }
-
-    ensure_github_auth_credential(storage).map(Some)
-}
-
-fn is_github_repository_url(repository_url: &str) -> bool {
-    github_repository_owner_from_url(repository_url).is_some()
 }
 
 fn writable_secret_storage(config: &RuntimeConfig) -> io::Result<StorageLayout> {
@@ -2060,14 +2096,66 @@ fn persist_secret_credential(
     Ok(())
 }
 
-fn persist_repository_secret_binding(
+fn persist_repository_auth_binding(
     config: &RuntimeConfig,
-    input: UpdateRepositorySecretBindingInput,
+    repository_id: i64,
+    credentials_id: Option<i64>,
 ) -> io::Result<()> {
     let storage = writable_secret_storage(config)?;
-    LocalCoordinator::new(&storage).update_repository_credentials_binding(
+    LocalCoordinator::new(&storage).update_repository_credentials_binding(repository_id, credentials_id)
+}
+
+fn persist_repository_auth_connect(
+    config: &RuntimeConfig,
+    input: ConnectRepositoryAuthInput,
+) -> io::Result<()> {
+    if input.credentials_id <= 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository credentials_id must be a positive integer",
+        ));
+    }
+
+    persist_repository_auth_binding(config, input.repository_id, Some(input.credentials_id))
+}
+
+fn persist_repository_auth_reconnect(
+    config: &RuntimeConfig,
+    input: ReconnectRepositoryAuthInput,
+) -> io::Result<()> {
+    if input.credentials_id <= 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository credentials_id must be a positive integer",
+        ));
+    }
+
+    persist_repository_auth_binding(config, input.repository_id, Some(input.credentials_id))
+}
+
+fn persist_repository_auth_disconnect(
+    config: &RuntimeConfig,
+    input: DisconnectRepositoryAuthInput,
+) -> io::Result<()> {
+    persist_repository_auth_binding(config, input.repository_id, None)
+}
+
+fn persist_repository_auth_assessment(
+    config: &RuntimeConfig,
+    input: SyncRepositoryAuthAssessmentInput,
+) -> io::Result<()> {
+    if input.repository_id <= 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository id must be a positive integer",
+        ));
+    }
+
+    let storage = writable_secret_storage(config)?;
+    persist_repository_auth_state_snapshot(
+        &storage,
         input.repository_id,
-        input.credentials_id,
+        &input.repository_access_assessment,
     )
 }
 
@@ -2088,12 +2176,9 @@ fn persist_repository_project(
 ) -> io::Result<CreatedRepositoryProjectRecord> {
     let normalized = normalize_create_repository_project_command_input(input)?;
     let storage = writable_secret_storage(config)?;
-    let default_github_auth = resolve_default_github_auth_credential(
-        &storage,
-        &normalized.repository_url,
-    )?;
+    let repository_access_assessment = normalized.repository_access_assessment.clone();
 
-    let mut create_result = LocalCoordinator::new(&storage).create_repository_project(
+    let mut created = LocalCoordinator::new(&storage).create_repository_project(
         StoreCreateRepositoryProjectInput {
             name: normalized.name,
             engine_kind: normalized.engine_kind,
@@ -2127,15 +2212,23 @@ fn persist_repository_project(
         },
     )?;
 
-    if let Some(credential) = default_github_auth {
+    if let Some(repository_credentials_id) = normalized.repository_credentials_id {
         LocalCoordinator::new(&storage).update_repository_credentials_binding(
-            create_result.repository_id,
-            Some(credential.id),
+            created.repository_id,
+            Some(repository_credentials_id),
         )?;
-        create_result.credentials_id = Some(credential.id);
+        created.credentials_id = Some(repository_credentials_id);
     }
 
-    Ok(create_result)
+    if let Some(assessment) = repository_access_assessment.as_ref() {
+        persist_repository_auth_state_snapshot(
+            &storage,
+            created.repository_id,
+            assessment,
+        )?;
+    }
+
+    Ok(created)
 }
 
 fn persist_repository_project_update(
@@ -2144,6 +2237,7 @@ fn persist_repository_project_update(
 ) -> io::Result<()> {
     let normalized = normalize_update_repository_project_command_input(input)?;
     let storage = writable_secret_storage(config)?;
+    let repository_access_assessment = normalized.repository_access_assessment.clone();
 
     LocalCoordinator::new(&storage).update_repository_project(
         StoreUpdateRepositoryProjectInput {
@@ -2177,6 +2271,34 @@ fn persist_repository_project_update(
                     ),
                 })
                 .collect(),
+        },
+    )?;
+
+    if let Some(assessment) = repository_access_assessment.as_ref() {
+        persist_repository_auth_state_snapshot(
+            &storage,
+            normalized.repository_id,
+            assessment,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn persist_repository_auth_state_snapshot(
+    storage: &StorageLayout,
+    repository_id: i64,
+    assessment: &RepositoryAccessAssessment,
+) -> io::Result<()> {
+    LocalCoordinator::new(storage).update_repository_auth_state(
+        StoreUpdateRepositoryAuthStateInput {
+            repository_id,
+            source_provider_id: assessment.provider_id.clone(),
+            source_instance_url: assessment.instance_url.clone(),
+            visibility_status: assessment.visibility.clone(),
+            auth_requirement_status: assessment.auth_requirement.clone(),
+            supports_interactive_login: assessment.supports_interactive_login,
+            auth_status_message: assessment.message.clone(),
         },
     )
 }
@@ -2218,6 +2340,15 @@ fn normalize_create_repository_project_command_input(
         ));
     }
 
+    if let Some(repository_credentials_id) = input.repository_credentials_id {
+        if repository_credentials_id <= 0 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "repository_credentials_id must be a positive integer when provided",
+            ));
+        }
+    }
+
     let mut build_target_names = std::collections::HashSet::new();
     let mut build_targets = Vec::with_capacity(input.build_targets.len());
     for target in input.build_targets {
@@ -2236,6 +2367,8 @@ fn normalize_create_repository_project_command_input(
         name,
         engine_kind,
         repository_url,
+        repository_access_assessment: input.repository_access_assessment,
+        repository_credentials_id: input.repository_credentials_id,
         default_branch: normalize_optional_shell_string(input.default_branch),
         artifacts_root_override: normalize_optional_shell_string(input.artifacts_root_override),
         workspace_root_override: normalize_optional_shell_string(input.workspace_root_override),
@@ -2314,6 +2447,7 @@ fn normalize_update_repository_project_command_input(
         name,
         engine_kind,
         repository_url,
+        repository_access_assessment: input.repository_access_assessment,
         default_branch: normalize_optional_shell_string(input.default_branch),
         artifacts_root_override: normalize_optional_shell_string(input.artifacts_root_override),
         workspace_root_override: normalize_optional_shell_string(input.workspace_root_override),
@@ -2445,24 +2579,6 @@ fn normalize_optional_shell_string(value: Option<String>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
-}
-
-fn github_repository_owner_from_url(repository_url: &str) -> Option<String> {
-    let repository_url = repository_url.trim();
-    let without_scheme = repository_url
-        .strip_prefix("https://")
-        .or_else(|| repository_url.strip_prefix("http://"))?;
-    let (host, path) = without_scheme.split_once('/')?;
-    if !host.eq_ignore_ascii_case("github.com") {
-        return None;
-    }
-
-    let owner = path.split('/').next()?.trim();
-    if owner.is_empty() {
-        return None;
-    }
-
-    Some(owner.to_owned())
 }
 
 fn credential_binding_references(
@@ -2973,6 +3089,7 @@ fn runtime_binary_file_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        finalize_github_auth_login,
         load_artifact_inspection,
         load_build_execution_report,
         load_build_history,
@@ -2982,10 +3099,14 @@ mod tests {
         development_runtime_command_plan, load_runtime_directory_settings,
         load_runtime_health_report, load_runtime_lifecycle_settings,
         load_runtime_log_lines,
+        detect_repository_provider,
+        persist_repository_auth_assessment,
+        persist_repository_auth_connect,
+        persist_repository_auth_disconnect,
+        persist_repository_auth_reconnect,
         persist_repository_project,
         persist_repository_project_update,
         persist_publish_target_secret_binding,
-        persist_repository_secret_binding,
         persist_secret_credential,
         process_identity_matches_runtime,
         purge_build_execution_retention_files,
@@ -2997,10 +3118,16 @@ mod tests {
         CreateRepositoryProjectBuildTargetCommandInput,
         CreateRepositoryProjectCommandInput,
         ProcessFeedInput,
+        RepositoryAccessAssessment,
+        RepositoryAccessAssessmentInput,
+        RepositoryProviderDetection,
+        AUTH_PROVIDER_STATUS_CONNECTED,
         UpdateRepositoryProjectBuildTargetCommandInput,
         UpdateRepositoryProjectCommandInput,
-        SaveSecretCredentialInput, UpdatePublishTargetSecretBindingInput,
-        UnityBuildContractCommandInput, UpdateRepositorySecretBindingInput,
+        ConnectRepositoryAuthInput, DisconnectRepositoryAuthInput,
+        ReconnectRepositoryAuthInput, SaveSecretCredentialInput,
+        SyncRepositoryAuthAssessmentInput,
+        UpdatePublishTargetSecretBindingInput, UnityBuildContractCommandInput,
         window_transition_settings,
     };
     use runtime_config::RuntimeConfig;
@@ -3742,7 +3869,7 @@ mod tests {
         assert_eq!(feed.items[0].git_tag, "v18.0.0");
         assert_eq!(feed.items[0].engine_version.as_deref(), Some("2022.3.20f1"));
         assert_eq!(feed.items[0].display_status, "queued");
-        assert_eq!(feed.items[0].current_step_label, "Queued for build");
+        assert_eq!(feed.items[0].current_step_label, "Queued build: Windows");
         assert_eq!(feed.items[0].queued_build_runs, 1);
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
@@ -4418,8 +4545,110 @@ mod tests {
     }
 
     #[test]
-    fn persist_secret_bindings_updates_repository_and_publish_target_settings() {
+    fn persist_repository_auth_commands_and_publish_target_binding_update_settings() {
         let root = std::env::temp_dir().join("desktop-shell-secret-binding-save-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO credentials (name, kind, config_json) VALUES (?, ?, ?)",
+                params![
+                    "origin-basic",
+                    "git-http-basic",
+                    r#"{"username":"worker","password":"solidarity"}"#,
+                ],
+            )
+            .expect("credentials row should insert");
+        let credentials_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO credentials (name, kind, config_json) VALUES (?, ?, ?)",
+                params![
+                    "origin-rotated",
+                    "git-http-basic",
+                    r#"{"username":"worker","password":"new-solidarity"}"#,
+                ],
+            )
+            .expect("replacement credentials row should insert");
+        let rotated_credentials_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params!["revolutions", "https://example.com/revolutions.git", "unity"],
+            )
+            .expect("repository should insert");
+        let repository_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO publish_targets (repository_id, name, kind) VALUES (?, ?, ?)",
+                params![repository_id, "filesystem-release", "filesystem"],
+            )
+            .expect("publish target should insert");
+        let publish_target_id = connection.last_insert_rowid();
+        drop(connection);
+
+        persist_repository_auth_connect(
+            &config,
+            ConnectRepositoryAuthInput {
+                repository_id,
+                credentials_id,
+            },
+        )
+        .expect("repository connect should persist");
+        persist_repository_auth_reconnect(
+            &config,
+            ReconnectRepositoryAuthInput {
+                repository_id,
+                credentials_id: rotated_credentials_id,
+            },
+        )
+        .expect("repository reconnect should persist");
+        persist_publish_target_secret_binding(
+            &config,
+            UpdatePublishTargetSecretBindingInput {
+                publish_target_id,
+                credentials_id: Some(credentials_id),
+            },
+        )
+        .expect("publish target binding should persist");
+
+        let settings = load_secret_settings(&config)
+            .expect("secret settings should reflect updated bindings");
+
+        assert_eq!(settings.repository_bindings.len(), 1);
+        assert_eq!(
+            settings.repository_bindings[0].credentials_id,
+            Some(rotated_credentials_id)
+        );
+        assert_eq!(settings.publish_target_bindings.len(), 1);
+        assert_eq!(
+            settings.publish_target_bindings[0].credentials_id,
+            Some(credentials_id)
+        );
+
+        persist_repository_auth_disconnect(
+            &config,
+            DisconnectRepositoryAuthInput { repository_id },
+        )
+        .expect("repository disconnect should persist");
+
+        let settings = load_secret_settings(&config)
+            .expect("secret settings should reflect disconnected repository binding");
+        assert_eq!(settings.repository_bindings[0].credentials_id, None);
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn persist_repository_auth_assessment_clears_binding_when_repository_is_public() {
+        let root = std::env::temp_dir().join("desktop-shell-auth-assessment-sync-test");
         if root.exists() {
             std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
         }
@@ -4447,44 +4676,68 @@ mod tests {
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
-        connection
-            .execute(
-                "INSERT INTO publish_targets (repository_id, name, kind) VALUES (?, ?, ?)",
-                params![repository_id, "filesystem-release", "filesystem"],
-            )
-            .expect("publish target should insert");
-        let publish_target_id = connection.last_insert_rowid();
         drop(connection);
 
-        persist_repository_secret_binding(
+        persist_repository_auth_connect(
             &config,
-            UpdateRepositorySecretBindingInput {
+            ConnectRepositoryAuthInput {
                 repository_id,
-                credentials_id: Some(credentials_id),
+                credentials_id,
             },
         )
-        .expect("repository binding should persist");
-        persist_publish_target_secret_binding(
+        .expect("repository connect should persist");
+
+        persist_repository_auth_assessment(
             &config,
-            UpdatePublishTargetSecretBindingInput {
-                publish_target_id,
-                credentials_id: Some(credentials_id),
+            SyncRepositoryAuthAssessmentInput {
+                repository_id,
+                repository_access_assessment: RepositoryAccessAssessment {
+                    provider_id: String::from("github"),
+                    provider_label: String::from("GitHub"),
+                    instance_url: String::from("https://github.com"),
+                    normalized_url: String::from(
+                        "https://github.com/indiegabo/revolutions.git",
+                    ),
+                    visibility: String::from("public"),
+                    auth_requirement: String::from("none"),
+                    auth_status: String::from("not_required"),
+                    supports_interactive_login: true,
+                    message: String::from(
+                        "Public repository detected through anonymous remote access.",
+                    ),
+                },
             },
         )
-        .expect("publish target binding should persist");
+        .expect("repository assessment sync should persist");
 
-        let settings = load_secret_settings(&config)
-            .expect("secret settings should reflect updated bindings");
-
-        assert_eq!(settings.repository_bindings.len(), 1);
-        assert_eq!(settings.repository_bindings[0].credentials_id, Some(credentials_id));
-        assert_eq!(settings.publish_target_bindings.len(), 1);
-        assert_eq!(
-            settings.publish_target_bindings[0].credentials_id,
-            Some(credentials_id)
-        );
+        let inspection = load_repository_inspection(&config)
+            .expect("repository inspection should reflect synced auth assessment");
+        assert_eq!(inspection.repositories.len(), 1);
+        assert_eq!(inspection.repositories[0].auth_binding_status, "not_required");
+        assert_eq!(inspection.repositories[0].auth_requirement_status, "none");
+        assert_eq!(inspection.repositories[0].visibility_status, "public");
+        assert!(inspection.repositories[0].credentials.is_none());
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn detect_repository_provider_command_reports_github_metadata() {
+        let detection = detect_repository_provider(RepositoryAccessAssessmentInput {
+            repository_url: String::from("https://github.com/indiegabo/hgp.git"),
+        })
+        .expect("provider detection should succeed");
+
+        assert_eq!(
+            detection,
+            RepositoryProviderDetection {
+                provider_id: String::from("github"),
+                provider_label: String::from("GitHub"),
+                instance_url: String::from("https://github.com"),
+                normalized_url: String::from("https://github.com/indiegabo/hgp.git"),
+                supports_interactive_login: true,
+            }
+        );
     }
 
     #[test]
@@ -4506,6 +4759,8 @@ mod tests {
                 name: String::from("Workers"),
                 engine_kind: String::from("unity"),
                 repository_url: String::from("https://example.com/workers.git"),
+                repository_access_assessment: None,
+                repository_credentials_id: None,
                 personal_access_token: None,
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: None,
@@ -4542,7 +4797,83 @@ mod tests {
     }
 
     #[test]
-    fn persist_repository_project_binds_default_github_auth_credential() {
+    fn persist_repository_project_persists_repository_auth_state_in_inspection() {
+        let root = std::env::temp_dir().join("desktop-shell-project-auth-state-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let unity_executable_path = std::env::current_exe()
+            .expect("current executable path should resolve")
+            .display()
+            .to_string();
+
+        let created = persist_repository_project(
+            &config,
+            CreateRepositoryProjectCommandInput {
+                name: String::from("Workers"),
+                engine_kind: String::from("unity"),
+                repository_url: String::from("https://github.com/indiegabo/workers.git"),
+                repository_access_assessment: Some(RepositoryAccessAssessment {
+                    provider_id: String::from("github"),
+                    provider_label: String::from("GitHub"),
+                    instance_url: String::from("https://github.com"),
+                    normalized_url: String::from(
+                        "https://github.com/indiegabo/workers.git",
+                    ),
+                    visibility: String::from("private"),
+                    auth_requirement: String::from("required"),
+                    auth_status: String::from("required_unbound"),
+                    supports_interactive_login: true,
+                    message: String::from(
+                        "GitHub repository requires authentication before HGP can access it.",
+                    ),
+                }),
+                repository_credentials_id: None,
+                personal_access_token: None,
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                build_targets: vec![CreateRepositoryProjectBuildTargetCommandInput {
+                    name: String::from("Windows"),
+                    contract: BuildContractCommandInput {
+                        unity: Some(UnityBuildContractCommandInput {
+                            target_platform: String::from("StandaloneWindows64"),
+                            build_method: String::from("Builder.PerformWindows"),
+                        }),
+                    },
+                    unity_executable_path,
+                }],
+            },
+        )
+        .expect("repository project should persist");
+
+        let inspection = load_repository_inspection(&config)
+            .expect("repository inspection should reflect created project");
+
+        assert_eq!(inspection.repositories.len(), 1);
+        let repository = &inspection.repositories[0];
+        assert_eq!(repository.repository_id, created.repository_id);
+        assert_eq!(repository.source_provider_id.as_deref(), Some("github"));
+        assert_eq!(
+            repository.source_instance_url.as_deref(),
+            Some("https://github.com")
+        );
+        assert_eq!(repository.visibility_status, "private");
+        assert_eq!(repository.auth_requirement_status, "required");
+        assert_eq!(repository.auth_binding_status, "required_unbound");
+        assert!(repository
+            .auth_status_message
+            .contains("requires authentication"));
+        assert!(repository.auth_last_verified_at.is_some());
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn persist_repository_project_does_not_bind_default_github_auth_credential() {
         let root = std::env::temp_dir().join("desktop-shell-project-github-auth-test");
         if root.exists() {
             std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
@@ -4577,6 +4908,8 @@ mod tests {
                 name: String::from("Workers"),
                 engine_kind: String::from("unity"),
                 repository_url: String::from("https://github.com/indiegabo/workers.git"),
+                repository_access_assessment: None,
+                repository_credentials_id: None,
                 personal_access_token: None,
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: None,
@@ -4596,19 +4929,128 @@ mod tests {
         )
         .expect("repository project should persist");
 
-        assert_eq!(created.credentials_id, Some(github_credentials_id));
+        assert_eq!(created.credentials_id, None);
 
         let inspection = load_repository_inspection(&config)
             .expect("repository inspection should reflect created project");
 
         assert_eq!(inspection.repositories.len(), 1);
         let repository = &inspection.repositories[0];
-        let credentials = repository
+        assert!(
+            repository.credentials.is_none(),
+            "GitHub auth credential should remain unbound until the project explicitly connects it"
+        );
+
+        let settings = load_secret_settings(&config)
+            .expect("secret settings should still expose the reusable credential record");
+        assert_eq!(settings.credentials.len(), 1);
+        assert_eq!(settings.credentials[0].credential_id, github_credentials_id);
+        assert_eq!(settings.repository_bindings[0].credentials_id, None);
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn finalize_github_auth_login_does_not_bind_matching_repositories() {
+        let root = std::env::temp_dir().join("desktop-shell-github-auth-finalize-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params!["workers", "https://github.com/indiegabo/workers.git", "unity"],
+            )
+            .expect("repository should insert");
+        drop(connection);
+
+        let provider = finalize_github_auth_login(&storage)
+            .expect("finalizing GitHub auth should persist the reusable credential record");
+
+        assert_eq!(provider.status, AUTH_PROVIDER_STATUS_CONNECTED);
+        assert_eq!(provider.bound_repository_count, 0);
+
+        let inspection = load_repository_inspection(&config)
+            .expect("repository inspection should keep the project unbound");
+        assert_eq!(inspection.repositories.len(), 1);
+        assert!(inspection.repositories[0].credentials.is_none());
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn persist_repository_project_binds_explicit_repository_credential() {
+        let root = std::env::temp_dir().join("desktop-shell-project-explicit-auth-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO credentials (name, kind, config_json) VALUES (?, ?, ?)",
+                params![
+                    "GitHub.com",
+                    "git-http-github-host-login",
+                    r#"{"provider":"github","instance_url":"https://github.com","credential_helper":"manager","auth_mode":"browser"}"#,
+                ],
+            )
+            .expect("GitHub auth credential should insert");
+        let github_credentials_id = connection.last_insert_rowid();
+        drop(connection);
+
+        let unity_executable_path = std::env::current_exe()
+            .expect("current executable path should resolve")
+            .display()
+            .to_string();
+
+        let created = persist_repository_project(
+            &config,
+            CreateRepositoryProjectCommandInput {
+                name: String::from("Workers"),
+                engine_kind: String::from("unity"),
+                repository_url: String::from("https://github.com/indiegabo/workers.git"),
+                repository_access_assessment: None,
+                repository_credentials_id: Some(github_credentials_id),
+                personal_access_token: None,
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                build_targets: vec![CreateRepositoryProjectBuildTargetCommandInput {
+                    name: String::from("Windows"),
+                    contract: BuildContractCommandInput {
+                        unity: Some(UnityBuildContractCommandInput {
+                            target_platform: String::from("StandaloneWindows64"),
+                            build_method: String::from("Builder.PerformWindows"),
+                        }),
+                    },
+                    unity_executable_path: unity_executable_path.clone(),
+                }],
+            },
+        )
+        .expect("repository project should persist with explicit auth binding");
+
+        assert_eq!(created.credentials_id, Some(github_credentials_id));
+
+        let inspection = load_repository_inspection(&config)
+            .expect("repository inspection should reflect explicit binding");
+        assert_eq!(inspection.repositories.len(), 1);
+        let credentials = inspection.repositories[0]
             .credentials
             .as_ref()
-            .expect("GitHub auth credential should be bound by default");
+            .expect("explicit credential binding should be visible in inspection");
         assert_eq!(credentials.credential_id, github_credentials_id);
-        assert_eq!(credentials.kind, "git-http-github-host-login");
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }
@@ -4632,6 +5074,8 @@ mod tests {
                 name: String::from("Workers"),
                 engine_kind: String::from("unity"),
                 repository_url: String::from("https://github.com/indiegabo/workers.git"),
+                repository_access_assessment: None,
+                repository_credentials_id: None,
                 personal_access_token: Some(String::from("ghp-legacy-token")),
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: None,
@@ -4657,7 +5101,9 @@ mod tests {
                 .contains("personal access token is no longer supported")
         );
 
-        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+        if root.exists() {
+            std::fs::remove_dir_all(root).expect("temp directory should be removable");
+        }
     }
 
     #[test]
@@ -4679,6 +5125,8 @@ mod tests {
                 name: String::from("Workers"),
                 engine_kind: String::from("unreal"),
                 repository_url: String::from("https://example.com/workers.git"),
+                repository_access_assessment: None,
+                repository_credentials_id: None,
                 personal_access_token: None,
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: None,
@@ -4728,6 +5176,8 @@ mod tests {
                 name: String::from("Workers"),
                 engine_kind: String::from("unity"),
                 repository_url: String::from("https://example.com/workers.git"),
+                repository_access_assessment: None,
+                repository_credentials_id: None,
                 personal_access_token: None,
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: Some(String::from("C:/artifacts/workers")),
@@ -4754,6 +5204,7 @@ mod tests {
                 name: String::from("Workers Updated"),
                 engine_kind: String::from("unity"),
                 repository_url: String::from("https://example.com/workers-updated.git"),
+                repository_access_assessment: None,
                 default_branch: Some(String::from("release")),
                 artifacts_root_override: None,
                 workspace_root_override: Some(String::from("D:/workspaces/workers")),
@@ -4832,6 +5283,8 @@ mod tests {
                 name: String::from("Workers"),
                 engine_kind: String::from("unity"),
                 repository_url: String::from("https://example.com/workers.git"),
+                repository_access_assessment: None,
+                repository_credentials_id: None,
                 personal_access_token: None,
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: None,
@@ -4858,6 +5311,7 @@ mod tests {
                 name: String::from("Workers Updated"),
                 engine_kind: String::from("unreal"),
                 repository_url: String::from("https://example.com/workers-updated.git"),
+                repository_access_assessment: None,
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: None,
                 workspace_root_override: None,

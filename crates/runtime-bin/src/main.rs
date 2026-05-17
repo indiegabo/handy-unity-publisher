@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::error::Error;
+use std::fmt::Display;
 use std::fs;
 use std::io;
 use std::io::ErrorKind;
@@ -64,13 +65,13 @@ use runtime_store::{
     ManualReleaseDispatchInput, PollingRepositoryRecord, PublishDispatchJob,
     PublishExecutionPlan as StoredPublishExecutionPlan, PublishRunRecord,
     RepositoryCheckoutRecord,
+    resolve_credential_secret_config_json,
     RepositoryPollDispatchInput, StartBuildRunInput,
     StartBuildRunStageInput, StartPublishRunInput, StorageLayout, CompletePublishRunInput,
     FailPublishRunInput,
     RuntimeControlRequest, take_runtime_control_requests,
     RuntimeRecoveryReport,
     RECOVERY_INTERRUPTION_KIND_REQUESTED, RECOVERY_INTERRUPTION_KIND_SYSTEM,
-    open_connection,
 };
 use builds::*;
 use serde::{Deserialize, Serialize};
@@ -88,6 +89,8 @@ const PUBLISH_QUEUE_LEASE_TTL: Duration = Duration::from_secs(30);
 const POLL_STATUS_SKIPPED_DISABLED: &str = "skipped_disabled";
 const POLL_STATUS_SKIPPED_NO_ENABLED_BUILD_TARGETS: &str = "skipped_no_enabled_build_targets";
 const POLL_STATUS_SKIPPED_ACTIVE_RELEASE_BACKLOG: &str = "skipped_active_release_backlog";
+const POLL_STATUS_SKIPPED_REQUIRED_UNBOUND: &str = "skipped_required_unbound";
+const POLL_STATUS_SKIPPED_REAUTH_REQUIRED: &str = "skipped_reauth_required";
 const POLL_STATUS_NO_TAGS: &str = "no_tags";
 const POLL_STATUS_UNCHANGED: &str = "unchanged";
 const POLL_STATUS_QUEUED: &str = "queued";
@@ -95,7 +98,19 @@ const POLL_STATUS_ALREADY_SEEN: &str = "already_seen";
 const POLL_STATUS_BUILD_IN_PROGRESS: &str = "build_in_progress";
 const POLL_STATUS_ERROR: &str = "error";
 const POLL_OBSERVED_VIA: &str = "hgp-runtime";
-const DEFAULT_REVOLUTIONS_PROJECT_PAT_ENV: &str = "REVOLUTIONS_PROJECT_PAT";
+const REPOSITORY_AUTH_BINDING_STATUS_REQUIRED_UNBOUND: &str = "required_unbound";
+const REPOSITORY_AUTH_BINDING_STATUS_REAUTH_REQUIRED: &str = "reauth_required";
+const AUTHENTICATION_FAILURE_PATTERNS: &[&str] = &[
+    "authentication failed",
+    "invalid username or token",
+    "could not read username",
+    "could not read password",
+    "host keyring error",
+    "no matching entry found in secure storage",
+    "access denied",
+    "permission denied",
+    "unauthorized",
+];
 const EVENT_TOPIC_RELEASE_QUEUED: &str = "automation.release_queued";
 const EVENT_TOPIC_POLL_AUTH_FAILED: &str = "automation.poll_auth_failed";
 const EVENT_TOPIC_BUILD_RUN_STARTED: &str = "build.run_started";
@@ -138,6 +153,30 @@ struct PublishRunEventContext {
     publish_target_name: String,
     artifact_name: String,
     user_requested: bool,
+}
+
+pub(crate) fn error_indicates_authentication_failure(error: &impl Display) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    AUTHENTICATION_FAILURE_PATTERNS
+        .iter()
+        .any(|pattern| message.contains(pattern))
+}
+
+pub(crate) fn persist_repository_auth_runtime_failure(
+    coordinator: &LocalCoordinator,
+    repository_id: i64,
+    error: &impl Display,
+) {
+    if let Err(store_error) = coordinator.mark_repository_auth_runtime_failure(
+        repository_id,
+        &error.to_string(),
+    ) {
+        eprintln!(
+            "failed to persist repository auth runtime failure for repository {}: {}",
+            repository_id,
+            store_error,
+        );
+    }
 }
 
 fn main() {
@@ -558,9 +597,6 @@ fn run_registrations_command(
         "import-runtime-db" => {
             run_registration_import_runtime_db_command(&arguments[1..], storage)
         }
-        "seed-revolutions" => {
-            run_seed_revolutions_registration_command(&arguments[1..], storage)
-        }
         command => Err(cli_usage_error(format!(
             "unknown registrations command {command:?}\n\n{}",
             registrations_usage()
@@ -775,83 +811,6 @@ fn run_manifest_sync_command(
     let report = sync_manifest_directory(&storage.database_path, &command.manifest_dir)?;
 
     serde_json::to_string_pretty(&report).map_err(|error| Box::new(error) as Box<dyn Error>)
-}
-
-fn run_seed_revolutions_registration_command(
-    arguments: &[String],
-    storage: &StorageLayout,
-) -> Result<String, Box<dyn Error>> {
-    if is_help_request(arguments) {
-        return Ok(registrations_seed_revolutions_usage().to_owned());
-    }
-
-    let command = parse_seed_revolutions_registration_command(arguments)?;
-    initialize_database(storage)?;
-
-    let project_pat = env::var(&command.project_pat_env).map_err(|error| {
-        Box::new(io::Error::new(
-            ErrorKind::NotFound,
-            format!(
-                "registrations seed-revolutions requires {} to be set: {error}",
-                command.project_pat_env
-            ),
-        )) as Box<dyn Error>
-    })?;
-    let project_pat = require_cli_value(&project_pat, "project pat env value")?;
-    let seed_path = revolutions_managed_repository_seed_path();
-    let seed_sql = std::fs::read_to_string(&seed_path)?;
-    let seed_sql = seed_sql.replace(
-        "__REVOLUTIONS_PROJECT_PAT__",
-        &escape_sql_literal(&project_pat),
-    );
-
-    let connection = open_connection(&storage.database_path)?;
-    connection.execute_batch(&seed_sql).map_err(|error| {
-        Box::new(io::Error::other(format!(
-            "apply Revolutions registration seed {:?}: {error}",
-            seed_path.display()
-        ))) as Box<dyn Error>
-    })?;
-
-    let (repository_id, workspace_root_override, artifacts_root_override): (
-        i64,
-        Option<String>,
-        Option<String>,
-    ) = connection
-        .query_row(
-            "
-            SELECT id,
-                   workspace_root_override,
-                   artifacts_root_override
-            FROM repositories
-            WHERE name = 'Revolutions'
-            ",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(|error| Box::new(io::Error::other(format!(
-            "load seeded Revolutions repository: {error}"
-        ))) as Box<dyn Error>)?;
-    let build_target_count: i64 = connection
-        .query_row(
-            "SELECT COUNT(1) FROM build_targets WHERE repository_id = ? AND enabled = 1",
-            [repository_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| Box::new(io::Error::other(format!(
-            "count seeded Revolutions build targets: {error}"
-        ))) as Box<dyn Error>)?;
-
-    serde_json::to_string_pretty(&RegistrationSeedReport {
-        registration_name: String::from("Revolutions"),
-        repository_id,
-        build_target_count,
-        workspace_root_override,
-        artifacts_root_override,
-        project_pat_env: command.project_pat_env,
-        seed_path: seed_path.display().to_string(),
-    })
-    .map_err(|error| Box::new(error) as Box<dyn Error>)
 }
 
 fn run_registration_checkout_command(
@@ -1276,7 +1235,6 @@ mod tests {
         parse_manifest_sync_command, parse_manual_release_dispatch_command,
         parse_registration_import_runtime_db_command,
         parse_registration_checkout_command,
-        parse_seed_revolutions_registration_command,
         parse_publish_inspect_command,
         QueueLeaseRenewer,
         parse_release_plan_command, run_manifest_sync_command,
@@ -1295,7 +1253,6 @@ mod tests {
         EVENT_TOPIC_POLL_AUTH_FAILED,
         RegistrationCheckoutReport, RuntimeLoopCadence,
         RepositoryPollSchedule,
-        RegistrationSeedReport,
         PublishedOutputInspectionReport,
     };
     use rusqlite::{params, Connection};
@@ -1309,6 +1266,7 @@ mod tests {
         enqueue_runtime_control_request,
         ImportedRepositoryRegistrationReport, InterruptedBuildRecoveryRecord,
         LocalCoordinator, RuntimeControlRequest, RuntimeRecoveryReport,
+        UpdateRepositoryAuthStateInput,
         RECOVERY_INTERRUPTION_KIND_REQUESTED,
     };
     use runtime_runner::{
@@ -1641,17 +1599,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_seed_revolutions_registration_command_accepts_env_override() {
-        let command = parse_seed_revolutions_registration_command(&[
-            String::from("--project-pat-env"),
-            String::from("RUNTIME_BIN_TEST_PAT"),
-        ])
-        .expect("seed registrations command should parse");
-
-        assert_eq!(command.project_pat_env, "RUNTIME_BIN_TEST_PAT");
-    }
-
-    #[test]
     fn parse_registration_checkout_command_accepts_explicit_ref() {
         let command = parse_registration_checkout_command(&[
             String::from("--repository-id"),
@@ -1835,58 +1782,6 @@ mod tests {
         assert_eq!(binding_count, 1);
         drop(connection);
 
-        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
-    }
-
-    #[test]
-    fn registrations_seed_revolutions_command_applies_sql_seed() {
-        let root = test_root("runtime-bin-registrations-seed-revolutions");
-        let config = RuntimeConfig::from_root(&root);
-        let storage = StorageLayout::from_directories(&config.directories);
-        let project_pat_env = "RUNTIME_BIN_TEST_REVOLUTIONS_PROJECT_PAT";
-        let project_pat = "solidarity'token";
-        std::env::set_var(project_pat_env, project_pat);
-
-        let output = run_registrations_command(
-            &[
-                String::from("seed-revolutions"),
-                String::from("--project-pat-env"),
-                String::from(project_pat_env),
-            ],
-            &config,
-            &storage,
-        )
-        .expect("registrations seed command should succeed");
-        let report: RegistrationSeedReport = serde_json::from_str(&output)
-            .expect("registration seed output should decode");
-
-        assert_eq!(report.registration_name, "Revolutions");
-        assert_eq!(report.build_target_count, 1);
-        assert_eq!(report.project_pat_env, project_pat_env);
-        assert_eq!(
-            report.workspace_root_override.as_deref(),
-            Some("D:\\Users\\gabao\\RevolutionsHandyUnityBuilderWorkspace")
-        );
-        assert_eq!(
-            report.artifacts_root_override.as_deref(),
-            Some("D:\\Users\\gabao\\Revolutions\\builds-output")
-        );
-
-        let connection = Connection::open(&storage.database_path).expect("connection should open");
-        let credentials_config_json: String = connection
-            .query_row(
-                "SELECT config_json FROM credentials WHERE name = 'Revolutions/origin'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("seeded credentials should load");
-        let credentials_config: serde_json::Value = serde_json::from_str(&credentials_config_json)
-            .expect("seeded credentials config should decode");
-        assert_eq!(credentials_config["username"], "indiegabo");
-        assert_eq!(credentials_config["password"], project_pat);
-        drop(connection);
-
-        std::env::remove_var(project_pat_env);
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
 
@@ -3087,6 +2982,15 @@ mod tests {
             repo_url: String::from("https://github.com/indiegabo/revolutions.git"),
             engine_kind: String::from("unity"),
             credentials_id: Some(7),
+            source_provider_id: Some(String::from("github")),
+            source_instance_url: Some(String::from("https://github.com")),
+            visibility_status: String::from("private"),
+            auth_requirement_status: String::from("required"),
+            auth_binding_status: String::from("bound_ready"),
+            auth_status_message: String::from(
+                "GitHub repository requires authentication before HGP can access it.",
+            ),
+            auth_last_verified_at: None,
             enabled: true,
             polling_interval_seconds: 300,
             last_seen_tag: Some(String::from("v1.0.0")),
@@ -3173,6 +3077,10 @@ mod tests {
             .into_iter()
             .next()
             .expect("polling repository should exist");
+        assert_eq!(repository.auth_binding_status, "reauth_required");
+        assert!(repository
+            .auth_status_message
+            .contains("host keyring error"));
         let failed_attempt_path = failed_poll_attempt_log_path(&storage, &repository);
         let failed_attempt_contents = fs::read_to_string(&failed_attempt_path)
             .expect("failed poll attempt log should exist");
@@ -3202,6 +3110,106 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("host keyring error"));
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn run_repository_poll_cycle_skips_reauth_required_repository_until_forced() {
+        let root = test_root("runtime-bin-poll-skip-reauth-required");
+        let directories = RuntimeDirectories::from_root(&root);
+        let storage = StorageLayout::from_directories(&directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let credentials_id = seed_credentials(
+            &connection,
+            "Revolutions/origin",
+            "git-http-basic",
+            r#"{"username":"indiegabo","password":"solidarity"}"#,
+        );
+        let repository_id = seed_repository_with_url_and_credentials(
+            &connection,
+            "Revolutions",
+            "https://github.com/indiegabo/revolutions.git",
+            Some(credentials_id),
+        );
+        seed_build_target(&connection, repository_id, "windows-player", "windows");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&storage);
+        coordinator
+            .update_repository_auth_state(UpdateRepositoryAuthStateInput {
+                repository_id,
+                source_provider_id: String::from("github"),
+                source_instance_url: String::from("https://github.com"),
+                visibility_status: String::from("private"),
+                auth_requirement_status: String::from("required"),
+                supports_interactive_login: true,
+                auth_status_message: String::from(
+                    "GitHub repository requires authentication before HGP can access it.",
+                ),
+            })
+            .expect("repository auth state should persist");
+        coordinator
+            .mark_repository_auth_runtime_failure(
+                repository_id,
+                "Authentication failed for https://github.com/indiegabo/revolutions.git",
+            )
+            .expect("runtime auth failure should persist");
+
+        let report = run_repository_poll_cycle(&coordinator, &storage, None)
+            .expect("reauth required repositories should be skipped");
+        assert_eq!(report.repositories.len(), 1);
+        assert_eq!(report.repositories[0].status, "skipped_reauth_required");
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        assert_eq!(queue_message_count(&connection, "release-runs"), 0);
+        drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn run_repository_poll_cycle_skips_required_unbound_repository_until_bound() {
+        let root = test_root("runtime-bin-poll-skip-required-unbound");
+        let directories = RuntimeDirectories::from_root(&root);
+        let storage = StorageLayout::from_directories(&directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let repository_id = seed_repository_with_url_and_credentials(
+            &connection,
+            "Revolutions",
+            "https://github.com/indiegabo/revolutions.git",
+            None,
+        );
+        seed_build_target(&connection, repository_id, "windows-player", "windows");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&storage);
+        coordinator
+            .update_repository_auth_state(UpdateRepositoryAuthStateInput {
+                repository_id,
+                source_provider_id: String::from("github"),
+                source_instance_url: String::from("https://github.com"),
+                visibility_status: String::from("private"),
+                auth_requirement_status: String::from("required"),
+                supports_interactive_login: true,
+                auth_status_message: String::from(
+                    "GitHub repository requires authentication before HGP can access it.",
+                ),
+            })
+            .expect("repository auth state should persist");
+
+        let report = run_repository_poll_cycle(&coordinator, &storage, None)
+            .expect("required_unbound repositories should be skipped");
+        assert_eq!(report.repositories.len(), 1);
+        assert_eq!(report.repositories[0].status, "skipped_required_unbound");
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        assert_eq!(queue_message_count(&connection, "release-runs"), 0);
+        drop(connection);
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -3410,6 +3418,93 @@ mod tests {
             || error_message.contains("clone repository into workspace"));
         assert!(error_message.contains("exit code"));
         assert!(error_message.contains("stderr:"));
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        assert_eq!(queue_message_count(&connection, "build-runs"), 0);
+        drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn build_run_next_command_marks_repository_reauth_required_on_auth_resolution_failure() {
+        let root = test_root("runtime-bin-build-run-next-auth-failure");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let credentials_id = seed_credentials(
+            &connection,
+            "Revolutions/origin",
+            "git-http-basic",
+            &json!({
+                "username": "indiegabo",
+                "password": "keyring://github/revolutions-origin"
+            })
+            .to_string(),
+        );
+        let repository_id = seed_repository_with_url_and_credentials(
+            &connection,
+            "Revolutions",
+            "https://github.com/indiegabo/revolutions.git",
+            Some(credentials_id),
+        );
+        seed_build_target(&connection, repository_id, "windows-player", "windows");
+        let release_run_id = seed_queued_release(
+            &connection,
+            repository_id,
+            "v1.0.0",
+            "2021.3.33f1",
+        );
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&storage);
+        coordinator
+            .update_repository_auth_state(UpdateRepositoryAuthStateInput {
+                repository_id,
+                source_provider_id: String::from("github"),
+                source_instance_url: String::from("https://github.com"),
+                visibility_status: String::from("private"),
+                auth_requirement_status: String::from("required"),
+                supports_interactive_login: true,
+                auth_status_message: String::from(
+                    "GitHub repository requires authentication before HGP can access it.",
+                ),
+            })
+            .expect("repository auth state should persist");
+
+        run_release_plan_command(
+            &[
+                String::from("--release-run-id"),
+                release_run_id.to_string(),
+            ],
+            &storage,
+        )
+        .expect("release plan command should succeed");
+
+        let output = run_build_run_next_command(&[], &config, &storage)
+            .expect("build run-next should persist a failed run on auth failure");
+        let record: BuildRunRecord =
+            serde_json::from_str(&output).expect("build run-next output should decode");
+
+        assert_eq!(record.status, "failed");
+        assert!(record
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("host keyring error"));
+
+        let repository = coordinator
+            .list_polling_repositories()
+            .expect("repository listing should load")
+            .into_iter()
+            .find(|candidate| candidate.id == repository_id)
+            .expect("polling repository should exist");
+        assert_eq!(repository.auth_binding_status, "reauth_required");
+        assert!(repository
+            .auth_status_message
+            .contains("host keyring error"));
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         assert_eq!(queue_message_count(&connection, "build-runs"), 0);
