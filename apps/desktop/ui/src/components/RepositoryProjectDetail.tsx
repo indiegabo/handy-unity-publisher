@@ -9,6 +9,8 @@ import {
 
 import { Button, IconButton } from "./Button";
 import { RepositoryCredentialComposer } from "./RepositoryCredentialComposer";
+import FormSection from "./forms/FormSection";
+import BuildTargetEditor from "./forms/BuildTargetEditor";
 import {
   PublishDestinationsEditor,
   buildPublishDestinationDrafts,
@@ -200,8 +202,9 @@ export function RepositoryProjectDetail({
     useState<string | null>(null);
   const [pendingPublishCredentialSave, setPendingPublishCredentialSave] =
     useState(false);
-  const [publishCredentialSaveError, setPublishCredentialSaveError] =
-    useState<string | null>(null);
+  const [publishCredentialSaveError, setPublishCredentialSaveError] = useState<
+    string | null
+  >(null);
   const [pathDiagnostics, setPathDiagnostics] = useState<
     Record<string, UnityExecutableValidation | null>
   >({});
@@ -669,8 +672,8 @@ export function RepositoryProjectDetail({
     }
 
     if (
-      collectBuildTargetBindingImpact(draft.publishDestinations, targetId).length >
-      0
+      collectBuildTargetBindingImpact(draft.publishDestinations, targetId)
+        .length > 0
     ) {
       startTransition(() => {
         setPendingBuildTargetRemovalId(targetId);
@@ -1165,9 +1168,9 @@ export function RepositoryProjectDetail({
       )
     : 0;
   const pendingBuildTargetRemoval = pendingBuildTargetRemovalId
-    ? draft?.buildTargets.find(
+    ? (draft?.buildTargets.find(
         (target) => target.id === pendingBuildTargetRemovalId,
-      ) ?? null
+      ) ?? null)
     : null;
   const pendingBuildTargetBindingImpact = pendingBuildTargetRemoval
     ? collectBuildTargetBindingImpact(
@@ -1621,13 +1624,10 @@ export function RepositoryProjectDetail({
                     Confirm build target removal
                   </p>
                   <p className="wizard-callout__copy">
-                    Removing
-                    {" "}
+                    Removing{" "}
                     {pendingBuildTargetRemoval.name.trim() ||
-                      "this build target"}
-                    {" "}
-                    also removes publish bindings from
-                    {" "}
+                      "this build target"}{" "}
+                    also removes publish bindings from{" "}
                     {pendingBuildTargetBindingImpact.join(", ")}.
                   </p>
                 </div>
@@ -1669,150 +1669,139 @@ export function RepositoryProjectDetail({
                 const diagnostics = pathDiagnostics[target.id];
                 const fieldErrors =
                   validationErrors.buildTargets[target.id] ?? {};
+                const isOpen = Boolean(expandedTargetIds[target.id]);
 
                 return (
-                  <VerticalAccordion
-                    bodyClassName="wizard-target-card__body"
-                    bodyInset
-                    className="wizard-target-card project-detail-target-accordion"
-                    collapsedToggleLabel={`Expand build target ${index + 1}`}
-                    expandedToggleLabel={`Collapse build target ${index + 1}`}
-                    header={
-                      <div className="wizard-target-card__header">
-                        <div className="wizard-target-card__top-row">
-                          <p className="wizard-target-card__eyebrow">
-                            Build target {index + 1}
-                          </p>
-                          <IconButton
-                            className="wizard-target-card__remove"
-                            disabled={
-                              draft.buildTargets.length === 1 || isSaving
-                            }
-                            icon="trash"
-                            label={`Remove build target ${index + 1}`}
-                            onClick={() => handleRemoveBuildTarget(target.id)}
-                            size="sm"
-                            variant="ghost"
-                          />
-                        </div>
-
-                        <div className="wizard-target-card__title-block">
-                          <h3 className="wizard-target-card__title">
-                            {target.name.trim() || "Unnamed target"}
-                          </h3>
-                        </div>
-
-                        <div className="wizard-target-card__badges">
-                          <Badge tone="neutral">
-                            {target.targetPlatform.trim() || "no Unity target"}
-                          </Badge>
-                          {diagnostics ? (
-                            <Badge
-                              tone={
-                                diagnostics.status === "ready"
-                                  ? "strong"
-                                  : "muted"
-                              }
-                            >
-                              {formatDiagnosticStatus(diagnostics.status)}
-                            </Badge>
-                          ) : null}
-                        </div>
+                  <FormSection
+                    key={target.id}
+                    title={target.name.trim() || `Build target ${index + 1}`}
+                    description={
+                      target.targetPlatform.trim() || "no Unity target"
+                    }
+                    actions={
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: 8,
+                          alignItems: "center",
+                        }}
+                      >
+                        <IconButton
+                          disabled={draft.buildTargets.length === 1 || isSaving}
+                          icon="trash"
+                          label={`Remove build target ${index + 1}`}
+                          onClick={() => handleRemoveBuildTarget(target.id)}
+                          size="sm"
+                          variant="ghost"
+                        />
+                        <Button
+                          onClick={() =>
+                            handleTargetAccordionChange(target.id, !isOpen)
+                          }
+                          size="sm"
+                          variant="ghost"
+                        >
+                          {isOpen ? "Collapse" : "Edit"}
+                        </Button>
                       </div>
                     }
-                    headerSeparated
-                    key={target.id}
-                    onOpenChange={(nextOpen) =>
-                      handleTargetAccordionChange(target.id, nextOpen)
-                    }
-                    open={Boolean(expandedTargetIds[target.id])}
-                    tone="section"
-                    triggerMode="button"
                   >
-                    <div className="wizard-form-grid wizard-form-grid--targets">
-                      <TextField
-                        error={fieldErrors.name}
-                        hint="Keep the target name stable. It becomes part of the artifact file name."
-                        label="Target name"
-                        onChange={(event) => {
-                          updateBuildTarget(target.id, {
-                            name: event.currentTarget.value,
-                          });
-                        }}
-                        placeholder="Windows"
-                        value={target.name}
-                      />
-                      <SelectField
-                        error={fieldErrors.targetPlatform}
-                        hint="This writes the Unity targetPlatform contract field directly."
-                        label="Unity target platform"
-                        onChange={(event) => {
-                          updateBuildTarget(target.id, {
-                            targetPlatform: normalizeUnityTargetPlatformValue(
-                              event.currentTarget.value,
-                            ),
-                          });
-                        }}
-                        options={PLATFORM_OPTIONS}
-                        value={normalizeUnityTargetPlatformValue(
-                          target.targetPlatform,
-                        )}
-                      />
-                      <TextField
-                        error={fieldErrors.buildMethod}
-                        hint="Point this at a real static Unity method, for example Builder.PerformWindows."
-                        label="Unity build method"
-                        onChange={(event) => {
-                          updateBuildTarget(target.id, {
-                            buildMethod: event.currentTarget.value,
-                          });
-                        }}
-                        placeholder="Builder.PerformWindows"
-                        value={target.buildMethod}
-                      />
-                      <PathPickerField
-                        buttonLabel="Choose Unity executable"
-                        disabled={isSaving}
-                        dialogTitle="Select Unity Editor executable"
-                        error={fieldErrors.unityExecutablePath}
-                        filters={[
-                          {
-                            name: "Unity Editor",
-                            extensions: ["exe", "app"],
-                          },
-                        ]}
-                        hint="Select the host-local Unity Editor executable that should run this target."
-                        label="Unity executable"
-                        onError={(pickError) => {
-                          setSaveError(buildProjectSaveErrorMessage(pickError));
-                        }}
-                        onPathPicked={(selectedPath) =>
-                          handlePickUnityExecutablePath(target.id, selectedPath)
-                        }
-                        pickerKind="file"
-                        placeholder="C:/Program Files/Unity/Hub/Editor/.../Unity.exe"
-                        value={target.unityExecutablePath}
-                      />
+                    <BuildTargetEditor
+                      target={target}
+                      onRemove={() => handleRemoveBuildTarget(target.id)}
+                    />
 
-                      {diagnostics ? (
-                        <p
-                          className={joinClassNames(
-                            "wizard-target-card__diagnostic",
-                            diagnostics.status !== "ready" &&
-                              "wizard-target-card__diagnostic--error",
+                    {isOpen ? (
+                      <div className="wizard-form-grid wizard-form-grid--targets">
+                        <TextField
+                          error={fieldErrors.name}
+                          hint="Keep the target name stable. It becomes part of the artifact file name."
+                          label="Target name"
+                          onChange={(event) => {
+                            updateBuildTarget(target.id, {
+                              name: event.currentTarget.value,
+                            });
+                          }}
+                          placeholder="Windows"
+                          value={target.name}
+                        />
+                        <SelectField
+                          error={fieldErrors.targetPlatform}
+                          hint="This writes the Unity targetPlatform contract field directly."
+                          label="Unity target platform"
+                          onChange={(event) => {
+                            updateBuildTarget(target.id, {
+                              targetPlatform: normalizeUnityTargetPlatformValue(
+                                event.currentTarget.value,
+                              ),
+                            });
+                          }}
+                          options={PLATFORM_OPTIONS}
+                          value={normalizeUnityTargetPlatformValue(
+                            target.targetPlatform,
                           )}
-                        >
-                          {diagnostics.message}
-                        </p>
-                      ) : null}
+                        />
+                        <TextField
+                          error={fieldErrors.buildMethod}
+                          hint="Point this at a real static Unity method, for example Builder.PerformWindows."
+                          label="Unity build method"
+                          onChange={(event) => {
+                            updateBuildTarget(target.id, {
+                              buildMethod: event.currentTarget.value,
+                            });
+                          }}
+                          placeholder="Builder.PerformWindows"
+                          value={target.buildMethod}
+                        />
+                        <PathPickerField
+                          buttonLabel="Choose Unity executable"
+                          disabled={isSaving}
+                          dialogTitle="Select Unity Editor executable"
+                          error={fieldErrors.unityExecutablePath}
+                          filters={[
+                            {
+                              name: "Unity Editor",
+                              extensions: ["exe", "app"],
+                            },
+                          ]}
+                          hint="Select the host-local Unity Editor executable that should run this target."
+                          label="Unity executable"
+                          onError={(pickError) => {
+                            setSaveError(
+                              buildProjectSaveErrorMessage(pickError),
+                            );
+                          }}
+                          onPathPicked={(selectedPath) =>
+                            handlePickUnityExecutablePath(
+                              target.id,
+                              selectedPath,
+                            )
+                          }
+                          pickerKind="file"
+                          placeholder="C:/Program Files/Unity/Hub/Editor/.../Unity.exe"
+                          value={target.unityExecutablePath}
+                        />
 
-                      {validatingTargets[target.id] ? (
-                        <p className="wizard-target-card__diagnostic">
-                          Validating Unity executable path...
-                        </p>
-                      ) : null}
-                    </div>
-                  </VerticalAccordion>
+                        {diagnostics ? (
+                          <p
+                            className={joinClassNames(
+                              "wizard-target-card__diagnostic",
+                              diagnostics.status !== "ready" &&
+                                "wizard-target-card__diagnostic--error",
+                            )}
+                          >
+                            {diagnostics.message}
+                          </p>
+                        ) : null}
+
+                        {validatingTargets[target.id] ? (
+                          <p className="wizard-target-card__diagnostic">
+                            Validating Unity executable path...
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </FormSection>
                 );
               })}
             </div>
@@ -2919,7 +2908,10 @@ function isRepositoryProjectDraftChanged(
       draft.workspaceRootOverride.trim() ||
     persistedDraft.pollingIntervalSeconds !== draft.pollingIntervalSeconds ||
     persistedDraft.enabled !== draft.enabled ||
-    !areBuildTargetDraftsEqual(persistedDraft.buildTargets, draft.buildTargets) ||
+    !areBuildTargetDraftsEqual(
+      persistedDraft.buildTargets,
+      draft.buildTargets,
+    ) ||
     !arePublishDestinationDraftsEqual(
       persistedDraft.publishDestinations,
       draft.publishDestinations,
@@ -2970,8 +2962,7 @@ function arePublishDestinationDraftsEqual(
       destination.name.trim() === candidate.name.trim() &&
       destination.kind === candidate.kind &&
       destination.enabled === candidate.enabled &&
-      destination.itchAccountName.trim() ===
-        candidate.itchAccountName.trim() &&
+      destination.itchAccountName.trim() === candidate.itchAccountName.trim() &&
       destination.itchGameSlug.trim() === candidate.itchGameSlug.trim() &&
       destination.itchButlerPath.trim() === candidate.itchButlerPath.trim() &&
       destination.credentialsId === candidate.credentialsId &&
@@ -3009,10 +3000,6 @@ function arePublishDestinationBindingDraftsEqual(
         candidate.itchUserversionTemplate.trim()
     );
   });
-}
-
-function formatDiagnosticStatus(status: string) {
-  return status.replace(/_/g, " ");
 }
 
 function normalizeOptionalDraftValue(value: string) {
