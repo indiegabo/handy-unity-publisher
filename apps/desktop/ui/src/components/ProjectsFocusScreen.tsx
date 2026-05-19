@@ -1,20 +1,19 @@
 import {
   startTransition,
+  useDeferredValue,
   useEffect,
   useEffectEvent,
+  useMemo,
   useRef,
   useState,
 } from "react";
 
 import { Button } from "./Button";
-import { Icon } from "./Icon";
-import {
-  Badge,
-  FocusPageFrame,
-  MetaItem,
-  MetaRow,
-  SurfacePanel,
-} from "./Surface";
+import { MetaItem, MetaRow, SurfacePanel } from "./Surface";
+import ScreenScaffold from "./ScreenScaffold";
+import InputWithPicker from "./InputWithPicker";
+import SelectListFullScreen from "./SelectListFullScreen";
+import ProjectList from "./projects/ProjectList";
 import {
   loadRepositoryInspection,
   type RepositoryInspectionEntry,
@@ -34,7 +33,9 @@ export function ProjectsFocusScreen({
   );
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [quickOpenQuery, setQuickOpenQuery] = useState("");
   const projectCardRefs = useRef<Record<number, HTMLButtonElement | null>>({});
+  const deferredQuickOpenQuery = useDeferredValue(quickOpenQuery);
 
   const highlightedProject =
     highlightedRepositoryId === null
@@ -49,6 +50,14 @@ export function ProjectsFocusScreen({
   const activeBuildTargetCount = repositories.reduce(
     (total, repository) => total + repository.enabled_build_target_count,
     0,
+  );
+  const filteredRepositories = useMemo(
+    () => filterRepositories(repositories, deferredQuickOpenQuery),
+    [deferredQuickOpenQuery, repositories],
+  );
+  const quickOpenItems = useMemo(
+    () => repositories.map(buildProjectPickerItem),
+    [repositories],
   );
 
   const loadProjects = useEffectEvent(async () => {
@@ -86,9 +95,64 @@ export function ProjectsFocusScreen({
     });
   }, [highlightedRepositoryId, isLoading, repositories]);
 
+  const handleQuickOpenPick = useEffectEvent((value: string) => {
+    const repository = repositories.find(
+      (entry) => String(entry.repository_id) === value,
+    );
+
+    if (!repository) {
+      return;
+    }
+
+    onOpenProject(repository.repository_id, repository.repository_name);
+  });
+
+  const handleQuickOpenKeyDown = useEffectEvent(
+    (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === "ArrowDown" && filteredRepositories.length > 0) {
+        event.preventDefault();
+        projectCardRefs.current[filteredRepositories[0].repository_id]?.focus();
+        return;
+      }
+
+      if (event.key !== "Enter") {
+        return;
+      }
+
+      const normalizedQuery = quickOpenQuery.trim().toLowerCase();
+
+      if (!normalizedQuery || filteredRepositories.length === 0) {
+        return;
+      }
+
+      const exactRepository = filteredRepositories.find((repository) => {
+        return (
+          repository.repository_name.toLowerCase() === normalizedQuery ||
+          repository.repo_url.toLowerCase() === normalizedQuery
+        );
+      });
+
+      const targetRepository =
+        exactRepository ??
+        (filteredRepositories.length === 1 ? filteredRepositories[0] : null);
+
+      if (!targetRepository) {
+        return;
+      }
+
+      event.preventDefault();
+      onOpenProject(
+        targetRepository.repository_id,
+        targetRepository.repository_name,
+      );
+    },
+  );
+
   return (
     <div className="project-list-shell">
-      <FocusPageFrame
+      <ScreenScaffold
+        title="Project List"
+        subtitle="Review repository projects registered in the local runtime and open one to inspect or edit its pipeline settings."
         actions={
           <Button
             leadingIcon="refresh"
@@ -99,29 +163,6 @@ export function ProjectsFocusScreen({
             Refresh
           </Button>
         }
-        description="Review repository projects registered in the local runtime and open one to inspect or edit its pipeline settings."
-        eyebrow="Projects"
-        summary={
-          <MetaRow>
-            <MetaItem label="Projects">
-              {isLoading
-                ? "Loading snapshot..."
-                : `${repositories.length} registered`}
-            </MetaItem>
-            {!isLoading ? (
-              <MetaItem label="Enabled">{enabledRepositoryCount}</MetaItem>
-            ) : null}
-            {!isLoading ? (
-              <MetaItem label="Disabled">{disabledRepositoryCount}</MetaItem>
-            ) : null}
-            {!isLoading ? (
-              <MetaItem label="Active targets">
-                {activeBuildTargetCount}
-              </MetaItem>
-            ) : null}
-          </MetaRow>
-        }
-        title="Project List"
       >
         {error ? (
           <p className="feed-banner feed-banner--error">{error}</p>
@@ -131,6 +172,53 @@ export function ProjectsFocusScreen({
             {`${highlightedProject.repository_name} was created. Open it to continue editing.`}
           </p>
         ) : null}
+
+        <MetaRow>
+          <MetaItem label="Projects">
+            {isLoading
+              ? "Loading snapshot..."
+              : `${repositories.length} registered`}
+          </MetaItem>
+          {!isLoading ? (
+            <MetaItem label="Enabled">{enabledRepositoryCount}</MetaItem>
+          ) : null}
+          {!isLoading ? (
+            <MetaItem label="Disabled">{disabledRepositoryCount}</MetaItem>
+          ) : null}
+          {!isLoading ? (
+            <MetaItem label="Active targets">{activeBuildTargetCount}</MetaItem>
+          ) : null}
+        </MetaRow>
+
+        <InputWithPicker
+          autoComplete="off"
+          buttonIcon="search"
+          buttonLabel="Browse"
+          className="project-list-toolbar"
+          disabled={isLoading || repositories.length === 0}
+          hint={
+            isLoading
+              ? "Loading inventory..."
+              : `${filteredRepositories.length} matching project${filteredRepositories.length === 1 ? "" : "s"}`
+          }
+          label="Quick open"
+          leadingIcon="search"
+          onChange={setQuickOpenQuery}
+          onKeyDown={handleQuickOpenKeyDown}
+          onPick={handleQuickOpenPick}
+          pickerComponent={SelectListFullScreen}
+          pickerProps={{
+            description:
+              "Search the registered repository inventory and open a project without leaving this screen.",
+            emptyStateCopy: "Try a different repository name or remote URL.",
+            emptyStateTitle: "No projects matched the current filter.",
+            initialQuery: quickOpenQuery,
+            items: quickOpenItems,
+            title: "Open project",
+          }}
+          placeholder="Filter by project name or repository URL"
+          value={quickOpenQuery}
+        />
 
         <SurfacePanel
           className="project-list-section"
@@ -160,91 +248,34 @@ export function ProjectsFocusScreen({
             </div>
           ) : null}
 
-          {!isLoading && repositories.length > 0 ? (
-            <div className="project-list-grid">
-              {repositories.map((repository) => (
-                <button
-                  className={joinClassNames(
-                    "project-list-card",
-                    repository.repository_id === highlightedRepositoryId &&
-                      "project-list-card--highlighted",
-                  )}
-                  key={repository.repository_id}
-                  onClick={() =>
-                    onOpenProject(
-                      repository.repository_id,
-                      repository.repository_name,
-                    )
-                  }
-                  ref={(element) => {
-                    projectCardRefs.current[repository.repository_id] = element;
-                  }}
-                  type="button"
-                >
-                  <div className="project-list-card__header">
-                    <div className="project-list-card__title-block">
-                      <div className="project-list-card__title-row">
-                        <h3 className="project-list-card__title">
-                          {repository.repository_name}
-                        </h3>
-                        <div className="project-list-card__badges">
-                          {repository.repository_id ===
-                          highlightedRepositoryId ? (
-                            <Badge tone="strong">new</Badge>
-                          ) : null}
-                          <Badge tone={repository.enabled ? "strong" : "muted"}>
-                            {repository.enabled ? "enabled" : "disabled"}
-                          </Badge>
-                        </div>
-                      </div>
-                      <p className="project-list-card__copy">
-                        {repository.repo_url}
-                      </p>
-                    </div>
-
-                    <span className="project-list-card__direction">
-                      <span className="project-list-card__direction-label">
-                        Edit
-                      </span>
-                      <Icon name="arrowUpRight" size={14} />
-                    </span>
-                  </div>
-
-                  <MetaRow className="project-list-card__meta">
-                    <MetaItem label="Engine">{repository.engine_kind}</MetaItem>
-                    <MetaItem label="Poll">
-                      {`${repository.polling_interval_seconds}s cadence`}
-                    </MetaItem>
-                    <MetaItem label="Targets">
-                      {formatTargetCount(repository.enabled_build_target_count)}
-                    </MetaItem>
-                  </MetaRow>
-
-                  <p className="project-list-card__summary">
-                    {buildRepositorySummary(repository)}
-                  </p>
-                </button>
-              ))}
+          {!isLoading &&
+          repositories.length > 0 &&
+          filteredRepositories.length === 0 ? (
+            <div className="feed-state">
+              <p className="feed-state__title">
+                No projects match this filter.
+              </p>
+              <p className="feed-state__copy">
+                Clear or broaden the quick-open query to inspect the rest of the
+                repository inventory.
+              </p>
             </div>
           ) : null}
+
+          {!isLoading && filteredRepositories.length > 0 ? (
+            <ProjectList
+              highlightedRepositoryId={highlightedRepositoryId}
+              onCardRef={(repositoryId, element) => {
+                projectCardRefs.current[repositoryId] = element;
+              }}
+              onOpen={onOpenProject}
+              repositories={filteredRepositories}
+            />
+          ) : null}
         </SurfacePanel>
-      </FocusPageFrame>
+      </ScreenScaffold>
     </div>
   );
-}
-
-function buildRepositorySummary(repository: RepositoryInspectionEntry) {
-  const lastSeenTag = repository.last_seen_tag
-    ? `Last seen tag ${repository.last_seen_tag}.`
-    : "No baseline tag recorded yet.";
-
-  const publishDestinationCount = repository.publish_targets.length;
-
-  return `${lastSeenTag} ${publishDestinationCount} publish destination${publishDestinationCount === 1 ? "" : "s"} registered.`;
-}
-
-function formatTargetCount(targetCount: number) {
-  return `${targetCount} active target${targetCount === 1 ? "" : "s"}`;
 }
 
 function buildProjectsListErrorMessage(error: unknown) {
@@ -259,6 +290,29 @@ function buildProjectsListErrorMessage(error: unknown) {
   return "The desktop shell could not load the project list.";
 }
 
-function joinClassNames(...tokens: Array<string | false | null | undefined>) {
-  return tokens.filter(Boolean).join(" ");
+function filterRepositories(
+  repositories: RepositoryInspectionEntry[],
+  query: string,
+) {
+  const normalizedQuery = query.trim().toLowerCase();
+
+  if (!normalizedQuery) {
+    return repositories;
+  }
+
+  return repositories.filter((repository) => {
+    return (
+      repository.repository_name.toLowerCase().includes(normalizedQuery) ||
+      repository.repo_url.toLowerCase().includes(normalizedQuery) ||
+      repository.engine_kind.toLowerCase().includes(normalizedQuery)
+    );
+  });
+}
+
+function buildProjectPickerItem(repository: RepositoryInspectionEntry) {
+  return {
+    id: String(repository.repository_id),
+    label: repository.repository_name,
+    subtitle: repository.repo_url,
+  };
 }

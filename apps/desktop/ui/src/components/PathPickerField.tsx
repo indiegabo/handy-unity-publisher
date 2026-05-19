@@ -1,6 +1,8 @@
 import { useEffectEvent, useState } from "react";
 
 import { Button, IconButton } from "./Button";
+import { useOverlay } from "./OverlayManager";
+import FullScreenFileBrowser from "./FullScreenFileBrowser";
 import {
   pickHostPath,
   type HostPathSelectionKind,
@@ -45,12 +47,12 @@ export function PathPickerField({
 }: PathPickerFieldProps) {
   const [isPicking, setIsPicking] = useState(false);
   const canClear = clearable && Boolean(onClear) && Boolean(value.trim());
+  const { openOverlay } = useOverlay();
 
   const handlePick = useEffectEvent(async () => {
     if (disabled || isPicking) {
       return;
     }
-
     setIsPicking(true);
 
     try {
@@ -69,9 +71,19 @@ export function PathPickerField({
       const selectedPath = await pickHostPath(input);
       if (selectedPath) {
         onPathPicked(selectedPath);
+        return;
       }
+      // if native picker returned falsy (cancel), do not fallback
     } catch (pickError) {
-      onError?.(pickError);
+      // fallback to overlay file browser if native picker fails
+      try {
+        const result = await openOverlay<string>(FullScreenFileBrowser, {
+          initialPath: value,
+        });
+        if (result) onPathPicked(result);
+      } catch (overlayErr) {
+        onError?.(overlayErr ?? pickError);
+      }
     } finally {
       setIsPicking(false);
     }

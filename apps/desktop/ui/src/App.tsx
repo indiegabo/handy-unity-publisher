@@ -11,6 +11,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button, IconButton } from "./components/Button";
 import { AuthProvidersFocusScreen } from "./components/AuthProvidersFocusScreen";
 import { CreateProjectWizard } from "./components/CreateProjectWizard";
+import OverlayProvider from "./components/OverlayManager";
 import { ProcessFeedItem } from "./components/ProcessFeedItem";
 import { ProcessDetailFocusScreen } from "./components/ProcessDetailFocusScreen";
 import { ProjectsFocusScreen } from "./components/ProjectsFocusScreen";
@@ -529,340 +530,346 @@ function App() {
   });
 
   return (
-    <main className="app-shell">
-      <header className="window-titlebar">
-        <div
-          className="window-titlebar__drag-region"
-          data-tauri-drag-region
-          onMouseDown={(event) => {
-            if (event.button !== 0) {
-              return;
-            }
-
-            void getCurrentWindow()
-              .startDragging()
-              .catch((error) => {
-                console.error("failed to start window drag", error);
-              });
-          }}
-        >
-          <span className="window-titlebar__title">
-            {resolveWindowTitle(activeScreen, activeProjectTitle)}
-          </span>
-        </div>
-        <div className="window-titlebar__actions">
-          <IconButton
-            aria-pressed={isMainWindowPinned}
-            className="window-titlebar__action window-titlebar__action--pin"
-            icon={isMainWindowPinned ? "unpin" : "pin"}
-            label={isMainWindowPinned ? "Desafixar janela" : "Fixar janela"}
-            onClick={handleToggleMainWindowPinned}
-            size="sm"
-            variant="ghost"
-          />
-          <IconButton
-            className="window-titlebar__action window-titlebar__action--close"
-            icon="close"
-            label="Fechar janela"
-            onClick={handleCloseMainWindow}
-            size="sm"
-            variant="ghost"
-          />
-        </div>
-      </header>
-
-      <div className="app-shell__content">
-        {isScreenBlank ? null : activeScreen.kind === "main" ? (
-          <div className="home-frame">
-            <section className="action-bar" aria-label="Primary actions">
-              <div className="action-bar__leading">
-                <div
-                  className="worker-status-shell"
-                  onBlurCapture={() => {
-                    setIsWorkerTooltipOpen(false);
-                  }}
-                  onFocusCapture={() => {
-                    setIsWorkerTooltipOpen(true);
-                  }}
-                  onMouseEnter={() => {
-                    setIsWorkerTooltipOpen(true);
-                  }}
-                  onMouseLeave={() => {
-                    setIsWorkerTooltipOpen(false);
-                  }}
-                >
-                  <WorkerStatusIndicator
-                    animated={workerStatus.animated}
-                    aria-controls={WORKER_TOOLTIP_ID}
-                    expanded={isWorkerTooltipOpen}
-                    label={workerStatus.label}
-                    onClick={handleOpenProjectWorkers}
-                    tone={workerStatus.tone}
-                  />
-
-                  {isWorkerTooltipOpen ? (
-                    <section
-                      className="worker-status-tooltip"
-                      id={WORKER_TOOLTIP_ID}
-                      role="tooltip"
-                    >
-                      <header className="worker-status-tooltip__header">
-                        <h2 className="worker-status-tooltip__title">
-                          Project Workers
-                        </h2>
-                      </header>
-
-                      <div className="worker-status-tooltip__content">
-                        {!workerSnapshot.inspectionAvailable ? (
-                          <p className="worker-status-tooltip__empty">
-                            Loading project worker inventory...
-                          </p>
-                        ) : null}
-
-                        {workerSnapshot.inspectionAvailable &&
-                        projectWorkers.length === 0 ? (
-                          <p className="worker-status-tooltip__empty">
-                            No active project workers configured.
-                          </p>
-                        ) : null}
-
-                        {workerSnapshot.inspectionAvailable &&
-                        projectWorkers.length > 0 ? (
-                          <ul className="worker-status-tooltip__list">
-                            {projectWorkers.map((projectWorker) => (
-                              <li
-                                className="worker-status-tooltip__item"
-                                key={projectWorker.repositoryId}
-                              >
-                                <span className="worker-status-tooltip__project-name">
-                                  {projectWorker.repositoryName}
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        ) : null}
-                      </div>
-                    </section>
-                  ) : null}
-                </div>
-              </div>
-
-              <div className="action-bar__actions">
-                <IconButton
-                  icon="layout"
-                  label="Projetos"
-                  onClick={handleOpenProjects}
-                  size="sm"
-                  variant="secondary"
-                />
-                <IconButton
-                  icon="plus"
-                  label="Criar novo projeto"
-                  onClick={handleOpenCreateProject}
-                  size="sm"
-                  variant="primary"
-                />
-              </div>
-            </section>
-
-            <section className="process-feed-shell" aria-label="Process list">
-              {transitionError ? (
-                <p className="feed-banner feed-banner--error">
-                  {transitionError}
-                </p>
-              ) : null}
-
-              {feedError ? (
-                <p className="feed-banner feed-banner--error">{feedError}</p>
-              ) : null}
-
-              {isLoadingFeed && processPage.items.length === 0 ? (
-                <div className="feed-state">
-                  <p className="feed-state__title">Loading process feed...</p>
-                  <p className="feed-state__copy">
-                    The shell is querying the runtime for recent build and
-                    publishing activity.
-                  </p>
-                </div>
-              ) : null}
-
-              {!isLoadingFeed && processPage.items.length === 0 ? (
-                <div className="feed-state">
-                  <p className="feed-state__title">
-                    No processes recorded yet.
-                  </p>
-                  <p className="feed-state__copy">
-                    New build or publishing runs will appear here as soon as the
-                    runtime creates them.
-                  </p>
-                </div>
-              ) : null}
-
-              {processPage.items.length > 0 ? (
-                <div className="process-list" aria-live="polite">
-                  {processPage.items.map((process) => (
-                    <ProcessFeedItem
-                      key={process.release_run_id}
-                      onOpenDetail={handleOpenProcessDetail}
-                      process={process}
-                    />
-                  ))}
-                </div>
-              ) : null}
-
-              {processPage.total_pages > 1 ? (
-                <footer className="pagination-bar">
-                  <div className="pagination-bar__actions">
-                    <Button
-                      disabled={!processPage.has_previous_page || isLoadingFeed}
-                      onClick={() =>
-                        startTransition(() => {
-                          setPage(processPage.page - 1);
-                        })
-                      }
-                      size="sm"
-                      variant="ghost"
-                    >
-                      Previous
-                    </Button>
-                    <Button
-                      disabled={!processPage.has_next_page || isLoadingFeed}
-                      onClick={() =>
-                        startTransition(() => {
-                          setPage(processPage.page + 1);
-                        })
-                      }
-                      size="sm"
-                      variant="secondary"
-                    >
-                      Next
-                    </Button>
-                  </div>
-                </footer>
-              ) : null}
-            </section>
-
-            <section
-              className="action-bar action-bar--home-bottom"
-              aria-label="Secondary actions"
-            >
-              <div className="action-bar__actions">
-                <IconButton
-                  icon="key"
-                  label="Auth"
-                  onClick={handleOpenAuthProviders}
-                  size="sm"
-                  variant="ghost"
-                />
-                <IconButton
-                  icon="settings"
-                  label="Settings"
-                  onClick={handleOpenSettings}
-                  size="sm"
-                  variant="ghost"
-                />
-              </div>
-            </section>
-          </div>
-        ) : (
-          <div className="focus-frame">
-            <section
-              className="action-bar action-bar--focus"
-              aria-label="Process detail actions"
-            >
-              <div className="action-bar__actions action-bar__actions--leading">
-                <IconButton
-                  icon="arrowLeft"
-                  label={resolveFocusBackLabel(activeScreen)}
-                  onClick={handleReturnFromFocus}
-                  size="sm"
-                  variant="ghost"
-                />
-              </div>
-            </section>
-
-            <section
-              className={
-                activeScreen.kind === "create-project"
-                  ? "focus-screen-shell focus-screen-shell--wizard"
-                  : activeScreen.kind === "auth-providers"
-                    ? "focus-screen-shell focus-screen-shell--auth-providers"
-                    : activeScreen.kind === "project-workers"
-                      ? "focus-screen-shell focus-screen-shell--project-workers"
-                      : activeScreen.kind === "project-list"
-                        ? "focus-screen-shell focus-screen-shell--project-list"
-                        : activeScreen.kind === "project-detail"
-                          ? "focus-screen-shell focus-screen-shell--project-detail"
-                          : activeScreen.kind === "process-detail"
-                            ? "focus-screen-shell focus-screen-shell--process-detail"
-                            : "focus-screen-shell"
+    <OverlayProvider>
+      <main className="app-shell">
+        <header className="window-titlebar">
+          <div
+            className="window-titlebar__drag-region"
+            data-tauri-drag-region
+            onMouseDown={(event) => {
+              if (event.button !== 0) {
+                return;
               }
-              aria-label="Focus screen"
-            >
-              {transitionError ? (
-                <p className="feed-banner feed-banner--error">
-                  {transitionError}
-                </p>
-              ) : null}
 
-              {activeScreen.kind === "create-project" ? (
-                <CreateProjectWizard
-                  onCreated={handleProjectCreated}
-                  onManageAuth={handleOpenAuthProvidersFromWizard}
-                />
-              ) : null}
-
-              {activeScreen.kind === "auth-providers" ? (
-                <AuthProvidersFocusScreen />
-              ) : null}
-
-              {activeScreen.kind === "settings" ? (
-                <p className="focus-screen-shell__title">Settings</p>
-              ) : null}
-
-              {activeScreen.kind === "project-list" ? (
-                <ProjectsFocusScreen
-                  highlightedRepositoryId={activeScreen.highlightedRepositoryId}
-                  onOpenProject={handleOpenProjectDetail}
-                />
-              ) : null}
-
-              {activeScreen.kind === "project-workers" ? (
-                <ProjectWorkersFocusScreen
-                  actionError={workerActionError}
-                  actionMessage={workerActionMessage}
-                  inspectionAvailable={workerSnapshot.inspectionAvailable}
-                  onInstantCheck={handleRepositoryInstantCheck}
-                  onRestartRuntime={handleRestartRuntime}
-                  onStartRuntime={handleStartRuntime}
-                  onStopRuntime={handleStopRuntime}
-                  pendingInstantCheckRepositoryId={
-                    pendingInstantCheckRepositoryId
-                  }
-                  pendingRuntimeAction={pendingRuntimeAction}
-                  projectWorkers={projectWorkers}
-                  runtimeStatus={workerSnapshot.runtimeStatus}
-                />
-              ) : null}
-
-              {activeScreen.kind === "project-detail" ? (
-                <RepositoryProjectDetail
-                  onProjectNameResolved={handleProjectNameResolved}
-                  repositoryId={activeScreen.repositoryId}
-                />
-              ) : null}
-
-              {activeScreen.kind === "process-detail" ? (
-                <ProcessDetailFocusScreen
-                  process={activeProcessDetail}
-                  usesLiveSnapshot={activeProcessDetailUsesLiveSnapshot}
-                />
-              ) : null}
-            </section>
+              void getCurrentWindow()
+                .startDragging()
+                .catch((error) => {
+                  console.error("failed to start window drag", error);
+                });
+            }}
+          >
+            <span className="window-titlebar__title">
+              {resolveWindowTitle(activeScreen, activeProjectTitle)}
+            </span>
           </div>
-        )}
-      </div>
-    </main>
+          <div className="window-titlebar__actions">
+            <IconButton
+              aria-pressed={isMainWindowPinned}
+              className="window-titlebar__action window-titlebar__action--pin"
+              icon={isMainWindowPinned ? "unpin" : "pin"}
+              label={isMainWindowPinned ? "Desafixar janela" : "Fixar janela"}
+              onClick={handleToggleMainWindowPinned}
+              size="sm"
+              variant="ghost"
+            />
+            <IconButton
+              className="window-titlebar__action window-titlebar__action--close"
+              icon="close"
+              label="Fechar janela"
+              onClick={handleCloseMainWindow}
+              size="sm"
+              variant="ghost"
+            />
+          </div>
+        </header>
+
+        <div className="app-shell__content">
+          {isScreenBlank ? null : activeScreen.kind === "main" ? (
+            <div className="home-frame">
+              <section className="action-bar" aria-label="Primary actions">
+                <div className="action-bar__leading">
+                  <div
+                    className="worker-status-shell"
+                    onBlurCapture={() => {
+                      setIsWorkerTooltipOpen(false);
+                    }}
+                    onFocusCapture={() => {
+                      setIsWorkerTooltipOpen(true);
+                    }}
+                    onMouseEnter={() => {
+                      setIsWorkerTooltipOpen(true);
+                    }}
+                    onMouseLeave={() => {
+                      setIsWorkerTooltipOpen(false);
+                    }}
+                  >
+                    <WorkerStatusIndicator
+                      animated={workerStatus.animated}
+                      aria-controls={WORKER_TOOLTIP_ID}
+                      expanded={isWorkerTooltipOpen}
+                      label={workerStatus.label}
+                      onClick={handleOpenProjectWorkers}
+                      tone={workerStatus.tone}
+                    />
+
+                    {isWorkerTooltipOpen ? (
+                      <section
+                        className="worker-status-tooltip"
+                        id={WORKER_TOOLTIP_ID}
+                        role="tooltip"
+                      >
+                        <header className="worker-status-tooltip__header">
+                          <h2 className="worker-status-tooltip__title">
+                            Project Workers
+                          </h2>
+                        </header>
+
+                        <div className="worker-status-tooltip__content">
+                          {!workerSnapshot.inspectionAvailable ? (
+                            <p className="worker-status-tooltip__empty">
+                              Loading project worker inventory...
+                            </p>
+                          ) : null}
+
+                          {workerSnapshot.inspectionAvailable &&
+                          projectWorkers.length === 0 ? (
+                            <p className="worker-status-tooltip__empty">
+                              No active project workers configured.
+                            </p>
+                          ) : null}
+
+                          {workerSnapshot.inspectionAvailable &&
+                          projectWorkers.length > 0 ? (
+                            <ul className="worker-status-tooltip__list">
+                              {projectWorkers.map((projectWorker) => (
+                                <li
+                                  className="worker-status-tooltip__item"
+                                  key={projectWorker.repositoryId}
+                                >
+                                  <span className="worker-status-tooltip__project-name">
+                                    {projectWorker.repositoryName}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          ) : null}
+                        </div>
+                      </section>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div className="action-bar__actions">
+                  <IconButton
+                    icon="layout"
+                    label="Projetos"
+                    onClick={handleOpenProjects}
+                    size="sm"
+                    variant="secondary"
+                  />
+                  <IconButton
+                    icon="plus"
+                    label="Criar novo projeto"
+                    onClick={handleOpenCreateProject}
+                    size="sm"
+                    variant="primary"
+                  />
+                </div>
+              </section>
+
+              <section className="process-feed-shell" aria-label="Process list">
+                {transitionError ? (
+                  <p className="feed-banner feed-banner--error">
+                    {transitionError}
+                  </p>
+                ) : null}
+
+                {feedError ? (
+                  <p className="feed-banner feed-banner--error">{feedError}</p>
+                ) : null}
+
+                {isLoadingFeed && processPage.items.length === 0 ? (
+                  <div className="feed-state">
+                    <p className="feed-state__title">Loading process feed...</p>
+                    <p className="feed-state__copy">
+                      The shell is querying the runtime for recent build and
+                      publishing activity.
+                    </p>
+                  </div>
+                ) : null}
+
+                {!isLoadingFeed && processPage.items.length === 0 ? (
+                  <div className="feed-state">
+                    <p className="feed-state__title">
+                      No processes recorded yet.
+                    </p>
+                    <p className="feed-state__copy">
+                      New build or publishing runs will appear here as soon as
+                      the runtime creates them.
+                    </p>
+                  </div>
+                ) : null}
+
+                {processPage.items.length > 0 ? (
+                  <div className="process-list" aria-live="polite">
+                    {processPage.items.map((process) => (
+                      <ProcessFeedItem
+                        key={process.release_run_id}
+                        onOpenDetail={handleOpenProcessDetail}
+                        process={process}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+
+                {processPage.total_pages > 1 ? (
+                  <footer className="pagination-bar">
+                    <div className="pagination-bar__actions">
+                      <Button
+                        disabled={
+                          !processPage.has_previous_page || isLoadingFeed
+                        }
+                        onClick={() =>
+                          startTransition(() => {
+                            setPage(processPage.page - 1);
+                          })
+                        }
+                        size="sm"
+                        variant="ghost"
+                      >
+                        Previous
+                      </Button>
+                      <Button
+                        disabled={!processPage.has_next_page || isLoadingFeed}
+                        onClick={() =>
+                          startTransition(() => {
+                            setPage(processPage.page + 1);
+                          })
+                        }
+                        size="sm"
+                        variant="secondary"
+                      >
+                        Next
+                      </Button>
+                    </div>
+                  </footer>
+                ) : null}
+              </section>
+
+              <section
+                className="action-bar action-bar--home-bottom"
+                aria-label="Secondary actions"
+              >
+                <div className="action-bar__actions">
+                  <IconButton
+                    icon="key"
+                    label="Auth"
+                    onClick={handleOpenAuthProviders}
+                    size="sm"
+                    variant="ghost"
+                  />
+                  <IconButton
+                    icon="settings"
+                    label="Settings"
+                    onClick={handleOpenSettings}
+                    size="sm"
+                    variant="ghost"
+                  />
+                </div>
+              </section>
+            </div>
+          ) : (
+            <div className="focus-frame">
+              <section
+                className="action-bar action-bar--focus"
+                aria-label="Process detail actions"
+              >
+                <div className="action-bar__actions action-bar__actions--leading">
+                  <IconButton
+                    icon="arrowLeft"
+                    label={resolveFocusBackLabel(activeScreen)}
+                    onClick={handleReturnFromFocus}
+                    size="sm"
+                    variant="ghost"
+                  />
+                </div>
+              </section>
+
+              <section
+                className={
+                  activeScreen.kind === "create-project"
+                    ? "focus-screen-shell focus-screen-shell--wizard"
+                    : activeScreen.kind === "auth-providers"
+                      ? "focus-screen-shell focus-screen-shell--auth-providers"
+                      : activeScreen.kind === "project-workers"
+                        ? "focus-screen-shell focus-screen-shell--project-workers"
+                        : activeScreen.kind === "project-list"
+                          ? "focus-screen-shell focus-screen-shell--project-list"
+                          : activeScreen.kind === "project-detail"
+                            ? "focus-screen-shell focus-screen-shell--project-detail"
+                            : activeScreen.kind === "process-detail"
+                              ? "focus-screen-shell focus-screen-shell--process-detail"
+                              : "focus-screen-shell"
+                }
+                aria-label="Focus screen"
+              >
+                {transitionError ? (
+                  <p className="feed-banner feed-banner--error">
+                    {transitionError}
+                  </p>
+                ) : null}
+
+                {activeScreen.kind === "create-project" ? (
+                  <CreateProjectWizard
+                    onCreated={handleProjectCreated}
+                    onManageAuth={handleOpenAuthProvidersFromWizard}
+                  />
+                ) : null}
+
+                {activeScreen.kind === "auth-providers" ? (
+                  <AuthProvidersFocusScreen />
+                ) : null}
+
+                {activeScreen.kind === "settings" ? (
+                  <p className="focus-screen-shell__title">Settings</p>
+                ) : null}
+
+                {activeScreen.kind === "project-list" ? (
+                  <ProjectsFocusScreen
+                    highlightedRepositoryId={
+                      activeScreen.highlightedRepositoryId
+                    }
+                    onOpenProject={handleOpenProjectDetail}
+                  />
+                ) : null}
+
+                {activeScreen.kind === "project-workers" ? (
+                  <ProjectWorkersFocusScreen
+                    actionError={workerActionError}
+                    actionMessage={workerActionMessage}
+                    inspectionAvailable={workerSnapshot.inspectionAvailable}
+                    onInstantCheck={handleRepositoryInstantCheck}
+                    onRestartRuntime={handleRestartRuntime}
+                    onStartRuntime={handleStartRuntime}
+                    onStopRuntime={handleStopRuntime}
+                    pendingInstantCheckRepositoryId={
+                      pendingInstantCheckRepositoryId
+                    }
+                    pendingRuntimeAction={pendingRuntimeAction}
+                    projectWorkers={projectWorkers}
+                    runtimeStatus={workerSnapshot.runtimeStatus}
+                  />
+                ) : null}
+
+                {activeScreen.kind === "project-detail" ? (
+                  <RepositoryProjectDetail
+                    onProjectNameResolved={handleProjectNameResolved}
+                    repositoryId={activeScreen.repositoryId}
+                  />
+                ) : null}
+
+                {activeScreen.kind === "process-detail" ? (
+                  <ProcessDetailFocusScreen
+                    process={activeProcessDetail}
+                    usesLiveSnapshot={activeProcessDetailUsesLiveSnapshot}
+                  />
+                ) : null}
+              </section>
+            </div>
+          )}
+        </div>
+      </main>
+    </OverlayProvider>
   );
 }
 
