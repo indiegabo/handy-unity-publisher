@@ -4,14 +4,23 @@
 use super::*;
 use runtime_contracts::BuildKind;
 use runtime_runner::{
-    BuildExecutionAdapter, EngineAdapterRegistry,
+    BuildExecutionAdapter, DiscoveredArtifact, EngineAdapterRegistry,
     unity::{
-        package_unity_build_output, resolve_unity_build_stage_identity,
-        UnityBuildStageIdentity,
+        package_unity_build_output, resolve_final_unity_artifact_output_path,
+        resolve_unity_build_stage_identity, UnityBuildStageIdentity,
     },
 };
+use runtime_store::{CreateArtifactRecordInput, LocalCoordinator};
 use runtime_store::lifecycle::ReleaseStatus;
 use std::collections::HashMap;
+
+#[cfg(test)]
+use runtime_config::RuntimeDirectories;
+#[cfg(test)]
+use runtime_store::{
+    CreateRepositoryProjectBuildTargetInput, CreateRepositoryProjectInput,
+    StorageLayout, initialize_database, open_connection,
+};
 
 const BUILD_EXECUTION_REPORT_SCHEMA_VERSION: u32 = 2;
 const BUILD_EXECUTION_CLEANUP_POLICY: &str = "retain-zipped-logs-json-report";
@@ -1078,7 +1087,12 @@ fn complete_successful_build_run(
         BuildProcessStage::RegisterArtifacts,
         register_message,
     );
-    register_build_artifacts(coordinator, build_run_id, &result.artifact_root_path)
+    register_build_artifacts(
+        coordinator,
+        build_run_id,
+        runner_plan,
+        &result.artifact_root_path,
+    )
         .map_err(|error| {
             let _ = tracker.fail_stage(BuildProcessStage::RegisterArtifacts, &error.to_string());
             error
@@ -1952,9 +1966,16 @@ fn should_retry_in_fresh_workspace(log_path: &Path) -> io::Result<bool> {
 fn register_build_artifacts(
     coordinator: &LocalCoordinator,
     build_run_id: i64,
+    plan: &UnityBuildExecutionPlan,
     artifact_root_path: &Path,
 ) -> io::Result<()> {
-    let artifacts = discover_artifacts(artifact_root_path)?;
+    let expected_output_path =
+        resolve_final_unity_artifact_output_path(plan, artifact_root_path)?;
+    let artifacts = select_target_aware_artifacts(
+        artifact_root_path,
+        &expected_output_path,
+        discover_artifacts(artifact_root_path)?,
+    )?;
     let inputs = artifacts
         .into_iter()
         .map(|artifact| CreateArtifactRecordInput {
@@ -1968,6 +1989,53 @@ fn register_build_artifacts(
     coordinator.replace_build_artifacts(build_run_id, inputs)?;
 
     Ok(())
+}
+
+fn select_target_aware_artifacts(
+    artifact_root_path: &Path,
+    expected_output_path: &Path,
+    artifacts: Vec<DiscoveredArtifact>,
+) -> io::Result<Vec<DiscoveredArtifact>> {
+    let expected_relative_path = normalize_relative_artifact_path(
+        expected_output_path
+            .strip_prefix(artifact_root_path)
+            .map_err(io::Error::other)?,
+    );
+
+    let expected_is_directory = fs::metadata(expected_output_path)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false);
+
+    let selected = artifacts
+        .into_iter()
+        .filter(|artifact| {
+            if expected_is_directory {
+                artifact.path == expected_relative_path
+                    || artifact
+                        .path
+                        .starts_with(&format!("{expected_relative_path}/"))
+            } else {
+                artifact.path == expected_relative_path
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if selected.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "no artifacts matched build target output {:?} under {:?}",
+                expected_output_path.display(),
+                artifact_root_path.display()
+            ),
+        ));
+    }
+
+    Ok(selected)
+}
+
+fn normalize_relative_artifact_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn load_claimed_build_plan(
@@ -2341,6 +2409,114 @@ mod tests {
         );
     }
 
+    #[test]
+    fn register_build_artifacts_keeps_only_target_expected_outputs() {
+        let root = TestDir::new("register-build-artifacts-target-aware")
+            .expect("temporary test directory should be created");
+        let directories = RuntimeDirectories::from_root(root.path());
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
+        let storage = StorageLayout::from_directories(&directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let coordinator = LocalCoordinator::new(&storage);
+        let created = coordinator
+            .create_repository_project(CreateRepositoryProjectInput {
+                name: String::from("Revolutions"),
+                engine_kind: String::from("unity"),
+                repo_url: String::from("https://example.com/revolutions.git"),
+                credentials: None,
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                enabled: true,
+                build_targets: vec![
+                    test_build_target_input("Windows", "StandaloneWindows64"),
+                    test_build_target_input("Linux", "StandaloneLinux64"),
+                ],
+                publish_targets: Vec::new(),
+            })
+            .expect("repository project should persist");
+        let connection = open_connection(&storage.database_path)
+            .expect("database connection should open");
+        connection
+            .execute(
+                "INSERT INTO release_runs (repository_id, git_tag, status) VALUES (?, ?, ?)",
+                rusqlite::params![
+                    created.repository_id,
+                    "v1.1.12",
+                    ReleaseStatus::Queued.as_str(),
+                ],
+            )
+            .expect("release run should insert");
+        let release_run_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO build_runs (release_run_id, build_target_id, status) VALUES (?, ?, ?)",
+                rusqlite::params![release_run_id, created.build_target_ids[1], "queued"],
+            )
+            .expect("linux build run should insert");
+        let linux_build_run_id = connection.last_insert_rowid();
+        drop(connection);
+
+        let artifact_root = root
+            .path()
+            .join("release-run-1")
+            .join("builds")
+            .join("build-run-linux")
+            .join("outputs");
+        fs::create_dir_all(&artifact_root)
+            .expect("artifact root should be created for test registration");
+        fs::write(
+            artifact_root.join("revolutions.v1.1.12.windows.zip"),
+            b"stale-windows-artifact",
+        )
+        .expect("stale windows artifact should be created");
+        fs::write(
+            artifact_root.join("revolutions.v1.1.12.linux.zip"),
+            b"linux-artifact",
+        )
+        .expect("linux artifact should be created");
+
+        let linux_plan = UnityBuildExecutionPlan {
+            build_run_id: linux_build_run_id,
+            release_run_id,
+            build_target_id: created.build_target_ids[1],
+            repository_name: String::from("Revolutions"),
+            repository_url: String::from("https://example.com/revolutions.git"),
+            git_tag: String::from("v1.1.12"),
+            target_name: String::from("Linux"),
+            unity_target_platform: String::from("StandaloneLinux64"),
+            runner_type: String::from(RunnerFamily::HostNative.label()),
+            unity_build_method: String::from("Builder.PerformLinux"),
+            output_kind: Some(String::from("archive")),
+            output_path_template: Some(String::from("Builds/Linux")),
+            engine_version: String::from("2022.3.20f1"),
+            config_json: String::from(
+                r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
+            ),
+            timeout_seconds: 900,
+        };
+
+        register_build_artifacts(
+            &coordinator,
+            linux_build_run_id,
+            &linux_plan,
+            &artifact_root,
+        )
+        .expect("artifact registration should keep only linux output");
+
+        let artifacts = coordinator
+            .list_artifacts_by_build_run(linux_build_run_id)
+            .expect("registered artifacts should load");
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].name, "revolutions.v1.1.12.linux.zip");
+        assert_eq!(artifacts[0].path, "revolutions.v1.1.12.linux.zip");
+    }
+
     fn test_stored_build_execution_plan(engine_kind: EngineKind) -> StoredBuildExecutionPlan {
         StoredBuildExecutionPlan {
             build_run_id: 41,
@@ -2401,6 +2577,32 @@ mod tests {
                 status: String::from("ready"),
                 message: String::from("ready"),
             },
+        }
+    }
+
+    fn test_build_target_input(
+        name: &str,
+        unity_target_platform: &str,
+    ) -> CreateRepositoryProjectBuildTargetInput {
+        CreateRepositoryProjectBuildTargetInput {
+            name: String::from(name),
+            build_kind: String::from("player"),
+            runner_type: String::from(RunnerFamily::HostNative.label()),
+            output_kind: Some(String::from("archive")),
+            output_path_template: Some(format!("Builds/{name}")),
+            timeout_seconds: 900,
+            enabled: true,
+            contract_json: serde_json::json!({
+                "unity": {
+                    "targetPlatform": unity_target_platform,
+                    "buildMethod": format!("Builder.Perform{name}"),
+                    "editorVersion": "2022.3.20f1"
+                }
+            })
+            .to_string(),
+            runner_config_json: String::from(
+                r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
+            ),
         }
     }
 }

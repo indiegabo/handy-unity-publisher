@@ -290,11 +290,8 @@ fn run_repository_poll_cycle_with_forced_repositories(
                         POLL_FAILURE_STAGE_POLL_REMOTE,
                         &error,
                     );
-                    return Err(fatal_poll_auth_failure(
-                        &repository,
-                        POLL_FAILURE_STAGE_POLL_REMOTE,
-                        error,
-                    ));
+                    results.push(error_poll_result(&repository, error));
+                    continue;
                 }
                 results.push(error_poll_result(&repository, error));
             }
@@ -560,23 +557,6 @@ fn is_authentication_poll_error(error: &io::Error) -> bool {
     error_indicates_authentication_failure(error)
 }
 
-fn fatal_poll_auth_failure(
-    repository: &PollingRepositoryRecord,
-    stage: &str,
-    error: io::Error,
-) -> io::Error {
-    io::Error::new(
-        ErrorKind::PermissionDenied,
-        format!(
-            "fatal repository poll authentication failure for repository {} ({}), stage {}: {}",
-            repository.id,
-            repository.name,
-            stage,
-            error
-        ),
-    )
-}
-
 fn log_poll_auth_failure_event(
     storage: &StorageLayout,
     repository: &PollingRepositoryRecord,
@@ -584,7 +564,7 @@ fn log_poll_auth_failure_event(
     error: &io::Error,
 ) {
     let summary = format!(
-        "Automatic polling stopped for {} after an authentication failure",
+        "Automatic polling paused for {} after an authentication failure",
         repository.name
     );
 
@@ -607,7 +587,7 @@ fn log_poll_auth_failure_event(
                 "last_seen_tag": &repository.last_seen_tag,
                 "stage": stage,
                 "error": error.to_string(),
-                "worker_action": "stop",
+                "worker_action": "mark_reauth_required",
             }),
         },
     ) {

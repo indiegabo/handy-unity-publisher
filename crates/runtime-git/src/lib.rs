@@ -406,24 +406,7 @@ fn request_github_host_login_credentials(
     login: Option<&str>,
 ) -> io::Result<(String, String)> {
     let (protocol, host) = credential_context_from_instance_url(instance_url)?;
-    let mut command = git_command();
-    let preview = format!(
-        "-c {GIT_CREDENTIAL_HELPER_RESET} -c credential.helper={GIT_CREDENTIAL_MANAGER_HELPER} credential fill"
-    );
-    command
-        .arg("-c")
-        .arg(GIT_CREDENTIAL_HELPER_RESET)
-        .arg("-c")
-        .arg(format!(
-            "credential.helper={GIT_CREDENTIAL_MANAGER_HELPER}"
-        ))
-        .arg("credential")
-        .arg("fill")
-        .env(GIT_TERMINAL_PROMPT_ENV, GIT_TERMINAL_PROMPT_DISABLED)
-        .env_remove(GCM_INTERACTIVE_ENV)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let (preview, mut command) = prepare_github_credential_fill_command();
 
     let mut child = command.spawn().map_err(|error| {
         io::Error::other(format!("spawn git {preview}: {error}"))
@@ -455,6 +438,28 @@ fn request_github_host_login_credentials(
     }
 
     parse_git_credential_fill_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn prepare_github_credential_fill_command() -> (String, Command) {
+    let preview = format!(
+        "-c {GIT_CREDENTIAL_HELPER_RESET} -c credential.helper={GIT_CREDENTIAL_MANAGER_HELPER} credential fill"
+    );
+    let mut command = git_command();
+    command
+        .arg("-c")
+        .arg(GIT_CREDENTIAL_HELPER_RESET)
+        .arg("-c")
+        .arg(format!(
+            "credential.helper={GIT_CREDENTIAL_MANAGER_HELPER}"
+        ))
+        .arg("credential")
+        .arg("fill")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_non_interactive_git_command(&mut command);
+
+    (preview, command)
 }
 
 fn credential_context_from_instance_url(instance_url: &str) -> io::Result<(String, String)> {
@@ -1141,6 +1146,7 @@ fn parse_git_tags(output: &str) -> io::Result<Vec<GitTag>> {
 
 #[cfg(test)]
 mod tests {
+    use super::prepare_github_credential_fill_command;
     use super::{
         assess_repository_access,
         detect_repository_provider_from_url,
@@ -1662,6 +1668,22 @@ mod tests {
             None,
             false,
         );
+
+        assert_eq!(
+            command_env_value(&command, "GIT_TERMINAL_PROMPT").as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            command_env_value(&command, "GCM_INTERACTIVE").as_deref(),
+            Some("never")
+        );
+        assert!(command_env_is_removed(&command, "GIT_ASKPASS"));
+        assert!(command_env_is_removed(&command, "SSH_ASKPASS"));
+    }
+
+    #[test]
+    fn prepare_github_credential_fill_command_disables_interactive_authentication() {
+        let (_, command) = prepare_github_credential_fill_command();
 
         assert_eq!(
             command_env_value(&command, "GIT_TERMINAL_PROMPT").as_deref(),

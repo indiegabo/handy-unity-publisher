@@ -1,13 +1,14 @@
-//! Bridges the durable runtime event stream into Tauri window events with a
-//! persisted read cursor owned by the desktop shell.
+//! Bridges the durable runtime event stream into Tauri window events by
+//! watching the runtime event stream file and advancing a persisted cursor.
 
 use std::collections::VecDeque;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use runtime_core::{read_runtime_event_batch, RuntimeEventRecord};
 use runtime_store::StorageLayout;
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,6 @@ use tauri_plugin_notification::{NotificationExt, PermissionState};
 use crate::MAIN_WINDOW_LABEL;
 
 const RUNTIME_EVENT_NAME: &str = "runtime:event";
-const RUNTIME_EVENT_RELAY_POLL_INTERVAL: Duration = Duration::from_millis(150);
 const RECENT_EVENT_ID_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,21 +48,87 @@ pub(crate) fn start_runtime_event_bridge<R: Runtime>(
             }
         };
         let mut recent_event_ids = VecDeque::with_capacity(RECENT_EVENT_ID_LIMIT);
+        let watch_root = match resolve_runtime_event_watch_root(&storage.runtime_events_path) {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("failed to initialize runtime event watch root: {error}");
+                return;
+            }
+        };
+        let (sender, receiver) = mpsc::channel();
+        let mut watcher = match RecommendedWatcher::new(
+            move |result| {
+                let _ = sender.send(result);
+            },
+            Config::default(),
+        ) {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                eprintln!("failed to initialize runtime event watcher: {error}");
+                return;
+            }
+        };
+
+        if let Err(error) = watcher.watch(&watch_root, RecursiveMode::NonRecursive) {
+            eprintln!("failed to watch runtime event stream root: {error}");
+            return;
+        }
+
+        if let Err(error) = relay_pending_runtime_events(
+            &app_handle,
+            &storage.runtime_events_path,
+            &storage.runtime_events_cursor_path,
+            &mut cursor,
+            &mut recent_event_ids,
+        ) {
+            eprintln!("failed to relay runtime events on bridge startup: {error}");
+        }
 
         loop {
-            if let Err(error) = relay_pending_runtime_events(
-                &app_handle,
-                &storage.runtime_events_path,
-                &storage.runtime_events_cursor_path,
-                &mut cursor,
-                &mut recent_event_ids,
-            ) {
-                eprintln!("failed to relay runtime events: {error}");
-            }
+            match receiver.recv() {
+                Ok(Ok(event)) => {
+                    if !should_process_runtime_event_watch(
+                        &storage.runtime_events_path,
+                        &event.paths,
+                    ) {
+                        continue;
+                    }
 
-            thread::sleep(RUNTIME_EVENT_RELAY_POLL_INTERVAL);
+                    if let Err(error) = relay_pending_runtime_events(
+                        &app_handle,
+                        &storage.runtime_events_path,
+                        &storage.runtime_events_cursor_path,
+                        &mut cursor,
+                        &mut recent_event_ids,
+                    ) {
+                        eprintln!("failed to relay runtime events: {error}");
+                    }
+                }
+                Ok(Err(error)) => {
+                    eprintln!("failed to watch runtime event stream: {error}");
+                }
+                Err(error) => {
+                    eprintln!("runtime event watcher channel closed: {error}");
+                    break;
+                }
+            }
         }
     });
+}
+
+fn resolve_runtime_event_watch_root(events_path: &Path) -> io::Result<PathBuf> {
+    let Some(parent) = events_path.parent() else {
+        return Err(io::Error::other(
+            "runtime event stream path does not have a watchable parent directory",
+        ));
+    };
+
+    fs::create_dir_all(parent)?;
+    Ok(parent.to_path_buf())
+}
+
+fn should_process_runtime_event_watch(events_path: &Path, changed_paths: &[PathBuf]) -> bool {
+    changed_paths.iter().any(|path| path == events_path)
 }
 
 fn relay_pending_runtime_events<R: Runtime>(
@@ -315,6 +381,23 @@ mod tests {
                 .len(),
         );
         assert!(storage.runtime_events_cursor_path.exists());
+    }
+
+    #[test]
+    fn runtime_event_watch_filters_for_the_runtime_event_stream_path() {
+        let events_path = PathBuf::from("C:/runtime/events/runtime-events.jsonl");
+
+        assert!(should_process_runtime_event_watch(
+            &events_path,
+            &[
+                PathBuf::from("C:/runtime/events/health-report.json"),
+                events_path.clone(),
+            ],
+        ));
+        assert!(!should_process_runtime_event_watch(
+            &events_path,
+            &[PathBuf::from("C:/runtime/events/runtime.log")],
+        ));
     }
 
     #[test]

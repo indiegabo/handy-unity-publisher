@@ -10,7 +10,7 @@ use std::io::ErrorKind;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -47,7 +47,10 @@ use runtime_store::{
     CreateRepositoryProjectPublishBindingInput as StoreCreateRepositoryProjectPublishBindingInput,
     CreateRepositoryProjectPublishTargetInput as StoreCreateRepositoryProjectPublishTargetInput,
     CreateRepositoryProjectInput as StoreCreateRepositoryProjectInput,
+    ManualReleaseDispatchInput,
     CreatedRepositoryProjectRecord,
+    PollingRepositoryRecord as StorePollingRepositoryRecord,
+    RepositoryAutomationStatus as StoreRepositoryAutomationStatus,
     UpdateRepositoryAuthStateInput as StoreUpdateRepositoryAuthStateInput,
     UpdateRepositoryProjectBuildTargetInput as StoreUpdateRepositoryProjectBuildTargetInput,
     UpdateRepositoryProjectPublishBindingInput as StoreUpdateRepositoryProjectPublishBindingInput,
@@ -103,6 +106,7 @@ const WINDOW_FOCUS_TRANSITION_MILLIS: u64 = 150;
 const WINDOW_FOCUS_TRANSITION_STEP_MILLIS: u64 = 15;
 const DEFAULT_PROCESS_FEED_PAGE_SIZE: u32 = 6;
 const MAX_PROCESS_FEED_PAGE_SIZE: u32 = 50;
+const HOST_CAPABILITY_PROFILE_CACHE_TTL: Duration = Duration::from_secs(30);
 const DEFAULT_HOST_NATIVE_RUNNER_TYPE: &str = "host-native";
 const DEFAULT_BUILD_TARGET_TIMEOUT_SECONDS: i64 = 3600;
 const MIN_REPOSITORY_POLL_INTERVAL_SECONDS: i64 = 5;
@@ -116,6 +120,7 @@ const GITHUB_AUTH_MODE_BROWSER: &str = "browser";
 const AUTH_PROVIDER_STATUS_CONNECTED: &str = "connected";
 const AUTH_PROVIDER_STATUS_DISCONNECTED: &str = "disconnected";
 const AUTH_PROVIDER_STATUS_UNAVAILABLE: &str = "unavailable";
+const DESKTOP_SHELL_RERUN_REQUESTED_VIA: &str = "desktop-shell-ui";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WindowLayoutPreset {
@@ -232,6 +237,24 @@ struct ShellLifecycleState {
     is_quitting: Mutex<bool>,
     is_main_window_pinned: Mutex<bool>,
     active_system_dialogs: Mutex<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedHostCapabilityProfile {
+    cached_at: Instant,
+    profile: HostCapabilityProfile,
+}
+
+static HOST_CAPABILITY_PROFILE_CACHE: LazyLock<
+    Mutex<HashMap<&'static str, CachedHostCapabilityProfile>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct RepositoryInspectionResources {
+    generated_at: String,
+    release_status_by_repository: HashMap<i64, StoreRepositoryAutomationStatus>,
+    credential_by_id: HashMap<i64, RepositoryCredentialReference>,
+    build_targets_by_repository: HashMap<i64, Vec<UnityAdapterBuildTargetSettings>>,
+    publish_targets_by_repository: HashMap<i64, Vec<RepositoryPublishTargetInspection>>,
 }
 
 struct ActiveSystemDialogGuard<'a> {
@@ -413,6 +436,8 @@ struct AuthProviderStatus {
     instance_url: String,
     credential_id: Option<i64>,
     credential_name: Option<String>,
+    credential_created_at: Option<String>,
+    credential_updated_at: Option<String>,
     bound_repository_count: usize,
 }
 
@@ -1033,6 +1058,7 @@ pub fn run() {
             runtime_lifecycle_settings,
             release_status,
             repository_inspection,
+            repository_project_detail,
             build_history,
             artifact_inspection,
             build_execution_report,
@@ -1054,6 +1080,7 @@ pub fn run() {
             start_runtime,
             stop_runtime,
             restart_runtime,
+            rerun_release_process,
             request_repository_instant_check,
             unity_adapter_settings,
         ])
@@ -1283,6 +1310,13 @@ fn repository_inspection() -> Result<RepositoryInspectionSettings, String> {
 }
 
 #[tauri::command]
+fn repository_project_detail(repository_id: i64) -> Result<RepositoryInspectionEntry, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    load_repository_project_detail(&config, repository_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn build_history() -> Result<Vec<BuildHistoryRecord>, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_build_history(&config).map_err(|error| error.to_string())
@@ -1335,6 +1369,18 @@ fn delete_release_process_outputs(
 }
 
 #[tauri::command]
+fn rerun_release_process(
+    app_handle: AppHandle,
+    release_run_id: i64,
+) -> Result<(), String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    request_release_process_rerun(&config, release_run_id)
+        .map_err(|error| error.to_string())?;
+
+    launch_runtime_process_handle(&app_handle).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn delete_build_log(build_run_id: i64) -> Result<BuildLogDeleteReport, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     delete_build_log_file(&config, build_run_id).map_err(|error| error.to_string())
@@ -1362,9 +1408,10 @@ fn assess_repository_access(
 }
 
 #[tauri::command]
-fn login_github_auth() -> Result<AuthProviderStatus, String> {
+fn login_github_auth(force: Option<bool>) -> Result<AuthProviderStatus, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    persist_github_auth_login(&config).map_err(|error| error.to_string())
+    persist_github_auth_login(&config, force.unwrap_or(false))
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1671,45 +1718,123 @@ fn load_repository_inspection(
         });
     }
 
+    let mut resources = load_repository_inspection_resources(config, &storage)?;
+
+    let coordinator = LocalCoordinator::new(&storage);
+    let repositories = coordinator
+        .list_polling_repositories()?
+        .into_iter()
+        .map(|repository| build_repository_inspection_entry(repository, &mut resources))
+        .collect();
+
+    Ok(RepositoryInspectionSettings {
+        generated_at: resources.generated_at,
+        repositories,
+    })
+}
+
+fn load_repository_project_detail(
+    config: &RuntimeConfig,
+    repository_id: i64,
+) -> io::Result<RepositoryInspectionEntry> {
+    config.directories.ensure_exists()?;
+    let storage = StorageLayout::from_directories(&config.directories);
+    if !storage.database_path.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::NotFound,
+            format!("repository id {repository_id} was not found"),
+        ));
+    }
+
+    let mut resources = load_repository_inspection_resources(config, &storage)?;
+    let repository = LocalCoordinator::new(&storage)
+        .list_polling_repositories()?
+        .into_iter()
+        .find(|repository| repository.id == repository_id)
+        .ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                format!("repository id {repository_id} was not found"),
+            )
+        })?;
+
+    Ok(build_repository_inspection_entry(repository, &mut resources))
+}
+
+fn load_repository_inspection_resources(
+    config: &RuntimeConfig,
+    storage: &StorageLayout,
+) -> io::Result<RepositoryInspectionResources> {
     let release_status = load_release_status(config)?;
-    let unity_adapter_settings = load_unity_adapter_settings(config)?;
-    let secret_settings = load_secret_settings(config)?;
     let generated_at = release_status.generated_at.clone();
     let release_status_by_repository = release_status
         .repositories
         .into_iter()
         .map(|repository| (repository.repository_id, repository))
         .collect::<HashMap<_, _>>();
-    let credential_by_id = secret_settings
-        .credentials
+    let credential_by_id = load_repository_credential_references(storage)?;
+    let build_targets_by_repository = load_repository_build_targets(storage)?;
+    let publish_targets_by_repository =
+        load_repository_publish_targets(storage, &credential_by_id)?;
+
+    Ok(RepositoryInspectionResources {
+        generated_at,
+        release_status_by_repository,
+        credential_by_id,
+        build_targets_by_repository,
+        publish_targets_by_repository,
+    })
+}
+
+fn load_repository_credential_references(
+    storage: &StorageLayout,
+) -> io::Result<HashMap<i64, RepositoryCredentialReference>> {
+    list_credential_records(storage)?
         .into_iter()
         .map(|credential| {
-            (
-                credential.credential_id,
+            let summary = summarize_credential_config(
+                &credential.kind,
+                &credential.config_json,
+            );
+
+            Ok((
+                credential.id,
                 RepositoryCredentialReference {
-                    credential_id: credential.credential_id,
+                    credential_id: credential.id,
                     name: credential.name,
                     kind: credential.kind,
-                    config_status: credential.config_summary.status,
-                    config_message: credential.config_summary.message,
+                    config_status: summary.status,
+                    config_message: summary.message,
                 },
-            )
+            ))
         })
-        .collect::<HashMap<_, _>>();
-    let mut build_targets_by_repository = HashMap::<
-        i64,
-        Vec<UnityAdapterBuildTargetSettings>,
-    >::new();
-    for target in unity_adapter_settings.build_targets {
+        .collect()
+}
+
+fn load_repository_build_targets(
+    storage: &StorageLayout,
+) -> io::Result<HashMap<i64, Vec<UnityAdapterBuildTargetSettings>>> {
+    let mut build_targets_by_repository =
+        HashMap::<i64, Vec<UnityAdapterBuildTargetSettings>>::new();
+
+    for target in list_build_target_runtime_settings(storage)? {
+        let repository_id = target.repository_id;
         build_targets_by_repository
-            .entry(target.repository_id)
+            .entry(repository_id)
             .or_default()
-            .push(target);
+            .push(map_build_target_runner_settings(target));
     }
 
+    Ok(build_targets_by_repository)
+}
+
+fn load_repository_publish_targets(
+    storage: &StorageLayout,
+    credential_by_id: &HashMap<i64, RepositoryCredentialReference>,
+) -> io::Result<HashMap<i64, Vec<RepositoryPublishTargetInspection>>> {
     let mut publish_bindings_by_target =
         HashMap::<i64, Vec<RepositoryPublishBindingInspection>>::new();
-    for binding in list_publish_target_binding_runtime_settings(&storage)? {
+    for binding in list_publish_target_binding_runtime_settings(storage)? {
         publish_bindings_by_target
             .entry(binding.publish_target_id)
             .or_default()
@@ -1724,7 +1849,7 @@ fn load_repository_inspection(
 
     let mut publish_targets_by_repository =
         HashMap::<i64, Vec<RepositoryPublishTargetInspection>>::new();
-    for target in list_publish_target_runtime_settings(&storage)? {
+    for target in list_publish_target_runtime_settings(storage)? {
         publish_targets_by_repository
             .entry(target.repository_id)
             .or_default()
@@ -1735,7 +1860,7 @@ fn load_repository_inspection(
                 enabled: target.enabled,
                 config_json: target.config_json,
                 credentials: clone_credential_reference(
-                    &credential_by_id,
+                    credential_by_id,
                     target.credentials_id,
                 ),
                 bindings: publish_bindings_by_target
@@ -1744,68 +1869,65 @@ fn load_repository_inspection(
             });
     }
 
-    let coordinator = LocalCoordinator::new(&storage);
-    let repositories = coordinator
-        .list_polling_repositories()?
-        .into_iter()
-        .map(|repository| {
-            let release_status = release_status_by_repository.get(&repository.id);
+    Ok(publish_targets_by_repository)
+}
 
-            RepositoryInspectionEntry {
-                repository_id: repository.id,
-                repository_name: repository.name,
-                repo_url: repository.repo_url,
-                engine_kind: repository.engine_kind,
-                enabled: repository.enabled,
-                polling_interval_seconds: repository.polling_interval_seconds,
-                default_branch: repository.default_branch,
-                artifacts_root_override: repository.artifacts_root_override,
-                workspace_root_override: repository.workspace_root_override,
-                last_seen_tag: repository.last_seen_tag,
-                enabled_build_target_count: repository.enabled_build_target_count,
-                credentials: clone_credential_reference(
-                    &credential_by_id,
-                    repository.credentials_id,
-                ),
-                source_provider_id: repository.source_provider_id,
-                source_instance_url: repository.source_instance_url,
-                visibility_status: repository.visibility_status,
-                auth_requirement_status: repository.auth_requirement_status,
-                auth_binding_status: repository.auth_binding_status,
-                auth_status_message: repository.auth_status_message,
-                auth_last_verified_at: repository.auth_last_verified_at,
-                build_targets: build_targets_by_repository
-                    .remove(&repository.id)
-                    .unwrap_or_default(),
-                publish_targets: publish_targets_by_repository
-                    .remove(&repository.id)
-                    .unwrap_or_default(),
-                pending_release_count: release_status
-                    .map(|status| status.pending_release_count)
-                    .unwrap_or(0),
-                queued_build_runs: release_status
-                    .map(|status| status.queued_build_runs)
-                    .unwrap_or(0),
-                running_build_runs: release_status
-                    .map(|status| status.running_build_runs)
-                    .unwrap_or(0),
-                queued_publish_runs: release_status
-                    .map(|status| status.queued_publish_runs)
-                    .unwrap_or(0),
-                running_publish_runs: release_status
-                    .map(|status| status.running_publish_runs)
-                    .unwrap_or(0),
-                release_queue: release_status
-                    .map(|status| status.release_queue.clone())
-                    .unwrap_or_default(),
-            }
-        })
-        .collect();
+fn build_repository_inspection_entry(
+    repository: StorePollingRepositoryRecord,
+    resources: &mut RepositoryInspectionResources,
+) -> RepositoryInspectionEntry {
+    let release_status = resources.release_status_by_repository.get(&repository.id);
 
-    Ok(RepositoryInspectionSettings {
-        generated_at,
-        repositories,
-    })
+    RepositoryInspectionEntry {
+        repository_id: repository.id,
+        repository_name: repository.name,
+        repo_url: repository.repo_url,
+        engine_kind: repository.engine_kind,
+        enabled: repository.enabled,
+        polling_interval_seconds: repository.polling_interval_seconds,
+        default_branch: repository.default_branch,
+        artifacts_root_override: repository.artifacts_root_override,
+        workspace_root_override: repository.workspace_root_override,
+        last_seen_tag: repository.last_seen_tag,
+        enabled_build_target_count: repository.enabled_build_target_count,
+        credentials: clone_credential_reference(
+            &resources.credential_by_id,
+            repository.credentials_id,
+        ),
+        source_provider_id: repository.source_provider_id,
+        source_instance_url: repository.source_instance_url,
+        visibility_status: repository.visibility_status,
+        auth_requirement_status: repository.auth_requirement_status,
+        auth_binding_status: repository.auth_binding_status,
+        auth_status_message: repository.auth_status_message,
+        auth_last_verified_at: repository.auth_last_verified_at,
+        build_targets: resources
+            .build_targets_by_repository
+            .remove(&repository.id)
+            .unwrap_or_default(),
+        publish_targets: resources
+            .publish_targets_by_repository
+            .remove(&repository.id)
+            .unwrap_or_default(),
+        pending_release_count: release_status
+            .map(|status| status.pending_release_count)
+            .unwrap_or(0),
+        queued_build_runs: release_status
+            .map(|status| status.queued_build_runs)
+            .unwrap_or(0),
+        running_build_runs: release_status
+            .map(|status| status.running_build_runs)
+            .unwrap_or(0),
+        queued_publish_runs: release_status
+            .map(|status| status.queued_publish_runs)
+            .unwrap_or(0),
+        running_publish_runs: release_status
+            .map(|status| status.running_publish_runs)
+            .unwrap_or(0),
+        release_queue: release_status
+            .map(|status| status.release_queue.clone())
+            .unwrap_or_default(),
+    }
 }
 
 fn load_build_history(config: &RuntimeConfig) -> io::Result<Vec<BuildHistoryRecord>> {
@@ -1830,6 +1952,32 @@ fn load_process_feed(
     }
 
     list_process_feed_page(&storage, page, page_size)
+}
+
+fn request_release_process_rerun(
+    config: &RuntimeConfig,
+    release_run_id: i64,
+) -> io::Result<()> {
+    config.directories.ensure_exists()?;
+    let storage = StorageLayout::from_directories(&config.directories);
+    if !storage.database_path.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::NotFound,
+            format!("release run {release_run_id} was not found"),
+        ));
+    }
+
+    let coordinator = LocalCoordinator::new(&storage);
+    let release_run = coordinator.get_release_run_record(release_run_id)?;
+
+    coordinator.dispatch_manual_release_rebuild(ManualReleaseDispatchInput {
+        repository_id: release_run.repository_id,
+        git_tag: release_run.git_tag,
+        git_commit: release_run.git_commit.unwrap_or_default(),
+        requested_via: String::from(DESKTOP_SHELL_RERUN_REQUESTED_VIA),
+    })?;
+
+    Ok(())
 }
 
 fn load_artifact_inspection(
@@ -2400,7 +2548,7 @@ fn load_github_auth_provider_status(
         ));
     }
 
-    let credential = ensure_github_auth_credential(&storage)?;
+    let credential = ensure_github_auth_credential(&storage, &known_accounts)?;
     let bound_repository_count = count_repository_bindings(&storage, credential.id)?;
 
     Ok(build_auth_provider_status(
@@ -2413,9 +2561,12 @@ fn load_github_auth_provider_status(
     ))
 }
 
-fn persist_github_auth_login(config: &RuntimeConfig) -> io::Result<AuthProviderStatus> {
+fn persist_github_auth_login(
+    config: &RuntimeConfig,
+    force: bool,
+) -> io::Result<AuthProviderStatus> {
     ensure_git_credential_manager_available()?;
-    run_github_browser_login_command()?;
+    run_github_browser_login_command(force)?;
 
     let storage = writable_secret_storage(config)?;
 
@@ -2423,7 +2574,15 @@ fn persist_github_auth_login(config: &RuntimeConfig) -> io::Result<AuthProviderS
 }
 
 fn finalize_github_auth_login(storage: &StorageLayout) -> io::Result<AuthProviderStatus> {
-    let credential = ensure_github_auth_credential(storage)?;
+    let known_accounts = load_known_github_accounts()?;
+    finalize_github_auth_login_with_known_accounts(storage, &known_accounts)
+}
+
+fn finalize_github_auth_login_with_known_accounts(
+    storage: &StorageLayout,
+    known_accounts: &[String],
+) -> io::Result<AuthProviderStatus> {
+    let credential = ensure_github_auth_credential(storage, known_accounts)?;
     let bound_repository_count = count_repository_bindings(storage, credential.id)?;
 
     Ok(build_auth_provider_status(
@@ -2450,6 +2609,8 @@ fn build_auth_provider_status(
         instance_url: String::from(GITHUB_AUTH_INSTANCE_URL),
         credential_id: credential.map(|record| record.id),
         credential_name: credential.map(|record| record.name.clone()),
+        credential_created_at: credential.map(|record| record.created_at.clone()),
+        credential_updated_at: credential.map(|record| record.updated_at.clone()),
         bound_repository_count,
     }
 }
@@ -2469,14 +2630,19 @@ fn git_credential_manager_available() -> bool {
     run_git_credential_manager_command(["--version"]).is_ok()
 }
 
-fn run_github_browser_login_command() -> io::Result<()> {
-    let _ = run_git_credential_manager_command([
-        "github",
-        "login",
-        "--browser",
-        "--url",
-        GITHUB_AUTH_INSTANCE_URL,
-    ])?;
+fn github_browser_login_command_args(force: bool) -> Vec<&'static str> {
+    let mut args = vec!["github", "login", "--browser"];
+    if force {
+        args.push("--force");
+    }
+    args.push("--url");
+    args.push(GITHUB_AUTH_INSTANCE_URL);
+
+    args
+}
+
+fn run_github_browser_login_command(force: bool) -> io::Result<()> {
+    let _ = run_git_credential_manager_command(github_browser_login_command_args(force))?;
 
     Ok(())
 }
@@ -2552,26 +2718,112 @@ fn resolve_github_auth_credential(
         .find(|credential| credential.kind == KIND_GIT_HTTP_GITHUB_HOST_LOGIN))
 }
 
-fn ensure_github_auth_credential(storage: &StorageLayout) -> io::Result<CredentialRecord> {
+fn ensure_github_auth_credential(
+    storage: &StorageLayout,
+    known_accounts: &[String],
+) -> io::Result<CredentialRecord> {
     let existing = resolve_github_auth_credential(storage)?;
+    let selected_login = select_github_auth_login(
+        existing
+            .as_ref()
+            .and_then(|credential| github_auth_credential_login(&credential.config_json)),
+        known_accounts,
+    );
+
     LocalCoordinator::new(storage).upsert_credential_record(
         UpsertCredentialRecordInput {
             credential_id: existing.as_ref().map(|credential| credential.id),
             name: String::from(GITHUB_AUTH_CREDENTIAL_NAME),
             kind: String::from(KIND_GIT_HTTP_GITHUB_HOST_LOGIN),
-            config_json: github_auth_credential_config_json(),
+            config_json: github_auth_credential_config_json(selected_login.as_deref()),
         },
     )
 }
 
-fn github_auth_credential_config_json() -> String {
-    serde_json::json!({
+fn github_auth_credential_config_json(login: Option<&str>) -> String {
+    let mut config = serde_json::json!({
         "provider": GITHUB_AUTH_PROVIDER_ID,
         "instance_url": GITHUB_AUTH_INSTANCE_URL,
         "credential_helper": GITHUB_AUTH_CREDENTIAL_HELPER,
         "auth_mode": GITHUB_AUTH_MODE_BROWSER,
-    })
-    .to_string()
+    });
+    if let Some(login) = normalize_optional_auth_login(login) {
+        config["login"] = serde_json::Value::String(login);
+    }
+
+    config.to_string()
+}
+
+fn github_auth_credential_login(config_json: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct GithubAuthCredentialConfig {
+        #[serde(default)]
+        login: Option<String>,
+    }
+
+    serde_json::from_str::<GithubAuthCredentialConfig>(config_json)
+        .ok()
+        .and_then(|config| normalize_optional_auth_login(config.login.as_deref()))
+}
+
+fn select_github_auth_login(
+    existing_login: Option<String>,
+    known_accounts: &[String],
+) -> Option<String> {
+    let normalized_accounts = normalize_known_github_accounts(known_accounts);
+    if normalized_accounts.is_empty() {
+        return existing_login;
+    }
+
+    if let Some(existing_login) =
+        existing_login.and_then(|login| normalize_optional_auth_login(Some(&login)))
+    {
+        if normalized_accounts.iter().any(|account| account == &existing_login) {
+            return Some(existing_login);
+        }
+    }
+
+    preferred_known_github_login(&normalized_accounts)
+        .or_else(|| normalized_accounts.first().cloned())
+}
+
+fn normalize_known_github_accounts(known_accounts: &[String]) -> Vec<String> {
+    let mut normalized_accounts = Vec::new();
+    let mut seen_accounts = HashSet::new();
+
+    for account in known_accounts {
+        let Some(account) = normalize_optional_auth_login(Some(account.as_str())) else {
+            continue;
+        };
+        if seen_accounts.insert(account.clone()) {
+            normalized_accounts.push(account);
+        }
+    }
+
+    normalized_accounts
+}
+
+fn preferred_known_github_login(known_accounts: &[String]) -> Option<String> {
+    known_accounts
+        .iter()
+        .filter(|account| !github_auth_login_is_placeholder(account))
+        .filter(|account| !account.chars().all(|character| character.is_ascii_digit()))
+    .next()
+        .cloned()
+}
+
+fn github_auth_login_is_placeholder(login: &str) -> bool {
+    matches!(
+        login.trim().to_ascii_lowercase().as_str(),
+        "x-access-token" | "x-oauth-basic"
+    )
+}
+
+fn normalize_optional_auth_login(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn count_repository_bindings(
@@ -3554,7 +3806,7 @@ fn load_unity_adapter_settings(config: &RuntimeConfig) -> io::Result<UnityAdapte
     } else {
         Vec::new()
     };
-    let capability_profile = inspect_host_capability_profile(config.platform);
+    let capability_profile = load_cached_host_capability_profile(config.platform);
     let mut supported_runner_families = vec![String::from(RunnerFamily::HostNative.label())];
     if let Some(selected_runner_family) = capability_profile
         .runner_selection
@@ -3573,6 +3825,33 @@ fn load_unity_adapter_settings(config: &RuntimeConfig) -> io::Result<UnityAdapte
         capability_profile,
         build_targets,
     })
+}
+
+fn load_cached_host_capability_profile(
+    platform: HostPlatform,
+) -> HostCapabilityProfile {
+    let cache_key = platform.as_str();
+
+    if let Ok(cache) = HOST_CAPABILITY_PROFILE_CACHE.lock() {
+        if let Some(entry) = cache.get(cache_key) {
+            if entry.cached_at.elapsed() <= HOST_CAPABILITY_PROFILE_CACHE_TTL {
+                return entry.profile.clone();
+            }
+        }
+    }
+
+    let profile = inspect_host_capability_profile(platform);
+    if let Ok(mut cache) = HOST_CAPABILITY_PROFILE_CACHE.lock() {
+        cache.insert(
+            cache_key,
+            CachedHostCapabilityProfile {
+                cached_at: Instant::now(),
+                profile: profile.clone(),
+            },
+        );
+    }
+
+    profile
 }
 
 fn default_unity_discovery_roots(
@@ -3899,12 +4178,17 @@ fn runtime_binary_file_name() -> String {
 mod tests {
     use crate::load_retained_log_archive_entry;
     use super::{
-        finalize_github_auth_login,
+        finalize_github_auth_login_with_known_accounts,
+        github_browser_login_command_args,
+        github_auth_credential_config_json,
+        select_github_auth_login,
         load_artifact_inspection,
         load_build_execution_report,
         load_build_history,
         load_process_feed,
+        request_release_process_rerun,
         load_repository_inspection,
+        load_repository_project_detail,
         load_release_status,
         development_runtime_command_plan, load_runtime_directory_settings,
         load_runtime_health_report, load_runtime_lifecycle_settings,
@@ -3921,6 +4205,7 @@ mod tests {
         process_identity_matches_runtime,
         purge_build_execution_retention_files,
         load_secret_settings,
+        resolve_github_auth_credential,
         load_unity_adapter_settings,
         normalize_runtime_log_line_limit, packaged_runtime_command_plan,
         runtime_binary_file_name, RuntimeLaunchAction, RUNTIME_BINARY_NAME,
@@ -4273,6 +4558,75 @@ mod tests {
     }
 
     #[test]
+    fn request_release_process_rerun_reuses_selected_release_run() {
+        let root = std::env::temp_dir().join("desktop-shell-release-rerun-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params!["release-rerun-repo", "https://example.com/release-rerun.git", "unity"],
+            )
+            .expect("repository should insert");
+        let repository_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO build_targets (
+                    repository_id,
+                    name,
+                    build_kind,
+                    runner_type,
+                    contract_json,
+                    config_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ",
+                params![
+                    repository_id,
+                    "windows-player",
+                    "player",
+                    "host-native",
+                    r#"{"unity":{"targetPlatform":"windows","buildMethod":"CI.Build.Perform","editorVersion":""}}"#,
+                    "{}",
+                ],
+            )
+            .expect("build target should insert");
+        drop(connection);
+
+        let initial_release = LocalCoordinator::new(&storage)
+            .dispatch_manual_release(ManualReleaseDispatchInput {
+                repository_id,
+                git_tag: String::from("v9.1.0"),
+                git_commit: String::from("deadbeef"),
+                requested_via: String::from("desktop-shell-test"),
+            })
+            .expect("manual release dispatch should succeed");
+
+        request_release_process_rerun(&config, initial_release.id)
+            .expect("release rerun request should succeed");
+
+        let rerun_release = LocalCoordinator::new(&storage)
+            .get_release_run_record(initial_release.id)
+            .expect("rerun release should reload");
+
+        assert_eq!(rerun_release.id, initial_release.id);
+        assert_eq!(rerun_release.repository_id, repository_id);
+        assert_eq!(rerun_release.git_tag, "v9.1.0");
+        assert_eq!(rerun_release.git_commit.as_deref(), Some("deadbeef"));
+        assert!(rerun_release.source_metadata_json.contains("desktop-shell-ui"));
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
     fn load_repository_inspection_reports_repository_config_and_backlog() {
         let root = std::env::temp_dir().join("desktop-shell-repository-inspection-test");
         if root.exists() {
@@ -4443,6 +4797,8 @@ mod tests {
 
         let inspection = load_repository_inspection(&config)
             .expect("repository inspection should aggregate repository metadata");
+        let detail = load_repository_project_detail(&config, repository_id)
+            .expect("repository detail should load one repository without host capability discovery");
 
         assert!(!inspection.generated_at.is_empty());
         assert_eq!(inspection.repositories.len(), 1);
@@ -4458,6 +4814,11 @@ mod tests {
         assert_eq!(repository.pending_release_count, 1);
         assert_eq!(repository.release_queue.len(), 1);
         assert_eq!(repository.release_queue[0].git_tag, "v10.0.0");
+        assert_eq!(detail.repository_id, repository_id);
+        assert_eq!(detail.repository_name, "repo-inspection");
+        assert_eq!(detail.publish_targets.len(), 2);
+        assert_eq!(detail.release_queue.len(), 1);
+        assert_eq!(detail.release_queue[0].git_tag, "v10.0.0");
 
         let repository_credentials = repository
             .credentials
@@ -5841,6 +6202,7 @@ mod tests {
                     },
                     unity_executable_path: unity_executable_path.clone(),
                 }],
+                publish_targets: vec![],
             },
         )
         .expect("repository project should persist");
@@ -5911,6 +6273,7 @@ mod tests {
                     },
                     unity_executable_path,
                 }],
+                publish_targets: vec![],
             },
         )
         .expect("repository project should persist");
@@ -5990,6 +6353,7 @@ mod tests {
                     },
                     unity_executable_path: unity_executable_path.clone(),
                 }],
+                publish_targets: vec![],
             },
         )
         .expect("repository project should persist");
@@ -6035,11 +6399,23 @@ mod tests {
             .expect("repository should insert");
         drop(connection);
 
-        let provider = finalize_github_auth_login(&storage)
+        let provider = finalize_github_auth_login_with_known_accounts(
+            &storage,
+            &[String::from("indiegabo")],
+        )
             .expect("finalizing GitHub auth should persist the reusable credential record");
 
         assert_eq!(provider.status, AUTH_PROVIDER_STATUS_CONNECTED);
         assert_eq!(provider.bound_repository_count, 0);
+        assert!(provider.credential_created_at.is_some());
+        assert!(provider.credential_updated_at.is_some());
+
+        let credential = resolve_github_auth_credential(&storage)
+            .expect("GitHub auth credential lookup should succeed")
+            .expect("finalizing GitHub auth should persist the reusable credential record");
+        let config_json = serde_json::from_str::<serde_json::Value>(&credential.config_json)
+            .expect("stored GitHub auth config should be valid JSON");
+        assert_eq!(config_json.get("login").and_then(serde_json::Value::as_str), Some("indiegabo"));
 
         let inspection = load_repository_inspection(&config)
             .expect("repository inspection should keep the project unbound");
@@ -6047,6 +6423,61 @@ mod tests {
         assert!(inspection.repositories[0].credentials.is_none());
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn select_github_auth_login_prefers_existing_known_login() {
+        let selected = select_github_auth_login(
+            Some(String::from("indiegabo")),
+            &[
+                String::from("x-access-token"),
+                String::from("indiegabo"),
+            ],
+        );
+
+        assert_eq!(selected.as_deref(), Some("indiegabo"));
+    }
+
+    #[test]
+    fn select_github_auth_login_skips_placeholder_and_numeric_accounts() {
+        let selected = select_github_auth_login(
+            None,
+            &[
+                String::from("95456621"),
+                String::from("x-oauth-basic"),
+                String::from("x-access-token"),
+                String::from("indiegabo"),
+            ],
+        );
+
+        assert_eq!(selected.as_deref(), Some("indiegabo"));
+    }
+
+    #[test]
+    fn github_auth_credential_config_json_includes_selected_login() {
+        let config_json = github_auth_credential_config_json(Some("indiegabo"));
+        let config_json = serde_json::from_str::<serde_json::Value>(&config_json)
+            .expect("GitHub auth config should be valid JSON");
+
+        assert_eq!(config_json.get("login").and_then(serde_json::Value::as_str), Some("indiegabo"));
+    }
+
+    #[test]
+    fn github_browser_login_command_args_enable_force_reauthentication_when_requested() {
+        let args = github_browser_login_command_args(true);
+
+        assert!(args.contains(&"--force"));
+        assert_eq!(args[0], "github");
+        assert_eq!(args[1], "login");
+    }
+
+    #[test]
+    fn github_browser_login_command_args_skip_force_by_default() {
+        let args = github_browser_login_command_args(false);
+
+        assert!(!args.contains(&"--force"));
+        assert_eq!(args[0], "github");
+        assert_eq!(args[1], "login");
     }
 
     #[test]
@@ -6102,6 +6533,7 @@ mod tests {
                     },
                     unity_executable_path: unity_executable_path.clone(),
                 }],
+                publish_targets: vec![],
             },
         )
         .expect("repository project should persist with explicit auth binding");
@@ -6156,6 +6588,7 @@ mod tests {
                     },
                     unity_executable_path: unity_executable_path.clone(),
                 }],
+                publish_targets: vec![],
             },
         )
         .expect_err("PAT-based repository auth should be rejected");
@@ -6207,6 +6640,7 @@ mod tests {
                     },
                     unity_executable_path,
                 }],
+                publish_targets: vec![],
             },
         )
         .expect_err("non-Unity repository engines should be rejected");
@@ -6258,6 +6692,7 @@ mod tests {
                     },
                     unity_executable_path: unity_executable_path.clone(),
                 }],
+                publish_targets: vec![],
             },
         )
         .expect("repository project should persist");
@@ -6299,6 +6734,7 @@ mod tests {
                         unity_executable_path,
                     },
                 ],
+                publish_targets: vec![],
             },
         )
         .expect("repository project update should persist");
@@ -6365,6 +6801,7 @@ mod tests {
                     },
                     unity_executable_path: unity_executable_path.clone(),
                 }],
+                publish_targets: vec![],
             },
         )
         .expect("repository project should persist");
@@ -6393,6 +6830,7 @@ mod tests {
                     },
                     unity_executable_path,
                 }],
+                publish_targets: vec![],
             },
         )
         .expect_err("non-Unity repository engines should be rejected on update");

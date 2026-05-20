@@ -215,7 +215,7 @@ impl WorkspacePreparer {
         let source_path = root_path.join("source");
         let host_source_path = host_root_path.join("source");
         let log_path = build_root_path.join("logs").join("unity-build.log");
-        let artifact_root_path = root_path.join("outputs");
+        let artifact_root_path = build_root_path.join("outputs");
         let host_artifact_root_path = artifact_root_path.clone();
 
         Ok(PreparedWorkspace {
@@ -797,7 +797,7 @@ mod tests {
                 .join("logs")
                 .join("unity-build.log")
         );
-        assert_eq!(prepared.artifact_root_path, prepared.root_path.join("outputs"));
+        assert_eq!(prepared.artifact_root_path, prepared.build_root_path.join("outputs"));
         assert_eq!(prepared.host_artifact_root_path, prepared.artifact_root_path);
 
         fs::remove_dir_all(root).expect("temporary runtime root should be removable");
@@ -968,7 +968,7 @@ mod tests {
                 .join("logs")
                 .join("unity-build.log")
         );
-        assert_eq!(prepared.artifact_root_path, prepared.root_path.join("outputs"));
+        assert_eq!(prepared.artifact_root_path, prepared.build_root_path.join("outputs"));
         assert_eq!(build_output_override, root.join("build-output"));
         assert!(prepared.source_path.join(PROJECT_VERSION_FILE_PATH).is_file());
 
@@ -1346,7 +1346,7 @@ mod tests {
             .expect("second workspace should prepare");
 
         assert_eq!(first.root_path, second.root_path);
-        assert_eq!(first.artifact_root_path, second.artifact_root_path);
+        assert_ne!(first.artifact_root_path, second.artifact_root_path);
         assert_ne!(first.build_root_path, second.build_root_path);
         assert_ne!(first.log_path, second.log_path);
         assert!(stale_path.exists());

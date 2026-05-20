@@ -59,7 +59,7 @@ use runtime_store::{
     ArtifactRecord,
     initialize_database, BuildDispatchJob, BuildExecutionPlan as StoredBuildExecutionPlan,
     BuildRunRecord, BuildRunStageRecord, CancelBuildRunInput, CompleteBuildRunInput,
-    CompleteBuildRunStageInput, CreateArtifactRecordInput, FailBuildRunInput,
+    CompleteBuildRunStageInput, FailBuildRunInput,
     FailBuildRunStageInput, HeartbeatBuildRunStageInput, LocalCoordinator,
     InterruptedBuildRecoveryRecord,
     ManualReleaseDispatchInput, PollingRepositoryRecord, PublishDispatchJob,
@@ -3063,7 +3063,7 @@ mod tests {
     }
 
     #[test]
-    fn run_repository_poll_cycle_stops_on_authentication_failure_and_emits_runtime_event() {
+    fn run_repository_poll_cycle_marks_repository_reauth_required_and_emits_runtime_event() {
         let root = test_root("runtime-bin-poll-auth-failure");
         let directories = RuntimeDirectories::from_root(&root);
         let storage = StorageLayout::from_directories(&directories);
@@ -3090,15 +3090,16 @@ mod tests {
         drop(connection);
 
         let coordinator = LocalCoordinator::new(&storage);
-        let error = run_repository_poll_cycle(&coordinator, &storage, None)
-            .expect_err("authentication failures should stop the poll cycle");
+        let report = run_repository_poll_cycle(&coordinator, &storage, None)
+            .expect("authentication failures should mark the repository and continue the poll cycle");
 
-        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-        assert!(error
-            .to_string()
-            .contains("fatal repository poll authentication failure"));
-        assert!(error
-            .to_string()
+        assert_eq!(report.repositories.len(), 1);
+        assert_eq!(report.repositories[0].repository_id, repository_id);
+        assert_eq!(report.repositories[0].status, "error");
+        assert!(report.repositories[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
             .contains("host keyring error"));
 
         let repository = coordinator
@@ -3135,11 +3136,85 @@ mod tests {
         assert_eq!(event.repository_id, Some(repository_id));
         assert!(event.summary.contains("Revolutions"));
         assert_eq!(event.payload["stage"], "poll_remote");
-        assert_eq!(event.payload["worker_action"], "stop");
+        assert_eq!(event.payload["worker_action"], "mark_reauth_required");
         assert!(event.payload["error"]
             .as_str()
             .unwrap_or_default()
             .contains("host keyring error"));
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn runtime_worker_iteration_continues_after_poll_auth_failure_and_advances_queued_release() {
+        let root = test_root("runtime-bin-worker-iteration-poll-auth-failure");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let credentials_id = seed_credentials(
+            &connection,
+            "Revolutions/origin",
+            "git-http-basic",
+            &json!({
+                "username": "indiegabo",
+                "password": "keyring://github/revolutions-origin"
+            })
+            .to_string(),
+        );
+        let repository_id = seed_repository_with_url_and_credentials(
+            &connection,
+            "Revolutions",
+            "https://github.com/indiegabo/revolutions.git",
+            Some(credentials_id),
+        );
+        seed_build_target(&connection, repository_id, "windows-player", "windows");
+        let release_run_id = seed_queued_release(
+            &connection,
+            repository_id,
+            "v1.0.0",
+            "2021.3.33f1",
+        );
+        drop(connection);
+
+        let mut poll_schedule = RepositoryPollSchedule::default();
+        run_runtime_worker_iteration(&config, &storage, &mut poll_schedule)
+            .expect("worker iteration should continue after marking repository auth as reauth_required");
+
+        let coordinator = LocalCoordinator::new(&storage);
+        let repository = coordinator
+            .list_polling_repositories()
+            .expect("repository listing should load")
+            .into_iter()
+            .find(|candidate| candidate.id == repository_id)
+            .expect("polling repository should exist");
+        assert_eq!(repository.auth_binding_status, "reauth_required");
+        assert!(repository
+            .auth_status_message
+            .contains("host keyring error"));
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let build_run_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM build_runs WHERE release_run_id = ?",
+                [release_run_id],
+                |row| row.get(0),
+            )
+            .expect("build run count should load");
+        assert_eq!(build_run_count, 1);
+
+        let build_status: String = connection
+            .query_row(
+                "SELECT status FROM build_runs WHERE release_run_id = ?",
+                [release_run_id],
+                |row| row.get(0),
+            )
+            .expect("build status should load");
+        assert_eq!(build_status, "failed");
+
+        assert_eq!(queue_message_count(&connection, "build-runs"), 0);
+        drop(connection);
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }

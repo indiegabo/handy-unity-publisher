@@ -3235,7 +3235,6 @@ impl LocalCoordinator {
                     trigger_source = ?,
                     trigger_rule_id = NULL,
                     source_metadata_json = ?,
-                    engine_version = NULL,
                     status = ?,
                     started_at = NULL,
                     finished_at = NULL,
@@ -13480,7 +13479,7 @@ mod tests {
         assert_eq!(rebuilt.id, release_run_id);
         assert_eq!(rebuilt.status, ReleaseStatus::Queued.as_str());
         assert_eq!(rebuilt.git_commit.as_deref(), Some("feedface"));
-        assert!(rebuilt.engine_version.is_none());
+        assert_eq!(rebuilt.engine_version.as_deref(), Some("2022.3.20f1"));
         assert_eq!(queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME), 1);
         assert!(!coordinator
             .claim_idempotency(
@@ -13496,7 +13495,7 @@ mod tests {
         assert_eq!(persisted.id, release_run_id);
         assert_eq!(persisted.status, ReleaseStatus::Queued.as_str());
         assert_eq!(persisted.git_commit.as_deref(), Some("feedface"));
-        assert!(persisted.engine_version.is_none());
+        assert_eq!(persisted.engine_version.as_deref(), Some("2022.3.20f1"));
         let metadata: Value = serde_json::from_str(&persisted.source_metadata_json)
             .expect("rebuild metadata should decode");
         assert_eq!(metadata["requested_via"], "hub");
