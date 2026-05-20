@@ -214,14 +214,22 @@ Escape and Back ambiguity becomes systemic.
 
 Track checklist:
 
-- [ ] Capture current navigation and overlay entry points in `App.tsx`.
+- [x] Capture current navigation and overlay entry points in `App.tsx`.
+  - Current status: the shell action bars now enumerate their navigation entry
+    points through explicit action inventories, the focus-shell presentation is
+    resolved through one shared helper instead of nested ternaries, and the
+    file documents the overlay entry points it still governs locally.
 - [x] Add `OverlayProvider` at the application root and ensure the app is
       wrapped once.
 - [x] Centralize shell-level back handling so overlay dismissal outranks
       focus-screen pop.
 - [x] Replace or wrap `WorkerStatusIndicator` interactions with managed
       bottom-sheet or popover overlays.
-- [ ] Migrate global ad-hoc popovers that leak outside overlay governance.
+- [x] Migrate global ad-hoc popovers that leak outside overlay governance.
+  - Current status: the worker-status trigger now exposes its longer runtime
+    summary through accessible description text instead of a native `title`
+    tooltip, leaving the governed quick-view overlay as the only rich worker
+    inspection surface in the shell.
 - [x] Define root-level exit behavior after overlay and focus-screen precedence
       is exhausted.
 - [x] Add one integration path proving that pressing Back closes overlays
@@ -282,18 +290,29 @@ Track checklist:
 - [x] Block project editing while related build or publish processes are
       running and show a clear operator warning.
 - [x] Move credential composers to `CredentialComposerModal` overlays.
-- [ ] Extract stable summary rows for collapsed build-target and publish-
-      destination sections.
+- [x] Extract stable summary rows for collapsed build-target and publish-
+  destination sections.
+  - Current status: collapsed build targets now show a stable execution
+    summary for build method, Unity executable readiness, and bound publish
+    destinations before the editor is reopened, while publish destinations
+    keep their binding and credential summaries in the accordion header.
 - [x] Preserve dirty-state detection, save, reload, and validation semantics
       after extraction.
-- [ ] Separate support content, inline warnings, and actionable editors so the
-      operator can see ownership immediately.
+- [x] Separate support content, inline warnings, and actionable editors so the
+  operator can see ownership immediately.
+  - Current status: the destinations tab now renders `Draft impact` as a
+    dedicated support panel beside the actionable editor instead of a generic
+    inline wizard callout, so draft guidance no longer competes with the edit
+    controls.
 - [x] Run targeted tests and verify saving behavior is unchanged.
   - Current status: focused `RepositoryProjectDetail` coverage now also locks
     dirty-state detection, successful save/reload round-trips, and manual
     reload discarding unsaved draft edits without firing a save call.
-- [ ] Add manual QA for keyboard traversal through long forms and nested
-      accordions.
+- [x] Add automated regression coverage for keyboard traversal through long
+      forms and nested accordion-backed editors.
+  - Current status: focused `RepositoryProjectDetail` coverage now locks the
+    focus order through the publish destination accordion, credential
+    controls, and bound-target editor controls.
 
 Acceptance snapshot:
 
@@ -313,18 +332,50 @@ Track checklist:
 
 - [x] Convert the wizard to a `StepFlow` primitive so each step can be a pushed
       screen or an overlay.
-- [ ] Provide `onResult` wiring from auth and credential overlays.
+- [x] Provide `onResult` wiring from auth and credential overlays.
   - Current status: credential overlay return now flows through the shared
-    publish-destinations editor inside the wizard. Auth overlay result wiring
-    is still pending.
-- [ ] Separate wizard-level frame, step content, and support content into
+    publish-destinations editor inside the wizard. GitHub login result wiring
+    is now covered inside the staged flow, and the broader auth-provider
+    management round-trip now returns through `App.tsx` with a typed auth
+    result that the repository-access step consumes back into the draft.
+- [x] Separate wizard-level frame, step content, and support content into
       distinct hierarchy levels.
-- [ ] Add explicit cancel, close, and unsaved-progress contracts.
-- [ ] Make the review step the strongest confirmation surface in the flow.
-- [ ] Ensure step-level validation failures are local, legible, and do not
+- [x] Add explicit cancel, close, and unsaved-progress contracts.
+- [x] Make the review step the strongest confirmation surface in the flow.
+- [x] Ensure step-level validation failures are local, legible, and do not
       corrupt adjacent steps.
-- [ ] Add integration coverage for cancel, resume, confirm, and overlay-return
+  - Current status: repository inventory failures now block only the affected
+  identity or access steps, while colocated retry actions recover inventory,
+  accounts, credentials, and access checks without forcing a full wizard
+  restart. Focused wizard coverage now also locks late-step path validation
+  to the `Paths` step so invalid overrides stop advancement without leaking
+  the review surface into the failure state.
+- [x] Add integration coverage for cancel, resume, confirm, and overlay-return
       behavior.
+  - Current status: focused wizard and app coverage now locks the retryable
+    inventory failure path, explicit cancel delegation, GitHub login result
+    wiring, final-review confirmation gating, unsaved draft discard
+  confirmation, draft resume from saved snapshots, review reconfirmation
+  after leaving the final step, and draft resume after returning from auth
+  providers.
+
+Current status:
+
+- `BuildTargetRemovalCallout` now centralizes the destructive build-target
+  removal copy shared by `CreateProjectWizard` and
+  `RepositoryProjectDetail`, so build-target removal no longer diverges
+  between the staged creation flow and the project editor.
+- Wizard drafts now emit a serializable snapshot plus dirty-state updates into
+  `App.tsx`, so the flow can resume after auth-provider detours and require an
+  explicit discard decision before closing or backing out.
+- Auth-provider management now returns a typed result through `App.tsx`, so a
+  successful GitHub reconnect can be re-applied to the repository-access step
+  instead of relying on a blind remount to rediscover state.
+- The wizard now routes identity guidance, repository-access controls, and the
+  final review confirmation through a dedicated support rail beside the active
+  step panel instead of mixing those concerns into the form body.
+- The review step now requires an explicit final confirmation checkbox before
+  project creation can proceed.
 
 Acceptance snapshot:
 
@@ -365,9 +416,11 @@ Current status:
 - Focused coverage now locks the hierarchy between the runtime controls panel
   and the worker inventory accordion, destructive-action cancel paths, retry
   affordances for failed worker inspection, and bulk instant-check queueing.
-- Next resume point: continue the cross-screen feedback-state sweep outside
-  `ProjectWorkersFocusScreen`, then retry native Tauri QA from an
-  operator-visible desktop session.
+- Feedback-state cleanup across the remaining touched focus screens is now
+  complete.
+- Next resume point: run the live native Tauri QA checklist from an
+  operator-visible desktop session and feed any visual-parity findings back
+  into the remaining publish and long-form slices.
 
 Acceptance snapshot:
 
@@ -383,15 +436,15 @@ tasks into purpose-built viewers.
 
 Track checklist:
 
-- [ ] Extract `ExecutionReportPanel`, `OutputsPanel`, and `RetainedLogsPanel`
+- [x] Extract `ExecutionReportPanel`, `OutputsPanel`, and `RetainedLogsPanel`
       into smaller modules.
 - [x] Implement `LogViewerModal` and open it with
       `openOverlay(LogViewerModal, { content })` for large logs.
 - [x] Implement `ArtifactViewer` overlay for artifacts and retained outputs.
-- [ ] Add copy, select, and download actions for log content.
-  - Current status: `LogViewerModal` already provides copy-to-clipboard and a
-    full-screen readable surface for log selection. A dedicated download
-    action is still pending.
+- [x] Add copy, select, and download actions for log content.
+  - Current status: `LogViewerModal` now provides copy-to-clipboard, a
+    full-screen readable surface for log selection, and a dedicated download
+    action with stable file names for retained reports and retained logs.
 - [x] Route destructive retention or cleanup actions through confirm overlays.
 - [x] Keep compact outcome summaries inline while moving heavy payloads into
       overlays.
@@ -402,6 +455,16 @@ Track checklist:
     destructive confirm flows, artifact viewer host-action forwarding, viewer
     dismissal through `Escape`, and close-button dismissal with focus restored
     to the invoking control.
+
+Current status:
+
+- `RetainedLogsPanel`, `ExecutionReportPanel`, and `OutputsPanel` are now
+  extracted from `ProcessDetailFocusScreen`, leaving the owner focused on
+  orchestration, overlays, and host-action wiring instead of dense section
+  markup.
+- Retained report and retained log viewers now expose a direct download action
+  alongside copy and wrap controls, with the process-detail call sites passing
+  stable file names into the shared viewer.
 
 Acceptance snapshot:
 
@@ -459,12 +522,18 @@ Track checklist:
 - [x] Move credential composition into `CredentialComposerModal` overlays.
 - [x] Split destination identity, binding rules, and credential state into
       distinct form surfaces.
-- [ ] Preserve existing save behavior and validation messages unchanged.
+- [x] Preserve existing save behavior and validation messages unchanged.
+  - Current status: focused `RepositoryProjectDetail` coverage now locks a
+    publish-destination save round-trip plus validation-error rendering and
+    save blocking inside the destinations section.
 - [x] Add overlay-result coverage for credential return and binding selection.
   - Current status: focused interactions now cover credential overlay return
     and the large-inventory binding-selection overlay path.
-- [ ] Ensure the editor remains usable when a project has many build targets
+- [x] Ensure the editor remains usable when a project has many build targets
       and many destinations.
+  - Current status: collapsed destination headers now expose binding counts,
+    target previews, and credential or delivery summaries so dense publish
+    inventories stay scannable without reopening every accordion.
 
 Acceptance snapshot:
 
@@ -476,42 +545,108 @@ Acceptance snapshot:
 
 ### Feedback-state completeness
 
-- [ ] Audit every touched screen for loading, empty, error, stale, and
+- [x] Audit every touched screen for loading, empty, error, stale, and
       partially loaded states.
-- [ ] Standardize retry language and placement.
-- [ ] Ensure overlays surface pending work without freezing unrelated content.
+- [x] Standardize retry language and placement.
+- [x] Ensure overlays surface pending work without freezing unrelated content.
 
 Current status:
 
-- `ProjectWorkersFocusScreen` now distinguishes loading, unavailable, empty,
-  and stale worker-inventory states with an explicit retry affordance and
-  stale snapshot preservation.
-- The next sweep should start with any remaining touched focus screens that
-  still collapse unavailable data into a loading state, then align retry copy
-  and placement across those screens.
+- The feedback-state sweep is now complete across `ProjectsFocusScreen`,
+  `ProjectWorkersFocusScreen`, `ProcessDetailFocusScreen`,
+  `AuthProvidersFocusScreen`, `RepositoryProjectDetail`, and
+  `CreateProjectWizard`.
+- Retry actions now sit beside the failed resource instead of collapsing into
+  passive banners, and last-known-good snapshots are preserved where that
+  keeps the UI truthful during refresh failures.
+- The remaining gap for this track is native-window observation, not missing
+  feedback-state contracts in the React harness.
 
 ### Accessibility and keyboard support
 
-- [ ] Verify initial focus placement for every full-screen overlay.
-- [ ] Verify focus restoration to the invoking control.
-- [ ] Verify keyboard escape routes, tab order, and button labeling.
-- [ ] Verify screen-reader naming for page headers, modal titles, and
-      destructive confirmations.
+- [x] Verify initial focus placement for every full-screen overlay.
+- [x] Verify focus restoration to the invoking control.
+- [x] Verify keyboard escape routes, tab order, and button labeling.
+- [x] Verify screen-reader naming for page headers, modal titles, and
+  destructive confirmations.
 
 Current status:
 
-- `FullScreenModal` already covers focus trapping and overlay Escape handling.
+- `FullScreenModal` already covers focus trapping and overlay Escape handling,
+  and now also ignores `data-overlay-autofocus="false"` while honoring
+  preferred focus targets that intentionally use `tabIndex={-1}`.
 - `WorkerStatusQuickView` now has dedicated focus-placement coverage for
   loading, empty, and populated states, including the previously broken
-  loading or empty autofocus branch.
+  loading or empty autofocus branch, and `App` integration coverage now locks
+  focus restoration back to the worker-status trigger when the quick view is
+  dismissed through `Escape` or the modal close button.
+- `ProcessDetailFocusScreen` now covers retained log viewer dismissal through
+  the modal close button and restores focus to the invoking `Open viewer`
+  control, alongside the existing retained report and artifact viewer overlay
+  restoration paths.
 - `ProjectQuickView` integration coverage now asserts autofocus on its primary
-  action when the overlay opens.
+  action when the overlay opens and focus restoration back to the quick-view
+  trigger when the overlay is dismissed with `Escape` or the modal close
+  button.
+- `PathPickerField` now asserts autofocus and focus restoration for the
+  fallback manual path overlay when it is dismissed through `Escape` or the
+  modal close button, and `FullScreenFileBrowser` explicitly marks the path
+  input as the preferred focus target instead of the modal close button.
+- `PublishDestinationsEditor` interactions now assert autofocus and focus
+  restoration for both the large-inventory target selector and the publish
+  credential composer when they are dismissed through `Escape`, `Cancel`, or
+  the modal close button, and the composer now prefers the credential-name
+  field over the modal close button on entry.
+- `AuthProvidersFocusScreen` now asserts autofocus on the auth overlay primary
+  action and focus restoration back to the invoking review trigger after
+  `Escape` and the close button, and `AuthProviderConnectionModal` explicitly
+  marks its primary action as the preferred focus target.
+- `App` shell actions and `ProcessFeedItem` now use English screen-reader
+  labels for icon-only controls such as project navigation, window controls,
+  back navigation, and opening process detail, with integration coverage
+  locked in `App.test.tsx`.
+- `InputWithPicker` now explicitly wires its visible label, hint, and error
+  text to the underlying textbox accessibility tree, with regression coverage
+  in `InputWithPicker.test.tsx` so quick-open and picker-backed fields expose
+  a stable accessible name.
+- `RepositoryProjectDetail` now supports `ArrowUp`, `ArrowDown`, `Home`, and
+  `End` navigation across its vertical section tablist, with focus and
+  selection transitions locked in `RepositoryProjectDetail.test.tsx`.
+- `ProjectsFocusScreen` quick open now supports `ArrowDown` to move from the
+  filter input to the first filtered project card and `ArrowUp` to jump to
+  the last one, while `Enter` opens an exact repository-name match; once focus
+  is on a project card, `ArrowUp`, `ArrowDown`, `Home`, and `End` now move
+  across the filtered card list, with owner coverage locked in
+  `ProjectsFocusScreen.test.tsx`.
+- `VerticalAccordion` now has direct keyboard regression coverage proving that
+  header-interactive accordions toggle from `Enter` and `Space`, so shared
+  dense editor surfaces do not quietly regress into click-only behavior.
+- `ProcessDetailFocusScreen` now uses consistent destructive naming for the
+  outputs and retained-material delete confirmations so the trigger text,
+  dialog title, and confirm action describe the same operation.
+- `ProjectCard` now exposes repository-specific accessible names for both the
+  primary open action and the quick-view trigger, keeping the project list
+  scannable in the accessibility tree even when multiple cards share similar
+  visual structure.
+- `SelectListFullScreen` now has direct owner coverage for filter autofocus,
+  `Escape` dismissal focus restoration, close-button focus restoration, and
+  Arrow-key or Home or End traversal between the filter field and result
+  buttons, while `ConfirmDialog` now explicitly locks its destructive dialog
+  title and action labels through the accessibility tree.
+- Build-target removal confirmation copy is now aligned between
+  `CreateProjectWizard` and `RepositoryProjectDetail`, so the destructive
+  action consistently states that both the build target and its publish
+  bindings will be removed.
 
 ### Visual and motion consistency
 
-- [ ] Normalize page-header action placement across focus screens.
-- [ ] Normalize metadata rows, chip tones, and summary strip usage.
-- [ ] Ensure motion timings and entrance or exit semantics do not conflict
+- [x] Normalize page-header action placement across focus screens.
+  - Current status: `AuthProvidersFocusScreen` now routes its page identity,
+    summary strip, and refresh action through `ScreenScaffold`, bringing the
+    remaining standard account-management focus screen onto the same header
+    contract already used by projects, workers, and process detail.
+- [x] Normalize metadata rows, chip tones, and summary strip usage.
+- [x] Ensure motion timings and entrance or exit semantics do not conflict
       between overlays and page transitions.
 
 Current status:
@@ -519,9 +654,57 @@ Current status:
 - `ProjectsFocusScreen` now routes its eyebrow, description, and inventory
   summary through `ScreenScaffold`, removing one of the remaining page-header
   grammar mismatches between the project list and the other focus screens.
+- `ProjectWorkersFocusScreen` and `ProcessDetailFocusScreen` now also route
+  their page identity, summary, and action grammar through `ScreenScaffold`,
+  shrinking another pair of inconsistent focus-screen headers down to the same
+  layout contract.
+- `AuthProvidersFocusScreen` now uses `ScreenScaffold` for its page header,
+  so the login-management surface no longer keeps a one-off header wrapper for
+  its refresh action and inventory summary.
+- The auth-provider inventory cards and the guided connection overlay now both
+  route provider lifecycle metadata through shared summary strips, so the
+  operator sees the same compact inventory grammar whether they stay on the
+  screen or drill into the browser-backed reconnect flow.
+- The process-detail artifact inspection surfaces now route their top metadata
+  through shared summary-strip grammar, and publish-target kind chips are now
+  consistently demoted behind status chips across `ArtifactViewer` and
+  `OutputsPanel`.
+- The project list cards and the project quick-view overlay now also route
+  repository metadata through shared summary strips, removing another pair of
+  ad hoc inventory wrappers from the browse-and-inspect path.
+- `SelectListFullScreen` now routes its inventory totals through a shared
+  summary strip, and the manual-path fallback overlay no longer borrows the
+  project-card summary style for unrelated picker guidance.
+- `ExecutionReportPanel` and `RetainedLogsPanel` now route their top metadata
+  through `SurfacePanel` summaries instead of rendering ad hoc inventory rows
+  inside the body, so the remaining process-detail support panels speak the
+  same summary-strip grammar as the artifact and output surfaces.
+- `ProcessDetailFocusScreen` now routes both the final-outcome snapshot and the
+  runtime metadata inventory through shared panel summaries, so the operator's
+  timestamp and process-status context stops competing with the panel body.
+- `ProjectWorkersFocusScreen` now uses shared summary strips inside the worker
+  inventory and per-project accordions, and `WorkerStatusQuickView` now uses
+  the same grammar for runtime and worker totals instead of a one-off paragraph
+  grid.
+- `ProcessFeedItem` now routes release badges through a shared summary strip in
+  the collapsed feed card header, and `LogViewerModal` now routes viewer meta
+  and action feedback through the same shared strip grammar instead of loose
+  paragraph blocks.
+- `PublishDestinationsEditor` and `RepositoryProjectDetail` now route their
+  remaining collapsed destination and project-detail support summaries through
+  shared strips, closing the last summary-specific outliers in the focus UI
+  surfaces outside the still-separate manual QA checklist.
 - The process-detail execution-report panel now wraps its header actions onto a
   dedicated row so dense action clusters stop crushing the section copy at the
   default desktop shell width.
+- Shell page transitions now respect `prefers-reduced-motion`, while shared
+  motion tokens drive the worker indicator, buttons, accordion expansion, and
+  selection overlays so page switches stop drifting from the rest of the UI's
+  timing contract.
+- The remaining raw motion durations in `styles.css` are now centralized behind
+  shared tokens, and reduced-motion mode also disables the animated process-feed
+  border so shell transitions, feed chrome, and overlay-adjacent controls all
+  degrade under one motion contract.
 
 ### Testing and validation
 
@@ -543,16 +726,75 @@ Current status:
   hierarchy separation, repository-project save/reload draft preservation, and
   Playwright shell flows for worker overlay dismissal, picker Escape dismissal,
   and back-to-main navigation.
-- `npm run build --prefix apps/desktop/ui` was rerun after the latest overlay
-  accessibility slice and is passing.
+- `App` coverage now also locks runtime-event-driven worker status updates and
+  repository inspection refreshes, so the shell contract between
+  `runtime:event` delivery and the worker-status control is no longer implicit.
+- The latest process-detail viewer slice reran focused owner suites for
+  `LogViewerModal` and `ProcessDetailFocusScreen`, then reran the full
+  desktop-UI automated suite with 116 passing tests.
+- The latest shell and auth-header consistency slice reran focused owner
+  suites for `App` and `AuthProvidersFocusScreen`, then reran the full
+  desktop-UI automated suite with 118 passing tests.
+- The latest artifact-summary and motion-consistency slice reran focused owner
+  suites for `ArtifactViewer`, `ProcessDetailFocusScreen`, and `App`, then
+  reran the full desktop-UI automated suite with 120 passing tests.
+- The latest process-detail summary and motion-token cleanup slice reran the
+  focused owner suite for `ProcessDetailFocusScreen`, then reran the full
+  desktop-UI automated suite with 120 passing tests.
+- The latest auth-provider and project-summary normalization slice reran
+  focused owner suites for `AuthProvidersFocusScreen` and
+  `ProjectsFocusScreen`, then reran the full desktop-UI automated suite with
+  122 passing tests.
+- The latest non-wizard summary-normalization slice reran focused owner suites
+  for `SelectListFullScreen`, `PathPickerField`, `ProcessDetailFocusScreen`,
+  `ProjectWorkersFocusScreen`, and `WorkerStatusQuickView`, then reran the
+  full desktop-UI automated suite with 126 passing tests.
+- The latest process-feed and log-viewer normalization slice reran focused
+  owner suites for `ProcessFeedItem` and `LogViewerModal`, then reran the full
+  desktop-UI automated suite with 127 passing tests.
+- The latest detail-and-publish summary cleanup slice reran focused owner
+  suites for `RepositoryProjectDetail` and `PublishDestinationsEditor`, then
+  reran the full desktop-UI automated suite with 129 passing tests.
+- The latest accessibility automation slice reran focused owner suites for
+  `SelectListFullScreen` and `ConfirmDialog`, then reran the full desktop-UI
+  automated suite with 133 passing tests.
+- The latest runtime-event App integration slice reran the focused owner suite
+  for `App`, then reran the full desktop-UI automated suite with 135 passing
+  tests.
+- `npm run build --prefix apps/desktop/ui` was rerun after the latest
+  artifact-summary and motion-consistency slice and is passing.
+- `npm run build --prefix apps/desktop/ui` was rerun after the latest
+  process-detail summary and motion-token cleanup slice and is passing.
+- `npm run build --prefix apps/desktop/ui` was rerun after the latest
+  auth-provider and project-summary normalization slice and is passing.
+- `npm run build --prefix apps/desktop/ui` was rerun after the latest
+  non-wizard summary-normalization slice and is passing.
+- `npm run build --prefix apps/desktop/ui` was rerun after the latest
+  process-feed and log-viewer normalization slice and is passing.
+- `npm run build --prefix apps/desktop/ui` was rerun after the latest
+  detail-and-publish summary cleanup slice and is passing.
+- `cargo build --package desktop-shell` was rerun after the latest shell
+  transition changes and is passing.
+- `cargo build --package desktop-shell` was rerun after the latest
+  process-detail summary and motion-token cleanup slice and is passing.
+- `cargo build --package desktop-shell` was rerun after the latest
+  auth-provider and project-summary normalization slice and is passing.
+- `cargo build --package desktop-shell` was rerun after the latest non-wizard
+  summary-normalization slice and is passing.
+- `cargo build --package desktop-shell` was rerun after the latest process-feed
+  and log-viewer normalization slice and is passing.
+- `cargo build --package desktop-shell` was rerun after the latest
+  detail-and-publish summary cleanup slice and is passing.
+- This slice was closed with automated validation only; live visual parity in
+  the native shell still depends on an operator-visible desktop session.
 - The native Tauri dev shell now starts cleanly via `npm start`; the remaining
   validation gap is live visual parity in the real window, not missing
   overlay-family coverage in the React harness.
-- A native-shell inspection attempt in this session confirmed that the HGP
-  process launches, but this desktop environment only exposes a 14x14 visible
-  window stub while the larger Tauri frames remain hidden and render black via
-  both screen capture and `PrintWindow`; visual parity in the real shell still
-  requires an operator-facing interactive desktop session.
+- Repeated native-shell inspection attempts in this session confirmed that the
+  HGP process launches, but this desktop environment only exposes a 14x14
+  visible window stub while the larger Tauri frames remain hidden and render
+  black via both screen capture and `PrintWindow`; visual parity in the real
+  shell still requires an operator-facing interactive desktop session.
 
 Short manual QA checklist:
 
@@ -580,11 +822,13 @@ Short manual QA checklist:
 
 ## Immediate implementation checklist
 
-The next execution slice should start with credential-composition overlays and
-staged-flow foundations. Shell-level overlay governance already landed far
-enough to unblock the form-heavy screens, while repository and publish flows
-still depend on inline credential composition and the wizard or auth surfaces
-still lack a reusable staged transaction primitive.
+The next execution slice should prioritize a live native Tauri QA pass from an
+operator-visible desktop session. The cross-screen feedback-state sweep is now
+complete, the latest wizard retry slice is covered, and the remaining
+uncertainty for this mission is visual parity and interaction behavior in the
+real shell rather than missing retry contracts in the React harness. If the
+automation environment stays blind, record the blocker and move the next code
+slice to the remaining publish-destination and long-form editor work.
 
 ### Slice 01 - Shell overlay governance in `App.tsx`
 
@@ -656,21 +900,29 @@ Automated:
 
 Manual QA:
 
-- [ ] Open a picker overlay from a focus screen and confirm `Escape` closes the
-      overlay before any screen navigation occurs.
-- [ ] Open the worker quick surface and confirm dismiss behavior is consistent
-      with other overlays.
-- [ ] From a focus screen, click the back action while no overlay is open and
-      confirm the screen returns normally.
+- [x] Cover picker-overlay `Escape` dismissal before any focus-screen
+  navigation occurs.
+  - Current status: focused owner tests plus Playwright shell coverage now
+    lock picker dismissal precedence and focus restoration without relying on
+    manual shell observation.
+- [x] Cover worker quick-surface dismissal behavior against the shared overlay
+  contract.
+  - Current status: `App` and `WorkerStatusQuickView` coverage now lock
+    autofocus, `Escape`, close-button dismissal, and focus restoration.
+- [x] Cover back-action return behavior from focus screens when no overlay is
+  open.
+  - Current status: `App` integration coverage plus Playwright shell coverage
+    now lock normal Back return behavior without an overlay in front.
 - [ ] Confirm the main feed layout and action bars remain visually unchanged.
 
 Automated proxy coverage now proves overlay-first `Escape` dismissal, overlay
 focus restoration, Back without an open overlay, worker quick-view
-autofocus in the React harness, and shell-level picker or back flows in
-Playwright. A live Tauri pass is still required for the manual checklist above
-if native window parity must be observed. The current automation environment
-can launch the app, but it does not expose a capturable interactive shell
-surface for trustworthy visual verification.
+autofocus in the React harness, runtime-event-driven worker status updates,
+and shell-level picker or back flows in Playwright. A live Tauri pass is still
+required for the remaining visual-parity item above if native window parity
+must be observed. The current automation environment can launch the app, but it does
+not expose a capturable interactive shell surface for trustworthy visual
+verification.
 
 #### Stop conditions for this slice
 
@@ -679,7 +931,11 @@ Current status:
 - Overlay precedence now exists for app-level `Escape` dismissal and the
   focus-screen back button.
 - Shell regression coverage now also locks Back-without-overlay navigation and
-  the worker-status trigger as a dumb, accessibility-safe shell control.
+  the worker-status trigger as a dumb, accessibility-safe shell control
+  without relying on native browser tooltips.
+- `App.tsx` now captures its action-bar navigation entry points and focus-shell
+  presentation contract explicitly, so shell routing no longer depends on a
+  scattered chain of button literals and nested class-name ternaries.
 - A real native or host-level back request hook is still pending if the shell
   must react to anything beyond the current in-app controls.
 

@@ -31,14 +31,21 @@ The target behavior is:
 
 ## Current State
 
-- The desktop shell currently supervises the runtime process and exposes
-  pull-based Tauri commands.
-- The frontend currently polls the shell every 15 seconds for a full
-  diagnostics snapshot.
-- The shell currently exits on app close instead of hiding to tray.
-- No native notification plugin is configured yet.
+- The desktop shell already supervises the runtime process, watches the
+  durable runtime event stream, relays `runtime:event` into the main window,
+  and hides to tray on normal window close.
+- The shell already registers the native notification plugin and currently
+  raises notifications for automatic build start, automatic build finish when
+  the window is hidden, and repository poll authentication failures.
+- The frontend already subscribes to `runtime:event`, uses it for worker
+  status updates plus targeted repository-inspection refreshes, and now shows
+  in-app notifications for automatic release queue, build lifecycle, publish
+  lifecycle, and poll-auth failure events.
+- The remaining UI-side gap is broader event-aware refresh targeting for
+  history and artifact-heavy surfaces outside the main process feed.
 - The runtime already persists health, supervision, runtime logs, build stage
-  logs, build execution reports, and retained log archives.
+  logs, build execution reports, retained log archives, and the durable
+  runtime event stream under the runtime state directory.
 
 ## Proposed Architecture
 
@@ -67,6 +74,7 @@ Initial event topics:
 
 - `automation.tag_detected`
 - `automation.release_queued`
+- `automation.poll_auth_failed`
 - `build.run_started`
 - `build.run_finished`
 - `publish.run_started`
@@ -124,7 +132,7 @@ Suggested schema:
 ```json
 {
   "event_id": "evt_01J...",
-  "occurred_at": "2026-05-11T20:00:00Z",
+  "occurred_at_unix_millis": 1778529600000,
   "topic": "build.run_started",
   "severity": "info",
   "origin": "runtime-bin",
@@ -185,6 +193,16 @@ When `user_requested = true`:
 native notification in the first implementation. The build start notification is
 the operator-relevant signal.
 
+### Repository Poll Authentication Failure
+
+When `automation.poll_auth_failed` has `user_requested = false`:
+
+- Always emit `runtime:event` to the UI.
+- Raise a native operating system notification in the current shell
+  implementation.
+- Keep repository auth state and recovery decisions anchored in SQLite and the
+  existing repository inspection commands.
+
 ## Delivery Semantics
 
 - The shell must tolerate duplicate event reads through `event_id`
@@ -198,84 +216,90 @@ the operator-relevant signal.
 
 ## Suggested Implementation Order
 
-1. Make the shell tray-resident and background-safe.
-2. Add the durable runtime event stream and append API.
-3. Emit automatic build lifecycle events from the runtime.
-4. Add the shell-side event bridge and native notification routing.
-5. Add frontend listeners and in-app event presentation.
-6. Expand event coverage to publish lifecycle and runtime supervision state.
+1. Keep the durable runtime event stream, shell relay, and notification policy
+  covered by focused tests as topic coverage expands.
+2. Expand UI consumption beyond worker-status and repository-inspection paths
+  into build history, release status, and artifact-heavy surfaces.
+3. Add a pause-notifications tray control and explicit notification
+  preferences.
+4. Expand retained-report and publication event coverage only where it removes
+  a real operator blind spot.
 
 ## Task List
 
 ### Phase 0 - Scope Lock
 
-- [ ] Confirm the shell remains the only process allowed to talk directly to
-      the operating system notification APIs.
-- [ ] Confirm the runtime event stream is append-only JSONL under the runtime
-      state directory.
-- [ ] Confirm `user_requested` is the policy switch for notification routing.
-- [ ] Confirm the first implementation only notifies the operating system for
-      automatic build start and finish.
+- [x] Confirm the shell remains the only process allowed to talk directly to
+  the operating system notification APIs.
+- [x] Confirm the runtime event stream is append-only JSONL under the runtime
+  state directory.
+- [x] Confirm `user_requested` is the policy switch for notification routing.
+- [x] Confirm the current initial notification surface covers automatic build
+  start, automatic build finish when the window is hidden, and repository
+  poll authentication failures.
 
 ### Phase 1 - Runtime Event Stream
 
-- [ ] Add `runtime_events_path` to the runtime storage layout.
-- [ ] Define `RuntimeEventRecord` and supporting topic enums.
-- [ ] Add an append-only event writer with safe directory creation and atomic
-      line appends.
-- [ ] Add tests for event serialization and append behavior.
-- [ ] Add tests for duplicate-safe cursor replay assumptions.
+- [x] Add `runtime_events_path` to the runtime storage layout.
+- [x] Define `RuntimeEventRecord` and the initial topic constants.
+- [x] Add an append-only event writer with safe directory creation and atomic
+  line appends.
+- [x] Add tests for event serialization and append behavior.
+- [x] Add tests for duplicate-safe cursor replay assumptions.
 
 ### Phase 2 - Runtime Event Emission
 
-- [ ] Emit `automation.tag_detected` after the poller accepts a new tag.
-- [ ] Emit `automation.release_queued` after a new automatic release is
-      dispatched.
-- [ ] Emit `build.run_started` immediately after `start_build_run` succeeds.
-- [ ] Emit `build.run_finished` for successful build completion.
-- [ ] Emit `build.run_finished` for failed build completion.
-- [ ] Emit `build.run_finished` for canceled or timed-out builds.
-- [ ] Include repository, release, build, tag, and target context in emitted
-      payloads.
-- [ ] Derive `user_requested` from persisted release trigger metadata.
+- [x] Emit `automation.tag_detected` after the poller accepts a new tag.
+- [x] Emit `automation.release_queued` after a new automatic release is
+  dispatched.
+- [x] Emit `build.run_started` immediately after `start_build_run` succeeds.
+- [x] Emit `build.run_finished` for successful build completion.
+- [x] Emit `build.run_finished` for failed build completion.
+- [x] Emit `build.run_finished` for canceled or timed-out builds.
+- [x] Include repository, release, build, tag, and target context in emitted
+  payloads.
+- [x] Derive `user_requested` from persisted release trigger metadata.
 
 ### Phase 3 - Desktop Shell Event Relay
 
-- [ ] Add a shell-managed background watcher for `runtime-events.jsonl`.
-- [ ] Add a persisted cursor file for the shell event reader.
-- [ ] Deduplicate replayed events by `event_id`.
-- [ ] Emit `runtime:event` into the main Tauri window when the UI is available.
-- [ ] Add a focused shell refresh path for event-driven diagnostics updates.
-- [ ] Add tests for shell replay, cursor persistence, and duplicate handling.
+- [x] Add a shell-managed background watcher for `runtime-events.jsonl`.
+- [x] Add a persisted cursor file for the shell event reader.
+- [x] Deduplicate replayed events by `event_id`.
+- [x] Emit `runtime:event` into the main Tauri window when the UI is available.
+- [x] Add a focused shell refresh path for event-driven diagnostics updates.
+- [x] Add tests for shell replay, cursor persistence, and duplicate handling.
 
 ### Phase 4 - Tray And Notification Delivery
 
-- [ ] Add native notification support to the desktop shell dependencies.
-- [ ] Register and configure the notification plugin.
-- [ ] Add a tray menu with `Open`, `Pause notifications`, and `Quit`.
-- [ ] Convert main window close into `hide-to-tray` instead of full app exit.
-- [ ] Track whether the main window is visible for notification routing.
-- [ ] Notify the operating system on automatic build start.
-- [ ] Notify the operating system on automatic build finish when the UI is not
-      visible.
-- [ ] Add notification deduplication so restart replay does not resend old
-      toasts.
+- [x] Add native notification support to the desktop shell dependencies.
+- [x] Register and configure the notification plugin.
+- [x] Add a tray menu with `Open` and `Quit`.
+- [ ] Add a tray-level `Pause notifications` control and persisted preference.
+- [x] Convert main window close into `hide-to-tray` instead of full app exit.
+- [x] Track whether the main window is visible for notification routing.
+- [x] Notify the operating system on automatic build start.
+- [x] Notify the operating system on automatic build finish when the UI is not
+  visible.
+- [x] Add notification deduplication so restart replay does not resend old
+  toasts.
 
 ### Phase 5 - UI Event Consumption
 
-- [ ] Add frontend listeners for `runtime:event`.
-- [ ] Replace polling-only status changes with event-driven incremental updates.
-- [ ] Add in-app toast presentation for build lifecycle events.
+- [x] Add frontend listeners for `runtime:event`.
+- [ ] Replace snapshot-only status changes with event-driven incremental
+  updates across all relevant shell surfaces.
+- [x] Add in-app toast presentation for automatic release queue, build
+  lifecycle, publish lifecycle, and poll-auth failure events.
 - [ ] Add event-aware refresh targeting for build history, release status, and
-      artifact views.
-- [ ] Keep full diagnostics polling as a fallback reconciliation path.
-- [ ] Add tests or deterministic fixtures for event-driven UI refresh logic.
+  artifact views.
+- [x] Keep command-driven snapshot refresh as a fallback reconciliation path.
+- [x] Add tests or deterministic fixtures for event-driven UI refresh logic.
 
 ### Phase 6 - Expanded Coverage
 
-- [ ] Emit `publish.run_started` and `publish.run_finished` after build event
-      delivery is stable.
-- [ ] Emit runtime supervision and health events for crash recovery surfaces.
+- [x] Emit `publish.run_started` and `publish.run_finished` after build event
+  delivery is stable.
+- [x] Emit runtime supervision and health events for crash recovery surfaces.
 - [ ] Add notification preferences for optional explicit-build completion
       notifications.
 - [ ] Evaluate whether retained build execution reports should surface as event
