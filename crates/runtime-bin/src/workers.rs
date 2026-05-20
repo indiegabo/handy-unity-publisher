@@ -368,6 +368,9 @@ fn poll_repository(
                     git_commit: release.git_commit.clone(),
                     user_requested: user_requested_from_trigger_source(&release.trigger_source),
                 };
+                if let Err(error) = emit_tag_detected_event(storage, &context) {
+                    log_runtime_event_failure(EVENT_TOPIC_TAG_DETECTED, &error);
+                }
                 if let Err(error) = emit_release_queued_event(storage, &context) {
                     log_runtime_event_failure(EVENT_TOPIC_RELEASE_QUEUED, &error);
                 }

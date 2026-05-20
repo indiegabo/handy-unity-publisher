@@ -111,6 +111,7 @@ const AUTHENTICATION_FAILURE_PATTERNS: &[&str] = &[
     "permission denied",
     "unauthorized",
 ];
+const EVENT_TOPIC_TAG_DETECTED: &str = "automation.tag_detected";
 const EVENT_TOPIC_RELEASE_QUEUED: &str = "automation.release_queued";
 const EVENT_TOPIC_POLL_AUTH_FAILED: &str = "automation.poll_auth_failed";
 const EVENT_TOPIC_BUILD_RUN_STARTED: &str = "build.run_started";
@@ -290,6 +291,41 @@ fn emit_release_queued_event(
                 "git_tag": &context.git_tag,
                 "git_commit": &context.git_commit,
                 "status": "queued",
+            }),
+        },
+    )?;
+    Ok(())
+}
+
+fn emit_tag_detected_event(
+    storage: &StorageLayout,
+    context: &ReleaseEventContext,
+) -> io::Result<()> {
+    let mode = if context.user_requested {
+        "Manual"
+    } else {
+        "Automatic"
+    };
+    emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: String::from(EVENT_TOPIC_TAG_DETECTED),
+            severity: String::from("info"),
+            origin: String::from("runtime-bin"),
+            user_requested: context.user_requested,
+            repository_id: Some(context.repository_id),
+            release_run_id: Some(context.release_run_id),
+            build_run_id: None,
+            publish_run_id: None,
+            summary: format!(
+                "{mode} tag detected for {} {}",
+                context.repository_name, context.git_tag
+            ),
+            payload: serde_json::json!({
+                "repository_name": &context.repository_name,
+                "git_tag": &context.git_tag,
+                "git_commit": &context.git_commit,
+                "status": "detected",
             }),
         },
     )?;
@@ -1278,6 +1314,8 @@ mod tests {
         runtime_stop_requested,
         select_queued_repository_tags,
         AutomationPollReport, BuildExecutionReport, BuildRunRecord,
+        EVENT_TOPIC_RELEASE_QUEUED,
+        EVENT_TOPIC_TAG_DETECTED,
         EVENT_TOPIC_POLL_AUTH_FAILED,
         RegistrationCheckoutReport, RuntimeLoopCadence,
         RepositoryPollSchedule,
@@ -3371,6 +3409,27 @@ mod tests {
         );
         assert_eq!(queue_message_count(&connection, "release-runs"), 2);
         drop(connection);
+
+        let runtime_events = read_runtime_event_batch(&storage.runtime_events_path, 0)
+            .expect("runtime event stream should read");
+        assert_eq!(runtime_events.events.len(), 4);
+        assert_eq!(
+            runtime_events
+                .events
+                .iter()
+                .map(|event| event.topic.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                EVENT_TOPIC_TAG_DETECTED,
+                EVENT_TOPIC_RELEASE_QUEUED,
+                EVENT_TOPIC_TAG_DETECTED,
+                EVENT_TOPIC_RELEASE_QUEUED,
+            ]
+        );
+        assert_eq!(runtime_events.events[0].payload["git_tag"], "v1.1.0");
+        assert_eq!(runtime_events.events[0].payload["status"], "detected");
+        assert_eq!(runtime_events.events[2].payload["git_tag"], "v1.2.0");
+        assert_eq!(runtime_events.events[2].payload["status"], "detected");
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
