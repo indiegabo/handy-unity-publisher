@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import OverlayProvider, { useOverlay } from "./OverlayManager";
 
 type TestOverlayProps = {
+  label?: string;
   onResolve?: (value?: string | null) => void;
 };
 
@@ -80,6 +81,53 @@ describe("OverlayManager", () => {
       expect(screen.getByLabelText("overlay result")).toHaveTextContent("null");
     });
   });
+
+  it("dismisses stacked overlays in last-in-first-out order", async () => {
+    render(
+      <OverlayProvider>
+        <StackedOverlayHarness />
+      </OverlayProvider>,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open stacked overlays" }),
+    );
+
+    expect(
+      await screen.findByRole("dialog", { name: "Second overlay" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Dismiss top overlay" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("overlay result second")).toHaveTextContent(
+        "null",
+      );
+    });
+
+    expect(
+      screen.queryByRole("dialog", { name: "Second overlay" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "First overlay" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Dismiss top overlay" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("overlay result first")).toHaveTextContent(
+        "null",
+      );
+    });
+
+    expect(
+      screen.queryByRole("dialog", { name: "First overlay" }),
+    ).not.toBeInTheDocument();
+  });
 });
 
 function OverlayHarness() {
@@ -103,9 +151,44 @@ function OverlayHarness() {
   );
 }
 
-function TestOverlay({ onResolve }: TestOverlayProps) {
+function StackedOverlayHarness() {
+  const { dismissTopOverlay, openOverlay } = useOverlay();
+  const [firstResult, setFirstResult] = useState("pending");
+  const [secondResult, setSecondResult] = useState("pending");
+
   return (
-    <div aria-label="Test overlay" role="dialog">
+    <>
+      <button
+        onClick={() => {
+          void openOverlay<string>(TestOverlay, {
+            label: "First overlay",
+          }).then((result) => {
+            setFirstResult(result ?? "null");
+          });
+          void openOverlay<string>(TestOverlay, {
+            label: "Second overlay",
+          }).then((result) => {
+            setSecondResult(result ?? "null");
+          });
+        }}
+        type="button"
+      >
+        Open stacked overlays
+      </button>
+
+      <button onClick={() => dismissTopOverlay()} type="button">
+        Dismiss top overlay
+      </button>
+
+      <output aria-label="overlay result first">{firstResult}</output>
+      <output aria-label="overlay result second">{secondResult}</output>
+    </>
+  );
+}
+
+function TestOverlay({ label = "Test overlay", onResolve }: TestOverlayProps) {
+  return (
+    <div aria-label={label} role="dialog">
       <button onClick={() => onResolve?.("target-42")} type="button">
         Confirm selection
       </button>

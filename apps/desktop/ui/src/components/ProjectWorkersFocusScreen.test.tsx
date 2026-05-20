@@ -1,19 +1,130 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ProjectWorkersFocusScreen } from "./ProjectWorkersFocusScreen";
 
+afterEach(() => {
+  cleanup();
+});
+
 describe("ProjectWorkersFocusScreen", () => {
+  it("shows a retryable error state when worker inspection is unavailable", () => {
+    const onRetryInventory = vi.fn();
+
+    render(
+      <ProjectWorkersFocusScreen
+        actionError={null}
+        actionMessage={null}
+        inspectionAvailable={false}
+        inspectionError="Inspection offline"
+        inspectionStale={false}
+        onBulkInstantCheck={() => undefined}
+        onInstantCheck={() => undefined}
+        onRestartRuntime={() => undefined}
+        onRetryInventory={onRetryInventory}
+        onStartRuntime={() => undefined}
+        onStopRuntime={() => undefined}
+        pendingBulkInstantCheck={false}
+        pendingInstantCheckRepositoryId={null}
+        pendingRuntimeAction={null}
+        projectWorkers={[]}
+        runtimeStatus="healthy"
+      />,
+    );
+
+    expect(
+      screen.getByText("Project worker inventory is unavailable."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Inspection offline")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry inventory" }));
+
+    expect(onRetryInventory).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps runtime-wide controls in a dedicated panel above the worker inventory", () => {
+    render(
+      <ProjectWorkersFocusScreen
+        actionError={null}
+        actionMessage={null}
+        inspectionAvailable
+        inspectionError={null}
+        inspectionStale={false}
+        onBulkInstantCheck={() => undefined}
+        onInstantCheck={() => undefined}
+        onRestartRuntime={() => undefined}
+        onRetryInventory={() => undefined}
+        onStartRuntime={() => undefined}
+        onStopRuntime={() => undefined}
+        pendingBulkInstantCheck={false}
+        pendingInstantCheckRepositoryId={null}
+        pendingRuntimeAction={null}
+        projectWorkers={[]}
+        runtimeStatus="healthy"
+      />,
+    );
+
+    const runtimePanel = screen
+      .getByRole("heading", {
+        name: "Runtime Controls",
+      })
+      .closest(".project-workers-runtime-panel");
+    const inventoryPanel = screen
+      .getByRole("button", {
+        name: "Collapse Worker Inventory",
+      })
+      .closest(".project-workers-section-accordion");
+
+    expect(runtimePanel).not.toBeNull();
+    expect(inventoryPanel).not.toBeNull();
+    if (!runtimePanel || !inventoryPanel) {
+      throw new Error("Expected runtime and inventory panels to be rendered.");
+    }
+
+    const runtimePanelElement = runtimePanel as HTMLElement;
+    const inventoryPanelElement = inventoryPanel as HTMLElement;
+
+    expect(
+      within(runtimePanelElement).getByRole("button", { name: "Start" }),
+    ).toBeInTheDocument();
+    expect(
+      within(runtimePanelElement).getByRole("button", { name: "Stop" }),
+    ).toBeInTheDocument();
+    expect(
+      within(runtimePanelElement).getByRole("button", { name: "Restart" }),
+    ).toBeInTheDocument();
+    expect(
+      within(runtimePanelElement).queryByRole("button", {
+        name: /Collapse Worker Inventory|Expand Worker Inventory/,
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      runtimePanelElement.compareDocumentPosition(inventoryPanelElement) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
   it("toggles a worker accordion body from the chevron button", () => {
     const { container } = render(
       <ProjectWorkersFocusScreen
         actionError={null}
         actionMessage={null}
         inspectionAvailable
+        inspectionError={null}
+        inspectionStale={false}
+        onBulkInstantCheck={() => undefined}
         onInstantCheck={() => undefined}
         onRestartRuntime={() => undefined}
+        onRetryInventory={() => undefined}
         onStartRuntime={() => undefined}
         onStopRuntime={() => undefined}
+        pendingBulkInstantCheck={false}
         pendingInstantCheckRepositoryId={null}
         pendingRuntimeAction={null}
         projectWorkers={[
@@ -49,7 +160,9 @@ describe("ProjectWorkersFocusScreen", () => {
     expect(accordionBody).toHaveAttribute("aria-hidden", "false");
     expect(accordionBody).not.toHaveAttribute("hidden");
 
-    fireEvent.click(screen.getByRole("button", { name: "Collapse Revolutions" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Collapse Revolutions" }),
+    );
 
     expect(accordionBody).toHaveAttribute("aria-hidden", "true");
     expect(accordionBody).toHaveAttribute("hidden");

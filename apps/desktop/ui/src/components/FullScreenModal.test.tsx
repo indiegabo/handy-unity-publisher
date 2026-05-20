@@ -60,4 +60,21 @@ describe("FullScreenModal", () => {
     fireEvent.keyDown(dialog, { key: "Escape" });
     expect(onResolve).toHaveBeenCalledWith(null);
   });
+
+  it("falls back to the first focusable control when the annotated target is disabled", async () => {
+    render(
+      <FullScreenModal onResolve={() => undefined} title="Artifact viewer">
+        <button data-overlay-autofocus disabled type="button">
+          Open artifact
+        </button>
+        <button type="button">Open folder</button>
+      </FullScreenModal>,
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Close overlay" }),
+      ).toHaveFocus();
+    });
+  });
 });
