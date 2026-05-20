@@ -18,6 +18,7 @@ describe("StepFlow", () => {
         onStepSelect={onStepSelect}
         progressSummary={<p>Progress summary</p>}
         startActions={<button type="button">Previous</button>}
+        supportContent={<p>Support body</p>}
         stepSummary={<p>Step summary</p>}
         steps={[
           {
@@ -47,6 +48,7 @@ describe("StepFlow", () => {
     expect(screen.getByText("Access step")).toBeInTheDocument();
     expect(screen.getByText("Current step body")).toBeInTheDocument();
     expect(screen.getByText("Progress summary")).toBeInTheDocument();
+    expect(screen.getByText("Support body")).toBeInTheDocument();
     expect(screen.getByText("Step summary")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Previous" }),

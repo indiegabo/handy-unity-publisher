@@ -50,7 +50,9 @@ describe("ProjectsFocusScreen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry load" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Quick view" })).toBeEnabled();
+      expect(
+        screen.getByRole("button", { name: "Quick view for Worker Demo" }),
+      ).toBeEnabled();
     });
   });
 
@@ -69,7 +71,7 @@ describe("ProjectsFocusScreen", () => {
       </OverlayProvider>,
     );
 
-    await screen.findByRole("button", { name: "Quick view" });
+    await screen.findByRole("button", { name: "Quick view for Worker Demo" });
 
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
 
@@ -140,6 +142,202 @@ describe("ProjectsFocusScreen", () => {
     }
   });
 
+  it("moves focus between the quick-open input and project cards with ArrowDown and ArrowUp", async () => {
+    loadRepositoryInspectionMock.mockResolvedValueOnce({
+      repositories: [
+        ...buildRepositoryInspection().repositories,
+        {
+          ...buildRepositoryInspection().repositories[0],
+          default_branch: "develop",
+          enabled: false,
+          repository_id: 2,
+          repository_name: "Build Lab",
+          repo_url: "https://github.com/indiegabo/build-lab.git",
+        },
+      ],
+    });
+
+    render(
+      <OverlayProvider>
+        <ProjectsFocusScreen onOpenProject={vi.fn()} />
+      </OverlayProvider>,
+    );
+
+    const quickOpenInput = await screen.findByRole("textbox", {
+      name: "Quick open",
+    });
+    await screen.findByRole("button", {
+      name: "Open project Worker Demo",
+    });
+    await screen.findByRole("button", {
+      name: "Open project Build Lab",
+    });
+
+    quickOpenInput.focus();
+    fireEvent.keyDown(quickOpenInput, { key: "ArrowDown" });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Open project Worker Demo" }),
+      ).toHaveFocus();
+    });
+
+    quickOpenInput.focus();
+    fireEvent.keyDown(quickOpenInput, { key: "ArrowUp" });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Open project Build Lab" }),
+      ).toHaveFocus();
+    });
+  });
+
+  it("supports ArrowUp, ArrowDown, Home, and End navigation across project cards", async () => {
+    loadRepositoryInspectionMock.mockResolvedValueOnce({
+      repositories: [
+        ...buildRepositoryInspection().repositories,
+        {
+          ...buildRepositoryInspection().repositories[0],
+          default_branch: "develop",
+          enabled: false,
+          repository_id: 2,
+          repository_name: "Build Lab",
+          repo_url: "https://github.com/indiegabo/build-lab.git",
+        },
+        {
+          ...buildRepositoryInspection().repositories[0],
+          default_branch: "release",
+          repository_id: 3,
+          repository_name: "Release Forge",
+          repo_url: "https://github.com/indiegabo/release-forge.git",
+        },
+      ],
+    });
+
+    render(
+      <OverlayProvider>
+        <ProjectsFocusScreen onOpenProject={vi.fn()} />
+      </OverlayProvider>,
+    );
+
+    const workerDemoButton = await screen.findByRole("button", {
+      name: "Open project Worker Demo",
+    });
+    const buildLabButton = screen.getByRole("button", {
+      name: "Open project Build Lab",
+    });
+    const releaseForgeButton = screen.getByRole("button", {
+      name: "Open project Release Forge",
+    });
+
+    workerDemoButton.focus();
+    fireEvent.keyDown(workerDemoButton, { key: "ArrowDown" });
+    await waitFor(() => {
+      expect(buildLabButton).toHaveFocus();
+    });
+
+    fireEvent.keyDown(buildLabButton, { key: "End" });
+    await waitFor(() => {
+      expect(releaseForgeButton).toHaveFocus();
+    });
+
+    fireEvent.keyDown(releaseForgeButton, { key: "ArrowUp" });
+    await waitFor(() => {
+      expect(buildLabButton).toHaveFocus();
+    });
+
+    fireEvent.keyDown(buildLabButton, { key: "Home" });
+    await waitFor(() => {
+      expect(workerDemoButton).toHaveFocus();
+    });
+  });
+
+  it("returns focus from a project card to the quick-open input with Escape", async () => {
+    loadRepositoryInspectionMock.mockResolvedValueOnce({
+      repositories: [
+        ...buildRepositoryInspection().repositories,
+        {
+          ...buildRepositoryInspection().repositories[0],
+          default_branch: "develop",
+          enabled: false,
+          repository_id: 2,
+          repository_name: "Build Lab",
+          repo_url: "https://github.com/indiegabo/build-lab.git",
+        },
+      ],
+    });
+
+    render(
+      <OverlayProvider>
+        <ProjectsFocusScreen onOpenProject={vi.fn()} />
+      </OverlayProvider>,
+    );
+
+    const quickOpenInput = await screen.findByRole("textbox", {
+      name: "Quick open",
+    });
+    const workerDemoButton = await screen.findByRole("button", {
+      name: "Open project Worker Demo",
+    });
+
+    workerDemoButton.focus();
+    fireEvent.keyDown(workerDemoButton, { key: "Escape" });
+
+    await waitFor(() => {
+      expect(quickOpenInput).toHaveFocus();
+    });
+  });
+
+  it("uses repository-specific accessible names for quick-view buttons", async () => {
+    loadRepositoryInspectionMock.mockResolvedValueOnce({
+      repositories: [
+        ...buildRepositoryInspection().repositories,
+        {
+          ...buildRepositoryInspection().repositories[0],
+          default_branch: "develop",
+          enabled: false,
+          repository_id: 2,
+          repository_name: "Build Lab",
+          repo_url: "https://github.com/indiegabo/build-lab.git",
+        },
+      ],
+    });
+
+    render(
+      <OverlayProvider>
+        <ProjectsFocusScreen onOpenProject={vi.fn()} />
+      </OverlayProvider>,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Quick view for Worker Demo" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Quick view for Build Lab" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens an exact quick-open match with Enter", async () => {
+    const onOpenProject = vi.fn();
+
+    render(
+      <OverlayProvider>
+        <ProjectsFocusScreen onOpenProject={onOpenProject} />
+      </OverlayProvider>,
+    );
+
+    const quickOpenInput = await screen.findByRole("textbox", {
+      name: "Quick open",
+    });
+
+    fireEvent.change(quickOpenInput, { target: { value: "Worker Demo" } });
+    fireEvent.keyDown(quickOpenInput, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(onOpenProject).toHaveBeenCalledWith(1, "Worker Demo");
+    });
+  });
+
   it("opens the project quick view and escalates to the project editor on demand", async () => {
     const requestAnimationFrameSpy = vi
       .spyOn(window, "requestAnimationFrame")
@@ -157,7 +355,7 @@ describe("ProjectsFocusScreen", () => {
       );
 
       const quickViewButton = await screen.findByRole("button", {
-        name: "Quick view",
+        name: "Quick view for Worker Demo",
       });
 
       quickViewButton.focus();
@@ -183,6 +381,116 @@ describe("ProjectsFocusScreen", () => {
       await waitFor(() => {
         expect(onOpenProject).toHaveBeenCalledWith(1, "Worker Demo");
       });
+
+      await waitFor(() => {
+        expect(
+          screen.queryByRole("dialog", { name: "Worker Demo" }),
+        ).not.toBeInTheDocument();
+        expect(quickViewButton).toHaveFocus();
+      });
+    } finally {
+      requestAnimationFrameSpy.mockRestore();
+    }
+  });
+
+  it("uses shared summary strips for project cards and the quick-view overlay", async () => {
+    render(
+      <OverlayProvider>
+        <ProjectsFocusScreen onOpenProject={vi.fn()} />
+      </OverlayProvider>,
+    );
+
+    const projectCard = await screen.findByRole("button", {
+      name: "Open project Worker Demo",
+    });
+
+    expect(
+      projectCard.querySelector(".project-list-card__summary-strip"),
+    ).not.toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Quick view for Worker Demo",
+      }),
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Worker Demo",
+    });
+
+    expect(
+      dialog.querySelector(".project-quick-view__summary-strip"),
+    ).not.toBeNull();
+  });
+
+  it("dismisses the project quick view with Escape and restores focus to its trigger", async () => {
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback: FrameRequestCallback) => {
+        callback(0);
+        return 1;
+      });
+
+    try {
+      render(
+        <OverlayProvider>
+          <ProjectsFocusScreen onOpenProject={vi.fn()} />
+        </OverlayProvider>,
+      );
+
+      const quickViewButton = await screen.findByRole("button", {
+        name: "Quick view for Worker Demo",
+      });
+
+      quickViewButton.focus();
+      fireEvent.click(quickViewButton);
+
+      const dialog = await screen.findByRole("dialog", {
+        name: "Worker Demo",
+      });
+
+      fireEvent.keyDown(dialog, { key: "Escape" });
+
+      await waitFor(() => {
+        expect(
+          screen.queryByRole("dialog", { name: "Worker Demo" }),
+        ).not.toBeInTheDocument();
+        expect(quickViewButton).toHaveFocus();
+      });
+    } finally {
+      requestAnimationFrameSpy.mockRestore();
+    }
+  });
+
+  it("dismisses the project quick view from its close button and restores focus to its trigger", async () => {
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback: FrameRequestCallback) => {
+        callback(0);
+        return 1;
+      });
+
+    try {
+      render(
+        <OverlayProvider>
+          <ProjectsFocusScreen onOpenProject={vi.fn()} />
+        </OverlayProvider>,
+      );
+
+      const quickViewButton = await screen.findByRole("button", {
+        name: "Quick view for Worker Demo",
+      });
+
+      quickViewButton.focus();
+      fireEvent.click(quickViewButton);
+
+      const dialog = await screen.findByRole("dialog", {
+        name: "Worker Demo",
+      });
+
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Close overlay" }),
+      );
 
       await waitFor(() => {
         expect(

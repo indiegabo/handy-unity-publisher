@@ -169,6 +169,100 @@ describe("PublishDestinationsEditor interactions", () => {
     expect(screen.getByRole("button", { name: "Itch" })).toBeDisabled();
   });
 
+  it("keeps a compact summary visible when a destination accordion is collapsed", () => {
+    const buildTargets = [
+      {
+        buildTargetId: 11,
+        id: "target-android",
+        name: "Android",
+      },
+      {
+        buildTargetId: 22,
+        id: "target-linux",
+        name: "Linux",
+      },
+      {
+        buildTargetId: 33,
+        id: "target-windows",
+        name: "Windows",
+      },
+    ];
+
+    render(
+      <Harness
+        buildTargets={buildTargets}
+        initialDestinations={[
+          {
+            ...createEmptyPublishDestinationDraft("itch"),
+            bindings: [
+              {
+                id: "binding-android",
+                buildTargetDraftId: buildTargets[0].id,
+                buildTargetId: buildTargets[0].buildTargetId,
+                buildTargetName: buildTargets[0].name,
+                enabled: true,
+                filesystemDirectoryPath: "",
+                itchChannel: "android-beta",
+                itchUserversionTemplate: "",
+              },
+              {
+                id: "binding-linux",
+                buildTargetDraftId: buildTargets[1].id,
+                buildTargetId: buildTargets[1].buildTargetId,
+                buildTargetName: buildTargets[1].name,
+                enabled: true,
+                filesystemDirectoryPath: "",
+                itchChannel: "linux-beta",
+                itchUserversionTemplate: "",
+              },
+              {
+                id: "binding-windows",
+                buildTargetDraftId: buildTargets[2].id,
+                buildTargetId: buildTargets[2].buildTargetId,
+                buildTargetName: buildTargets[2].name,
+                enabled: true,
+                filesystemDirectoryPath: "",
+                itchChannel: "windows-beta",
+                itchUserversionTemplate: "",
+              },
+            ],
+            itchAccountName: "indiegabo",
+            itchGameSlug: "red-horizon",
+          },
+        ]}
+      />,
+    );
+
+    const itchAccordion = screen
+      .getByRole("heading", { name: "Itch" })
+      .closest(".vertical-accordion");
+
+    expect(itchAccordion).not.toBeNull();
+
+    fireEvent.click(
+      within(itchAccordion as HTMLElement).getByRole("button", {
+        name: "Collapse section",
+      }),
+    );
+
+    expect(itchAccordion).toHaveAttribute("data-state", "closed");
+    expect(
+      (itchAccordion as HTMLElement).querySelector(
+        ".publish-destination-card__summary-strip.ui-summary-strip",
+      ),
+    ).not.toBeNull();
+    expect(
+      within(itchAccordion as HTMLElement).getByText("3 targets"),
+    ).toBeInTheDocument();
+    expect(
+      within(itchAccordion as HTMLElement).getByText("Android, Linux +1 more"),
+    ).toBeInTheDocument();
+    expect(
+      within(itchAccordion as HTMLElement).getByText("Missing"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Itch account name")).not.toBeVisible();
+  });
+
   it("opens the binding target overlay when many unbound targets are available", async () => {
     const buildTargets = Array.from({ length: 9 }, (_, index) => ({
       buildTargetId: index + 1,
@@ -211,6 +305,89 @@ describe("PublishDestinationsEditor interactions", () => {
     expect(
       screen.getByRole("button", { name: "Remove binding for Target 9" }),
     ).toBeInTheDocument();
+  });
+
+  it("autofocuses the binding selector filter and restores focus on Escape", async () => {
+    const buildTargets = Array.from({ length: 9 }, (_, index) => ({
+      buildTargetId: index + 1,
+      id: `target-${index + 1}`,
+      name: `Target ${index + 1}`,
+    }));
+
+    render(
+      <Harness
+        buildTargets={buildTargets}
+        initialDestinations={[
+          {
+            ...createEmptyPublishDestinationDraft(),
+            name: "Large Inventory Folder",
+          },
+        ]}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Target: Target 1" });
+
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Select build target",
+    });
+    const filterInput = within(dialog).getByPlaceholderText(
+      "Search by name or secondary text",
+    );
+
+    expect(filterInput).toHaveFocus();
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Select build target" }),
+      ).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+    });
+  });
+
+  it("closes the binding selector from its close button and restores focus to the trigger", async () => {
+    const buildTargets = Array.from({ length: 9 }, (_, index) => ({
+      buildTargetId: index + 1,
+      id: `target-${index + 1}`,
+      name: `Target ${index + 1}`,
+    }));
+
+    render(
+      <Harness
+        buildTargets={buildTargets}
+        initialDestinations={[
+          {
+            ...createEmptyPublishDestinationDraft(),
+            name: "Large Inventory Folder",
+          },
+        ]}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Target: Target 1" });
+
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Select build target",
+    });
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close overlay" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Select build target" }),
+      ).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+    });
   });
 
   it("opens the credential composer overlay and saves the returned payload", async () => {
@@ -273,6 +450,86 @@ describe("PublishDestinationsEditor interactions", () => {
       expect(
         screen.queryByRole("dialog", { name: "New publish credential" }),
       ).not.toBeInTheDocument();
+    });
+  });
+
+  it("autofocuses the credential name field and restores focus on cancel", async () => {
+    render(
+      <Harness
+        initialDestinations={[
+          {
+            ...createEmptyPublishDestinationDraft("itch"),
+            id: "destination-itch",
+            itchAccountName: "indiegabo",
+            itchGameSlug: "red-horizon",
+            name: "Itch Release",
+          },
+        ]}
+        onSaveCredential={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "New credential" });
+
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "New publish credential",
+    });
+    const credentialNameInput = within(dialog)
+      .getByText("Credential name")
+      .closest("label")
+      ?.querySelector("input");
+
+    expect(credentialNameInput).not.toBeNull();
+
+    expect(credentialNameInput as HTMLInputElement).toHaveFocus();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "New publish credential" }),
+      ).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+    });
+  });
+
+  it("closes the credential composer from its close button and restores focus to the trigger", async () => {
+    render(
+      <Harness
+        initialDestinations={[
+          {
+            ...createEmptyPublishDestinationDraft("itch"),
+            id: "destination-itch",
+            itchAccountName: "indiegabo",
+            itchGameSlug: "red-horizon",
+            name: "Itch Release",
+          },
+        ]}
+        onSaveCredential={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "New credential" });
+
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "New publish credential",
+    });
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close overlay" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "New publish credential" }),
+      ).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
     });
   });
 });

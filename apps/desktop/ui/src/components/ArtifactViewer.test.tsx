@@ -14,6 +14,23 @@ afterEach(() => {
 });
 
 describe("ArtifactViewer", () => {
+  it("renders artifact summary metadata through the shared summary strip", () => {
+    render(
+      <ArtifactViewer
+        artifact={buildArtifact()}
+        artifactAbsolutePath="C:/tmp/artifacts/build.zip"
+        artifactFolderPath="C:/tmp/artifacts"
+        artifactLocationSummary="Filesystem path"
+        resolvePublishTargetKindTone={() => "muted"}
+      />,
+    );
+
+    expect(screen.getByText("Windows Build")).toBeInTheDocument();
+    expect(screen.getByText("0 publishes")).toBeInTheDocument();
+    expect(screen.getByText("Active location")).toBeInTheDocument();
+    expect(screen.getByText("Size")).toBeInTheDocument();
+  });
+
   it("autofocuses the folder action when the artifact file cannot be opened", async () => {
     const onOpenFolder = vi.fn();
 
@@ -24,6 +41,7 @@ describe("ArtifactViewer", () => {
         artifactFolderPath="C:/tmp/artifacts"
         artifactLocationSummary="Filesystem path"
         onOpenFolder={onOpenFolder}
+        resolvePublishTargetKindTone={() => "muted"}
       />,
     );
 

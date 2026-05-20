@@ -137,4 +137,85 @@ describe("PathPickerField", () => {
       expect(onPathPicked).toHaveBeenCalledWith("C:/Manual/Unity.exe");
     });
   });
+
+  it("autofocuses the manual path input and restores focus on Escape", async () => {
+    pickHostPathMock.mockRejectedValueOnce(
+      new Error("native picker unavailable"),
+    );
+
+    render(
+      <OverlayProvider>
+        <PathPickerField
+          buttonLabel="Choose Unity executable"
+          label="Unity executable"
+          onPathPicked={vi.fn()}
+          pickerKind="file"
+          value="C:/Existing/Unity.exe"
+        />
+      </OverlayProvider>,
+    );
+
+    const trigger = screen.getByRole("button", {
+      name: "Choose Unity executable",
+    });
+
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Enter path manually",
+    });
+    const pathInput = within(dialog).getByDisplayValue("C:/Existing/Unity.exe");
+
+    expect(pathInput).toHaveFocus();
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Enter path manually" }),
+      ).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+    });
+  });
+
+  it("closes the manual path overlay from its close button and restores focus to the trigger", async () => {
+    pickHostPathMock.mockRejectedValueOnce(
+      new Error("native picker unavailable"),
+    );
+
+    render(
+      <OverlayProvider>
+        <PathPickerField
+          buttonLabel="Choose Unity executable"
+          label="Unity executable"
+          onPathPicked={vi.fn()}
+          pickerKind="file"
+          value="C:/Existing/Unity.exe"
+        />
+      </OverlayProvider>,
+    );
+
+    const trigger = screen.getByRole("button", {
+      name: "Choose Unity executable",
+    });
+
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Enter path manually",
+    });
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close overlay" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Enter path manually" }),
+      ).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+    });
+  });
 });

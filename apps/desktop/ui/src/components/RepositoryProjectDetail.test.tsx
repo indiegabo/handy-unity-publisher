@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -74,6 +75,30 @@ beforeEach(() => {
 });
 
 describe("RepositoryProjectDetail", () => {
+  it("shows a retryable error state when the project detail load fails", async () => {
+    loadRepositoryProjectDetailMock
+      .mockRejectedValueOnce(new Error("Detail offline"))
+      .mockResolvedValue(buildRepositoryDetail());
+
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    expect(
+      await screen.findByText("Project detail is unavailable."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Detail offline")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry project load" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Revolutions" }),
+    ).toBeInTheDocument();
+  });
+
   it("renders icon tabs with tooltips for each project section", async () => {
     render(
       <RepositoryProjectDetail
@@ -108,6 +133,75 @@ describe("RepositoryProjectDetail", () => {
     expect(
       screen.getByRole("tab", { name: "Project Settings" }),
     ).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("supports ArrowUp, ArrowDown, Home, and End navigation across project section tabs", async () => {
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Revolutions" }),
+    ).toBeInTheDocument();
+
+    const projectSettingsTab = await screen.findByRole("tab", {
+      name: "Project Settings",
+    });
+
+    projectSettingsTab.focus();
+    fireEvent.keyDown(projectSettingsTab, { key: "ArrowDown" });
+
+    await waitFor(() => {
+      const repositoryTab = screen.getByRole("tab", { name: "Repository" });
+
+      expect(repositoryTab).toHaveFocus();
+      expect(repositoryTab).toHaveAttribute("aria-selected", "true");
+    });
+
+    fireEvent.keyDown(screen.getByRole("tab", { name: "Repository" }), {
+      key: "End",
+    });
+
+    await waitFor(() => {
+      const runtimeStatusTab = screen.getByRole("tab", {
+        name: "Runtime Status",
+      });
+
+      expect(runtimeStatusTab).toHaveFocus();
+      expect(runtimeStatusTab).toHaveAttribute("aria-selected", "true");
+    });
+
+    fireEvent.keyDown(screen.getByRole("tab", { name: "Runtime Status" }), {
+      key: "Home",
+    });
+
+    await waitFor(() => {
+      const refreshedProjectSettingsTab = screen.getByRole("tab", {
+        name: "Project Settings",
+      });
+
+      expect(refreshedProjectSettingsTab).toHaveFocus();
+      expect(refreshedProjectSettingsTab).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    });
+
+    fireEvent.keyDown(screen.getByRole("tab", { name: "Project Settings" }), {
+      key: "ArrowUp",
+    });
+
+    await waitFor(() => {
+      const runtimeStatusTab = screen.getByRole("tab", {
+        name: "Runtime Status",
+      });
+
+      expect(runtimeStatusTab).toHaveFocus();
+      expect(runtimeStatusTab).toHaveAttribute("aria-selected", "true");
+    });
   });
 
   it("shows repository configuration in its own tab", async () => {
@@ -163,6 +257,120 @@ describe("RepositoryProjectDetail", () => {
       "aria-selected",
       "true",
     );
+  });
+
+  it("shows a stable collapsed summary before reopening a build target editor", async () => {
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Build Targets" }));
+
+    expect(await screen.findByText("Builder.PerformWindows")).toBeInTheDocument();
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getByText("No publish bindings")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Unity build method")).not.toBeInTheDocument();
+    expect(
+      document.querySelector(
+        ".project-detail-target-card__summary-strip.ui-summary-strip",
+      ),
+    ).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    expect(await screen.findByLabelText("Unity build method")).toBeInTheDocument();
+  });
+
+  it("uses shared summary strips in project detail section headers", async () => {
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Build Targets" }));
+
+    const buildTargetsPanel = screen
+      .getByRole("heading", { name: "Build Targets" })
+      .closest("section");
+
+    expect(buildTargetsPanel).not.toBeNull();
+    expect(
+      (buildTargetsPanel as HTMLElement).querySelector(
+        ".project-detail-section-accordion__summary.ui-summary-strip",
+      ),
+    ).not.toBeNull();
+  });
+
+  it("uses consistent build-target removal copy when publish bindings would also be removed", async () => {
+    loadRepositoryProjectDetailMock.mockResolvedValue(
+      buildRepositoryDetail({
+        build_targets: [
+          {
+            build_target_id: 11,
+            diagnostic_message: "Ready for host-native execution.",
+            diagnostic_status: "ready",
+            enabled: true,
+            host_native_diagnostics: buildUnityExecutableValidation(),
+            repository_id: 1,
+            repository_name: "Revolutions",
+            runner_type: "host-native",
+            target_name: "Windows",
+            unity_build_method: "Builder.PerformWindows",
+            unity_target_platform: "StandaloneWindows64",
+          },
+          {
+            build_target_id: 12,
+            diagnostic_message: "Ready for host-native execution.",
+            diagnostic_status: "ready",
+            enabled: true,
+            host_native_diagnostics: buildUnityExecutableValidation(),
+            repository_id: 1,
+            repository_name: "Revolutions",
+            runner_type: "host-native",
+            target_name: "Linux",
+            unity_build_method: "Builder.PerformLinux",
+            unity_target_platform: "StandaloneLinux64",
+          },
+        ],
+        enabled_build_target_count: 2,
+        publish_targets: [
+          buildItchPublishTarget({
+            channel: "windows-stable",
+            gameSlug: "red-horizon",
+          }),
+        ],
+      }),
+    );
+
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Build Targets" }));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Remove build target 1" }),
+    );
+
+    expect(
+      await screen.findByText("Confirm build target removal"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Remove build target and bindings",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/also removes publish bindings from/i),
+    ).toBeInTheDocument();
   });
 
   it("re-detects repository access only after the operator edits the repository url", async () => {
@@ -228,6 +436,28 @@ describe("RepositoryProjectDetail", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("uses a shared summary strip for repository access support metadata", async () => {
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Repository" }));
+
+    const repositoryAccessCallout = screen
+      .getByText("Repository access")
+      .closest(".wizard-callout");
+
+    expect(repositoryAccessCallout).not.toBeNull();
+    expect(
+      (repositoryAccessCallout as HTMLElement).querySelector(
+        ".wizard-callout__summary-strip.ui-summary-strip",
+      ),
+    ).not.toBeNull();
+  });
+
   it("shows publish destination content when the destinations tab is selected", async () => {
     render(
       <RepositoryProjectDetail
@@ -242,7 +472,279 @@ describe("RepositoryProjectDetail", () => {
       }),
     );
 
-    expect(await screen.findByText("Draft impact")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Draft impact" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Unbound targets")).toBeInTheDocument();
+  });
+
+  it("keeps a stable focus order through the publish destination accordion and binding controls", async () => {
+    loadRepositoryProjectDetailMock.mockResolvedValue(
+      buildRepositoryDetail({
+        build_targets: [
+          {
+            build_target_id: 11,
+            diagnostic_message: "Ready for host-native execution.",
+            diagnostic_status: "ready",
+            enabled: true,
+            host_native_diagnostics: buildUnityExecutableValidation(),
+            repository_id: 1,
+            repository_name: "Revolutions",
+            runner_type: "host-native",
+            target_name: "Windows",
+            unity_build_method: "Builder.PerformWindows",
+            unity_target_platform: "StandaloneWindows64",
+          },
+          {
+            build_target_id: 12,
+            diagnostic_message: "Ready for host-native execution.",
+            diagnostic_status: "ready",
+            enabled: true,
+            host_native_diagnostics: buildUnityExecutableValidation(),
+            repository_id: 1,
+            repository_name: "Revolutions",
+            runner_type: "host-native",
+            target_name: "Linux",
+            unity_build_method: "Builder.PerformLinux",
+            unity_target_platform: "StandaloneLinux64",
+          },
+        ],
+        enabled_build_target_count: 2,
+        publish_targets: [
+          buildItchPublishTarget({
+            channel: "windows-stable",
+            gameSlug: "red-horizon",
+          }),
+        ],
+      }),
+    );
+
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("tab", {
+        name: "Publish Destinations",
+      }),
+    );
+
+    const panel = await screen.findByRole("tabpanel", {
+      name: "Publish Destinations",
+    });
+    const itchAccordion = (
+      await within(panel).findByRole("heading", { name: "Itch" })
+    ).closest(".vertical-accordion");
+
+    expect(itchAccordion).not.toBeNull();
+
+    if (itchAccordion?.getAttribute("data-state") !== "open") {
+      fireEvent.click(
+        within(itchAccordion as HTMLElement).getByRole("button", {
+          name: "Expand section",
+        }),
+      );
+    }
+
+    const [destinationStatusSelect, bindingStatusSelect] = within(
+      panel,
+    ).getAllByRole("combobox", { name: "Status" });
+
+    expectFocusOrder(panel, [
+      within(panel).getByRole("button", { name: "Add destination" }),
+      within(itchAccordion as HTMLElement).getByRole("button", {
+        name: "Collapse section",
+      }),
+      within(itchAccordion as HTMLElement).getByRole("button", {
+        name: "Remove Itch destination",
+      }),
+      destinationStatusSelect,
+      within(panel).getByRole("textbox", { name: "Itch account name" }),
+      within(panel).getByRole("textbox", { name: "Itch game slug" }),
+      within(panel).getByRole("button", { name: "Pick butler" }),
+      within(panel).getByRole("button", { name: "Reset" }),
+      within(panel).getByRole("button", { name: "New credential" }),
+      within(panel).getByRole("combobox", { name: "Credential" }),
+      within(panel).getByRole("combobox", { name: "Target" }),
+      within(panel).getByRole("button", { name: "Add target" }),
+      within(panel).getByRole("button", { name: "Remove binding for Windows" }),
+      bindingStatusSelect,
+      within(panel).getByRole("textbox", { name: "Itch channel" }),
+      within(panel).getByRole("textbox", {
+        name: "Itch userversion template",
+      }),
+    ]);
+  });
+
+  it("persists edited publish destination fields through project save", async () => {
+    loadRepositoryProjectDetailMock.mockReset();
+    loadRepositoryProjectDetailMock
+      .mockResolvedValueOnce(
+        buildRepositoryDetail({
+          publish_targets: [
+            buildItchPublishTarget({
+              channel: "windows-stable",
+              gameSlug: "red-horizon",
+            }),
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        buildRepositoryDetail({
+          publish_targets: [
+            buildItchPublishTarget({
+              channel: "windows-stable",
+              gameSlug: "red-horizon-redux",
+            }),
+          ],
+        }),
+      );
+
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("tab", {
+        name: "Publish Destinations",
+      }),
+    );
+
+    const itchAccordion = (
+      await screen.findByRole("heading", { name: "Itch" })
+    ).closest(".vertical-accordion");
+
+    expect(itchAccordion).not.toBeNull();
+
+    if (itchAccordion?.getAttribute("data-state") !== "open") {
+      fireEvent.click(
+        within(itchAccordion as HTMLElement).getByRole("button", {
+          name: "Expand section",
+        }),
+      );
+    }
+
+    const gameSlugField = await screen.findByLabelText("Itch game slug");
+
+    fireEvent.change(gameSlugField, {
+      target: { value: "red-horizon-redux" },
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Save Changes" }),
+      ).toBeEnabled();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() => {
+      expect(updateRepositoryProjectMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          repository_id: 1,
+          publish_targets: [
+            expect.objectContaining({
+              bindings: [
+                expect.objectContaining({
+                  build_target_id: 11,
+                  build_target_name: "Windows",
+                  enabled: true,
+                  options_json: JSON.stringify({
+                    channel: "windows-stable",
+                    userversion_template: "{{git_tag}}",
+                  }),
+                }),
+              ],
+              config_json: JSON.stringify({
+                account_name: "indiegabo",
+                game_slug: "red-horizon-redux",
+                butler_path: "C:/tools/butler.exe",
+              }),
+              credentials_id: 202,
+              enabled: true,
+              kind: "itch",
+              name: "Itch",
+              publish_target_id: 5,
+            }),
+          ],
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Itch game slug")).toHaveValue(
+        "red-horizon-redux",
+      );
+      expect(
+        screen.getByRole("button", { name: "Save Changes" }),
+      ).toBeDisabled();
+    });
+  });
+
+  it("keeps publish validation errors in the destinations section and blocks save", async () => {
+    loadRepositoryProjectDetailMock.mockResolvedValue(
+      buildRepositoryDetail({
+        publish_targets: [
+          buildItchPublishTarget({
+            channel: "windows-stable",
+            gameSlug: "red-horizon",
+          }),
+        ],
+      }),
+    );
+
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("tab", {
+        name: "Publish Destinations",
+      }),
+    );
+
+    const itchAccordion = (
+      await screen.findByRole("heading", { name: "Itch" })
+    ).closest(".vertical-accordion");
+
+    expect(itchAccordion).not.toBeNull();
+
+    if (itchAccordion?.getAttribute("data-state") !== "open") {
+      fireEvent.click(
+        within(itchAccordion as HTMLElement).getByRole("button", {
+          name: "Expand section",
+        }),
+      );
+    }
+
+    fireEvent.change(await screen.findByLabelText("Itch game slug"), {
+      target: { value: "" },
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Save Changes" }),
+      ).toBeEnabled();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    expect(
+      await screen.findByText("Itch game slug is required."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: "Publish Destinations" }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(updateRepositoryProjectMock).not.toHaveBeenCalled();
   });
 
   it("persists edited project fields and returns to a saved draft state after reload", async () => {
@@ -553,4 +1055,72 @@ function buildUnityExecutableValidation() {
     unity_executable_path:
       "C:/Program Files/Unity/Hub/Editor/6000.0.23f1/Editor/Unity.exe",
   };
+}
+
+function buildItchPublishTarget({
+  channel,
+  gameSlug,
+}: {
+  channel: string;
+  gameSlug: string;
+}) {
+  return {
+    bindings: [
+      {
+        build_target_id: 11,
+        build_target_name: "Windows",
+        consumption_behavior: "non_consuming",
+        enabled: true,
+        options_json: JSON.stringify({
+          channel,
+          userversion_template: "{{git_tag}}",
+        }),
+      },
+    ],
+    config_json: JSON.stringify({
+      account_name: "indiegabo",
+      game_slug: gameSlug,
+      butler_path: "C:/tools/butler.exe",
+    }),
+    credentials: {
+      config_message: "Itch API key is present.",
+      config_status: "ready",
+      credential_id: 202,
+      kind: "itch-api-key",
+      name: "Itch Release",
+    },
+    enabled: true,
+    kind: "itch",
+    name: "Itch stable",
+    publish_target_id: 5,
+  };
+}
+
+function expectFocusOrder(container: HTMLElement, elements: HTMLElement[]) {
+  const focusableElements = listFocusableElements(container);
+  let previousIndex = -1;
+
+  for (const element of elements) {
+    const nextIndex = focusableElements.indexOf(element);
+
+    expect(nextIndex).toBeGreaterThan(previousIndex);
+    previousIndex = nextIndex;
+  }
+}
+
+function listFocusableElements(container: HTMLElement) {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      [
+        "button:not([disabled])",
+        "input:not([disabled])",
+        "select:not([disabled])",
+        "textarea:not([disabled])",
+        '[tabindex]:not([tabindex="-1"])',
+      ].join(", "),
+    ),
+  ).filter(
+    (element) =>
+      !element.hidden && !element.closest("[hidden], [aria-hidden='true']"),
+  );
 }

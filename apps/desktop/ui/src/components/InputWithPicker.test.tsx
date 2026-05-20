@@ -15,6 +15,21 @@ afterEach(() => {
 });
 
 describe("InputWithPicker", () => {
+  it("exposes the text input with its visible label as the accessible name", () => {
+    render(
+      <OverlayProvider>
+        <InputWithPicker
+          buttonLabel="Browse"
+          hint="2 matching projects"
+          label="Quick open"
+          value=""
+        />
+      </OverlayProvider>,
+    );
+
+    expect(screen.getByRole("textbox", { name: "Quick open" })).toHaveValue("");
+  });
+
   it("forwards the overlay result to onPick when a picker component resolves", async () => {
     const onPick = vi.fn();
 

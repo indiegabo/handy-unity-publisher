@@ -42,4 +42,33 @@ describe("VerticalAccordion", () => {
     expect(body).toHaveStyle({ display: "none" });
     expect(icon).toHaveStyle({ transform: "rotate(-90deg)" });
   });
+
+  it("toggles the body from the interactive header with Enter and Space", () => {
+    const { container } = render(
+      <VerticalAccordion
+        collapsedToggleLabel="Expand build target"
+        expandedToggleLabel="Collapse build target"
+        header={<div>Build target</div>}
+        triggerMode="header"
+      >
+        <div>Target content</div>
+      </VerticalAccordion>,
+    );
+
+    const header = container.querySelector(
+      ".vertical-accordion__header[role='button']",
+    );
+    const body = container.querySelector(".vertical-accordion__body");
+
+    expect(header).not.toBeNull();
+    expect(body).toHaveAttribute("aria-hidden", "true");
+
+    fireEvent.keyDown(header!, { key: "Enter" });
+    expect(body).toHaveAttribute("aria-hidden", "false");
+    expect(body).toHaveStyle({ display: "grid" });
+
+    fireEvent.keyDown(header!, { key: " " });
+    expect(body).toHaveAttribute("aria-hidden", "true");
+    expect(body).toHaveStyle({ display: "none" });
+  });
 });

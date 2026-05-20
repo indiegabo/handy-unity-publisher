@@ -37,6 +37,27 @@ describe("ConfirmDialog", () => {
     expect(onResolve).toHaveBeenCalledWith(null);
   });
 
+  it("exposes its destructive title and action labels through the accessibility tree", () => {
+    render(
+      <ConfirmDialog
+        confirmLabel="Delete run"
+        description="Keep the operator in the current shell context."
+        message="The current release run will remain untouched."
+        title="Delete release run?"
+      />,
+    );
+
+    expect(
+      screen.getByRole("dialog", { name: "Delete release run?" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Stay in shell" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Delete run" }),
+    ).toBeInTheDocument();
+  });
+
   it("resolves true when the confirm action is pressed", () => {
     const onResolve = vi.fn();
 

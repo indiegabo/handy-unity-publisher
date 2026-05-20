@@ -75,4 +75,34 @@ describe("WorkerStatusQuickView", () => {
       expect(action).toHaveFocus();
     });
   });
+
+  it("uses a shared summary strip for runtime and worker totals", () => {
+    const { container } = render(
+      <WorkerStatusQuickView
+        inspectionAvailable
+        onResolve={() => undefined}
+        projectWorkers={[
+          {
+            buildTargets: [
+              {
+                buildTargetId: 7,
+                diagnosticMessage: "Ready",
+                diagnosticStatus: "ready",
+                name: "Windows",
+                unityTargetPlatform: "StandaloneWindows64",
+              },
+            ],
+            pollingIntervalSeconds: 30,
+            repositoryId: 1,
+            repositoryName: "Worker Demo",
+          },
+        ]}
+        runtimeStatus="healthy"
+      />,
+    );
+
+    expect(
+      container.querySelector(".worker-status-quick-view__summary-strip.ui-summary-strip"),
+    ).not.toBeNull();
+  });
 });

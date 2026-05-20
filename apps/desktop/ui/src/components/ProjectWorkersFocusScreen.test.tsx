@@ -167,4 +167,62 @@ describe("ProjectWorkersFocusScreen", () => {
     expect(accordionBody).toHaveAttribute("aria-hidden", "true");
     expect(accordionBody).toHaveAttribute("hidden");
   });
+
+  it("uses shared summary strips for inventory and worker accordions", () => {
+    render(
+      <ProjectWorkersFocusScreen
+        actionError={null}
+        actionMessage={null}
+        inspectionAvailable
+        inspectionError={null}
+        inspectionStale={false}
+        onBulkInstantCheck={() => undefined}
+        onInstantCheck={() => undefined}
+        onRestartRuntime={() => undefined}
+        onRetryInventory={() => undefined}
+        onStartRuntime={() => undefined}
+        onStopRuntime={() => undefined}
+        pendingBulkInstantCheck={false}
+        pendingInstantCheckRepositoryId={null}
+        pendingRuntimeAction={null}
+        projectWorkers={[
+          {
+            pollingIntervalSeconds: 30,
+            repositoryId: 1,
+            repositoryName: "Revolutions",
+            buildTargets: [
+              {
+                buildTargetId: 1,
+                diagnosticMessage: "Ready",
+                diagnosticStatus: "ready",
+                name: "Windows",
+                unityTargetPlatform: "StandaloneWindows64",
+              },
+            ],
+          },
+        ]}
+        runtimeStatus="healthy"
+      />,
+    );
+
+    const inventoryAccordion = screen
+      .getByRole("button", { name: "Collapse Worker Inventory" })
+      .closest(".project-workers-section-accordion");
+    const workerAccordion = screen
+      .getByRole("button", { name: "Expand Revolutions" })
+      .closest(".project-workers-worker-accordion");
+
+    expect(inventoryAccordion).not.toBeNull();
+    expect(workerAccordion).not.toBeNull();
+    expect(
+      (inventoryAccordion as HTMLElement).querySelector(
+        ".project-workers-section-accordion__summary.ui-summary-strip",
+      ),
+    ).not.toBeNull();
+    expect(
+      (workerAccordion as HTMLElement).querySelector(
+        ".project-workers-worker-accordion__summary.ui-summary-strip",
+      ),
+    ).not.toBeNull();
+  });
 });

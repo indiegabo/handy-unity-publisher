@@ -162,6 +162,73 @@ beforeEach(() => {
 });
 
 describe("ProcessDetailFocusScreen", () => {
+  it("shows a retryable completed-snapshot error state without fake empty outputs", async () => {
+    loadBuildHistoryMock.mockRejectedValueOnce(new Error("Snapshot offline"));
+
+    render(
+      <OverlayProvider>
+        <ProcessDetailFocusScreen
+          process={COMPLETED_PROCESS}
+          usesLiveSnapshot
+        />
+      </OverlayProvider>,
+    );
+
+    expect(await screen.findByText("Snapshot offline")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Retry retained data" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "No artifact records are currently attached to this process.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "No retained log archive was found for this completed process.",
+      ),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry retained data" }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "View JSON report" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the last completed snapshot visible when a refresh fails", async () => {
+    render(
+      <OverlayProvider>
+        <ProcessDetailFocusScreen
+          process={COMPLETED_PROCESS}
+          usesLiveSnapshot
+        />
+      </OverlayProvider>,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "View JSON report" }),
+    ).toBeInTheDocument();
+
+    loadBuildHistoryMock.mockRejectedValueOnce(new Error("Snapshot offline"));
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh retained data" }),
+    );
+
+    expect(await screen.findByText("Snapshot offline")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Showing the last known completed snapshot while retained data refresh recovers.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "View JSON report" }),
+    ).toBeInTheDocument();
+  });
+
   it("requires confirmation before deleting process outputs", async () => {
     render(
       <OverlayProvider>
@@ -177,7 +244,7 @@ describe("ProcessDetailFocusScreen", () => {
     );
 
     const dialog = await screen.findByRole("dialog", {
-      name: "Delete process outputs?",
+      name: "Delete outputs?",
     });
 
     expect(dialog).toBeInTheDocument();
@@ -203,7 +270,7 @@ describe("ProcessDetailFocusScreen", () => {
     );
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "Delete retained files" }),
+      await screen.findByRole("button", { name: "Delete retained material" }),
     );
 
     const dialog = await screen.findByRole("dialog", {
@@ -214,7 +281,9 @@ describe("ProcessDetailFocusScreen", () => {
     expect(purgeBuildExecutionRetentionMock).not.toHaveBeenCalled();
 
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Delete retained" }),
+      within(dialog).getByRole("button", {
+        name: "Delete retained material",
+      }),
     );
 
     await waitFor(() => {
@@ -251,6 +320,37 @@ describe("ProcessDetailFocusScreen", () => {
     await waitFor(() => {
       expect(requestRerunMock).toHaveBeenCalledWith(COMPLETED_PROCESS);
     });
+  });
+
+  it("uses shared panel summaries for the outcome and runtime metadata panels", async () => {
+    render(
+      <OverlayProvider>
+        <ProcessDetailFocusScreen
+          process={COMPLETED_PROCESS}
+          usesLiveSnapshot
+        />
+      </OverlayProvider>,
+    );
+
+    await screen.findByRole("button", { name: "View JSON report" });
+
+    const finalOutcomePanel = screen
+      .getByRole("heading", { name: "Final Outcome" })
+      .closest("section");
+    const runtimeMetadataPanel = screen
+      .getByRole("heading", { name: "Runtime Metadata" })
+      .closest("section");
+
+    expect(finalOutcomePanel).not.toBeNull();
+    expect(runtimeMetadataPanel).not.toBeNull();
+    expect(
+      (finalOutcomePanel as HTMLElement).querySelector(".ui-panel__summary"),
+    ).not.toBeNull();
+    expect(
+      (runtimeMetadataPanel as HTMLElement).querySelector(
+        ".ui-panel__summary",
+      ),
+    ).not.toBeNull();
   });
 
   it("opens retained report JSON in the log viewer overlay", async () => {
@@ -321,7 +421,11 @@ describe("ProcessDetailFocusScreen", () => {
       }),
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Open viewer" }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Open retained log viewer for Editor.log",
+      }),
+    );
 
     await waitFor(() => {
       expect(readRetainedLogArchiveEntryMock).toHaveBeenCalledWith(
@@ -339,6 +443,43 @@ describe("ProcessDetailFocusScreen", () => {
     expect(
       within(dialog).getByText(/Showing the full log file/i),
     ).toBeInTheDocument();
+  });
+
+  it("dismisses the retained log viewer from its close button and restores focus to the trigger", async () => {
+    render(
+      <OverlayProvider>
+        <ProcessDetailFocusScreen
+          process={COMPLETED_PROCESS}
+          usesLiveSnapshot
+        />
+      </OverlayProvider>,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Expand retained log Editor.log",
+      }),
+    );
+
+    const openViewerButton = await screen.findByRole("button", {
+      name: "Open retained log viewer for Editor.log",
+    });
+
+    openViewerButton.focus();
+    fireEvent.click(openViewerButton);
+
+    const dialog = await screen.findByRole("dialog", { name: "Editor.log" });
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Close overlay" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Editor.log" }),
+      ).not.toBeInTheDocument();
+      expect(openViewerButton).toHaveFocus();
+    });
   });
 
   it("opens an artifact viewer overlay and forwards host actions from it", async () => {

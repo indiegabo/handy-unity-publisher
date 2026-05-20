@@ -33,6 +33,40 @@ describe("FullScreenModal", () => {
     });
   });
 
+  it("focuses an explicit autofocus target with tabindex -1 before interactive controls", async () => {
+    render(
+      <FullScreenModal onResolve={() => undefined} title="Project workers">
+        <p data-overlay-autofocus tabIndex={-1}>
+          Loading project worker inventory...
+        </p>
+        <button type="button">Open Project Workers</button>
+      </FullScreenModal>,
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Loading project worker inventory..."),
+      ).toHaveFocus();
+    });
+  });
+
+  it("ignores data-overlay-autofocus set to false and uses the next valid target", async () => {
+    render(
+      <FullScreenModal onResolve={() => undefined} title="Artifact viewer">
+        <button data-overlay-autofocus={false} type="button">
+          Open artifact
+        </button>
+        <button data-overlay-autofocus type="button">
+          Open folder
+        </button>
+      </FullScreenModal>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Open folder" })).toHaveFocus();
+    });
+  });
+
   it("wraps focus inside the modal and resolves null on Escape", () => {
     const onResolve = vi.fn();
 
