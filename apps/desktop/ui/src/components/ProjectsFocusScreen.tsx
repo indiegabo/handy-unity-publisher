@@ -41,8 +41,25 @@ export function ProjectsFocusScreen({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [quickOpenQuery, setQuickOpenQuery] = useState("");
+  const quickOpenInputRef = useRef<HTMLInputElement | null>(null);
   const projectCardRefs = useRef<Record<number, HTMLButtonElement | null>>({});
   const deferredQuickOpenQuery = useDeferredValue(quickOpenQuery);
+
+  const focusProjectCard = useEffectEvent((repositoryId: number) => {
+    const targetCard = projectCardRefs.current[repositoryId];
+
+    if (!targetCard) {
+      return;
+    }
+
+    targetCard.focus();
+
+    if (document.activeElement !== targetCard) {
+      window.requestAnimationFrame(() => {
+        projectCardRefs.current[repositoryId]?.focus();
+      });
+    }
+  });
 
   const highlightedProject =
     highlightedRepositoryId === null
@@ -147,7 +164,15 @@ export function ProjectsFocusScreen({
     (event: React.KeyboardEvent<HTMLInputElement>) => {
       if (event.key === "ArrowDown" && filteredRepositories.length > 0) {
         event.preventDefault();
-        projectCardRefs.current[filteredRepositories[0].repository_id]?.focus();
+        focusProjectCard(filteredRepositories[0].repository_id);
+        return;
+      }
+
+      if (event.key === "ArrowUp" && filteredRepositories.length > 0) {
+        event.preventDefault();
+        focusProjectCard(
+          filteredRepositories[filteredRepositories.length - 1].repository_id,
+        );
         return;
       }
 
@@ -181,6 +206,55 @@ export function ProjectsFocusScreen({
         targetRepository.repository_id,
         targetRepository.repository_name,
       );
+    },
+  );
+
+  const handleProjectCardKeyDown = useEffectEvent(
+    (repositoryId: number, event: React.KeyboardEvent<HTMLButtonElement>) => {
+      if (filteredRepositories.length === 0) {
+        return;
+      }
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        quickOpenInputRef.current?.focus();
+        return;
+      }
+
+      const currentIndex = filteredRepositories.findIndex(
+        (repository) => repository.repository_id === repositoryId,
+      );
+
+      if (currentIndex === -1) {
+        return;
+      }
+
+      let targetRepositoryId = repositoryId;
+
+      switch (event.key) {
+        case "ArrowDown":
+          targetRepositoryId =
+            filteredRepositories[
+              Math.min(currentIndex + 1, filteredRepositories.length - 1)
+            ].repository_id;
+          break;
+        case "ArrowUp":
+          targetRepositoryId =
+            filteredRepositories[Math.max(currentIndex - 1, 0)].repository_id;
+          break;
+        case "Home":
+          targetRepositoryId = filteredRepositories[0].repository_id;
+          break;
+        case "End":
+          targetRepositoryId =
+            filteredRepositories[filteredRepositories.length - 1].repository_id;
+          break;
+        default:
+          return;
+      }
+
+      event.preventDefault();
+      focusProjectCard(targetRepositoryId);
     },
   );
 
@@ -239,6 +313,7 @@ export function ProjectsFocusScreen({
               ? "Loading inventory..."
               : `${filteredRepositories.length} matching project${filteredRepositories.length === 1 ? "" : "s"}`
           }
+          inputRef={quickOpenInputRef}
           label="Quick open"
           leadingIcon="search"
           onChange={setQuickOpenQuery}
@@ -332,6 +407,7 @@ export function ProjectsFocusScreen({
         {!isLoading && filteredRepositories.length > 0 ? (
           <ProjectList
             highlightedRepositoryId={highlightedRepositoryId}
+            onCardKeyDown={handleProjectCardKeyDown}
             onCardRef={(repositoryId, element) => {
               projectCardRefs.current[repositoryId] = element;
             }}

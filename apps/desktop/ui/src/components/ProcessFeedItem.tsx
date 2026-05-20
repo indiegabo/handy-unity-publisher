@@ -1,4 +1,4 @@
-import { Badge } from "./Surface";
+import { Badge, SummaryStrip } from "./Surface";
 import type { IconName } from "./Icon";
 import { IconButton } from "./Button";
 import { VerticalAccordion } from "./VerticalAccordion";
@@ -20,7 +20,9 @@ export function ProcessFeedItem({
   process,
   onOpenDetail,
 }: ProcessFeedItemProps) {
-  const normalizedStatus = normalizeProcessFeedDisplayStatus(process.display_status);
+  const normalizedStatus = normalizeProcessFeedDisplayStatus(
+    process.display_status,
+  );
   const currentStep = resolveProcessFeedStepLabel(process, normalizedStatus);
 
   return (
@@ -52,33 +54,37 @@ export function ProcessFeedItem({
                   `process-status-trigger--${normalizedStatus}`,
                 )}
                 icon={resolveStatusIcon(normalizedStatus)}
-                label={`Abrir detalhe do processo #${process.release_run_id}`}
+                label={`Open process detail #${process.release_run_id}`}
                 onClick={() => onOpenDetail(process)}
                 size="sm"
                 variant="ghost"
               />
             </div>
+
+            <SummaryStrip className="process-item__summary-strip">
+              <div className="process-item__badges">
+                <Badge className="process-item__badge" tone="neutral">
+                  {process.git_tag}
+                </Badge>
+                <Badge className="process-item__badge" tone="muted">
+                  {formatProcessFeedEngineKindBadge(
+                    process.repository_engine_kind,
+                  )}
+                </Badge>
+                <Badge className="process-item__badge" tone="muted">
+                  {formatProcessFeedEngineVersionBadge(process.engine_version)}
+                </Badge>
+                <Badge className="process-item__badge" tone="muted">
+                  {formatProcessFeedBuildCount(process.total_build_runs)}
+                </Badge>
+              </div>
+            </SummaryStrip>
           </div>
         }
         triggerMode="button"
       >
         <div className="process-item__body">
           <p className="process-item__step">{currentStep}</p>
-
-          <div className="process-item__badges">
-            <Badge className="process-item__badge" tone="neutral">
-              {process.git_tag}
-            </Badge>
-            <Badge className="process-item__badge" tone="muted">
-              {formatProcessFeedEngineKindBadge(process.repository_engine_kind)}
-            </Badge>
-            <Badge className="process-item__badge" tone="muted">
-              {formatProcessFeedEngineVersionBadge(process.engine_version)}
-            </Badge>
-            <Badge className="process-item__badge" tone="muted">
-              {formatProcessFeedBuildCount(process.total_build_runs)}
-            </Badge>
-          </div>
         </div>
       </VerticalAccordion>
     </article>

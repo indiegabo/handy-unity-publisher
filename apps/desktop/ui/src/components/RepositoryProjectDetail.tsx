@@ -8,9 +8,9 @@ import {
 } from "react";
 
 import { Button, IconButton } from "./Button";
+import { BuildTargetRemovalCallout } from "./BuildTargetRemovalCallout";
 import { type IconName } from "./Icon";
 import FormSection from "./forms/FormSection";
-import BuildTargetEditor from "./forms/BuildTargetEditor";
 import {
   PublishDestinationsEditor,
   buildPublishDestinationDrafts,
@@ -29,7 +29,14 @@ import {
 import { SelectField, TextField, type SelectOption } from "./Field";
 import { PathPickerField } from "./PathPickerField";
 import { RepositoryEngineField } from "./RepositoryEngineField";
-import { Badge, FocusPageFrame, MetaItem, MetaRow } from "./Surface";
+import {
+  Badge,
+  FocusPageFrame,
+  MetaItem,
+  MetaRow,
+  SummaryStrip,
+  SurfacePanel,
+} from "./Surface";
 import {
   connectRepositoryAuth,
   detectRepositoryProvider,
@@ -1103,7 +1110,18 @@ export function RepositoryProjectDetail({
           eyebrow="Repository Project"
           title="Project Detail"
         >
-          <p className="feed-banner feed-banner--error">{error}</p>
+          <div className="feed-state">
+            <p className="feed-state__title">Project detail is unavailable.</p>
+            <p className="feed-state__copy">{error}</p>
+            <Button
+              leadingIcon="refresh"
+              onClick={handleReloadProject}
+              size="sm"
+              variant="secondary"
+            >
+              Retry project load
+            </Button>
+          </div>
         </FocusPageFrame>
       </div>
     );
@@ -1485,36 +1503,38 @@ export function RepositoryProjectDetail({
                           isAssessingRepositoryAccess ||
                           repositoryAccessAssessment ||
                           repositoryAccessError ? (
-                            <MetaRow className="wizard-callout__meta">
-                              <MetaItem label="Provider">
-                                {formatRepositoryAccessProviderLabel(
-                                  repositoryAccessAssessment,
-                                  isAssessingRepositoryAccess,
-                                  repositoryAccessError,
-                                )}
-                              </MetaItem>
-                              <MetaItem label="Visibility">
-                                {formatRepositoryVisibilityLabel(
-                                  repositoryAccessAssessment,
-                                  isAssessingRepositoryAccess,
-                                  repositoryAccessError,
-                                )}
-                              </MetaItem>
-                              <MetaItem label="Login">
-                                {formatRepositoryLoginStatus(
-                                  repositoryAccessAssessment,
-                                  githubAuthProvider,
-                                  isLoadingAuthProviders,
-                                )}
-                              </MetaItem>
-                              <MetaItem label="Connection">
-                                {formatRepositoryBindingStatus(
-                                  repositoryAccessAssessment,
-                                  desiredRepositoryCredentialId,
-                                  pendingRepositoryAccessAction,
-                                )}
-                              </MetaItem>
-                            </MetaRow>
+                            <SummaryStrip className="wizard-callout__summary-strip">
+                              <MetaRow className="wizard-callout__meta">
+                                <MetaItem label="Provider">
+                                  {formatRepositoryAccessProviderLabel(
+                                    repositoryAccessAssessment,
+                                    isAssessingRepositoryAccess,
+                                    repositoryAccessError,
+                                  )}
+                                </MetaItem>
+                                <MetaItem label="Visibility">
+                                  {formatRepositoryVisibilityLabel(
+                                    repositoryAccessAssessment,
+                                    isAssessingRepositoryAccess,
+                                    repositoryAccessError,
+                                  )}
+                                </MetaItem>
+                                <MetaItem label="Login">
+                                  {formatRepositoryLoginStatus(
+                                    repositoryAccessAssessment,
+                                    githubAuthProvider,
+                                    isLoadingAuthProviders,
+                                  )}
+                                </MetaItem>
+                                <MetaItem label="Connection">
+                                  {formatRepositoryBindingStatus(
+                                    repositoryAccessAssessment,
+                                    desiredRepositoryCredentialId,
+                                    pendingRepositoryAccessAction,
+                                  )}
+                                </MetaItem>
+                              </MetaRow>
+                            </SummaryStrip>
                           ) : null}
 
                           {repositoryAccessActionMessage ? (
@@ -1727,42 +1747,14 @@ export function RepositoryProjectDetail({
                 ) : null}
 
                 {pendingBuildTargetRemoval ? (
-                  <div className="wizard-callout wizard-callout--compact wizard-callout--auth">
-                    <div className="wizard-callout__header">
-                      <div>
-                        <p className="wizard-callout__title">
-                          Confirm build target removal
-                        </p>
-                        <p className="wizard-callout__copy">
-                          Removing{" "}
-                          {pendingBuildTargetRemoval.name.trim() ||
-                            "this build target"}{" "}
-                          also removes publish bindings from{" "}
-                          {pendingBuildTargetBindingImpact.join(", ")}.
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="wizard-callout__actions">
-                      <Button
-                        disabled={isSaving}
-                        leadingIcon="trash"
-                        onClick={handleConfirmBuildTargetRemoval}
-                        size="sm"
-                        variant="primary"
-                      >
-                        Remove target and bindings
-                      </Button>
-                      <Button
-                        disabled={isSaving}
-                        onClick={() => setPendingBuildTargetRemovalId(null)}
-                        size="sm"
-                        variant="ghost"
-                      >
-                        Cancel
-                      </Button>
-                    </div>
-                  </div>
+                  <BuildTargetRemovalCallout
+                    bindingImpact={pendingBuildTargetBindingImpact}
+                    cancelDisabled={isSaving}
+                    confirmDisabled={isSaving}
+                    onCancel={() => setPendingBuildTargetRemovalId(null)}
+                    onConfirm={handleConfirmBuildTargetRemoval}
+                    targetName={pendingBuildTargetRemoval.name}
+                  />
                 ) : null}
 
                 {draft && draft.buildTargets.length === 0 ? (
@@ -1781,6 +1773,10 @@ export function RepositoryProjectDetail({
                       const diagnostics = pathDiagnostics[target.id];
                       const fieldErrors =
                         validationErrors.buildTargets[target.id] ?? {};
+                      const bindingDestinations = collectBuildTargetBindingImpact(
+                        draft.publishDestinations,
+                        target.id,
+                      );
                       const isOpen = Boolean(expandedTargetIds[target.id]);
 
                       return (
@@ -1826,12 +1822,19 @@ export function RepositoryProjectDetail({
                               </Button>
                             </div>
                           }
+                          summary={
+                            isOpen ? null : (
+                              <ProjectDetailBuildTargetSummary
+                                bindingDestinations={bindingDestinations}
+                                diagnostics={diagnostics}
+                                isValidating={Boolean(
+                                  validatingTargets[target.id],
+                                )}
+                                target={target}
+                              />
+                            )
+                          }
                         >
-                          <BuildTargetEditor
-                            target={target}
-                            onRemove={() => handleRemoveBuildTarget(target.id)}
-                          />
-
                           {isOpen ? (
                             <div className="wizard-form-grid wizard-form-grid--targets">
                               <TextField
@@ -1974,45 +1977,12 @@ export function RepositoryProjectDetail({
                     onSaveCredential={handleSavePublishCredential}
                   />
 
-                  <div className="wizard-callout wizard-callout--compact wizard-callout--support">
-                    <div className="wizard-callout__header">
-                      <div>
-                        <p className="wizard-callout__title">Draft impact</p>
-                        <p className="wizard-callout__copy">
-                          Unbound targets stay local under the runtime-managed
-                          output root until a destination binding consumes or
-                          uploads them.
-                        </p>
-                      </div>
-                    </div>
-
-                    <MetaRow className="wizard-callout__meta">
-                      <MetaItem label="Unbound targets">
-                        {String(unboundPublishTargetNames.length)}
-                      </MetaItem>
-                      <MetaItem label="Credential gaps">
-                        {
-                          publishDestinationReviewSummary.filter(
-                            (destination) => destination.missingCredential,
-                          ).length
-                        }
-                      </MetaItem>
-                    </MetaRow>
-
-                    {publishDestinationReviewSummary.length > 0 ? (
-                      <p className="wizard-callout__copy">
-                        {publishDestinationReviewSummary
-                          .map((destination) => {
-                            const targetSummary =
-                              destination.bindingTargetNames.length > 0
-                                ? destination.bindingTargetNames.join(", ")
-                                : "no bound targets";
-                            return `${destination.name}: ${targetSummary}`;
-                          })
-                          .join(" | ")}
-                      </p>
-                    ) : null}
-                  </div>
+                  <ProjectDetailPublishSupportPanel
+                    publishDestinationReviewSummary={
+                      publishDestinationReviewSummary
+                    }
+                    unboundPublishTargetNames={unboundPublishTargetNames}
+                  />
                 </div>
               </ProjectDetailSectionPanel>
 
@@ -2070,6 +2040,60 @@ function ProjectDetailSectionTabs({
   disabled?: boolean;
   onChange: (sectionKey: ProjectDetailSectionKey) => void;
 }) {
+  const tabRefs = useRef<
+    Partial<Record<ProjectDetailSectionKey, HTMLButtonElement | null>>
+  >({});
+
+  const handleTabKeyDown =
+    (key: ProjectDetailSectionKey) =>
+    (event: React.KeyboardEvent<HTMLButtonElement>) => {
+      if (disabled) {
+        return;
+      }
+
+      const currentIndex = PROJECT_DETAIL_SECTION_TABS.findIndex(
+        (tab) => tab.key === key,
+      );
+
+      if (currentIndex < 0) {
+        return;
+      }
+
+      let nextIndex: number | null = null;
+
+      switch (event.key) {
+        case "ArrowUp":
+          nextIndex =
+            currentIndex === 0
+              ? PROJECT_DETAIL_SECTION_TABS.length - 1
+              : currentIndex - 1;
+          break;
+        case "ArrowDown":
+          nextIndex =
+            currentIndex === PROJECT_DETAIL_SECTION_TABS.length - 1
+              ? 0
+              : currentIndex + 1;
+          break;
+        case "Home":
+          nextIndex = 0;
+          break;
+        case "End":
+          nextIndex = PROJECT_DETAIL_SECTION_TABS.length - 1;
+          break;
+        default:
+          return;
+      }
+
+      event.preventDefault();
+
+      const nextTab = PROJECT_DETAIL_SECTION_TABS[nextIndex];
+
+      onChange(nextTab.key);
+      requestAnimationFrame(() => {
+        tabRefs.current[nextTab.key]?.focus();
+      });
+    };
+
   return (
     <div
       aria-label="Project detail sections"
@@ -2095,6 +2119,10 @@ function ProjectDetailSectionTabs({
             id={`project-detail-tab-${tab.key}`}
             label={tab.label}
             onClick={() => onChange(tab.key)}
+            onKeyDown={handleTabKeyDown(tab.key)}
+            ref={(node) => {
+              tabRefs.current[tab.key] = node;
+            }}
             role="tab"
             size="sm"
             tabIndex={isActive ? 0 : -1}
@@ -2143,9 +2171,9 @@ function ProjectDetailSectionPanel({
             <h2 className="ui-panel__title">{title}</h2>
             <p className="ui-panel__description">{description}</p>
             {summary ? (
-              <div className="project-detail-section-accordion__summary">
+              <SummaryStrip className="project-detail-section-accordion__summary">
                 {summary}
-              </div>
+              </SummaryStrip>
             ) : null}
           </div>
           {actions ? (
@@ -2159,6 +2187,81 @@ function ProjectDetailSectionPanel({
         {children}
       </div>
     </section>
+  );
+}
+
+function ProjectDetailBuildTargetSummary({
+  bindingDestinations,
+  diagnostics,
+  isValidating,
+  target,
+}: {
+  bindingDestinations: string[];
+  diagnostics: UnityExecutableValidation | null;
+  isValidating: boolean;
+  target: RepositoryProjectBuildTargetDraft;
+}) {
+  return (
+    <div className="project-detail-target-card">
+      <SummaryStrip className="project-detail-target-card__summary-strip">
+        <MetaRow className="wizard-target-card__summary">
+          <MetaItem label="Build method">
+            {formatBuildTargetMethodSummary(target.buildMethod)}
+          </MetaItem>
+          <MetaItem label="Unity executable">
+            {formatCollapsedBuildTargetUnitySummary(
+              diagnostics,
+              isValidating,
+              target.unityExecutablePath,
+            )}
+          </MetaItem>
+          <MetaItem label="Publish bindings">
+            {formatCollapsedBuildTargetBindingSummary(bindingDestinations)}
+          </MetaItem>
+        </MetaRow>
+      </SummaryStrip>
+    </div>
+  );
+}
+
+function ProjectDetailPublishSupportPanel({
+  publishDestinationReviewSummary,
+  unboundPublishTargetNames,
+}: {
+  publishDestinationReviewSummary: ReturnType<
+    typeof buildPublishDestinationReviewSummary
+  >;
+  unboundPublishTargetNames: string[];
+}) {
+  const missingCredentialCount = publishDestinationReviewSummary.filter(
+    (destination) => destination.missingCredential,
+  ).length;
+  const draftImpactSummary = publishDestinationReviewSummary.length
+    ? publishDestinationReviewSummary
+        .map((destination) => {
+          const targetSummary = destination.bindingTargetNames.length
+            ? destination.bindingTargetNames.join(", ")
+            : "no bound targets";
+          return `${destination.name}: ${targetSummary}`;
+        })
+        .join(" | ")
+    : "No publish destinations are currently configured.";
+
+  return (
+    <SurfacePanel
+      description="Unbound targets stay local under the runtime-managed output root until a destination binding consumes or uploads them."
+      eyebrow="Support"
+      title="Draft impact"
+      tone="inset"
+    >
+      <MetaRow>
+        <MetaItem label="Unbound targets">
+          {String(unboundPublishTargetNames.length)}
+        </MetaItem>
+        <MetaItem label="Credential gaps">{missingCredentialCount}</MetaItem>
+      </MetaRow>
+      <p className="project-detail-target-card__copy">{draftImpactSummary}</p>
+    </SurfacePanel>
   );
 }
 
@@ -2226,6 +2329,43 @@ function formatTargetAttentionSummary(targetAttentionCount: number) {
   }
 
   return `${targetAttentionCount} need review`;
+}
+
+function formatBuildTargetMethodSummary(buildMethod: string) {
+  const trimmed = buildMethod.trim();
+  return trimmed ? trimmed : "Missing build method";
+}
+
+function formatCollapsedBuildTargetUnitySummary(
+  diagnostics: UnityExecutableValidation | null,
+  isValidating: boolean,
+  unityExecutablePath: string,
+) {
+  if (isValidating) {
+    return "Checking";
+  }
+
+  if (!unityExecutablePath.trim()) {
+    return "Missing path";
+  }
+
+  if (!diagnostics) {
+    return "Pending check";
+  }
+
+  return diagnostics.status === "ready" ? "Ready" : "Needs review";
+}
+
+function formatCollapsedBuildTargetBindingSummary(bindingDestinations: string[]) {
+  if (bindingDestinations.length === 0) {
+    return "No publish bindings";
+  }
+
+  if (bindingDestinations.length <= 2) {
+    return bindingDestinations.join(", ");
+  }
+
+  return `${bindingDestinations.slice(0, 2).join(", ")} +${bindingDestinations.length - 2} more`;
 }
 
 function countEnabledPublishDestinationBindings(

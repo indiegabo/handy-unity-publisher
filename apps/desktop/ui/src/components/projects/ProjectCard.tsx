@@ -2,18 +2,22 @@ import React from "react";
 
 import { Button } from "../Button";
 import { Icon } from "../Icon";
-import { Badge, MetaItem, MetaRow } from "../Surface";
+import { Badge, MetaItem, MetaRow, SummaryStrip } from "../Surface";
 import type { RepositoryInspectionEntry } from "../../services/projects";
 
 export type ProjectCardProps = {
   repository: RepositoryInspectionEntry;
   highlighted?: boolean;
+  onCardKeyDown?: (
+    repositoryId: number,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => void;
   onOpen: (repositoryId: number, repositoryName: string) => void;
   onQuickView: (repositoryId: number) => void;
 };
 
 const ProjectCard = React.forwardRef<HTMLButtonElement, ProjectCardProps>(
-  ({ repository, highlighted, onOpen, onQuickView }, ref) => {
+  ({ repository, highlighted, onCardKeyDown, onOpen, onQuickView }, ref) => {
     const showStatusBadge = highlighted || !repository.enabled;
 
     return (
@@ -24,11 +28,16 @@ const ProjectCard = React.forwardRef<HTMLButtonElement, ProjectCardProps>(
         )}
       >
         <button
+          aria-label={`Open project ${repository.repository_name}`}
           ref={ref}
           className="project-list-card__open"
+          onKeyDown={(event) =>
+            onCardKeyDown?.(repository.repository_id, event)
+          }
           onClick={() =>
             onOpen(repository.repository_id, repository.repository_name)
           }
+          title={`Open project ${repository.repository_name}`}
           type="button"
         >
           <div className="project-list-card__header">
@@ -56,26 +65,30 @@ const ProjectCard = React.forwardRef<HTMLButtonElement, ProjectCardProps>(
             </span>
           </div>
 
-          <MetaRow className="project-list-card__meta">
-            <MetaItem label="Engine">{repository.engine_kind}</MetaItem>
-            <MetaItem label="Poll">
-              {`${repository.polling_interval_seconds}s cadence`}
-            </MetaItem>
-            <MetaItem label="Targets">
-              {formatTargetCount(repository.enabled_build_target_count)}
-            </MetaItem>
-          </MetaRow>
+          <SummaryStrip className="project-list-card__summary-strip">
+            <MetaRow className="project-list-card__meta">
+              <MetaItem label="Engine">{repository.engine_kind}</MetaItem>
+              <MetaItem label="Poll">
+                {`${repository.polling_interval_seconds}s cadence`}
+              </MetaItem>
+              <MetaItem label="Targets">
+                {formatTargetCount(repository.enabled_build_target_count)}
+              </MetaItem>
+            </MetaRow>
 
-          <p className="project-list-card__summary">
-            {buildRepositorySummary(repository)}
-          </p>
+            <p className="project-list-card__summary">
+              {buildRepositorySummary(repository)}
+            </p>
+          </SummaryStrip>
         </button>
 
         <div className="project-list-card__actions">
           <Button
+            aria-label={`Quick view for ${repository.repository_name}`}
             leadingIcon="search"
             onClick={() => onQuickView(repository.repository_id)}
             size="sm"
+            title={`Quick view for ${repository.repository_name}`}
             variant="ghost"
           >
             Quick view

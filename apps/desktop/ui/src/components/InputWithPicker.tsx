@@ -1,4 +1,9 @@
-import type { ComponentType, InputHTMLAttributes } from "react";
+import {
+  useId,
+  type ComponentType,
+  type InputHTMLAttributes,
+  type Ref,
+} from "react";
 
 import { Button } from "./Button";
 import { Icon, type IconName } from "./Icon";
@@ -14,6 +19,7 @@ export type InputWithPickerProps = Omit<
   disabled?: boolean;
   error?: string;
   hint?: string;
+  inputRef?: Ref<HTMLInputElement>;
   leadingIcon?: IconName;
   onPick?: (value: string) => void;
   value?: string;
@@ -32,6 +38,7 @@ const InputWithPicker = ({
   disabled = false,
   error,
   hint,
+  inputRef,
   leadingIcon,
   onPick,
   onBlur,
@@ -44,6 +51,11 @@ const InputWithPicker = ({
   ...inputProps
 }: InputWithPickerProps) => {
   const { openOverlay } = useOverlay();
+  const inputId = useId();
+  const labelId = `${inputId}-label`;
+  const hintId = hint ? `${inputId}-hint` : undefined;
+  const errorId = error ? `${inputId}-error` : undefined;
+  const describedBy = [hintId, errorId].filter(Boolean).join(" ") || undefined;
 
   const handlePick = async () => {
     if (disabled || !pickerComponent) {
@@ -74,8 +86,14 @@ const InputWithPicker = ({
       )}
     >
       <span className="ui-field__header">
-        <span className="ui-field__label">{label}</span>
-        {hint ? <span className="ui-field__hint">{hint}</span> : null}
+        <span className="ui-field__label" id={labelId}>
+          {label}
+        </span>
+        {hint ? (
+          <span className="ui-field__hint" id={hintId}>
+            {hint}
+          </span>
+        ) : null}
       </span>
 
       <span className="input-with-picker__row">
@@ -86,12 +104,16 @@ const InputWithPicker = ({
             ) : null}
             <input
               {...inputProps}
+              aria-describedby={describedBy}
+              aria-labelledby={labelId}
               autoComplete={autoComplete}
               className={joinClassNames(
                 "ui-field__input",
                 leadingIcon && "ui-field__input--with-icon",
               )}
               disabled={disabled}
+              id={inputId}
+              ref={inputRef}
               onBlur={onBlur}
               onChange={(event) => onChange?.(event.target.value)}
               placeholder={placeholder}
@@ -116,7 +138,11 @@ const InputWithPicker = ({
         </span>
       </span>
 
-      {error ? <span className="ui-field__error">{error}</span> : null}
+      {error ? (
+        <span className="ui-field__error" id={errorId}>
+          {error}
+        </span>
+      ) : null}
     </label>
   );
 };

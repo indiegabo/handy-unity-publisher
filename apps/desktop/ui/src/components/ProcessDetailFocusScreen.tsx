@@ -9,16 +9,13 @@ import {
 import { Button } from "./Button";
 import { ArtifactViewer } from "./ArtifactViewer";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { ExecutionReportPanel } from "./ExecutionReportPanel";
 import { LogViewerModal } from "./LogViewerModal";
+import { OutputsPanel } from "./OutputsPanel";
 import { useOverlay } from "./OverlayManager";
-import {
-  Badge,
-  FocusPageFrame,
-  MetaItem,
-  MetaRow,
-  SurfacePanel,
-} from "./Surface";
-import { VerticalAccordion } from "./VerticalAccordion";
+import { RetainedLogsPanel } from "./RetainedLogsPanel";
+import ScreenScaffold from "./ScreenScaffold";
+import { Badge, MetaItem, MetaRow, SurfacePanel } from "./Surface";
 import {
   formatProcessFeedBuildCount,
   formatProcessFeedEngineKindBadge,
@@ -54,11 +51,15 @@ type ProcessDetailFocusScreenProps = {
 };
 
 type CompletedProcessSnapshot = {
+  releaseRunId: number | null;
   builds: BuildHistoryRecord[];
   artifacts: ArtifactInspectionRecord[];
   executionReport: BuildExecutionReportPayload | null;
   outputsPath: string | null;
+  isAvailable: boolean;
   isLoading: boolean;
+  isRefreshing: boolean;
+  isStale: boolean;
   error: string | null;
 };
 
@@ -68,11 +69,15 @@ type LogPreviewState = {
 };
 
 const EMPTY_COMPLETED_PROCESS_SNAPSHOT: CompletedProcessSnapshot = {
+  releaseRunId: null,
   builds: [],
   artifacts: [],
   executionReport: null,
   outputsPath: null,
+  isAvailable: false,
   isLoading: false,
+  isRefreshing: false,
+  isStale: false,
   error: null,
 };
 
@@ -104,8 +109,8 @@ export function ProcessDetailFocusScreen({
 
   if (!process) {
     return (
-      <FocusPageFrame
-        description="The selected process is no longer present on the current feed page."
+      <ScreenScaffold
+        subtitle="The selected process is no longer present on the current feed page."
         eyebrow="Process"
         title="Process detail unavailable"
       >
@@ -113,7 +118,7 @@ export function ProcessDetailFocusScreen({
           description="Return to the main feed and reopen the process if you need a fresh runtime snapshot."
           title="No cached snapshot"
         />
-      </FocusPageFrame>
+      </ScreenScaffold>
     );
   }
 
@@ -129,9 +134,21 @@ export function ProcessDetailFocusScreen({
     latestCompletedSnapshotRequestIdRef.current = requestId;
 
     startTransition(() => {
-      setCompletedSnapshot({
-        ...EMPTY_COMPLETED_PROCESS_SNAPSHOT,
-        isLoading: true,
+      setCompletedSnapshot((current) => {
+        if (current.isAvailable && current.releaseRunId === releaseRunId) {
+          return {
+            ...current,
+            isRefreshing: true,
+            isStale: false,
+            error: null,
+          };
+        }
+
+        return {
+          ...EMPTY_COMPLETED_PROCESS_SNAPSHOT,
+          releaseRunId,
+          isLoading: true,
+        };
       });
       setLogPreviewsByEntryPath({});
       setPendingLogPreviewEntryPath(null);
@@ -163,11 +180,15 @@ export function ProcessDetailFocusScreen({
 
       startTransition(() => {
         setCompletedSnapshot({
+          releaseRunId,
           builds,
           artifacts,
           executionReport,
           outputsPath: resolveOutputsPath(builds, artifacts),
+          isAvailable: true,
           isLoading: false,
+          isRefreshing: false,
+          isStale: false,
           error: null,
         });
       });
@@ -177,10 +198,23 @@ export function ProcessDetailFocusScreen({
       }
 
       startTransition(() => {
-        setCompletedSnapshot({
-          ...EMPTY_COMPLETED_PROCESS_SNAPSHOT,
-          isLoading: false,
-          error: buildProcessDetailErrorMessage(error),
+        setCompletedSnapshot((current) => {
+          if (current.isAvailable && current.releaseRunId === releaseRunId) {
+            return {
+              ...current,
+              isLoading: false,
+              isRefreshing: false,
+              isStale: true,
+              error: buildProcessDetailErrorMessage(error),
+            };
+          }
+
+          return {
+            ...EMPTY_COMPLETED_PROCESS_SNAPSHOT,
+            releaseRunId,
+            isLoading: false,
+            error: buildProcessDetailErrorMessage(error),
+          };
         });
       });
     }
@@ -202,6 +236,14 @@ export function ProcessDetailFocusScreen({
 
     void loadCompletedSnapshot(process.release_run_id);
   }, [isCompletedMode, process.release_run_id]);
+
+  const handleRetryCompletedSnapshot = useEffectEvent(() => {
+    if (!isCompletedMode) {
+      return;
+    }
+
+    void loadCompletedSnapshot(process.release_run_id);
+  });
 
   const handleOpenPath = useEffectEvent(async (path: string) => {
     if (!path.trim()) {
@@ -308,6 +350,10 @@ export function ProcessDetailFocusScreen({
       content: reportJson,
       description:
         "Full retained JSON captured for this completed process. Use the viewer controls to switch between wrapped and preserved line layout.",
+      downloadFileName: resolveLogViewerFileName(
+        completedSnapshot.executionReport.report_path,
+        "retained-report.json",
+      ),
       initialWrap: false,
       meta: completedSnapshot.executionReport.report_path
         ? `Report path: ${completedSnapshot.executionReport.report_path}`
@@ -336,6 +382,7 @@ export function ProcessDetailFocusScreen({
         content: preview.content,
         description:
           "Retained log content loaded from the durable execution archive.",
+        downloadFileName: resolveLogViewerFileName(entryName, "retained-log.txt"),
         initialWrap: false,
         meta: buildRetainedLogViewerMeta(preview),
         title: entryName,
@@ -351,7 +398,7 @@ export function ProcessDetailFocusScreen({
         "This removes the shared outputs directory currently attached to the selected process.",
       message:
         "Use this only when you want to remove the current process outputs from disk. Published destinations and database records are not rewritten by this action.",
-      title: "Delete process outputs?",
+      title: "Delete outputs?",
     });
 
     if (!shouldDelete) {
@@ -364,7 +411,7 @@ export function ProcessDetailFocusScreen({
   const handleRequestDeleteRetainedMaterial = useEffectEvent(async () => {
     const shouldDelete = await openOverlay<boolean>(ConfirmDialog, {
       cancelLabel: "Keep retained material",
-      confirmLabel: "Delete retained",
+      confirmLabel: "Delete retained material",
       description:
         "This removes the retained execution report and archived logs currently attached to the completed process.",
       message:
@@ -450,6 +497,7 @@ export function ProcessDetailFocusScreen({
           artifactFolderPath && pendingOpenPath === artifactFolderPath
             ? "Opening folder..."
             : "Open folder",
+        resolvePublishTargetKindTone,
       });
     },
   );
@@ -554,11 +602,20 @@ export function ProcessDetailFocusScreen({
   const reportJson = formatJsonValue(
     completedSnapshot.executionReport?.report ?? null,
   );
+  const reportInterruptionMessage = resolveReportInterruptionMessage(
+    completedSnapshot.executionReport?.report ?? null,
+  );
+  const showsCompletedSnapshotLoading =
+    completedSnapshot.isLoading && !completedSnapshot.isAvailable;
+  const showsCompletedSnapshotUnavailable =
+    !completedSnapshot.isLoading &&
+    !completedSnapshot.isAvailable &&
+    completedSnapshot.error !== null;
 
   return (
-    <FocusPageFrame
+    <ScreenScaffold
       className="process-detail-screen"
-      description={frameDescription}
+      subtitle={frameDescription}
       eyebrow={isCompletedMode ? "Process Report" : "Ongoing Process"}
       summary={
         <>
@@ -596,25 +653,70 @@ export function ProcessDetailFocusScreen({
         <p className="feed-banner feed-banner--success">{actionMessage}</p>
       ) : null}
 
+      {isCompletedMode &&
+      completedSnapshot.isStale &&
+      completedSnapshot.error ? (
+        <>
+          <p className="feed-banner feed-banner--error">
+            {completedSnapshot.error}
+          </p>
+          <p className="process-detail-report__copy">
+            Showing the last known completed snapshot while retained data
+            refresh recovers.
+          </p>
+        </>
+      ) : null}
+
       {isCompletedMode ? (
         <>
           <SurfacePanel
             bodyClassName="process-detail-panel__body"
             className="process-detail-panel"
             description="Terminal state language sourced from the durable release process snapshot."
+            summary={
+              <MetaRow className="process-detail-panel__meta-row">
+                <MetaItem label="Terminal state">
+                  {formatProcessFeedStatusLabel(
+                    process.current_step_status || normalizedStatus,
+                  )}
+                </MetaItem>
+                <MetaItem label="Builds">
+                  {formatProcessFeedBuildCount(process.total_build_runs)}
+                </MetaItem>
+                <MetaItem label="Publishes">
+                  {formatProcessFeedPublishCount(process.total_publish_runs)}
+                </MetaItem>
+              </MetaRow>
+            }
             title="Final Outcome"
             actions={
-              onRequestRerun ? (
+              onRequestRerun || isCompletedMode ? (
                 <div className="process-detail-toolbar">
                   <Button
-                    disabled={isRequestingRerun}
+                    disabled={
+                      completedSnapshot.isLoading ||
+                      completedSnapshot.isRefreshing
+                    }
                     leadingIcon="refresh"
-                    onClick={() => void handleRequestRerun()}
+                    onClick={() => void handleRetryCompletedSnapshot()}
                     size="sm"
-                    variant="secondary"
+                    variant="ghost"
                   >
-                    {isRequestingRerun ? "Rerunning..." : "Rerun process"}
+                    {completedSnapshot.isRefreshing
+                      ? "Refreshing retained data..."
+                      : "Refresh retained data"}
                   </Button>
+                  {onRequestRerun ? (
+                    <Button
+                      disabled={isRequestingRerun}
+                      leadingIcon="refresh"
+                      onClick={() => void handleRequestRerun()}
+                      size="sm"
+                      variant="secondary"
+                    >
+                      {isRequestingRerun ? "Rerunning..." : "Rerun process"}
+                    </Button>
+                  ) : null}
                 </div>
               ) : null
             }
@@ -627,9 +729,92 @@ export function ProcessDetailFocusScreen({
                 </p>
               ) : null}
             </div>
+          </SurfacePanel>
 
+          <ExecutionReportPanel
+            deletedRetention={deletedRetention}
+            error={completedSnapshot.error}
+            interruptionMessage={reportInterruptionMessage}
+            isDeletingRetention={isDeletingRetention}
+            isRefreshing={completedSnapshot.isRefreshing}
+            onDeleteRetainedMaterial={() => {
+              void handleRequestDeleteRetainedMaterial();
+            }}
+            onOpenPath={(path) => {
+              void handleOpenPath(path);
+            }}
+            onOpenReportViewer={() => {
+              void handleOpenReportViewer();
+            }}
+            onRetry={handleRetryCompletedSnapshot}
+            pendingOpenPath={pendingOpenPath}
+            report={completedSnapshot.executionReport}
+            reportSummaryItems={reportSummaryItems}
+            retainedDirPath={retainedDirPath}
+            retentionAnchorBuildRunId={retentionAnchorBuildRunId}
+            showsLoading={showsCompletedSnapshotLoading}
+            showsUnavailable={showsCompletedSnapshotUnavailable}
+          />
+
+          {completedSnapshot.isAvailable ? (
+            <OutputsPanel
+              artifacts={completedSnapshot.artifacts}
+              deletedOutputs={deletedOutputs}
+              formatArtifactActiveLocationKindLabel={
+                formatArtifactActiveLocationKindLabel
+              }
+              formatArtifactActiveLocationSummary={
+                formatArtifactActiveLocationSummary
+              }
+              formatArtifactPublishRunSummary={formatArtifactPublishRunSummary}
+              formatByteSize={formatByteSize}
+              formatPublishTargetKindLabel={formatPublishTargetKindLabel}
+              isDeletingOutputs={isDeletingOutputs}
+              onInspectArtifact={(artifact) => {
+                void handleOpenArtifactViewer(artifact);
+              }}
+              onOpenOutputs={(path) => {
+                void handleOpenPath(path);
+              }}
+              onRequestDeleteOutputs={() => {
+                void handleRequestDeleteOutputs();
+              }}
+              outputsPath={completedSnapshot.outputsPath}
+              pendingOpenPath={pendingOpenPath}
+              resolveArtifactPublishRunTone={resolveArtifactPublishRunTone}
+              resolvePublishTargetKindTone={resolvePublishTargetKindTone}
+            />
+          ) : null}
+
+          {completedSnapshot.isAvailable ? (
+            <RetainedLogsPanel
+              deletedRetention={deletedRetention}
+              entries={retainedLogEntries}
+              formatByteSize={formatByteSize}
+              logPreviewStatesByEntryPath={logPreviewsByEntryPath}
+              logsArchiveExists={Boolean(
+                completedSnapshot.executionReport?.logs_archive_exists,
+              )}
+              logsArchivePath={logsArchivePath}
+              onOpenArchive={(path) => {
+                void handleOpenPath(path);
+              }}
+              onOpenViewer={(entryPath, entryName) => {
+                void handleOpenRetainedLogViewer(entryPath, entryName);
+              }}
+              pendingLogPreviewEntryPath={pendingLogPreviewEntryPath}
+              pendingOpenPath={pendingOpenPath}
+            />
+          ) : null}
+        </>
+      ) : (
+        <SurfacePanel
+          bodyClassName="process-detail-panel__body"
+          className="process-detail-panel"
+          description="Short operator-facing progress language sourced from the runtime process feed."
+          summary={
             <MetaRow className="process-detail-panel__meta-row">
-              <MetaItem label="Terminal state">
+              <MetaItem label="Step state">
                 {formatProcessFeedStatusLabel(
                   process.current_step_status || normalizedStatus,
                 )}
@@ -641,419 +826,7 @@ export function ProcessDetailFocusScreen({
                 {formatProcessFeedPublishCount(process.total_publish_runs)}
               </MetaItem>
             </MetaRow>
-          </SurfacePanel>
-
-          <SurfacePanel
-            bodyClassName="process-detail-panel__body"
-            className="process-detail-report-panel"
-            description="Retained report data captured after this release process reached a terminal state."
-            title="Execution Report"
-            tone="inset"
-            actions={
-              <div className="process-detail-toolbar process-detail-toolbar--report-header">
-                {completedSnapshot.executionReport?.report_path ? (
-                  <Button
-                    disabled={
-                      deletedRetention ||
-                      pendingOpenPath ===
-                        completedSnapshot.executionReport.report_path
-                    }
-                    leadingIcon="arrowUpRight"
-                    onClick={() =>
-                      void handleOpenPath(
-                        completedSnapshot.executionReport?.report_path ?? "",
-                      )
-                    }
-                    size="sm"
-                    variant="ghost"
-                  >
-                    Open report file
-                  </Button>
-                ) : null}
-                {retainedDirPath ? (
-                  <Button
-                    disabled={
-                      deletedRetention || pendingOpenPath === retainedDirPath
-                    }
-                    leadingIcon="folder"
-                    onClick={() => void handleOpenPath(retainedDirPath)}
-                    size="sm"
-                    variant="ghost"
-                  >
-                    Open retained folder
-                  </Button>
-                ) : null}
-                {retentionAnchorBuildRunId ? (
-                  <Button
-                    disabled={deletedRetention || isDeletingRetention}
-                    leadingIcon="trash"
-                    onClick={() => void handleRequestDeleteRetainedMaterial()}
-                    size="sm"
-                    variant="ghost"
-                  >
-                    {isDeletingRetention
-                      ? "Deleting..."
-                      : "Delete retained files"}
-                  </Button>
-                ) : null}
-              </div>
-            }
-          >
-            {completedSnapshot.isLoading ? (
-              <p className="process-detail-report__copy">
-                Loading retained report data for this completed process...
-              </p>
-            ) : completedSnapshot.error ? (
-              <p className="process-detail-report__copy">
-                {completedSnapshot.error}
-              </p>
-            ) : deletedRetention ? (
-              <p className="process-detail-report__copy">
-                The retained report directory for this completed process has
-                been removed from disk.
-              </p>
-            ) : completedSnapshot.executionReport?.exists &&
-              completedSnapshot.executionReport.report ? (
-              <div className="process-detail-report-shell">
-                {reportSummaryItems.length > 0 ? (
-                  <MetaRow className="process-detail-panel__meta-row">
-                    {reportSummaryItems.map((item) => (
-                      <MetaItem key={item.label} label={item.label}>
-                        {item.value}
-                      </MetaItem>
-                    ))}
-                  </MetaRow>
-                ) : null}
-
-                {resolveReportInterruptionMessage(
-                  completedSnapshot.executionReport.report,
-                ) ? (
-                  <p className="process-detail-report__copy">
-                    {resolveReportInterruptionMessage(
-                      completedSnapshot.executionReport.report,
-                    )}
-                  </p>
-                ) : null}
-
-                <div className="process-detail-log-preview">
-                  <p className="process-detail-report__copy">
-                    Open the full retained JSON in the viewer when you need raw
-                    details; the inline screen stays compact.
-                  </p>
-                  <div className="process-detail-toolbar">
-                    <Button
-                      leadingIcon="terminal"
-                      onClick={() => void handleOpenReportViewer()}
-                      size="sm"
-                      variant="ghost"
-                    >
-                      View JSON report
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <p className="process-detail-report__copy">
-                No retained execution report file was found for this completed
-                process.
-              </p>
-            )}
-          </SurfacePanel>
-
-          <SurfacePanel
-            bodyClassName="process-detail-panel__body"
-            description="Artifacts registered for this process and the shared outputs directory they live under."
-            title="Outputs"
-            actions={
-              <div className="process-detail-toolbar">
-                {completedSnapshot.outputsPath ? (
-                  <Button
-                    disabled={
-                      deletedOutputs ||
-                      pendingOpenPath === completedSnapshot.outputsPath
-                    }
-                    leadingIcon="folder"
-                    onClick={() =>
-                      void handleOpenPath(completedSnapshot.outputsPath ?? "")
-                    }
-                    size="sm"
-                    variant="ghost"
-                  >
-                    Open outputs
-                  </Button>
-                ) : null}
-                {completedSnapshot.outputsPath ? (
-                  <Button
-                    disabled={deletedOutputs || isDeletingOutputs}
-                    leadingIcon="trash"
-                    onClick={() => void handleRequestDeleteOutputs()}
-                    size="sm"
-                    variant="ghost"
-                  >
-                    {isDeletingOutputs ? "Deleting..." : "Delete outputs"}
-                  </Button>
-                ) : null}
-              </div>
-            }
-          >
-            <MetaRow className="process-detail-panel__meta-row">
-              <MetaItem label="Outputs root">
-                {completedSnapshot.outputsPath || "not recorded"}
-              </MetaItem>
-              <MetaItem label="Artifacts recorded">
-                {String(completedSnapshot.artifacts.length)}
-              </MetaItem>
-            </MetaRow>
-
-            {deletedOutputs ? (
-              <p className="process-detail-report__copy">
-                The shared outputs directory for this process has been removed
-                from disk.
-              </p>
-            ) : null}
-
-            {completedSnapshot.artifacts.length === 0 ? (
-              <p className="process-detail-report__copy">
-                No artifact records are currently attached to this process.
-              </p>
-            ) : (
-              <div className="process-detail-artifact-list">
-                {completedSnapshot.artifacts.map((artifact) => {
-                  return (
-                    <div
-                      className="process-detail-artifact-card"
-                      key={artifact.artifact_id}
-                    >
-                      <div className="process-detail-artifact-card__header">
-                        <div className="process-detail-artifact-card__title-block">
-                          <p className="process-detail-artifact-card__title">
-                            {artifact.artifact_name}
-                          </p>
-                          <p className="process-detail-artifact-card__copy">
-                            {artifact.artifact_path}
-                          </p>
-                          <p className="process-detail-artifact-card__copy process-detail-artifact-card__copy--muted">
-                            {formatArtifactActiveLocationSummary(artifact)}
-                          </p>
-                        </div>
-
-                        <div className="process-detail-toolbar">
-                          <Button
-                            leadingIcon="search"
-                            onClick={() =>
-                              void handleOpenArtifactViewer(artifact)
-                            }
-                            size="sm"
-                            variant="ghost"
-                          >
-                            Inspect artifact
-                          </Button>
-                        </div>
-                      </div>
-
-                      <MetaRow className="process-detail-panel__meta-row">
-                        <MetaItem label="Kind">
-                          {artifact.artifact_kind}
-                        </MetaItem>
-                        <MetaItem label="Build target">
-                          {artifact.build_target_name}
-                        </MetaItem>
-                        <MetaItem label="Active location">
-                          {formatArtifactActiveLocationKindLabel(
-                            artifact.artifact_active_location_kind,
-                          )}
-                        </MetaItem>
-                        <MetaItem label="Size">
-                          {formatByteSize(artifact.size_bytes)}
-                        </MetaItem>
-                        <MetaItem label="Publishes">
-                          {String(artifact.publish_run_count)}
-                        </MetaItem>
-                      </MetaRow>
-
-                      {artifact.publish_runs.length > 0 ? (
-                        <div className="project-detail-status-grid">
-                          {artifact.publish_runs.map((publishRun) => (
-                            <div
-                              className="project-detail-target-card"
-                              key={publishRun.publish_run_id}
-                            >
-                              <div className="project-detail-target-card__header">
-                                <div className="project-detail-target-card__title-block">
-                                  <h4 className="project-detail-target-card__title">
-                                    {publishRun.publish_target_name}
-                                  </h4>
-                                  <p className="project-detail-target-card__copy">
-                                    {formatArtifactPublishRunSummary(
-                                      publishRun,
-                                    )}
-                                  </p>
-                                </div>
-
-                                <div className="project-detail-target-card__badges">
-                                  <Badge
-                                    tone={resolveArtifactPublishRunTone(
-                                      publishRun.status,
-                                    )}
-                                  >
-                                    {publishRun.status}
-                                  </Badge>
-                                  <Badge tone="neutral">
-                                    {formatPublishTargetKindLabel(
-                                      publishRun.publish_target_kind,
-                                    )}
-                                  </Badge>
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </SurfacePanel>
-
-          <SurfacePanel
-            bodyClassName="process-detail-panel__body"
-            description="Archived execution log entries stored under retained/execution-logs.zip for this completed process."
-            title="Retained Logs"
-            actions={
-              logsArchivePath ? (
-                <Button
-                  disabled={
-                    deletedRetention || pendingOpenPath === logsArchivePath
-                  }
-                  leadingIcon="arrowUpRight"
-                  onClick={() => void handleOpenPath(logsArchivePath)}
-                  size="sm"
-                  variant="ghost"
-                >
-                  Open log archive
-                </Button>
-              ) : null
-            }
-          >
-            <MetaRow className="process-detail-panel__meta-row">
-              <MetaItem label="Archive path">
-                {logsArchivePath || "not recorded"}
-              </MetaItem>
-              <MetaItem label="Entries">
-                {String(retainedLogEntries.length)}
-              </MetaItem>
-            </MetaRow>
-
-            {deletedRetention ? (
-              <p className="process-detail-report__copy">
-                The retained log archive for this completed process has been
-                removed from disk.
-              </p>
-            ) : !completedSnapshot.executionReport?.logs_archive_exists ? (
-              <p className="process-detail-report__copy">
-                No retained log archive was found for this completed process.
-              </p>
-            ) : retainedLogEntries.length === 0 ? (
-              <p className="process-detail-report__copy">
-                The retained log archive exists, but it does not contain any
-                readable log entries.
-              </p>
-            ) : (
-              <div className="process-detail-log-list">
-                {retainedLogEntries.map((entry) => {
-                  const logPreview = logPreviewsByEntryPath[entry.entry_path];
-
-                  return (
-                    <VerticalAccordion
-                      bodyInset
-                      className="process-detail-log-card"
-                      collapsedToggleLabel={`Expand retained log ${entry.entry_name}`}
-                      expandedToggleLabel={`Collapse retained log ${entry.entry_name}`}
-                      header={
-                        <div className="process-detail-log-card__header">
-                          <div className="process-detail-log-card__title-block">
-                            <p className="process-detail-log-card__title">
-                              {entry.entry_name}
-                            </p>
-                            <p className="process-detail-log-card__copy">
-                              {entry.entry_path}
-                            </p>
-                          </div>
-
-                          <div className="process-detail-log-card__badges">
-                            <Badge tone="muted">
-                              {formatByteSize(entry.size_bytes)}
-                            </Badge>
-                            <Badge tone="muted">
-                              {formatByteSize(entry.compressed_size_bytes)}{" "}
-                              zipped
-                            </Badge>
-                          </div>
-                        </div>
-                      }
-                      headerSeparated
-                      tone="section"
-                      key={entry.entry_path}
-                    >
-                      <div className="process-detail-log-card__body">
-                        <div className="process-detail-toolbar">
-                          <Button
-                            disabled={
-                              deletedRetention ||
-                              pendingLogPreviewEntryPath === entry.entry_path
-                            }
-                            leadingIcon="terminal"
-                            onClick={() =>
-                              void handleOpenRetainedLogViewer(
-                                entry.entry_path,
-                                entry.entry_name,
-                              )
-                            }
-                            size="sm"
-                            variant="ghost"
-                          >
-                            {pendingLogPreviewEntryPath === entry.entry_path
-                              ? "Loading viewer..."
-                              : "Open viewer"}
-                          </Button>
-                        </div>
-
-                        <MetaRow className="process-detail-panel__meta-row">
-                          <MetaItem label="Archive path">
-                            {logsArchivePath || "not recorded"}
-                          </MetaItem>
-                          <MetaItem label="Expanded size">
-                            {formatByteSize(entry.size_bytes)}
-                          </MetaItem>
-                          <MetaItem label="Compressed size">
-                            {formatByteSize(entry.compressed_size_bytes)}
-                          </MetaItem>
-                        </MetaRow>
-
-                        {logPreview?.error ? (
-                          <p className="process-detail-report__copy">
-                            {logPreview.error}
-                          </p>
-                        ) : null}
-
-                        <p className="process-detail-report__copy">
-                          Open the retained log viewer to inspect this entry
-                          without expanding the full log body inline.
-                        </p>
-                      </div>
-                    </VerticalAccordion>
-                  );
-                })}
-              </div>
-            )}
-          </SurfacePanel>
-        </>
-      ) : (
-        <SurfacePanel
-          bodyClassName="process-detail-panel__body"
-          className="process-detail-panel"
-          description="Short operator-facing progress language sourced from the runtime process feed."
+          }
           title="Current Step"
         >
           <div className="process-detail-panel__step-block">
@@ -1062,52 +835,46 @@ export function ProcessDetailFocusScreen({
               <p className="process-detail-panel__step-detail">{stepDetail}</p>
             ) : null}
           </div>
-
-          <MetaRow className="process-detail-panel__meta-row">
-            <MetaItem label="Step state">
-              {formatProcessFeedStatusLabel(
-                process.current_step_status || normalizedStatus,
-              )}
-            </MetaItem>
-            <MetaItem label="Builds">
-              {formatProcessFeedBuildCount(process.total_build_runs)}
-            </MetaItem>
-            <MetaItem label="Publishes">
-              {formatProcessFeedPublishCount(process.total_publish_runs)}
-            </MetaItem>
-          </MetaRow>
         </SurfacePanel>
       )}
 
       <SurfacePanel
         bodyClassName="process-detail-panel__body"
         description="Durable runtime timestamps and identifiers currently attached to this release process."
+        summary={
+          <>
+            <MetaRow className="process-detail-panel__meta-row">
+              <MetaItem label="Started">
+                {formatProcessFeedMetaValue(process.started_at, "not started")}
+              </MetaItem>
+              <MetaItem label="Finished">
+                {formatProcessFeedMetaValue(process.finished_at, "still active")}
+              </MetaItem>
+              <MetaItem label="Updated">
+                {formatProcessFeedMetaValue(process.updated_at)}
+              </MetaItem>
+            </MetaRow>
+
+            <MetaRow className="process-detail-panel__meta-row">
+              <MetaItem label="Commit">
+                {formatProcessFeedMetaValue(process.git_commit, "pending")}
+              </MetaItem>
+              <MetaItem label="Created">
+                {formatProcessFeedMetaValue(process.created_at)}
+              </MetaItem>
+              <MetaItem label="Repository">{process.repository_url}</MetaItem>
+            </MetaRow>
+          </>
+        }
         title="Runtime Metadata"
         tone="inset"
       >
-        <MetaRow className="process-detail-panel__meta-row">
-          <MetaItem label="Started">
-            {formatProcessFeedMetaValue(process.started_at, "not started")}
-          </MetaItem>
-          <MetaItem label="Finished">
-            {formatProcessFeedMetaValue(process.finished_at, "still active")}
-          </MetaItem>
-          <MetaItem label="Updated">
-            {formatProcessFeedMetaValue(process.updated_at)}
-          </MetaItem>
-        </MetaRow>
-
-        <MetaRow className="process-detail-panel__meta-row">
-          <MetaItem label="Commit">
-            {formatProcessFeedMetaValue(process.git_commit, "pending")}
-          </MetaItem>
-          <MetaItem label="Created">
-            {formatProcessFeedMetaValue(process.created_at)}
-          </MetaItem>
-          <MetaItem label="Repository">{process.repository_url}</MetaItem>
-        </MetaRow>
+        <p className="process-detail-report__copy">
+          Runtime identity stays pinned in the shared summary strip so the
+          panel body can stay compact.
+        </p>
       </SurfacePanel>
-    </FocusPageFrame>
+    </ScreenScaffold>
   );
 }
 
@@ -1128,6 +895,20 @@ function buildRetainedLogViewerMeta(
   }
 
   return `Showing the full log file (${formatByteSize(payload.size_bytes)}) from ${payload.archive_path}.`;
+}
+
+function resolveLogViewerFileName(value: string | null | undefined, fallback: string) {
+  const normalizedValue = value?.trim();
+
+  if (!normalizedValue) {
+    return fallback;
+  }
+
+  const pathSeparators = [normalizedValue.lastIndexOf("/"), normalizedValue.lastIndexOf("\\")];
+  const separatorIndex = Math.max(...pathSeparators);
+  const fileName = normalizedValue.slice(separatorIndex + 1).trim();
+
+  return fileName || fallback;
 }
 
 function buildOngoingProcessDescription(usesLiveSnapshot: boolean) {
@@ -1239,6 +1020,10 @@ function resolveArtifactPublishRunTone(
     default:
       return "muted";
   }
+}
+
+function resolvePublishTargetKindTone(): "muted" {
+  return "muted";
 }
 
 function formatPublishTargetKindLabel(kind: string) {

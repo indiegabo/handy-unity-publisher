@@ -1,6 +1,13 @@
 import { Button } from "./Button";
 import FullScreenModal from "./FullScreenModal";
-import { Badge, MetaItem, MetaRow, SurfacePanel } from "./Surface";
+import {
+  Badge,
+  type BadgeTone,
+  MetaItem,
+  MetaRow,
+  SummaryStrip,
+  SurfacePanel,
+} from "./Surface";
 import type { ArtifactInspectionRecord } from "../services/processDetail";
 
 type ArtifactViewerProps = {
@@ -15,6 +22,7 @@ type ArtifactViewerProps = {
   openArtifactLabel?: string;
   openFolderDisabled?: boolean;
   openFolderLabel?: string;
+  resolvePublishTargetKindTone: (kind: string) => BadgeTone;
 };
 
 export function ArtifactViewer({
@@ -29,6 +37,7 @@ export function ArtifactViewer({
   openArtifactLabel = "Open artifact",
   openFolderDisabled = false,
   openFolderLabel = "Open folder",
+  resolvePublishTargetKindTone,
 }: ArtifactViewerProps) {
   const canOpenArtifact =
     !openArtifactDisabled && Boolean(artifactAbsolutePath);
@@ -45,22 +54,28 @@ export function ArtifactViewer({
         <div className="artifact-viewer__summary">
           <p className="artifact-viewer__path">{artifact.artifact_path}</p>
 
-          <div className="artifact-viewer__badges">
-            <Badge tone="muted">{artifact.artifact_kind}</Badge>
-            <Badge tone="muted">{artifact.build_target_name}</Badge>
-            <Badge tone="muted">
-              {formatPublishCount(artifact.publish_run_count)}
-            </Badge>
-          </div>
+          <SummaryStrip className="artifact-viewer__summary-strip">
+            <div className="artifact-viewer__badges">
+              <Badge tone="muted">{artifact.artifact_kind}</Badge>
+              <Badge tone="neutral">{artifact.build_target_name}</Badge>
+              <Badge
+                tone={resolveArtifactPublishCountTone(
+                  artifact.publish_run_count,
+                )}
+              >
+                {formatPublishCount(artifact.publish_run_count)}
+              </Badge>
+            </div>
 
-          <MetaRow>
-            <MetaItem label="Active location">
-              {artifactLocationSummary}
-            </MetaItem>
-            <MetaItem label="Size">
-              {formatByteSize(artifact.size_bytes)}
-            </MetaItem>
-          </MetaRow>
+            <MetaRow>
+              <MetaItem label="Active location">
+                {artifactLocationSummary}
+              </MetaItem>
+              <MetaItem label="Size">
+                {formatByteSize(artifact.size_bytes)}
+              </MetaItem>
+            </MetaRow>
+          </SummaryStrip>
         </div>
 
         <SurfacePanel
@@ -133,7 +148,11 @@ export function ArtifactViewer({
                     <Badge tone={resolvePublishRunTone(publishRun.status)}>
                       {publishRun.status}
                     </Badge>
-                    <Badge tone="neutral">
+                    <Badge
+                      tone={resolvePublishTargetKindTone(
+                        publishRun.publish_target_kind,
+                      )}
+                    >
                       {formatPublishTargetKindLabel(
                         publishRun.publish_target_kind,
                       )}
@@ -151,6 +170,10 @@ export function ArtifactViewer({
 
 function formatPublishCount(count: number) {
   return `${count} publish${count === 1 ? "" : "es"}`;
+}
+
+function resolveArtifactPublishCountTone(count: number): BadgeTone {
+  return count > 0 ? "neutral" : "muted";
 }
 
 function resolvePublishRunTone(status: string): "strong" | "neutral" | "muted" {

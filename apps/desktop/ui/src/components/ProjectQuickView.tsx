@@ -1,6 +1,6 @@
 import { Button } from "./Button";
 import FullScreenModal from "./FullScreenModal";
-import { Badge, MetaItem, MetaRow, SurfacePanel } from "./Surface";
+import { Badge, MetaItem, MetaRow, SummaryStrip, SurfacePanel } from "./Surface";
 import type { RepositoryInspectionEntry } from "../services/projects";
 
 export type ProjectQuickViewResult = "open-project";
@@ -22,7 +22,7 @@ export function ProjectQuickView({
       title={repository.repository_name}
     >
       <div className="project-quick-view">
-        <div className="project-quick-view__summary">
+        <SummaryStrip className="project-quick-view__summary-strip">
           <p className="project-quick-view__repo-url">{repository.repo_url}</p>
 
           <div className="project-quick-view__badges">
@@ -46,7 +46,7 @@ export function ProjectQuickView({
               {`${repository.polling_interval_seconds}s cadence`}
             </MetaItem>
           </MetaRow>
-        </div>
+        </SummaryStrip>
 
         <SurfacePanel
           description="Current repository automation and credential posture exposed by the local runtime inspection."

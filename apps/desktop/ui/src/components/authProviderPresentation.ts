@@ -15,22 +15,28 @@ export type AuthProviderLifecycleSnapshot = {
     storedAtLabel: string;
 };
 
+type AuthProviderSummaryItem = {
+    label: string;
+    value: string;
+};
+
+type AuthProviderSummaryRow = readonly AuthProviderSummaryItem[];
+
 export function buildAuthProviderConnectionResult(
     previousProvider: AuthProviderStatus,
     nextProvider: AuthProviderStatus,
 ): AuthProviderConnectionResult {
     const outcome =
         previousProvider.status === "connected" ? "reconnected" : "connected";
+    const boundRepositorySummary = buildBoundRepositorySummary(
+        nextProvider.bound_repository_count,
+    );
 
     return {
         message:
             outcome === "reconnected"
-                ? `${nextProvider.label} browser reconnect completed. ${formatBoundRepositoryCount(
-                    nextProvider.bound_repository_count,
-                )} are currently bound to it.`
-                : `${nextProvider.label} browser login completed. ${formatBoundRepositoryCount(
-                    nextProvider.bound_repository_count,
-                )} are currently bound to it.`,
+                ? `${nextProvider.label} browser reconnect completed. ${boundRepositorySummary}`
+                : `${nextProvider.label} browser login completed. ${boundRepositorySummary}`,
         outcome,
         provider: nextProvider,
         sessionEventLabel:
@@ -56,6 +62,53 @@ export function buildAuthProviderLifecycleSnapshot(
         refreshedAtLabel: formatAuthProviderRefreshTimestamp(provider),
         storedAtLabel: formatAuthProviderStoredTimestamp(provider),
     };
+}
+
+export function buildAuthProviderSummaryRows(
+    provider: AuthProviderStatus,
+    lifecycleSnapshot: AuthProviderLifecycleSnapshot,
+    options: {
+        includeLifecycleRow?: boolean;
+    } = {},
+): readonly AuthProviderSummaryRow[] {
+    const { includeLifecycleRow = true } = options;
+    const rows: AuthProviderSummaryRow[] = [
+        [
+            {
+                label: "Credential",
+                value: provider.credential_name || "No reusable credential",
+            },
+            {
+                label: "Usage",
+                value: formatBoundRepositoryCount(provider.bound_repository_count),
+            },
+        ],
+        [
+            {
+                label: "Stored",
+                value: lifecycleSnapshot.storedAtLabel,
+            },
+            {
+                label: "Refreshed",
+                value: lifecycleSnapshot.refreshedAtLabel,
+            },
+        ],
+    ];
+
+    if (includeLifecycleRow) {
+        rows.push([
+            {
+                label: "Lifecycle",
+                value: lifecycleSnapshot.lifecycleLabel,
+            },
+            {
+                label: "Next step",
+                value: lifecycleSnapshot.nextActionLabel,
+            },
+        ]);
+    }
+
+    return rows;
 }
 
 export function buildAuthProviderActionLabel(
@@ -98,6 +151,13 @@ export function formatAuthProviderStatus(status: string) {
 export function formatBoundRepositoryCount(boundRepositoryCount: number) {
     return `${boundRepositoryCount} repository project${boundRepositoryCount === 1 ? "" : "s"
         }`;
+}
+
+function buildBoundRepositorySummary(boundRepositoryCount: number) {
+    const boundRepositoryLabel = formatBoundRepositoryCount(boundRepositoryCount);
+
+    return `${boundRepositoryLabel} ${boundRepositoryCount === 1 ? "is" : "are"
+        } currently bound to it.`;
 }
 
 function buildDefaultLifecycleLabel(status: string) {

@@ -6,52 +6,73 @@ import {
   type AuthProviderConnectionResult,
   buildAuthProviderActionLabel,
   buildAuthProviderLifecycleSnapshot,
+  buildAuthProviderSummaryRows,
   formatAuthProviderStatus,
-  formatBoundRepositoryCount,
   resolveAuthProviderTone,
 } from "./authProviderPresentation";
 import {
   Badge,
-  FocusPageFrame,
   MetaItem,
   MetaRow,
+  SummaryStrip,
   SurfacePanel,
 } from "./Surface";
 import { useOverlay } from "./OverlayManager";
+import ScreenScaffold from "./ScreenScaffold";
 import { loadAuthProviders, type AuthProviderStatus } from "../services/auth";
 
-type AuthProvidersFocusScreenProps = {};
+type AuthProvidersFocusScreenProps = {
+  onResult?: (result: AuthProviderConnectionResult) => void;
+};
 
-export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
+export function AuthProvidersFocusScreen({
+  onResult,
+}: AuthProvidersFocusScreenProps) {
   const { openOverlay } = useOverlay();
   const [providers, setProviders] = useState<AuthProviderStatus[]>([]);
   const [lastConnectionResults, setLastConnectionResults] = useState<
     Record<string, AuthProviderConnectionResult>
   >({});
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [inventoryAvailable, setInventoryAvailable] = useState(false);
+  const [inventoryStale, setInventoryStale] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
-  const loadProviders = useEffectEvent(async () => {
-    setIsLoading(true);
-
-    try {
-      const nextProviders = await loadAuthProviders();
-      startTransition(() => {
-        setProviders(nextProviders);
+  const loadProviders = useEffectEvent(
+    async (reason: "initial" | "refresh") => {
+      if (reason === "refresh" && inventoryAvailable) {
+        setIsRefreshing(true);
+        setInventoryStale(false);
         setError(null);
-        setIsLoading(false);
-      });
-    } catch (loadError) {
-      startTransition(() => {
-        setError(buildAuthProviderErrorMessage(loadError));
-        setIsLoading(false);
-      });
-    }
-  });
+      } else {
+        setIsLoading(true);
+      }
+
+      try {
+        const nextProviders = await loadAuthProviders();
+        startTransition(() => {
+          setProviders(nextProviders);
+          setInventoryAvailable(true);
+          setInventoryStale(false);
+          setError(null);
+          setIsLoading(false);
+          setIsRefreshing(false);
+        });
+      } catch (loadError) {
+        startTransition(() => {
+          setError(buildAuthProviderErrorMessage(loadError));
+          setIsLoading(false);
+          setIsRefreshing(false);
+          setInventoryStale(inventoryAvailable);
+        });
+      }
+    },
+  );
 
   useEffect(() => {
-    void loadProviders();
+    void loadProviders("initial");
   }, []);
 
   const handleOpenConnectionFlow = useEffectEvent(
@@ -80,6 +101,8 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
         setError(null);
         setActionMessage(connectionResult.message);
       });
+
+      onResult?.(connectionResult);
     },
   );
 
@@ -90,47 +113,61 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
     (total, provider) => total + provider.bound_repository_count,
     0,
   );
+  const showsProviderLoading = isLoading && !inventoryAvailable;
+  const showsProviderUnavailable =
+    !isLoading && !inventoryAvailable && error !== null;
 
   return (
-    <div className="auth-providers-shell">
-      <FocusPageFrame
-        actions={
-          <Button
-            leadingIcon="refresh"
-            onClick={() => void loadProviders()}
-            size="sm"
-            variant="secondary"
-          >
-            Refresh
-          </Button>
-        }
-        description="GitHub login is delegated to Git Credential Manager and reused by repository polling and checkout flows."
-        eyebrow="Accounts"
-        summary={
-          <MetaRow>
-            <MetaItem label="Providers">
-              {isLoading ? "Loading..." : providers.length}
+    <ScreenScaffold
+      actions={
+        <Button
+          disabled={isLoading || isRefreshing}
+          leadingIcon="refresh"
+          onClick={() => void loadProviders("refresh")}
+          size="sm"
+          variant="secondary"
+        >
+          {isRefreshing ? "Refreshing providers..." : "Refresh providers"}
+        </Button>
+      }
+      className="auth-providers-shell"
+      eyebrow="Accounts"
+      subtitle="GitHub login is delegated to Git Credential Manager and reused by repository polling and checkout flows."
+      summary={
+        <MetaRow>
+          <MetaItem label="Providers">
+            {showsProviderLoading ? "Loading..." : providers.length}
+          </MetaItem>
+          {!showsProviderLoading ? (
+            <MetaItem label="Connected">{connectedProviderCount}</MetaItem>
+          ) : null}
+          {!showsProviderLoading ? (
+            <MetaItem label="Connected projects">
+              {totalBoundRepositoryCount}
             </MetaItem>
-            {!isLoading ? (
-              <MetaItem label="Connected">{connectedProviderCount}</MetaItem>
-            ) : null}
-            {!isLoading ? (
-              <MetaItem label="Connected projects">
-                {totalBoundRepositoryCount}
-              </MetaItem>
-            ) : null}
-          </MetaRow>
-        }
-        title="Login Providers"
-      >
-        {error ? (
+          ) : null}
+        </MetaRow>
+      }
+      title="Login Providers"
+    >
+        {inventoryStale && error ? (
+          <>
+            <p className="feed-banner feed-banner--error">{error}</p>
+            <p className="feed-state__copy">
+              Showing the last known provider inventory while the shell retries
+              host-backed authentication discovery.
+            </p>
+          </>
+        ) : null}
+
+        {!inventoryStale && error && inventoryAvailable ? (
           <p className="feed-banner feed-banner--error">{error}</p>
         ) : null}
         {actionMessage ? (
           <p className="feed-banner feed-banner--success">{actionMessage}</p>
         ) : null}
 
-        {isLoading && providers.length === 0 ? (
+        {showsProviderLoading ? (
           <div className="feed-state">
             <p className="feed-state__title">Loading login providers...</p>
             <p className="feed-state__copy">
@@ -140,7 +177,26 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
           </div>
         ) : null}
 
-        {!isLoading && providers.length === 0 ? (
+        {showsProviderUnavailable ? (
+          <div className="feed-state">
+            <p className="feed-state__title">
+              Login provider inventory is unavailable.
+            </p>
+            <p className="feed-state__copy">{error}</p>
+            <Button
+              leadingIcon="refresh"
+              onClick={() => void loadProviders("refresh")}
+              size="sm"
+              variant="secondary"
+            >
+              Retry provider load
+            </Button>
+          </div>
+        ) : null}
+
+        {!showsProviderLoading &&
+        inventoryAvailable &&
+        providers.length === 0 ? (
           <div className="feed-state">
             <p className="feed-state__title">
               No login providers are available.
@@ -152,15 +208,15 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
           </div>
         ) : null}
 
-        <SurfacePanel
-          className="auth-provider-section"
-          description="Host-backed login providers available to the desktop shell. Open the guided connection overlay only when one provider needs to be created, rebound, or refreshed."
-          eyebrow="Provider Inventory"
-          headerSeparated
-          title="Available Accounts"
-          tone="section"
-        >
-          {providers.length > 0 ? (
+        {inventoryAvailable && providers.length > 0 ? (
+          <SurfacePanel
+            className="auth-provider-section"
+            description="Host-backed login providers available to the desktop shell. Open the guided connection overlay only when one provider needs to be created, rebound, or refreshed."
+            eyebrow="Provider Inventory"
+            headerSeparated
+            title="Available Accounts"
+            tone="section"
+          >
             <div className="auth-provider-grid">
               {providers.map((provider) => {
                 const lifecycleSnapshot = buildAuthProviderLifecycleSnapshot(
@@ -191,34 +247,23 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
                       {provider.status_message}
                     </p>
 
-                    <MetaRow className="auth-provider-card__summary">
-                      <MetaItem label="Credential">
-                        {provider.credential_name || "No reusable credential"}
-                      </MetaItem>
-                      <MetaItem label="Usage">
-                        {formatBoundRepositoryCount(
-                          provider.bound_repository_count,
-                        )}
-                      </MetaItem>
-                    </MetaRow>
-
-                    <MetaRow className="auth-provider-card__summary">
-                      <MetaItem label="Stored">
-                        {lifecycleSnapshot.storedAtLabel}
-                      </MetaItem>
-                      <MetaItem label="Refreshed">
-                        {lifecycleSnapshot.refreshedAtLabel}
-                      </MetaItem>
-                    </MetaRow>
-
-                    <MetaRow className="auth-provider-card__summary">
-                      <MetaItem label="Lifecycle">
-                        {lifecycleSnapshot.lifecycleLabel}
-                      </MetaItem>
-                      <MetaItem label="Next step">
-                        {lifecycleSnapshot.nextActionLabel}
-                      </MetaItem>
-                    </MetaRow>
+                    <SummaryStrip className="auth-provider-card__summary-strip">
+                      {buildAuthProviderSummaryRows(
+                        provider,
+                        lifecycleSnapshot,
+                      ).map((summaryRow, summaryRowIndex) => (
+                        <MetaRow
+                          className="auth-provider-card__summary"
+                          key={`${provider.provider_id}-summary-${summaryRowIndex}`}
+                        >
+                          {summaryRow.map((item) => (
+                            <MetaItem key={item.label} label={item.label}>
+                              {item.value}
+                            </MetaItem>
+                          ))}
+                        </MetaRow>
+                      ))}
+                    </SummaryStrip>
 
                     <div className="auth-provider-card__actions">
                       <Button
@@ -242,10 +287,9 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
                 );
               })}
             </div>
-          ) : null}
-        </SurfacePanel>
-      </FocusPageFrame>
-    </div>
+          </SurfacePanel>
+        ) : null}
+    </ScreenScaffold>
   );
 }
 

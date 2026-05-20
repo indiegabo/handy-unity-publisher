@@ -20,6 +20,11 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(", ");
 
+const PROGRAMMATIC_FOCUS_SELECTOR = [
+  FOCUSABLE_SELECTOR,
+  '[tabindex="-1"]',
+].join(", ");
+
 const FullScreenModal = ({
   title,
   description,
@@ -147,11 +152,15 @@ function resolvePreferredFocusTarget(
   focusableNodes: HTMLElement[],
 ) {
   const preferredFocusTargets = Array.from(
-    container.querySelectorAll<HTMLElement>("[data-overlay-autofocus]"),
+    container.querySelectorAll<HTMLElement>(
+      '[data-overlay-autofocus]:not([data-overlay-autofocus="false"])',
+    ),
   );
 
-  return preferredFocusTargets.find((candidate) =>
-    focusableNodes.some((node) => node === candidate),
+  return preferredFocusTargets.find(
+    (candidate) =>
+      candidate.matches(PROGRAMMATIC_FOCUS_SELECTOR) ||
+      focusableNodes.some((node) => node === candidate),
   );
 }
 

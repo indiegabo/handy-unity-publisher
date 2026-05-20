@@ -1,13 +1,8 @@
 import { type ReactNode, useState } from "react";
 
 import { Button } from "./Button";
-import {
-  Badge,
-  FocusPageFrame,
-  MetaItem,
-  MetaRow,
-  SurfacePanel,
-} from "./Surface";
+import ScreenScaffold from "./ScreenScaffold";
+import { Badge, MetaItem, MetaRow, SummaryStrip, SurfacePanel } from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
 import type { RuntimeHealthStatus } from "../services/runtime";
 
@@ -89,8 +84,8 @@ export function ProjectWorkersFocusScreen({
 
   return (
     <div className="project-workers-focus-shell">
-      <FocusPageFrame
-        description="Control the local automation runtime and inspect repositories that currently expose enabled build targets."
+      <ScreenScaffold
+        subtitle="Control the local automation runtime and inspect repositories that currently expose enabled build targets."
         eyebrow="Runtime"
         summary={
           <MetaRow>
@@ -270,7 +265,7 @@ export function ProjectWorkersFocusScreen({
             </div>
           ) : null}
         </ProjectWorkersSectionAccordion>
-      </FocusPageFrame>
+      </ScreenScaffold>
     </div>
   );
 }
@@ -354,9 +349,9 @@ function ProjectWorkersSectionAccordion({
             <h2 className="ui-panel__title">{title}</h2>
             <p className="ui-panel__description">{description}</p>
             {summary ? (
-              <div className="project-workers-section-accordion__summary">
+              <SummaryStrip className="project-workers-section-accordion__summary">
                 {summary}
-              </div>
+              </SummaryStrip>
             ) : null}
           </div>
           {actions ? (
@@ -406,7 +401,7 @@ function ProjectWorkerAccordion({
         <div className="project-workers-worker-accordion__header-content">
           <div className="ui-panel__title-block">
             <h3 className="ui-panel__title">{projectWorker.repositoryName}</h3>
-            <div className="project-workers-worker-accordion__summary">
+            <SummaryStrip className="project-workers-worker-accordion__summary">
               <MetaRow>
                 <MetaItem label="Poll">
                   {`${projectWorker.pollingIntervalSeconds}s`}
@@ -422,7 +417,7 @@ function ProjectWorkerAccordion({
                     : attentionTargetCount}
                 </MetaItem>
               </MetaRow>
-            </div>
+            </SummaryStrip>
           </div>
           <div
             className="project-workers-worker-accordion__actions"

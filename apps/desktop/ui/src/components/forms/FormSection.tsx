@@ -6,6 +6,7 @@ export type FormSectionProps = {
   children?: React.ReactNode;
   actions?: React.ReactNode;
   className?: string;
+  summary?: React.ReactNode;
 };
 
 const headerStyle: React.CSSProperties = {
@@ -22,6 +23,7 @@ const FormSection: React.FC<FormSectionProps> = ({
   children,
   actions,
   className,
+  summary,
 }) => {
   return (
     <section className={className} style={{ marginBottom: 16 }}>
@@ -36,7 +38,8 @@ const FormSection: React.FC<FormSectionProps> = ({
         </div>
         <div>{actions}</div>
       </div>
-      <div style={{ paddingTop: 12 }}>{children}</div>
+      {summary ? <div style={{ paddingTop: 12 }}>{summary}</div> : null}
+      {children ? <div style={{ paddingTop: 12 }}>{children}</div> : null}
     </section>
   );
 };

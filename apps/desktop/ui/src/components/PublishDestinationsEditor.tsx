@@ -7,7 +7,7 @@ import { PathPickerField } from "./PathPickerField";
 import SelectListFullScreen, {
   type SelectListItem,
 } from "./SelectListFullScreen";
-import { Badge, SurfacePanel } from "./Surface";
+import { Badge, MetaItem, MetaRow, SummaryStrip, SurfacePanel } from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
 import CredentialComposerModal from "./forms/CredentialComposerModal";
 import type {
@@ -389,6 +389,10 @@ export function PublishDestinationsEditor({
           buildTargets,
           pendingBindingTargetSelections[destination.id],
         );
+        const bindingTargetNames = collectPublishDestinationBindingTargets(
+          destination,
+          buildTargets,
+        );
         const adapter = getPublishDestinationAdapter(destination.kind);
         const AdapterComponent = adapter.Component;
 
@@ -423,6 +427,24 @@ export function PublishDestinationsEditor({
                     {destination.enabled ? "enabled" : "disabled"}
                   </Badge>
                 </div>
+
+                <SummaryStrip className="publish-destination-card__summary-strip">
+                  <MetaRow className="wizard-target-card__summary">
+                    <MetaItem label="Bindings">
+                      {formatPublishDestinationBindingCount(
+                        bindingTargetNames.length,
+                      )}
+                    </MetaItem>
+                    <MetaItem label="Targets">
+                      {formatPublishDestinationBindingPreview(bindingTargetNames)}
+                    </MetaItem>
+                    <MetaItem
+                      label={destination.kind === "itch" ? "Credential" : "Mode"}
+                    >
+                      {formatPublishDestinationOperationalSummary(destination)}
+                    </MetaItem>
+                  </MetaRow>
+                </SummaryStrip>
               </div>
             }
             headerSeparated
@@ -1441,6 +1463,32 @@ function formatPublishDestinationKindLabel(kind: PublishDestinationKind) {
 
 function formatPublishDestinationTitle(destination: PublishDestinationDraft) {
   return derivePublishDestinationName(destination.kind);
+}
+
+function formatPublishDestinationBindingCount(count: number) {
+  return count === 1 ? "1 target" : `${count} targets`;
+}
+
+function formatPublishDestinationBindingPreview(bindingTargetNames: string[]) {
+  if (bindingTargetNames.length === 0) {
+    return "No bound targets";
+  }
+
+  if (bindingTargetNames.length <= 2) {
+    return bindingTargetNames.join(", ");
+  }
+
+  return `${bindingTargetNames.slice(0, 2).join(", ")} +${bindingTargetNames.length - 2} more`;
+}
+
+function formatPublishDestinationOperationalSummary(
+  destination: PublishDestinationDraft,
+) {
+  if (destination.kind === "filesystem") {
+    return "Move artifacts";
+  }
+
+  return destination.credentialsId === null ? "Missing" : "Configured";
 }
 
 function derivePublishDestinationName(kind: PublishDestinationKind) {

@@ -1,5 +1,6 @@
 import { Button } from "./Button";
 import FullScreenModal from "./FullScreenModal";
+import { MetaItem, MetaRow, SummaryStrip } from "./Surface";
 import type { ProjectWorkerEntry } from "./ProjectWorkersFocusScreen";
 import type { RuntimeHealthStatus } from "../services/runtime";
 
@@ -26,17 +27,17 @@ export function WorkerStatusQuickView({
       title="Project Workers"
     >
       <div className="worker-status-quick-view">
-        <div className="worker-status-quick-view__summary">
-          <p className="worker-status-tooltip__project-meta">
-            Runtime: {formatRuntimeStatus(runtimeStatus)}
-          </p>
-          <p className="worker-status-tooltip__project-meta">
-            Active projects: {projectWorkers.length}
-          </p>
-          <p className="worker-status-tooltip__project-meta">
-            Enabled targets: {countBuildTargets(projectWorkers)}
-          </p>
-        </div>
+        <SummaryStrip className="worker-status-quick-view__summary-strip">
+          <MetaRow className="worker-status-quick-view__summary-row">
+            <MetaItem label="Runtime">
+              {formatRuntimeStatus(runtimeStatus)}
+            </MetaItem>
+            <MetaItem label="Active projects">{projectWorkers.length}</MetaItem>
+            <MetaItem label="Enabled targets">
+              {countBuildTargets(projectWorkers)}
+            </MetaItem>
+          </MetaRow>
+        </SummaryStrip>
 
         <div className="worker-status-tooltip__content">
           {!inspectionAvailable ? (

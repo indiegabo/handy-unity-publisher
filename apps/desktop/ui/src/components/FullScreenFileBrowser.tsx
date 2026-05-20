@@ -27,6 +27,7 @@ const FullScreenFileBrowser = ({
       <div className="select-list-modal">
         <TextField
           autoComplete="off"
+          data-overlay-autofocus
           hint="Absolute host path"
           label="Path"
           onChange={(event) => setPath(event.target.value)}
@@ -36,14 +37,15 @@ const FullScreenFileBrowser = ({
 
         <SurfacePanel
           description="This fallback keeps the workflow unblocked when the desktop picker cannot be opened."
+          summary={
+            <p className="full-screen-file-browser__summary">
+              Provide the full host path exactly as it should be persisted in
+              the repository settings.
+            </p>
+          }
           title="Manual path entry"
           tone="inset"
         >
-          <p className="project-list-card__summary">
-            Provide the full host path exactly as it should be persisted in the
-            repository settings.
-          </p>
-
           <div className="input-with-picker__actions">
             <Button onClick={() => onResolve?.(null)} size="sm" variant="ghost">
               Cancel

@@ -9,9 +9,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { Button, IconButton } from "./components/Button";
+import { Icon, type IconName } from "./components/Icon";
 import { AuthProvidersFocusScreen } from "./components/AuthProvidersFocusScreen";
+import { type AuthProviderConnectionResult } from "./components/authProviderPresentation";
 import { ConfirmDialog } from "./components/ConfirmDialog";
-import { CreateProjectWizard } from "./components/CreateProjectWizard";
+import {
+  CreateProjectWizard,
+  type CreateProjectWizardSnapshot,
+} from "./components/CreateProjectWizard";
 import { useOverlay } from "./components/OverlayManager";
 import { ProcessFeedItem } from "./components/ProcessFeedItem";
 import { ProcessDetailFocusScreen } from "./components/ProcessDetailFocusScreen";
@@ -88,6 +93,24 @@ type WorkerStatusSnapshot = {
   runtimeStatus: RuntimeHealthStatus | null;
 };
 
+type ShellNavigationAction = {
+  icon: IconName;
+  label: string;
+  onClick: () => void;
+  variant: "primary" | "secondary" | "ghost";
+};
+
+type RuntimeToastTone = "info" | "success" | "warning";
+
+type RuntimeToast = {
+  id: string;
+  icon: IconName;
+  message: string;
+  releaseRunId: number | null;
+  title: string;
+  tone: RuntimeToastTone;
+};
+
 type AppScreen =
   | { kind: "main" }
   | { kind: "create-project" }
@@ -130,7 +153,20 @@ const WORKER_STATUS_REPOSITORY_EVENT_TOPICS = new Set<string>([
   "publish.run_finished",
   "automation.poll_auth_failed",
 ]);
+const PROCESS_FEED_RESET_PAGE_EVENT_TOPICS = new Set<string>([
+  "automation.release_queued",
+  "build.run_started",
+  "build.run_finished",
+  "publish.run_started",
+  "publish.run_finished",
+]);
 
+// Shell routing stays local to App so the audited entry points remain explicit.
+// Navigation enters through the home action bars, process-feed detail actions,
+// focus-screen back handling, and overlay result hand-offs. Overlay entry
+// points are the worker quick view, runtime lifecycle confirmations, bulk
+// instant-check selection and confirmation, and the create-project discard
+// guard.
 function App() {
   const { dismissTopOverlay, hasOpenOverlay, openOverlay } = useOverlay();
   const [page, setPage] = useState(1);
@@ -147,6 +183,7 @@ function App() {
   const [isLoadingFeed, setIsLoadingFeed] = useState(true);
   const [, setIsRefreshingFeed] = useState(false);
   const [feedError, setFeedError] = useState<string | null>(null);
+  const [runtimeToasts, setRuntimeToasts] = useState<RuntimeToast[]>([]);
   const [workerSnapshot, setWorkerSnapshot] = useState<WorkerStatusSnapshot>(
     EMPTY_WORKER_STATUS_SNAPSHOT,
   );
@@ -156,6 +193,12 @@ function App() {
   const [workerActionMessage, setWorkerActionMessage] = useState<string | null>(
     null,
   );
+  const [createProjectWizardSnapshot, setCreateProjectWizardSnapshot] =
+    useState<CreateProjectWizardSnapshot | null>(null);
+  const [createProjectAuthProviderResult, setCreateProjectAuthProviderResult] =
+    useState<AuthProviderConnectionResult | null>(null);
+  const [isCreateProjectWizardDirty, setIsCreateProjectWizardDirty] =
+    useState(false);
   const [pendingBulkInstantCheck, setPendingBulkInstantCheck] = useState(false);
   const [pendingRuntimeAction, setPendingRuntimeAction] =
     useState<RuntimeControlAction | null>(null);
@@ -168,7 +211,7 @@ function App() {
   const githubReauthPromptInFlightRef = useRef(false);
   const workerStatus = resolveWorkerStatusSummary(workerSnapshot);
   const projectWorkers = collectProjectWorkers(workerSnapshot.repositories);
-  const workerStatusTooltip = buildWorkerStatusTooltip(
+  const workerStatusDescription = buildWorkerStatusDescription(
     workerSnapshot,
     projectWorkers,
   );
@@ -185,6 +228,35 @@ function App() {
       (process) =>
         process.release_run_id === activeScreen.process.release_run_id,
     );
+  const isInCreateProjectFlow =
+    activeScreen.kind === "create-project" ||
+    (activeScreen.kind === "auth-providers" &&
+      activeScreen.returnTo === "create-project");
+
+  useEffect(() => {
+    if (isInCreateProjectFlow) {
+      return;
+    }
+
+    if (
+      !createProjectWizardSnapshot &&
+      !createProjectAuthProviderResult &&
+      !isCreateProjectWizardDirty
+    ) {
+      return;
+    }
+
+    startTransition(() => {
+      setCreateProjectAuthProviderResult(null);
+      setCreateProjectWizardSnapshot(null);
+      setIsCreateProjectWizardDirty(false);
+    });
+  }, [
+    createProjectAuthProviderResult,
+    createProjectWizardSnapshot,
+    isCreateProjectWizardDirty,
+    isInCreateProjectFlow,
+  ]);
 
   const loadProcessFeed = useEffectEvent(
     async (pageToLoad: number, reason: "page" | "event") => {
@@ -398,9 +470,31 @@ function App() {
     },
   );
 
+  const dismissRuntimeToast = useEffectEvent((toastId: string) => {
+    startTransition(() => {
+      setRuntimeToasts((current) =>
+        current.filter((toast) => toast.id !== toastId),
+      );
+    });
+  });
+
+  const handleRuntimeToastEvent = useEffectEvent((event: RuntimeEventRecord) => {
+    const toast = buildRuntimeToast(event);
+
+    if (!toast) {
+      return;
+    }
+
+    startTransition(() => {
+      setRuntimeToasts((current) =>
+        [toast, ...current.filter((entry) => entry.id !== toast.id)].slice(0, 3),
+      );
+    });
+  });
+
   const handleProcessFeedEvent = useEffectEvent(
     (event: ProcessFeedRuntimeEvent) => {
-      if (event.topic === "automation.release_queued" && page !== 1) {
+      if (PROCESS_FEED_RESET_PAGE_EVENT_TOPICS.has(event.topic) && page !== 1) {
         startTransition(() => {
           setPage(1);
         });
@@ -453,6 +547,7 @@ function App() {
         return;
       }
 
+      handleRuntimeToastEvent(event);
       handleRuntimeStatusEvent(event);
 
       if (!WORKER_STATUS_REPOSITORY_EVENT_TOPICS.has(event.topic)) {
@@ -493,7 +588,7 @@ function App() {
     setIsScreenBlank(true);
 
     try {
-      await waitForBlankPaint();
+      await waitForShellTransitionPhase();
       await invoke("transition_window_focus", {
         target: nextScreen.kind === "main" ? "main" : "focus",
       });
@@ -564,11 +659,30 @@ function App() {
   });
 
   const handleOpenAuthProvidersFromWizard = useEffectEvent(() => {
+    startTransition(() => {
+      setCreateProjectAuthProviderResult(null);
+    });
+
     void transitionToScreen({
       kind: "auth-providers",
       returnTo: "create-project",
     });
   });
+
+  const handleAuthProviderResult = useEffectEvent(
+    (result: AuthProviderConnectionResult) => {
+      if (
+        activeScreen.kind !== "auth-providers" ||
+        activeScreen.returnTo !== "create-project"
+      ) {
+        return;
+      }
+
+      startTransition(() => {
+        setCreateProjectAuthProviderResult(result);
+      });
+    },
+  );
 
   const handleOpenSettings = useEffectEvent(() => {
     void transitionToScreen({ kind: "settings" });
@@ -827,6 +941,8 @@ function App() {
 
   const handleProjectCreated = useEffectEvent((repositoryId: number) => {
     startTransition(() => {
+      setCreateProjectWizardSnapshot(null);
+      setIsCreateProjectWizardDirty(false);
       setActiveScreen({
         kind: "project-list",
         highlightedRepositoryId: repositoryId,
@@ -857,8 +973,44 @@ function App() {
     void transitionToScreen({ kind: "main" });
   });
 
+  const handleRequestCreateProjectClose = useEffectEvent(async () => {
+    if (activeScreen.kind !== "create-project") {
+      handleReturnFromFocus();
+      return;
+    }
+
+    if (isCreateProjectWizardDirty) {
+      const shouldDiscard = await openOverlay<boolean>(ConfirmDialog, {
+        cancelLabel: "Continue editing",
+        confirmLabel: "Discard draft",
+        confirmVariant: "secondary",
+        description:
+          "This leaves project creation and clears the current unsaved wizard draft.",
+        message:
+          "HGP will discard the repository, target, publish, and path changes that have not been saved yet.",
+        title: "Discard project draft?",
+      });
+
+      if (!shouldDiscard) {
+        return;
+      }
+    }
+
+    startTransition(() => {
+      setCreateProjectWizardSnapshot(null);
+      setIsCreateProjectWizardDirty(false);
+    });
+
+    handleReturnFromFocus();
+  });
+
   const handleFocusBackAction = useEffectEvent(() => {
     if (hasOpenOverlay && dismissTopOverlay()) {
+      return;
+    }
+
+    if (activeScreen.kind === "create-project") {
+      void handleRequestCreateProjectClose();
       return;
     }
 
@@ -868,6 +1020,39 @@ function App() {
   const handleRequestShellClose = useEffectEvent(async () => {
     await closeMainWindow();
   });
+
+  const homePrimaryNavigationActions: ShellNavigationAction[] = [
+    {
+      icon: "layout",
+      label: "Projects",
+      onClick: handleOpenProjects,
+      variant: "secondary" as const,
+    },
+    {
+      icon: "plus",
+      label: "Create project",
+      onClick: handleOpenCreateProject,
+      variant: "primary" as const,
+    },
+  ];
+  const homeSecondaryNavigationActions: ShellNavigationAction[] = [
+    {
+      icon: "key",
+      label: "Auth",
+      onClick: handleOpenAuthProviders,
+      variant: "ghost" as const,
+    },
+    {
+      icon: "settings",
+      label: "Settings",
+      onClick: handleOpenSettings,
+      variant: "ghost" as const,
+    },
+  ];
+  const focusBackLabel = resolveFocusBackLabel(activeScreen);
+  const focusScreenShellClassName = resolveFocusScreenShellClassName(
+    activeScreen,
+  );
 
   useEffect(() => {
     const handleWindowKeyDown = (event: KeyboardEvent) => {
@@ -917,7 +1102,7 @@ function App() {
             aria-pressed={isMainWindowPinned}
             className="window-titlebar__action window-titlebar__action--pin"
             icon={isMainWindowPinned ? "unpin" : "pin"}
-            label={isMainWindowPinned ? "Desafixar janela" : "Fixar janela"}
+            label={isMainWindowPinned ? "Unpin window" : "Pin window"}
             onClick={handleToggleMainWindowPinned}
             size="sm"
             variant="ghost"
@@ -925,7 +1110,7 @@ function App() {
           <IconButton
             className="window-titlebar__action window-titlebar__action--close"
             icon="close"
-            label="Fechar janela"
+            label="Close window"
             onClick={handleRequestShellClose}
             size="sm"
             variant="ghost"
@@ -934,6 +1119,88 @@ function App() {
       </header>
 
       <div className="app-shell__content">
+        {runtimeToasts.length > 0 ? (
+          <section
+            aria-label="Runtime notifications"
+            className="runtime-notification-rail"
+          >
+            <div aria-live="polite" className="runtime-notification-rail__stack">
+              {runtimeToasts.map((toast) => {
+                const linkedProcess =
+                  toast.releaseRunId === null
+                    ? null
+                    : (processPage.items.find(
+                        (process) => process.release_run_id === toast.releaseRunId,
+                      ) ?? null);
+                const canOpenLinkedProcess =
+                  linkedProcess !== null &&
+                  !(
+                    activeScreen.kind === "process-detail" &&
+                    activeProcessDetail?.release_run_id ===
+                      linkedProcess.release_run_id
+                  );
+
+                return (
+                  <div
+                    aria-atomic="true"
+                    className={joinClassNames(
+                      "runtime-notification-card",
+                      `runtime-notification-card--${toast.tone}`,
+                      "ui-panel",
+                      "ui-panel--inset",
+                      "ui-panel--header-separated",
+                    )}
+                    key={toast.id}
+                    role={toast.tone === "warning" ? "alert" : "status"}
+                  >
+                    <div className="ui-panel__header runtime-notification-card__header">
+                      <div className="runtime-notification-card__title-row">
+                        <span className="runtime-notification-card__icon-shell">
+                          <Icon
+                            className="runtime-notification-card__icon"
+                            name={toast.icon}
+                          />
+                        </span>
+                        <div className="ui-panel__title-block">
+                          <p className="ui-panel__eyebrow">Runtime event</p>
+                          <p className="ui-panel__title">{toast.title}</p>
+                        </div>
+                      </div>
+                      <IconButton
+                        className="runtime-notification-card__dismiss"
+                        icon="close"
+                        label={`Dismiss ${toast.title}`}
+                        onClick={() => dismissRuntimeToast(toast.id)}
+                        size="sm"
+                        variant="ghost"
+                      />
+                    </div>
+                    <div className="ui-panel__body runtime-notification-card__body">
+                      <p className="runtime-notification-card__message">
+                        {toast.message}
+                      </p>
+                      {canOpenLinkedProcess ? (
+                        <div className="runtime-notification-card__actions">
+                          <Button
+                            onClick={() => {
+                              dismissRuntimeToast(toast.id);
+                              handleOpenProcessDetail(linkedProcess);
+                            }}
+                            size="sm"
+                            variant="ghost"
+                          >
+                            {`Open process detail #${linkedProcess.release_run_id}`}
+                          </Button>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        ) : null}
+
         {isScreenBlank ? null : activeScreen.kind === "main" ? (
           <div className="home-frame">
             <section className="action-bar" aria-label="Primary actions">
@@ -941,32 +1208,28 @@ function App() {
                 <div className="worker-status-shell">
                   <WorkerStatusIndicator
                     animated={workerStatus.animated}
+                    aria-description={workerStatusDescription}
                     aria-haspopup="dialog"
                     label={workerStatus.label}
                     onClick={() => {
                       void handleOpenWorkerQuickView();
                     }}
                     tone={workerStatus.tone}
-                    title={workerStatusTooltip}
                   />
                 </div>
               </div>
 
               <div className="action-bar__actions">
-                <IconButton
-                  icon="layout"
-                  label="Projetos"
-                  onClick={handleOpenProjects}
-                  size="sm"
-                  variant="secondary"
-                />
-                <IconButton
-                  icon="plus"
-                  label="Criar novo projeto"
-                  onClick={handleOpenCreateProject}
-                  size="sm"
-                  variant="primary"
-                />
+                {homePrimaryNavigationActions.map((action) => (
+                  <IconButton
+                    icon={action.icon}
+                    key={action.label}
+                    label={action.label}
+                    onClick={action.onClick}
+                    size="sm"
+                    variant={action.variant}
+                  />
+                ))}
               </div>
             </section>
 
@@ -1052,20 +1315,16 @@ function App() {
               aria-label="Secondary actions"
             >
               <div className="action-bar__actions">
-                <IconButton
-                  icon="key"
-                  label="Auth"
-                  onClick={handleOpenAuthProviders}
-                  size="sm"
-                  variant="ghost"
-                />
-                <IconButton
-                  icon="settings"
-                  label="Settings"
-                  onClick={handleOpenSettings}
-                  size="sm"
-                  variant="ghost"
-                />
+                {homeSecondaryNavigationActions.map((action) => (
+                  <IconButton
+                    icon={action.icon}
+                    key={action.label}
+                    label={action.label}
+                    onClick={action.onClick}
+                    size="sm"
+                    variant={action.variant}
+                  />
+                ))}
               </div>
             </section>
           </div>
@@ -1078,7 +1337,7 @@ function App() {
               <div className="action-bar__actions action-bar__actions--leading">
                 <IconButton
                   icon="arrowLeft"
-                  label={resolveFocusBackLabel(activeScreen)}
+                  label={focusBackLabel}
                   onClick={handleFocusBackAction}
                   size="sm"
                   variant="ghost"
@@ -1087,21 +1346,7 @@ function App() {
             </section>
 
             <section
-              className={
-                activeScreen.kind === "create-project"
-                  ? "focus-screen-shell focus-screen-shell--wizard"
-                  : activeScreen.kind === "auth-providers"
-                    ? "focus-screen-shell focus-screen-shell--auth-providers"
-                    : activeScreen.kind === "project-workers"
-                      ? "focus-screen-shell focus-screen-shell--project-workers"
-                      : activeScreen.kind === "project-list"
-                        ? "focus-screen-shell focus-screen-shell--project-list"
-                        : activeScreen.kind === "project-detail"
-                          ? "focus-screen-shell focus-screen-shell--project-detail"
-                          : activeScreen.kind === "process-detail"
-                            ? "focus-screen-shell focus-screen-shell--process-detail"
-                            : "focus-screen-shell"
-              }
+              className={focusScreenShellClassName}
               aria-label="Focus screen"
             >
               {transitionError ? (
@@ -1112,13 +1357,18 @@ function App() {
 
               {activeScreen.kind === "create-project" ? (
                 <CreateProjectWizard
+                  authProviderResult={createProjectAuthProviderResult}
+                  initialSnapshot={createProjectWizardSnapshot}
                   onCreated={handleProjectCreated}
+                  onDirtyChange={setIsCreateProjectWizardDirty}
                   onManageAuth={handleOpenAuthProvidersFromWizard}
+                  onRequestClose={handleRequestCreateProjectClose}
+                  onSnapshotChange={setCreateProjectWizardSnapshot}
                 />
               ) : null}
 
               {activeScreen.kind === "auth-providers" ? (
-                <AuthProvidersFocusScreen />
+                <AuthProvidersFocusScreen onResult={handleAuthProviderResult} />
               ) : null}
 
               {activeScreen.kind === "settings" ? (
@@ -1177,14 +1427,30 @@ function App() {
   );
 }
 
-async function waitForBlankPaint() {
-  await new Promise<void>((resolve) => {
-    requestAnimationFrame(() => {
+async function waitForShellTransitionPhase() {
+  if (prefersReducedMotion()) {
+    return;
+  }
+
+  await waitForAnimationFrames(2);
+}
+
+async function waitForAnimationFrames(frameCount: number) {
+  for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+    await new Promise<void>((resolve) => {
       requestAnimationFrame(() => {
         resolve();
       });
     });
-  });
+  }
+}
+
+function prefersReducedMotion() {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
 }
 
 function buildInvokeErrorMessage(error: unknown): string {
@@ -1468,7 +1734,7 @@ function formatBuildTargetCount(buildTargetCount: number) {
   return `${buildTargetCount} build target${buildTargetCount === 1 ? "" : "s"}`;
 }
 
-function buildWorkerStatusTooltip(
+function buildWorkerStatusDescription(
   snapshot: WorkerStatusSnapshot,
   projectWorkers: ProjectWorkerEntry[],
 ) {
@@ -1477,7 +1743,7 @@ function buildWorkerStatusTooltip(
   }
 
   if (snapshot.inspectionStale) {
-    return `Showing the last known worker snapshot while repository inspection recovers. ${projectWorkers.length > 0 ? buildActiveWorkersTooltip(projectWorkers) : ""}`.trim();
+    return `Showing the last known worker snapshot while repository inspection recovers. ${projectWorkers.length > 0 ? buildActiveWorkersDescription(projectWorkers) : ""}`.trim();
   }
 
   if (!snapshot.inspectionAvailable) {
@@ -1488,10 +1754,10 @@ function buildWorkerStatusTooltip(
     return "No active workers configured.";
   }
 
-  return buildActiveWorkersTooltip(projectWorkers);
+  return buildActiveWorkersDescription(projectWorkers);
 }
 
-function buildActiveWorkersTooltip(projectWorkers: ProjectWorkerEntry[]) {
+function buildActiveWorkersDescription(projectWorkers: ProjectWorkerEntry[]) {
   return `Active workers: ${projectWorkers
     .map((projectWorker) => {
       const buildTargetNames = projectWorker.buildTargets
@@ -1538,17 +1804,174 @@ function resolveFocusBackLabel(activeScreen: AppScreen) {
     activeScreen.kind === "project-detail" &&
     activeScreen.returnTo === "project-list"
   ) {
-    return "Voltar para a lista de projetos";
+    return "Back to project list";
   }
 
   if (
     activeScreen.kind === "auth-providers" &&
     activeScreen.returnTo === "create-project"
   ) {
-    return "Voltar para a criação do projeto";
+    return "Back to project creation";
   }
 
-  return "Voltar para a tela principal";
+  return "Back to main screen";
+}
+
+function resolveFocusScreenShellClassName(activeScreen: AppScreen) {
+  switch (activeScreen.kind) {
+    case "create-project":
+      return "focus-screen-shell focus-screen-shell--wizard";
+    case "auth-providers":
+      return "focus-screen-shell focus-screen-shell--auth-providers";
+    case "project-workers":
+      return "focus-screen-shell focus-screen-shell--project-workers";
+    case "project-list":
+      return "focus-screen-shell focus-screen-shell--project-list";
+    case "project-detail":
+      return "focus-screen-shell focus-screen-shell--project-detail";
+    case "process-detail":
+      return "focus-screen-shell focus-screen-shell--process-detail";
+    default:
+      return "focus-screen-shell";
+  }
+}
+
+function buildRuntimeToast(event: RuntimeEventRecord): RuntimeToast | null {
+  switch (event.topic) {
+    case "automation.poll_auth_failed":
+      return {
+        id: event.event_id,
+        icon: "alertCircle",
+        message: event.summary,
+        releaseRunId: event.release_run_id,
+        title: "Repository polling stopped",
+        tone: "warning",
+      };
+    case "automation.release_queued":
+      if (event.user_requested) {
+        return null;
+      }
+
+      return {
+        id: event.event_id,
+        icon: "queue",
+        message: event.summary,
+        releaseRunId: event.release_run_id,
+        title: "Automatic release queued",
+        tone: "info",
+      };
+    case "build.run_started":
+      if (event.user_requested) {
+        return null;
+      }
+
+      return {
+        id: event.event_id,
+        icon: "play",
+        message: event.summary,
+        releaseRunId: event.release_run_id,
+        title: "Automatic build started",
+        tone: "info",
+      };
+    case "build.run_finished":
+      if (event.user_requested) {
+        return null;
+      }
+
+      return {
+        id: event.event_id,
+        ...resolveFinishedBuildToastPresentation(event),
+        message: event.summary,
+        releaseRunId: event.release_run_id,
+      };
+    case "publish.run_started":
+      if (event.user_requested) {
+        return null;
+      }
+
+      return {
+        id: event.event_id,
+        icon: "arrowUpRight",
+        message: event.summary,
+        releaseRunId: event.release_run_id,
+        title: "Automatic publish started",
+        tone: "info",
+      };
+    case "publish.run_finished":
+      if (event.user_requested) {
+        return null;
+      }
+
+      return {
+        id: event.event_id,
+        ...resolveFinishedPublishToastPresentation(event),
+        message: event.summary,
+        releaseRunId: event.release_run_id,
+      };
+    default:
+      return null;
+  }
+}
+
+function resolveFinishedBuildToastPresentation(
+  event: RuntimeEventRecord,
+): Pick<RuntimeToast, "icon" | "title" | "tone"> {
+  switch (readRuntimeEventStatus(event.payload)) {
+    case "failed":
+      return {
+        icon: "alertCircle",
+        title: "Automatic build failed",
+        tone: "warning",
+      };
+    case "canceled":
+      return {
+        icon: "close",
+        title: "Automatic build canceled",
+        tone: "warning",
+      };
+    default:
+      return {
+        icon: "checkCircle",
+        title: "Automatic build finished",
+        tone: "success",
+      };
+  }
+}
+
+function resolveFinishedPublishToastPresentation(
+  event: RuntimeEventRecord,
+): Pick<RuntimeToast, "icon" | "title" | "tone"> {
+  switch (readRuntimeEventStatus(event.payload)) {
+    case "failed":
+      return {
+        icon: "alertCircle",
+        title: "Automatic publish failed",
+        tone: "warning",
+      };
+    case "canceled":
+    case "cancelled":
+      return {
+        icon: "close",
+        title: "Automatic publish canceled",
+        tone: "warning",
+      };
+    default:
+      return {
+        icon: "checkCircle",
+        title: "Automatic publish finished",
+        tone: "success",
+      };
+  }
+}
+
+function readRuntimeEventStatus(payload: Record<string, unknown>) {
+  const status = payload.status;
+
+  return typeof status === "string" ? status.trim().toLowerCase() : null;
+}
+
+function joinClassNames(...tokens: Array<string | false | null | undefined>) {
+  return tokens.filter(Boolean).join(" ");
 }
 
 export default App;

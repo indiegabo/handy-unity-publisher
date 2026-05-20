@@ -7,6 +7,7 @@ import {
 } from "react";
 
 import { Button, IconButton } from "./Button";
+import { BuildTargetRemovalCallout } from "./BuildTargetRemovalCallout";
 import {
   PublishDestinationsEditor,
   buildCreateProjectPublishTargetsInput,
@@ -30,6 +31,7 @@ import {
   SurfacePanel,
 } from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
+import { type AuthProviderConnectionResult } from "./authProviderPresentation";
 import StepFlow from "./wizard/StepFlow";
 import {
   createRepositoryProject,
@@ -53,7 +55,7 @@ import {
   type AuthProviderStatus,
 } from "../services/auth";
 
-type BuildTargetDraft = {
+export type BuildTargetDraft = {
   id: string;
   name: string;
   targetPlatform: string;
@@ -61,7 +63,7 @@ type BuildTargetDraft = {
   unityExecutablePath: string;
 };
 
-type ProjectDraft = {
+export type ProjectDraft = {
   projectKind: "repository" | "local";
   engineKind: RepositoryEngineKind;
   name: string;
@@ -100,11 +102,28 @@ type PathStepErrors = {
   workspaceRootOverride?: string;
 };
 
+export type CreateProjectWizardSnapshot = {
+  attemptedSteps: Record<WizardStepKey, boolean>;
+  currentStepIndex: number;
+  draft: ProjectDraft;
+  expandedTargetIds: Record<string, boolean>;
+  pathDiagnostics: Record<string, UnityExecutableValidation | null>;
+  pendingBuildTargetRemovalId: string | null;
+  repositoryCredentialId: number | null;
+  reviewConfirmed: boolean;
+  touchedFields: Record<string, boolean>;
+};
+
 type ProjectPathFieldName = "artifactsRootOverride" | "workspaceRootOverride";
 
 type CreateProjectWizardProps = {
+  authProviderResult?: AuthProviderConnectionResult | null;
+  initialSnapshot?: CreateProjectWizardSnapshot | null;
   onCreated: (repositoryId: number) => void;
+  onDirtyChange?: (isDirty: boolean) => void;
   onManageAuth?: () => void;
+  onRequestClose?: () => void;
+  onSnapshotChange?: (snapshot: CreateProjectWizardSnapshot) => void;
 };
 
 type ValidationTimerMap = Record<string, number | undefined>;
@@ -181,29 +200,36 @@ const EMPTY_VALIDATION_ATTEMPTS: Record<WizardStepKey, boolean> = {
   review: false,
 };
 
+const INITIAL_PROJECT_DRAFT = createInitialProjectDraft();
+const INITIAL_PROJECT_DRAFT_DIRTY_KEY = buildProjectDraftDirtyKey(
+  INITIAL_PROJECT_DRAFT,
+);
+
 export function CreateProjectWizard({
+  authProviderResult = null,
+  initialSnapshot: initialSnapshotProp = null,
   onCreated,
+  onDirtyChange,
   onManageAuth,
+  onRequestClose,
+  onSnapshotChange,
 }: CreateProjectWizardProps) {
-  const [draft, setDraft] = useState<ProjectDraft>(() => ({
-    projectKind: "repository",
-    engineKind: "unity",
-    name: "",
-    repositoryUrl: "",
-    repositoryVisibility: "public",
-    defaultBranch: "main",
-    pollingIntervalSeconds: "300",
-    artifactsRootOverride: "",
-    workspaceRootOverride: "",
-    buildTargets: [createEmptyBuildTargetDraft(1)],
-    publishDestinations: [],
-  }));
-  const [currentStepIndex, setCurrentStepIndex] = useState(0);
-  const [attemptedSteps, setAttemptedSteps] = useState(
-    EMPTY_VALIDATION_ATTEMPTS,
+  const initialSnapshot =
+    initialSnapshotProp ?? createInitialCreateProjectWizardSnapshot();
+  const [draft, setDraft] = useState<ProjectDraft>(() =>
+    cloneProjectDraft(initialSnapshot.draft),
   );
+  const [currentStepIndex, setCurrentStepIndex] = useState(() =>
+    normalizeWizardStepIndex(initialSnapshot.currentStepIndex),
+  );
+  const [attemptedSteps, setAttemptedSteps] = useState(() => ({
+    ...EMPTY_VALIDATION_ATTEMPTS,
+    ...initialSnapshot.attemptedSteps,
+  }));
   const [touchedFields, setTouchedFields] = useState<Record<string, boolean>>(
-    {},
+    () => ({
+      ...initialSnapshot.touchedFields,
+    }),
   );
   const [repositoryInventory, setRepositoryInventory] = useState<
     RepositoryInspectionEntry[]
@@ -237,7 +263,7 @@ export function CreateProjectWizard({
   >(null);
   const [repositoryCredentialId, setRepositoryCredentialId] = useState<
     number | null
-  >(null);
+  >(initialSnapshot.repositoryCredentialId);
   const [repositoryAccessActionMessage, setRepositoryAccessActionMessage] =
     useState<string | null>(null);
   const [pendingRepositoryAccessAction, setPendingRepositoryAccessAction] =
@@ -246,18 +272,33 @@ export function CreateProjectWizard({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pathDiagnostics, setPathDiagnostics] = useState<
     Record<string, UnityExecutableValidation | null>
-  >({});
+  >(() => ({
+    ...initialSnapshot.pathDiagnostics,
+  }));
   const [validatingTargets, setValidatingTargets] = useState<
     Record<string, boolean>
   >({});
   const [expandedTargetIds, setExpandedTargetIds] = useState<
     Record<string, boolean>
-  >({
-    "target-1": true,
+  >(() => {
+    if (Object.keys(initialSnapshot.expandedTargetIds).length > 0) {
+      return {
+        ...initialSnapshot.expandedTargetIds,
+      };
+    }
+
+    return {
+      "target-1": true,
+    };
   });
   const [pendingBuildTargetRemovalId, setPendingBuildTargetRemovalId] =
-    useState<string | null>(null);
-  const nextBuildTargetIdRef = useRef(2);
+    useState<string | null>(initialSnapshot.pendingBuildTargetRemovalId);
+  const [reviewConfirmed, setReviewConfirmed] = useState(
+    initialSnapshot.reviewConfirmed,
+  );
+  const nextBuildTargetIdRef = useRef(
+    resolveNextBuildTargetIndex(initialSnapshot.draft.buildTargets),
+  );
   const validationTimersRef = useRef<ValidationTimerMap>({});
   const validationTokenRef = useRef<Record<string, number>>({});
   const accessAssessmentTimerRef = useRef<number | undefined>(undefined);
@@ -398,9 +439,57 @@ export function CreateProjectWizard({
         <MetaItem label="Access">{repositoryAccessSummary}</MetaItem>
       </MetaRow>
     );
+  const currentStepBlockedByInventory =
+    (currentStep.key === "identity" || currentStep.key === "access") &&
+    (isLoadingRepositoryInventory || inventoryError !== null);
+  const isWizardDirty = buildCreateProjectWizardDirtyState(
+    draft,
+    currentStepIndex,
+    repositoryCredentialId,
+  );
+
+  useEffect(() => {
+    onDirtyChange?.(isWizardDirty);
+  }, [isWizardDirty, onDirtyChange]);
+
+  useEffect(() => {
+    if (!onSnapshotChange) {
+      return;
+    }
+
+    onSnapshotChange({
+      attemptedSteps,
+      currentStepIndex,
+      draft: cloneProjectDraft(draft),
+      expandedTargetIds: {
+        ...expandedTargetIds,
+      },
+      pathDiagnostics: {
+        ...pathDiagnostics,
+      },
+      pendingBuildTargetRemovalId,
+      repositoryCredentialId,
+      reviewConfirmed,
+      touchedFields: {
+        ...touchedFields,
+      },
+    });
+  }, [
+    attemptedSteps,
+    currentStepIndex,
+    draft,
+    expandedTargetIds,
+    onSnapshotChange,
+    pathDiagnostics,
+    pendingBuildTargetRemovalId,
+    repositoryCredentialId,
+    reviewConfirmed,
+    touchedFields,
+  ]);
 
   const loadRepositoryInventoryEffect = useEffectEvent(async () => {
     setIsLoadingRepositoryInventory(true);
+    setInventoryError(null);
 
     try {
       const inspection = await loadRepositoryInspection();
@@ -420,6 +509,7 @@ export function CreateProjectWizard({
 
   const loadAuthProvidersEffect = useEffectEvent(async () => {
     setIsLoadingAuthProviders(true);
+    setAuthProviderError(null);
 
     try {
       const providers = await loadAuthProviders();
@@ -446,6 +536,7 @@ export function CreateProjectWizard({
 
   const loadRepositoryCredentialsEffect = useEffectEvent(async () => {
     setIsLoadingRepositoryCredentials(true);
+    setRepositoryCredentialsError(null);
 
     try {
       const credentials = await listRepositoryCredentialsEffect();
@@ -633,6 +724,22 @@ export function CreateProjectWizard({
   }, []);
 
   useEffect(() => {
+    for (const target of draft.buildTargets) {
+      const unityExecutablePath = target.unityExecutablePath.trim();
+
+      if (
+        !unityExecutablePath ||
+        pathDiagnostics[target.id] ||
+        validatingTargets[target.id]
+      ) {
+        continue;
+      }
+
+      scheduleUnityExecutableValidation(target.id, unityExecutablePath, 0);
+    }
+  }, [draft.buildTargets, pathDiagnostics, validatingTargets]);
+
+  useEffect(() => {
     const normalizedUrl = draft.repositoryUrl.trim();
     const repositoryVisibility = draft.repositoryVisibility;
     accessAssessmentTokenRef.current += 1;
@@ -682,14 +789,107 @@ export function CreateProjectWizard({
   }, [draft.repositoryUrl, draft.repositoryVisibility]);
 
   useEffect(() => {
-    if (supportsShellRepositoryLoginAction(repositoryAccessAssessment)) {
+    if (
+      !repositoryAccessAssessment ||
+      supportsShellRepositoryLoginAction(repositoryAccessAssessment)
+    ) {
       return;
     }
 
     startTransition(() => {
       setRepositoryCredentialId(null);
     });
-  }, [repositoryAccessAssessment?.auth_requirement]);
+  }, [repositoryAccessAssessment]);
+
+  useEffect(() => {
+    if (currentStep.key === "review" || !reviewConfirmed) {
+      return;
+    }
+
+    startTransition(() => {
+      setReviewConfirmed(false);
+    });
+  }, [currentStep.key, reviewConfirmed]);
+
+  useEffect(() => {
+    if (
+      !authProviderResult ||
+      !isGithubAuthProviderResult(authProviderResult)
+    ) {
+      return;
+    }
+
+    startTransition(() => {
+      setGithubAuthProvider(authProviderResult.provider);
+      setAuthProviderError(null);
+      setRepositoryAccessActionMessage(
+        buildAuthProviderRoundTripMessage(
+          authProviderResult,
+          repositoryCredentialId,
+          githubAuthProvider?.credential_id ?? null,
+        ),
+      );
+
+      if (
+        authProviderResult.provider.credential_id !== null &&
+        (repositoryCredentialId === null ||
+          repositoryCredentialId ===
+            (githubAuthProvider?.credential_id ?? null))
+      ) {
+        setRepositoryCredentialId(authProviderResult.provider.credential_id);
+      }
+    });
+  }, [
+    authProviderResult,
+    githubAuthProvider?.credential_id,
+    repositoryCredentialId,
+  ]);
+
+  const handleRetryRepositoryInventory = useEffectEvent(() => {
+    void loadRepositoryInventoryEffect();
+  });
+
+  const handleRetryAuthProviders = useEffectEvent(() => {
+    void loadAuthProvidersEffect();
+  });
+
+  const handleRetryRepositoryCredentials = useEffectEvent(() => {
+    void loadRepositoryCredentialsEffect();
+  });
+
+  const handleRetryRepositoryAccessCheck = useEffectEvent(() => {
+    const normalizedUrl = draft.repositoryUrl.trim();
+
+    if (
+      !normalizedUrl ||
+      !(
+        normalizedUrl.startsWith("https://") ||
+        normalizedUrl.startsWith("http://")
+      )
+    ) {
+      return;
+    }
+
+    if (accessAssessmentTimerRef.current !== undefined) {
+      window.clearTimeout(accessAssessmentTimerRef.current);
+      accessAssessmentTimerRef.current = undefined;
+    }
+
+    accessAssessmentTokenRef.current += 1;
+    const assessmentToken = accessAssessmentTokenRef.current;
+
+    startTransition(() => {
+      setIsAssessingRepositoryAccess(true);
+      setRepositoryAccessError(null);
+      setRepositoryAccessActionMessage(null);
+    });
+
+    void loadRepositoryAccessAssessmentEffect(
+      normalizedUrl,
+      draft.repositoryVisibility,
+      assessmentToken,
+    );
+  });
 
   const markFieldTouched = useEffectEvent((fieldKey: string) => {
     startTransition(() => {
@@ -921,7 +1121,11 @@ export function CreateProjectWizard({
 
   const handleAdvanceStep = useEffectEvent(() => {
     if (currentStep.key === "identity") {
-      if (hasIdentityErrors(identityErrors) || isLoadingRepositoryInventory) {
+      if (
+        hasIdentityErrors(identityErrors) ||
+        isLoadingRepositoryInventory ||
+        inventoryError !== null
+      ) {
         startTransition(() => {
           setAttemptedSteps((current) => ({
             ...current,
@@ -933,7 +1137,11 @@ export function CreateProjectWizard({
     }
 
     if (currentStep.key === "access") {
-      if (hasAccessErrors(accessErrors) || isLoadingRepositoryInventory) {
+      if (
+        hasAccessErrors(accessErrors) ||
+        isLoadingRepositoryInventory ||
+        inventoryError !== null
+      ) {
         startTransition(() => {
           setAttemptedSteps((current) => ({
             ...current,
@@ -1010,6 +1218,10 @@ export function CreateProjectWizard({
   });
 
   const handleSubmitProject = useEffectEvent(async () => {
+    if (!reviewConfirmed) {
+      return;
+    }
+
     const firstInvalidStep = findFirstInvalidStep({
       identityErrors,
       accessErrors,
@@ -1017,6 +1229,7 @@ export function CreateProjectWizard({
       publishErrors: publishDestinationErrors,
       pathErrors,
       isLoadingRepositoryInventory,
+      inventoryError,
     });
     if (firstInvalidStep) {
       const invalidTargetIds =
@@ -1066,6 +1279,246 @@ export function CreateProjectWizard({
     }
   });
 
+  const currentStepSupport =
+    currentStep.key === "identity" ? (
+      <SurfacePanel
+        className="wizard-support-panel"
+        description="Context for how this registration model behaves inside the local runtime."
+        eyebrow="Support"
+        headerSeparated
+        title="Repository projects"
+        tone="inset"
+      >
+        <p className="wizard-callout__copy">
+          Repository projects let the runtime poll a remote Git repository on a
+          fixed cadence and queue automation when a new release tag appears.
+          Only Unity is currently supported; the future engines stay visible so
+          the model does not keep lying about the roadmap.
+        </p>
+      </SurfacePanel>
+    ) : currentStep.key === "access" ? (
+      <SurfacePanel
+        actions={
+          <Badge
+            tone={resolveRepositoryAccessBadgeTone(
+              repositoryAccessAssessment,
+              isAssessingRepositoryAccess,
+              repositoryAccessError,
+            )}
+          >
+            {formatRepositoryAccessStatus(
+              draft.repositoryUrl,
+              repositoryAccessAssessment,
+              isAssessingRepositoryAccess,
+              repositoryAccessError,
+            )}
+          </Badge>
+        }
+        className="wizard-support-panel"
+        description={resolveRepositoryAccessCopy(
+          draft.repositoryUrl,
+          repositoryAccessAssessment,
+          isAssessingRepositoryAccess,
+          repositoryAccessError,
+        )}
+        eyebrow="Support"
+        headerSeparated
+        summary={
+          draft.repositoryUrl.trim() ||
+          isAssessingRepositoryAccess ||
+          repositoryAccessAssessment ||
+          repositoryAccessError ? (
+            <MetaRow className="wizard-callout__meta">
+              <MetaItem label="Provider">
+                {formatRepositoryAccessProviderLabel(
+                  repositoryAccessAssessment,
+                  isAssessingRepositoryAccess,
+                  repositoryAccessError,
+                )}
+              </MetaItem>
+              <MetaItem label="Visibility">
+                {formatRepositoryVisibilityLabel(
+                  repositoryAccessAssessment,
+                  isAssessingRepositoryAccess,
+                  repositoryAccessError,
+                )}
+              </MetaItem>
+              <MetaItem label="Login">
+                {formatRepositoryLoginStatus(
+                  repositoryAccessAssessment,
+                  githubAuthProvider,
+                  isLoadingAuthProviders,
+                )}
+              </MetaItem>
+              <MetaItem label="Connection">
+                {formatRepositoryBindingStatus(
+                  repositoryAccessAssessment,
+                  repositoryCredentialId,
+                  pendingRepositoryAccessAction,
+                )}
+              </MetaItem>
+            </MetaRow>
+          ) : undefined
+        }
+        title="Repository access"
+        tone="inset"
+      >
+        {repositoryAccessActionMessage ? (
+          <p className="feed-banner feed-banner--info">
+            {repositoryAccessActionMessage}
+          </p>
+        ) : null}
+
+        {shouldShowFieldError(
+          attemptedSteps.access,
+          touchedFields,
+          "repositoryAccess",
+        ) && accessErrors.repositoryAccess ? (
+          <p className="ui-field__error">{accessErrors.repositoryAccess}</p>
+        ) : null}
+
+        {repositoryAccessError ||
+        authProviderError ||
+        repositoryCredentialsError ? (
+          <div className="wizard-callout__actions">
+            {repositoryAccessError ? (
+              <Button
+                disabled={isAssessingRepositoryAccess}
+                leadingIcon="refresh"
+                onClick={handleRetryRepositoryAccessCheck}
+                size="sm"
+                variant="secondary"
+              >
+                {isAssessingRepositoryAccess
+                  ? "Retrying access check..."
+                  : "Retry access check"}
+              </Button>
+            ) : null}
+
+            {authProviderError ? (
+              <Button
+                disabled={isLoadingAuthProviders}
+                leadingIcon="refresh"
+                onClick={handleRetryAuthProviders}
+                size="sm"
+                variant="secondary"
+              >
+                {isLoadingAuthProviders
+                  ? "Retrying accounts..."
+                  : "Retry accounts"}
+              </Button>
+            ) : null}
+
+            {repositoryCredentialsError ? (
+              <Button
+                disabled={isLoadingRepositoryCredentials}
+                leadingIcon="refresh"
+                onClick={handleRetryRepositoryCredentials}
+                size="sm"
+                variant="secondary"
+              >
+                {isLoadingRepositoryCredentials
+                  ? "Retrying credentials..."
+                  : "Retry credentials"}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+
+        {shouldShowRepositoryLoginAction(repositoryAccessAssessment) ? (
+          <>
+            <SelectField
+              disabled={
+                isLoadingRepositoryCredentials || pendingRepositoryAccessAction
+              }
+              hint={formatRepositoryCredentialFieldHint(
+                repositoryAccessAssessment,
+                isLoadingRepositoryCredentials,
+              )}
+              label="Repository credential"
+              onChange={(event) =>
+                handleRepositoryCredentialSelectionChange(
+                  event.currentTarget.value,
+                )
+              }
+              options={repositoryCredentialOptions}
+              value={repositoryCredentialId?.toString() ?? ""}
+            />
+
+            <div className="wizard-callout__actions">
+              {supportsShellRepositoryLoginAction(
+                repositoryAccessAssessment,
+              ) ? (
+                <Button
+                  leadingIcon="key"
+                  onClick={handleBindRepositoryAccess}
+                  disabled={pendingRepositoryAccessAction}
+                  size="sm"
+                  variant={
+                    repositoryCredentialId !== null ? "secondary" : "primary"
+                  }
+                >
+                  {pendingRepositoryAccessAction
+                    ? "Connecting login..."
+                    : formatRepositoryBindingActionLabel(
+                        repositoryAccessAssessment,
+                        githubAuthProvider,
+                        repositoryCredentialId,
+                      )}
+                </Button>
+              ) : null}
+
+              {repositoryCredentialId !== null ? (
+                <Button
+                  onClick={handleClearRepositoryAccessBinding}
+                  size="sm"
+                  variant="ghost"
+                >
+                  Disconnect
+                </Button>
+              ) : null}
+
+              {onManageAuth &&
+              supportsShellRepositoryLoginAction(repositoryAccessAssessment) ? (
+                <Button onClick={onManageAuth} size="sm" variant="ghost">
+                  Open accounts
+                </Button>
+              ) : null}
+            </div>
+          </>
+        ) : null}
+      </SurfacePanel>
+    ) : currentStep.key === "review" ? (
+      <SurfacePanel
+        actions={
+          <Badge tone={reviewConfirmed ? "strong" : "muted"}>
+            {reviewConfirmed ? "Ready to create" : "Pending confirmation"}
+          </Badge>
+        }
+        className="wizard-support-panel"
+        description="Review the repository access, targets, publish bindings, and path overrides below before the shell saves this project."
+        eyebrow="Support"
+        headerSeparated
+        title="Final confirmation"
+        tone="inset"
+      >
+        <label className="wizard-review-confirmation">
+          <input
+            checked={reviewConfirmed}
+            className="wizard-review-confirmation__input"
+            onChange={(event) => {
+              setReviewConfirmed(event.currentTarget.checked);
+            }}
+            type="checkbox"
+          />
+          <span className="wizard-review-confirmation__copy">
+            I reviewed the repository access, targets, publish destinations, and
+            path overrides for this project.
+          </span>
+        </label>
+      </SurfacePanel>
+    ) : null;
+
   return (
     <FocusPageFrame
       bodyClassName="wizard-shell__body"
@@ -1089,7 +1542,22 @@ export function CreateProjectWizard({
       title="Create Project"
     >
       {inventoryError ? (
-        <p className="feed-banner feed-banner--error">{inventoryError}</p>
+        <>
+          <p className="feed-banner feed-banner--error">{inventoryError}</p>
+          <div className="wizard-callout__actions">
+            <Button
+              disabled={isLoadingRepositoryInventory}
+              leadingIcon="refresh"
+              onClick={handleRetryRepositoryInventory}
+              size="sm"
+              variant="secondary"
+            >
+              {isLoadingRepositoryInventory
+                ? "Retrying inventory..."
+                : "Retry inventory load"}
+            </Button>
+          </div>
+        </>
       ) : null}
 
       {submitError ? (
@@ -1102,7 +1570,7 @@ export function CreateProjectWizard({
           <>
             {currentStep.key === "review" ? (
               <Button
-                disabled={isSubmitting}
+                disabled={isSubmitting || !reviewConfirmed}
                 onClick={() => void handleSubmitProject()}
                 size="sm"
                 variant="primary"
@@ -1113,7 +1581,7 @@ export function CreateProjectWizard({
 
             {showNextAction ? (
               <Button
-                disabled={isSubmitting || isLoadingRepositoryInventory}
+                disabled={isSubmitting || currentStepBlockedByInventory}
                 onClick={handleAdvanceStep}
                 size="sm"
                 variant="primary"
@@ -1137,17 +1605,32 @@ export function CreateProjectWizard({
         }
         progressTitle="Wizard Steps"
         startActions={
-          showPreviousAction ? (
-            <Button
-              disabled={isSubmitting}
-              onClick={handleRetreatStep}
-              size="sm"
-              variant="ghost"
-            >
-              Previous
-            </Button>
+          onRequestClose || showPreviousAction ? (
+            <>
+              {onRequestClose ? (
+                <Button
+                  disabled={isSubmitting}
+                  onClick={onRequestClose}
+                  size="sm"
+                  variant="ghost"
+                >
+                  Cancel
+                </Button>
+              ) : null}
+              {showPreviousAction ? (
+                <Button
+                  disabled={isSubmitting}
+                  onClick={handleRetreatStep}
+                  size="sm"
+                  variant="ghost"
+                >
+                  Previous
+                </Button>
+              ) : null}
+            </>
           ) : null
         }
+        supportContent={currentStepSupport}
         stepSummary={currentStepSummary}
         steps={WIZARD_STEPS}
       >
@@ -1230,15 +1713,6 @@ export function CreateProjectWizard({
               }}
               value={draft.engineKind}
             />
-
-            <div className="wizard-callout wizard-callout--compact wizard-callout--support">
-              <p className="wizard-callout__copy">
-                Repository projects let the runtime poll a remote Git repository
-                on a fixed cadence and queue automation when a new release tag
-                appears. Only Unity is currently supported; the future engines
-                stay visible so the model does not keep lying about the roadmap.
-              </p>
-            </div>
           </div>
         ) : null}
 
@@ -1347,159 +1821,6 @@ export function CreateProjectWizard({
               type="number"
               value={draft.pollingIntervalSeconds}
             />
-
-            <div className="wizard-callout wizard-callout--compact wizard-callout--auth wizard-callout--support">
-              <div className="wizard-callout__header">
-                <div>
-                  <p className="wizard-callout__title">Repository access</p>
-                  <p className="wizard-callout__copy">
-                    {resolveRepositoryAccessCopy(
-                      draft.repositoryUrl,
-                      repositoryAccessAssessment,
-                      isAssessingRepositoryAccess,
-                      repositoryAccessError,
-                    )}
-                  </p>
-                </div>
-
-                <div className="wizard-callout__badges">
-                  <Badge
-                    tone={resolveRepositoryAccessBadgeTone(
-                      repositoryAccessAssessment,
-                      isAssessingRepositoryAccess,
-                      repositoryAccessError,
-                    )}
-                  >
-                    {formatRepositoryAccessStatus(
-                      draft.repositoryUrl,
-                      repositoryAccessAssessment,
-                      isAssessingRepositoryAccess,
-                      repositoryAccessError,
-                    )}
-                  </Badge>
-                </div>
-              </div>
-
-              {draft.repositoryUrl.trim() ||
-              isAssessingRepositoryAccess ||
-              repositoryAccessAssessment ||
-              repositoryAccessError ? (
-                <MetaRow className="wizard-callout__meta">
-                  <MetaItem label="Provider">
-                    {formatRepositoryAccessProviderLabel(
-                      repositoryAccessAssessment,
-                      isAssessingRepositoryAccess,
-                      repositoryAccessError,
-                    )}
-                  </MetaItem>
-                  <MetaItem label="Visibility">
-                    {formatRepositoryVisibilityLabel(
-                      repositoryAccessAssessment,
-                      isAssessingRepositoryAccess,
-                      repositoryAccessError,
-                    )}
-                  </MetaItem>
-                  <MetaItem label="Login">
-                    {formatRepositoryLoginStatus(
-                      repositoryAccessAssessment,
-                      githubAuthProvider,
-                      isLoadingAuthProviders,
-                    )}
-                  </MetaItem>
-                  <MetaItem label="Connection">
-                    {formatRepositoryBindingStatus(
-                      repositoryAccessAssessment,
-                      repositoryCredentialId,
-                      pendingRepositoryAccessAction,
-                    )}
-                  </MetaItem>
-                </MetaRow>
-              ) : null}
-
-              {repositoryAccessActionMessage ? (
-                <p className="feed-banner feed-banner--info">
-                  {repositoryAccessActionMessage}
-                </p>
-              ) : null}
-
-              {shouldShowFieldError(
-                attemptedSteps.access,
-                touchedFields,
-                "repositoryAccess",
-              ) && accessErrors.repositoryAccess ? (
-                <p className="ui-field__error">
-                  {accessErrors.repositoryAccess}
-                </p>
-              ) : null}
-
-              {shouldShowRepositoryLoginAction(repositoryAccessAssessment) ? (
-                <>
-                  <SelectField
-                    disabled={
-                      isLoadingRepositoryCredentials ||
-                      pendingRepositoryAccessAction
-                    }
-                    hint={formatRepositoryCredentialFieldHint(
-                      repositoryAccessAssessment,
-                      isLoadingRepositoryCredentials,
-                    )}
-                    label="Repository credential"
-                    onChange={(event) =>
-                      handleRepositoryCredentialSelectionChange(
-                        event.currentTarget.value,
-                      )
-                    }
-                    options={repositoryCredentialOptions}
-                    value={repositoryCredentialId?.toString() ?? ""}
-                  />
-
-                  <div className="wizard-callout__actions">
-                    {supportsShellRepositoryLoginAction(
-                      repositoryAccessAssessment,
-                    ) ? (
-                      <Button
-                        leadingIcon="key"
-                        onClick={handleBindRepositoryAccess}
-                        disabled={pendingRepositoryAccessAction}
-                        size="sm"
-                        variant={
-                          repositoryCredentialId !== null
-                            ? "secondary"
-                            : "primary"
-                        }
-                      >
-                        {pendingRepositoryAccessAction
-                          ? "Connecting login..."
-                          : formatRepositoryBindingActionLabel(
-                              repositoryAccessAssessment,
-                              githubAuthProvider,
-                              repositoryCredentialId,
-                            )}
-                      </Button>
-                    ) : null}
-
-                    {repositoryCredentialId !== null ? (
-                      <Button
-                        onClick={handleClearRepositoryAccessBinding}
-                        size="sm"
-                        variant="ghost"
-                      >
-                        Disconnect
-                      </Button>
-                    ) : null}
-
-                    {onManageAuth &&
-                    supportsShellRepositoryLoginAction(
-                      repositoryAccessAssessment,
-                    ) ? (
-                      <Button onClick={onManageAuth} size="sm" variant="ghost">
-                        Open accounts
-                      </Button>
-                    ) : null}
-                  </div>
-                </>
-              ) : null}
-            </div>
           </div>
         ) : null}
 
@@ -1513,40 +1834,12 @@ export function CreateProjectWizard({
             ) : null}
 
             {pendingBuildTargetRemoval ? (
-              <div className="wizard-callout wizard-callout--compact wizard-callout--auth">
-                <div className="wizard-callout__header">
-                  <div>
-                    <p className="wizard-callout__title">
-                      Confirm build target removal
-                    </p>
-                    <p className="wizard-callout__copy">
-                      Removing{" "}
-                      {pendingBuildTargetRemoval.name.trim() ||
-                        "this build target"}{" "}
-                      also removes publish bindings from{" "}
-                      {pendingBuildTargetBindingImpact.join(", ")}.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="wizard-callout__actions">
-                  <Button
-                    leadingIcon="trash"
-                    onClick={handleConfirmBuildTargetRemoval}
-                    size="sm"
-                    variant="primary"
-                  >
-                    Remove target and bindings
-                  </Button>
-                  <Button
-                    onClick={() => setPendingBuildTargetRemovalId(null)}
-                    size="sm"
-                    variant="ghost"
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              </div>
+              <BuildTargetRemovalCallout
+                bindingImpact={pendingBuildTargetBindingImpact}
+                onCancel={() => setPendingBuildTargetRemovalId(null)}
+                onConfirm={handleConfirmBuildTargetRemoval}
+                targetName={pendingBuildTargetRemoval.name}
+              />
             ) : null}
 
             {draft.buildTargets.map((target, index) => {
@@ -2020,6 +2313,40 @@ function formatWizardTargetCount(targetCount: number) {
   return `${targetCount} target${targetCount === 1 ? "" : "s"}`;
 }
 
+function createInitialProjectDraft(): ProjectDraft {
+  return {
+    projectKind: "repository",
+    engineKind: "unity",
+    name: "",
+    repositoryUrl: "",
+    repositoryVisibility: "public",
+    defaultBranch: "main",
+    pollingIntervalSeconds: "300",
+    artifactsRootOverride: "",
+    workspaceRootOverride: "",
+    buildTargets: [createEmptyBuildTargetDraft(1)],
+    publishDestinations: [],
+  };
+}
+
+function createInitialCreateProjectWizardSnapshot(): CreateProjectWizardSnapshot {
+  return {
+    attemptedSteps: {
+      ...EMPTY_VALIDATION_ATTEMPTS,
+    },
+    currentStepIndex: 0,
+    draft: cloneProjectDraft(INITIAL_PROJECT_DRAFT),
+    expandedTargetIds: {
+      "target-1": true,
+    },
+    pathDiagnostics: {},
+    pendingBuildTargetRemovalId: null,
+    repositoryCredentialId: null,
+    reviewConfirmed: false,
+    touchedFields: {},
+  };
+}
+
 function createEmptyBuildTargetDraft(index: number): BuildTargetDraft {
   return {
     id: `target-${index}`,
@@ -2336,15 +2663,18 @@ function findFirstInvalidStep(input: {
   publishErrors: ReturnType<typeof validatePublishDestinationDrafts>;
   pathErrors: PathStepErrors;
   isLoadingRepositoryInventory: boolean;
+  inventoryError: string | null;
 }): WizardStepKey | null {
   if (
     input.isLoadingRepositoryInventory ||
+    input.inventoryError ||
     hasIdentityErrors(input.identityErrors)
   ) {
     return "identity";
   }
   if (
     input.isLoadingRepositoryInventory ||
+    input.inventoryError ||
     hasAccessErrors(input.accessErrors)
   ) {
     return "access";
@@ -2436,6 +2766,53 @@ function normalizeUnityTargetPlatformValue(value: string) {
     default:
       return value.trim();
   }
+}
+
+function cloneProjectDraft(draft: ProjectDraft): ProjectDraft {
+  return {
+    ...draft,
+    buildTargets: draft.buildTargets.map((target) => ({
+      ...target,
+    })),
+    publishDestinations: draft.publishDestinations.map((destination) => ({
+      ...destination,
+      bindings: destination.bindings.map((binding) => ({
+        ...binding,
+      })),
+    })),
+  };
+}
+
+function normalizeWizardStepIndex(stepIndex: number) {
+  return Math.min(Math.max(stepIndex, 0), WIZARD_STEPS.length - 1);
+}
+
+function resolveNextBuildTargetIndex(buildTargets: BuildTargetDraft[]) {
+  return buildTargets.reduce((nextIndex, target) => {
+    const match = /^target-(\d+)$/.exec(target.id.trim());
+
+    if (!match) {
+      return nextIndex;
+    }
+
+    return Math.max(nextIndex, Number(match[1]) + 1);
+  }, 2);
+}
+
+function buildProjectDraftDirtyKey(draft: ProjectDraft) {
+  return JSON.stringify(cloneProjectDraft(draft));
+}
+
+function buildCreateProjectWizardDirtyState(
+  draft: ProjectDraft,
+  currentStepIndex: number,
+  repositoryCredentialId: number | null,
+) {
+  if (currentStepIndex > 0 || repositoryCredentialId !== null) {
+    return true;
+  }
+
+  return buildProjectDraftDirtyKey(draft) !== INITIAL_PROJECT_DRAFT_DIRTY_KEY;
 }
 
 function indexOfWizardStep(stepKey: WizardStepKey) {
@@ -2885,6 +3262,35 @@ function buildRepositoryCredentialOptions(
   }
 
   return options;
+}
+
+function isGithubAuthProviderResult(result: AuthProviderConnectionResult) {
+  return (
+    result.provider.provider_id === "github" ||
+    result.provider.label.trim().toLocaleLowerCase() === "github" ||
+    result.provider.instance_url
+      .trim()
+      .toLocaleLowerCase()
+      .includes("github.com")
+  );
+}
+
+function buildAuthProviderRoundTripMessage(
+  result: AuthProviderConnectionResult,
+  repositoryCredentialId: number | null,
+  previousGithubCredentialId: number | null,
+) {
+  const nextCredentialId = result.provider.credential_id;
+  const shouldSelectCredential =
+    nextCredentialId !== null &&
+    (repositoryCredentialId === null ||
+      repositoryCredentialId === previousGithubCredentialId);
+
+  if (shouldSelectCredential) {
+    return `${result.message} The connected credential is now selected for this project draft.`;
+  }
+
+  return `${result.message} Return to the repository credential field to choose how this draft should bind the refreshed account.`;
 }
 
 function formatRepositoryCredentialOptionLabel(

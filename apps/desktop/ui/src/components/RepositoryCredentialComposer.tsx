@@ -88,6 +88,7 @@ export function RepositoryCredentialComposer({
     <>
       <TextField
         autoComplete="off"
+        data-overlay-autofocus
         error={errors.name}
         hint="Use a unique reusable credential name."
         label="Credential name"

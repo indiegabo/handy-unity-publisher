@@ -19,6 +19,7 @@ type StepFlowProps<TStepKey extends string = string> = {
   progressSummary?: ReactNode;
   progressTitle?: string;
   startActions?: ReactNode;
+  supportContent?: ReactNode;
   stepSummary?: ReactNode;
   steps: readonly StepFlowStep<TStepKey>[];
 };
@@ -34,6 +35,7 @@ export function StepFlow<TStepKey extends string = string>({
   progressSummary,
   progressTitle = "Steps",
   startActions,
+  supportContent,
   stepSummary,
   steps,
 }: StepFlowProps<TStepKey>) {
@@ -83,17 +85,30 @@ export function StepFlow<TStepKey extends string = string>({
           </div>
         </SurfacePanel>
 
-        <SurfacePanel
-          className="wizard-stage-panel"
-          description={activeStep.description}
-          eyebrow={`Step ${activeStepIndex + 1} of ${steps.length}`}
-          headerSeparated
-          summary={stepSummary}
-          title={activeStep.label}
-          tone="section"
+        <div
+          className={joinClassNames(
+            "wizard-stage-content-shell",
+            supportContent
+              ? "wizard-stage-content-shell--with-support"
+              : undefined,
+          )}
         >
-          {children}
-        </SurfacePanel>
+          <SurfacePanel
+            className="wizard-stage-panel"
+            description={activeStep.description}
+            eyebrow={`Step ${activeStepIndex + 1} of ${steps.length}`}
+            headerSeparated
+            summary={stepSummary}
+            title={activeStep.label}
+            tone="section"
+          >
+            {children}
+          </SurfacePanel>
+
+          {supportContent ? (
+            <div className="wizard-stage-support-shell">{supportContent}</div>
+          ) : null}
+        </div>
       </div>
 
       <footer className="wizard-footer">

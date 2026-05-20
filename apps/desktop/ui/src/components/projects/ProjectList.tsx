@@ -3,6 +3,10 @@ import type { RepositoryInspectionEntry } from "../../services/projects";
 import ProjectCard from "./ProjectCard";
 
 type ProjectListProps = {
+  onCardKeyDown?: (
+    repositoryId: number,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => void;
   highlightedRepositoryId?: number | null;
   onCardRef?: (repositoryId: number, element: HTMLButtonElement | null) => void;
   onOpen: (repositoryId: number, repositoryName: string) => void;
@@ -12,6 +16,7 @@ type ProjectListProps = {
 
 export default function ProjectList({
   highlightedRepositoryId = null,
+  onCardKeyDown,
   onCardRef,
   onOpen,
   onQuickView,
@@ -23,6 +28,7 @@ export default function ProjectList({
         <ProjectCard
           highlighted={repository.repository_id === highlightedRepositoryId}
           key={repository.repository_id}
+          onCardKeyDown={onCardKeyDown}
           onOpen={onOpen}
           onQuickView={onQuickView}
           ref={(element) => onCardRef?.(repository.repository_id, element)}

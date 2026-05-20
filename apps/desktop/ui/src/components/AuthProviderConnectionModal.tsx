@@ -2,10 +2,11 @@ import { useState } from "react";
 
 import { Button } from "./Button";
 import FullScreenModal from "./FullScreenModal";
-import { Badge, MetaItem, MetaRow } from "./Surface";
+import { Badge, MetaItem, MetaRow, SummaryStrip } from "./Surface";
 import {
   buildAuthProviderConnectionResult,
   buildAuthProviderLifecycleSnapshot,
+  buildAuthProviderSummaryRows,
   formatAuthProviderStatus,
   formatBoundRepositoryCount,
   resolveAuthProviderTone,
@@ -111,11 +112,17 @@ export function AuthProviderConnectionModal({
         activeStepKey={currentStepKey}
         endActions={
           currentStepKey === "summary" ? (
-            <Button onClick={handleAdvanceStep} size="sm" variant="primary">
+            <Button
+              data-overlay-autofocus
+              onClick={handleAdvanceStep}
+              size="sm"
+              variant="primary"
+            >
               Continue
             </Button>
           ) : (
             <Button
+              data-overlay-autofocus
               disabled={isSubmitting}
               leadingIcon="arrowUpRight"
               onClick={() => {
@@ -183,23 +190,22 @@ export function AuthProviderConnectionModal({
 
           <p className="auth-provider-card__copy">{provider.status_message}</p>
 
-          <MetaRow className="auth-provider-card__summary">
-            <MetaItem label="Credential">
-              {provider.credential_name || "No reusable credential"}
-            </MetaItem>
-            <MetaItem label="Usage">
-              {formatBoundRepositoryCount(provider.bound_repository_count)}
-            </MetaItem>
-          </MetaRow>
-
-          <MetaRow className="auth-provider-card__summary">
-            <MetaItem label="Stored">
-              {lifecycleSnapshot.storedAtLabel}
-            </MetaItem>
-            <MetaItem label="Refreshed">
-              {lifecycleSnapshot.refreshedAtLabel}
-            </MetaItem>
-          </MetaRow>
+          <SummaryStrip className="auth-provider-card__summary-strip">
+            {buildAuthProviderSummaryRows(provider, lifecycleSnapshot, {
+              includeLifecycleRow: false,
+            }).map((summaryRow, summaryRowIndex) => (
+              <MetaRow
+                className="auth-provider-card__summary"
+                key={`${provider.provider_id}-summary-${summaryRowIndex}`}
+              >
+                {summaryRow.map((item) => (
+                  <MetaItem key={item.label} label={item.label}>
+                    {item.value}
+                  </MetaItem>
+                ))}
+              </MetaRow>
+            ))}
+          </SummaryStrip>
 
           <p className="auth-provider-card__copy">
             {currentStepKey === "summary"

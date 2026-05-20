@@ -3,7 +3,7 @@ import { useDeferredValue, useMemo, useRef, useState } from "react";
 import { Button } from "./Button";
 import { TextField } from "./Field";
 import FullScreenModal from "./FullScreenModal";
-import { MetaItem, MetaRow, SurfacePanel } from "./Surface";
+import { MetaItem, MetaRow, SummaryStrip, SurfacePanel } from "./Surface";
 
 export type SelectListItem = {
   id: string;
@@ -104,16 +104,18 @@ const SelectListFullScreen = ({
           value={query}
         />
 
-        <MetaRow className="select-list-modal__summary">
-          <MetaItem label="Items">{items.length}</MetaItem>
-          <MetaItem label="Visible">{filtered.length}</MetaItem>
-          {selectionMode === "multiple" ? (
-            <MetaItem label={selectionLabel}>{selectedIds.length}</MetaItem>
-          ) : null}
-          {deferredQuery.trim() ? (
-            <MetaItem label="Query">{deferredQuery.trim()}</MetaItem>
-          ) : null}
-        </MetaRow>
+        <SummaryStrip className="select-list-modal__summary-strip">
+          <MetaRow className="select-list-modal__summary">
+            <MetaItem label="Items">{items.length}</MetaItem>
+            <MetaItem label="Visible">{filtered.length}</MetaItem>
+            {selectionMode === "multiple" ? (
+              <MetaItem label={selectionLabel}>{selectedIds.length}</MetaItem>
+            ) : null}
+            {deferredQuery.trim() ? (
+              <MetaItem label="Query">{deferredQuery.trim()}</MetaItem>
+            ) : null}
+          </MetaRow>
+        </SummaryStrip>
 
         <SurfacePanel
           bodyClassName="select-list-modal__panel-body"
