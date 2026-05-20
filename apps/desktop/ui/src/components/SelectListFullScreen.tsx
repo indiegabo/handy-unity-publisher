@@ -1,5 +1,6 @@
 import { useDeferredValue, useMemo, useRef, useState } from "react";
 
+import { Button } from "./Button";
 import { TextField } from "./Field";
 import FullScreenModal from "./FullScreenModal";
 import { MetaItem, MetaRow, SurfacePanel } from "./Surface";
@@ -16,9 +17,13 @@ export type SelectListFullScreenProps = {
   emptyStateTitle?: string;
   initialQuery?: string;
   initialValue?: string;
+  initialValues?: readonly string[];
   items?: readonly SelectListItem[];
+  selectionLabel?: string;
+  selectionMode?: "single" | "multiple";
+  submitLabel?: string;
   title?: string;
-  onResolve?: (value?: string | null) => void;
+  onResolve?: (value?: string | string[] | null) => void;
 };
 
 const SelectListFullScreen = ({
@@ -27,13 +32,25 @@ const SelectListFullScreen = ({
   emptyStateTitle = "No results matched the current filter.",
   initialQuery,
   initialValue,
+  initialValues,
   items = [],
+  selectionLabel = "Selected",
+  selectionMode = "single",
+  submitLabel = "Apply selection",
   title = "Select item",
   onResolve,
 }: SelectListFullScreenProps) => {
   const [query, setQuery] = useState(initialQuery ?? initialValue ?? "");
+  const [selectedIds, setSelectedIds] = useState<string[]>(() => {
+    if (selectionMode === "multiple") {
+      return initialValues ? [...initialValues] : [];
+    }
+
+    return initialValue ? [initialValue] : [];
+  });
   const deferredQuery = useDeferredValue(query);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
 
   const filtered = useMemo(() => {
     const normalizedQuery = deferredQuery.trim().toLowerCase();
@@ -49,6 +66,19 @@ const SelectListFullScreen = ({
       );
     });
   }, [deferredQuery, items]);
+
+  const handleSelectItem = (itemId: string) => {
+    if (selectionMode === "multiple") {
+      setSelectedIds((current) =>
+        current.includes(itemId)
+          ? current.filter((existingId) => existingId !== itemId)
+          : [...current, itemId],
+      );
+      return;
+    }
+
+    onResolve?.(itemId);
+  };
 
   return (
     <FullScreenModal
@@ -77,6 +107,9 @@ const SelectListFullScreen = ({
         <MetaRow className="select-list-modal__summary">
           <MetaItem label="Items">{items.length}</MetaItem>
           <MetaItem label="Visible">{filtered.length}</MetaItem>
+          {selectionMode === "multiple" ? (
+            <MetaItem label={selectionLabel}>{selectedIds.length}</MetaItem>
+          ) : null}
           {deferredQuery.trim() ? (
             <MetaItem label="Query">{deferredQuery.trim()}</MetaItem>
           ) : null}
@@ -84,7 +117,11 @@ const SelectListFullScreen = ({
 
         <SurfacePanel
           bodyClassName="select-list-modal__panel-body"
-          description="Use the filter above to narrow the list, then choose a single result."
+          description={
+            selectionMode === "multiple"
+              ? "Use the filter above to narrow the list, then toggle every result that should be included in the batch action."
+              : "Use the filter above to narrow the list, then choose a single result."
+          }
           title="Results"
           tone="inset"
         >
@@ -101,9 +138,19 @@ const SelectListFullScreen = ({
             >
               {filtered.map((item, index) => (
                 <button
-                  className="select-list-modal__item"
+                  aria-pressed={
+                    selectionMode === "multiple"
+                      ? selectedIdSet.has(item.id)
+                      : undefined
+                  }
+                  className={joinClassNames(
+                    "select-list-modal__item",
+                    selectionMode === "multiple" &&
+                      selectedIdSet.has(item.id) &&
+                      "select-list-modal__item--selected",
+                  )}
                   key={item.id}
-                  onClick={() => onResolve?.(item.id)}
+                  onClick={() => handleSelectItem(item.id)}
                   onKeyDown={(event) => {
                     if (event.key === "ArrowDown") {
                       event.preventDefault();
@@ -156,11 +203,38 @@ const SelectListFullScreen = ({
                       </span>
                     ) : null}
                   </span>
-                  <span className="select-list-modal__item-action">Select</span>
+                  <span className="select-list-modal__item-action">
+                    {selectionMode === "multiple"
+                      ? selectedIdSet.has(item.id)
+                        ? "Selected"
+                        : "Select"
+                      : "Select"}
+                  </span>
                 </button>
               ))}
             </div>
           )}
+
+          {selectionMode === "multiple" ? (
+            <div className="select-list-modal__actions">
+              <Button
+                disabled={selectedIds.length === 0}
+                onClick={() => setSelectedIds([])}
+                size="sm"
+                variant="ghost"
+              >
+                Clear selection
+              </Button>
+              <Button
+                disabled={selectedIds.length === 0}
+                onClick={() => onResolve?.(selectedIds)}
+                size="sm"
+                variant="primary"
+              >
+                {submitLabel}
+              </Button>
+            </div>
+          ) : null}
         </SurfacePanel>
       </div>
     </FullScreenModal>
@@ -168,3 +242,7 @@ const SelectListFullScreen = ({
 };
 
 export default SelectListFullScreen;
+
+function joinClassNames(...tokens: Array<string | false | null | undefined>) {
+  return tokens.filter(Boolean).join(" ");
+}

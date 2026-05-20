@@ -9,15 +9,20 @@ import {
 } from "react";
 
 import { Button } from "./Button";
-import { MetaItem, MetaRow, SurfacePanel } from "./Surface";
+import { MetaItem, MetaRow } from "./Surface";
 import ScreenScaffold from "./ScreenScaffold";
 import InputWithPicker from "./InputWithPicker";
 import SelectListFullScreen from "./SelectListFullScreen";
 import ProjectList from "./projects/ProjectList";
 import {
+  ProjectQuickView,
+  type ProjectQuickViewResult,
+} from "./ProjectQuickView";
+import {
   loadRepositoryInspection,
   type RepositoryInspectionEntry,
 } from "../services/projects";
+import { useOverlay } from "./OverlayManager";
 
 type ProjectsFocusScreenProps = {
   highlightedRepositoryId?: number | null;
@@ -28,10 +33,12 @@ export function ProjectsFocusScreen({
   highlightedRepositoryId = null,
   onOpenProject,
 }: ProjectsFocusScreenProps) {
+  const { openOverlay } = useOverlay();
   const [repositories, setRepositories] = useState<RepositoryInspectionEntry[]>(
     [],
   );
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [quickOpenQuery, setQuickOpenQuery] = useState("");
   const projectCardRefs = useRef<Record<number, HTMLButtonElement | null>>({});
@@ -60,8 +67,12 @@ export function ProjectsFocusScreen({
     [repositories],
   );
 
-  const loadProjects = useEffectEvent(async () => {
-    setIsLoading(true);
+  const loadProjects = useEffectEvent(async (reason: "initial" | "refresh") => {
+    if (reason === "refresh" && repositories.length > 0) {
+      setIsRefreshing(true);
+    } else {
+      setIsLoading(true);
+    }
 
     try {
       const inspection = await loadRepositoryInspection();
@@ -70,17 +81,19 @@ export function ProjectsFocusScreen({
         setRepositories(inspection.repositories);
         setError(null);
         setIsLoading(false);
+        setIsRefreshing(false);
       });
     } catch (loadError) {
       startTransition(() => {
         setError(buildProjectsListErrorMessage(loadError));
         setIsLoading(false);
+        setIsRefreshing(false);
       });
     }
   });
 
   useEffect(() => {
-    void loadProjects();
+    void loadProjects("initial");
   }, []);
 
   useEffect(() => {
@@ -106,6 +119,29 @@ export function ProjectsFocusScreen({
 
     onOpenProject(repository.repository_id, repository.repository_name);
   });
+
+  const handleOpenProjectQuickView = useEffectEvent(
+    async (repositoryId: number) => {
+      const repository = repositories.find(
+        (entry) => entry.repository_id === repositoryId,
+      );
+
+      if (!repository) {
+        return;
+      }
+
+      const result = await openOverlay<ProjectQuickViewResult>(
+        ProjectQuickView,
+        {
+          repository,
+        },
+      );
+
+      if (result === "open-project") {
+        onOpenProject(repository.repository_id, repository.repository_name);
+      }
+    },
+  );
 
   const handleQuickOpenKeyDown = useEffectEvent(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -151,44 +187,46 @@ export function ProjectsFocusScreen({
   return (
     <div className="project-list-shell">
       <ScreenScaffold
+        eyebrow="Projects"
         title="Project List"
-        subtitle="Review repository projects registered in the local runtime and open one to inspect or edit its pipeline settings."
+        subtitle="Browse registered repositories, inspect current automation health, and jump into project editing without losing context."
+        summary={
+          <MetaRow>
+            <MetaItem label="Projects">
+              {isLoading
+                ? "Loading snapshot..."
+                : `${repositories.length} registered`}
+            </MetaItem>
+            {!isLoading ? (
+              <MetaItem label="Enabled">{enabledRepositoryCount}</MetaItem>
+            ) : null}
+            {!isLoading ? (
+              <MetaItem label="Disabled">{disabledRepositoryCount}</MetaItem>
+            ) : null}
+            {!isLoading ? (
+              <MetaItem label="Active targets">
+                {activeBuildTargetCount}
+              </MetaItem>
+            ) : null}
+          </MetaRow>
+        }
         actions={
           <Button
             leadingIcon="refresh"
-            onClick={() => void loadProjects()}
+            disabled={isLoading || isRefreshing}
+            onClick={() => void loadProjects("refresh")}
             size="sm"
             variant="secondary"
           >
-            Refresh
+            {isRefreshing ? "Refreshing..." : "Refresh"}
           </Button>
         }
       >
-        {error ? (
-          <p className="feed-banner feed-banner--error">{error}</p>
-        ) : null}
         {highlightedProject ? (
           <p className="notice-banner">
             {`${highlightedProject.repository_name} was created. Open it to continue editing.`}
           </p>
         ) : null}
-
-        <MetaRow>
-          <MetaItem label="Projects">
-            {isLoading
-              ? "Loading snapshot..."
-              : `${repositories.length} registered`}
-          </MetaItem>
-          {!isLoading ? (
-            <MetaItem label="Enabled">{enabledRepositoryCount}</MetaItem>
-          ) : null}
-          {!isLoading ? (
-            <MetaItem label="Disabled">{disabledRepositoryCount}</MetaItem>
-          ) : null}
-          {!isLoading ? (
-            <MetaItem label="Active targets">{activeBuildTargetCount}</MetaItem>
-          ) : null}
-        </MetaRow>
 
         <InputWithPicker
           autoComplete="off"
@@ -220,59 +258,88 @@ export function ProjectsFocusScreen({
           value={quickOpenQuery}
         />
 
-        <SurfacePanel
-          className="project-list-section"
-          description="Repository projects currently known by the local runtime."
-          eyebrow="Registered Projects"
-          headerSeparated
-          title="Project Inventory"
-          tone="section"
-        >
-          {isLoading ? (
-            <div className="feed-state">
-              <p className="feed-state__title">Loading projects...</p>
-              <p className="feed-state__copy">
-                The shell is resolving the latest repository inspection
-                snapshot.
-              </p>
+        {error && !isLoading && repositories.length > 0 ? (
+          <div className="project-list-state">
+            <p className="feed-banner feed-banner--error">{error}</p>
+            <div className="project-list-state__actions">
+              <Button
+                leadingIcon="refresh"
+                onClick={() => void loadProjects("refresh")}
+                size="sm"
+                variant="ghost"
+              >
+                Retry load
+              </Button>
             </div>
-          ) : null}
+          </div>
+        ) : null}
 
-          {!isLoading && repositories.length === 0 ? (
-            <div className="feed-state">
-              <p className="feed-state__title">No projects configured yet.</p>
-              <p className="feed-state__copy">
-                Create a repository project from the home screen to manage it
-                here.
-              </p>
+        {isRefreshing && repositories.length > 0 ? (
+          <p className="notice-banner">
+            Refreshing repository inventory while keeping the latest known
+            snapshot visible.
+          </p>
+        ) : null}
+
+        {isLoading ? (
+          <div className="feed-state">
+            <p className="feed-state__title">Loading projects...</p>
+            <p className="feed-state__copy">
+              The shell is resolving the latest repository inspection snapshot.
+            </p>
+          </div>
+        ) : null}
+
+        {!isLoading && error && repositories.length === 0 ? (
+          <div className="feed-state project-list-state">
+            <p className="feed-state__title">Could not load projects.</p>
+            <p className="feed-state__copy">{error}</p>
+            <div className="project-list-state__actions">
+              <Button
+                leadingIcon="refresh"
+                onClick={() => void loadProjects("refresh")}
+                size="sm"
+                variant="secondary"
+              >
+                Retry load
+              </Button>
             </div>
-          ) : null}
+          </div>
+        ) : null}
 
-          {!isLoading &&
-          repositories.length > 0 &&
-          filteredRepositories.length === 0 ? (
-            <div className="feed-state">
-              <p className="feed-state__title">
-                No projects match this filter.
-              </p>
-              <p className="feed-state__copy">
-                Clear or broaden the quick-open query to inspect the rest of the
-                repository inventory.
-              </p>
-            </div>
-          ) : null}
+        {!isLoading && repositories.length === 0 ? (
+          <div className="feed-state">
+            <p className="feed-state__title">No projects configured yet.</p>
+            <p className="feed-state__copy">
+              Create a repository project from the home screen to manage it
+              here.
+            </p>
+          </div>
+        ) : null}
 
-          {!isLoading && filteredRepositories.length > 0 ? (
-            <ProjectList
-              highlightedRepositoryId={highlightedRepositoryId}
-              onCardRef={(repositoryId, element) => {
-                projectCardRefs.current[repositoryId] = element;
-              }}
-              onOpen={onOpenProject}
-              repositories={filteredRepositories}
-            />
-          ) : null}
-        </SurfacePanel>
+        {!isLoading &&
+        repositories.length > 0 &&
+        filteredRepositories.length === 0 ? (
+          <div className="feed-state">
+            <p className="feed-state__title">No projects match this filter.</p>
+            <p className="feed-state__copy">
+              Clear or broaden the quick-open query to inspect the rest of the
+              repository inventory.
+            </p>
+          </div>
+        ) : null}
+
+        {!isLoading && filteredRepositories.length > 0 ? (
+          <ProjectList
+            highlightedRepositoryId={highlightedRepositoryId}
+            onCardRef={(repositoryId, element) => {
+              projectCardRefs.current[repositoryId] = element;
+            }}
+            onOpen={onOpenProject}
+            onQuickView={handleOpenProjectQuickView}
+            repositories={filteredRepositories}
+          />
+        ) : null}
       </ScreenScaffold>
     </div>
   );

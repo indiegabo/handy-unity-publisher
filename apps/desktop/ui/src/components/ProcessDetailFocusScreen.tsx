@@ -7,6 +7,10 @@ import {
 } from "react";
 
 import { Button } from "./Button";
+import { ArtifactViewer } from "./ArtifactViewer";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { LogViewerModal } from "./LogViewerModal";
+import { useOverlay } from "./OverlayManager";
 import {
   Badge,
   FocusPageFrame,
@@ -46,6 +50,7 @@ import {
 type ProcessDetailFocusScreenProps = {
   process: ProcessFeedRecord | null;
   usesLiveSnapshot: boolean;
+  onRequestRerun?: (process: ProcessFeedRecord) => Promise<void>;
 };
 
 type CompletedProcessSnapshot = {
@@ -76,7 +81,9 @@ const DEFAULT_LOG_PREVIEW_MAX_BYTES = 128 * 1024;
 export function ProcessDetailFocusScreen({
   process,
   usesLiveSnapshot,
+  onRequestRerun,
 }: ProcessDetailFocusScreenProps) {
+  const { openOverlay } = useOverlay();
   const [completedSnapshot, setCompletedSnapshot] =
     useState<CompletedProcessSnapshot>(EMPTY_COMPLETED_PROCESS_SNAPSHOT);
   const [logPreviewsByEntryPath, setLogPreviewsByEntryPath] = useState<
@@ -88,6 +95,7 @@ export function ProcessDetailFocusScreen({
   >(null);
   const [isDeletingOutputs, setIsDeletingOutputs] = useState(false);
   const [isDeletingRetention, setIsDeletingRetention] = useState(false);
+  const [isRequestingRerun, setIsRequestingRerun] = useState(false);
   const [deletedOutputs, setDeletedOutputs] = useState(false);
   const [deletedRetention, setDeletedRetention] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -231,7 +239,7 @@ export function ProcessDetailFocusScreen({
           },
         }));
       });
-      return;
+      return null;
     }
 
     const retentionAnchorBuildRunId =
@@ -250,7 +258,7 @@ export function ProcessDetailFocusScreen({
           },
         }));
       });
-      return;
+      return null;
     }
 
     setPendingLogPreviewEntryPath(normalizedEntryPath);
@@ -272,6 +280,7 @@ export function ProcessDetailFocusScreen({
         }));
         setActionError(null);
       });
+      return preview;
     } catch (error) {
       startTransition(() => {
         setLogPreviewsByEntryPath((current) => ({
@@ -282,12 +291,168 @@ export function ProcessDetailFocusScreen({
           },
         }));
       });
+      return null;
     } finally {
       startTransition(() => {
         setPendingLogPreviewEntryPath(null);
       });
     }
   });
+
+  const handleOpenReportViewer = useEffectEvent(async () => {
+    if (!completedSnapshot.executionReport?.report) {
+      return;
+    }
+
+    await openOverlay(LogViewerModal, {
+      content: reportJson,
+      description:
+        "Full retained JSON captured for this completed process. Use the viewer controls to switch between wrapped and preserved line layout.",
+      initialWrap: false,
+      meta: completedSnapshot.executionReport.report_path
+        ? `Report path: ${completedSnapshot.executionReport.report_path}`
+        : undefined,
+      title: "Retained report JSON",
+    });
+  });
+
+  const handleOpenRetainedLogViewer = useEffectEvent(
+    async (entryPath: string, entryName: string) => {
+      const normalizedEntryPath = entryPath.trim();
+
+      if (!normalizedEntryPath) {
+        return;
+      }
+
+      const preview =
+        logPreviewsByEntryPath[normalizedEntryPath]?.payload ??
+        (await handleLoadLogPreview(normalizedEntryPath));
+
+      if (!preview) {
+        return;
+      }
+
+      await openOverlay(LogViewerModal, {
+        content: preview.content,
+        description:
+          "Retained log content loaded from the durable execution archive.",
+        initialWrap: false,
+        meta: buildRetainedLogViewerMeta(preview),
+        title: entryName,
+      });
+    },
+  );
+
+  const handleRequestDeleteOutputs = useEffectEvent(async () => {
+    const shouldDelete = await openOverlay<boolean>(ConfirmDialog, {
+      cancelLabel: "Keep outputs",
+      confirmLabel: "Delete outputs",
+      description:
+        "This removes the shared outputs directory currently attached to the selected process.",
+      message:
+        "Use this only when you want to remove the current process outputs from disk. Published destinations and database records are not rewritten by this action.",
+      title: "Delete process outputs?",
+    });
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    await handleDeleteOutputs();
+  });
+
+  const handleRequestDeleteRetainedMaterial = useEffectEvent(async () => {
+    const shouldDelete = await openOverlay<boolean>(ConfirmDialog, {
+      cancelLabel: "Keep retained material",
+      confirmLabel: "Delete retained",
+      description:
+        "This removes the retained execution report and archived logs currently attached to the completed process.",
+      message:
+        "Use this only when you want to discard durable retained execution material from disk. The runtime history record remains, but the retained files are removed.",
+      title: "Delete retained material?",
+    });
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    await handleDeleteRetainedMaterial();
+  });
+
+  const handleRequestRerun = useEffectEvent(async () => {
+    if (!onRequestRerun) {
+      return;
+    }
+
+    const shouldRerun = await openOverlay<boolean>(ConfirmDialog, {
+      cancelLabel: "Keep current run",
+      confirmLabel: "Rerun process",
+      description:
+        "This requeues the selected release process using the same repository and tag.",
+      message:
+        "HGP will clear the derived build and publish state for this release, return to the main feed, and queue the process again.",
+      title: "Rerun process?",
+    });
+
+    if (!shouldRerun) {
+      return;
+    }
+
+    setIsRequestingRerun(true);
+
+    try {
+      startTransition(() => {
+        setActionError(null);
+        setActionMessage(null);
+      });
+
+      await onRequestRerun(process);
+    } catch (error) {
+      startTransition(() => {
+        setActionError(buildProcessDetailErrorMessage(error));
+      });
+    } finally {
+      startTransition(() => {
+        setIsRequestingRerun(false);
+      });
+    }
+  });
+
+  const handleOpenArtifactViewer = useEffectEvent(
+    async (artifact: ArtifactInspectionRecord) => {
+      const artifactAbsolutePath = resolveArtifactAbsolutePath(artifact);
+      const artifactFolderPath = resolveArtifactFolderPath(artifact);
+
+      await openOverlay(ArtifactViewer, {
+        artifact,
+        artifactAbsolutePath,
+        artifactFolderPath,
+        artifactLocationSummary: formatArtifactActiveLocationSummary(artifact),
+        onOpenArtifact: artifactAbsolutePath
+          ? () => void handleOpenPath(artifactAbsolutePath)
+          : undefined,
+        onOpenFolder: artifactFolderPath
+          ? () => void handleOpenPath(artifactFolderPath)
+          : undefined,
+        openArtifactDisabled:
+          deletedOutputs ||
+          !artifactAbsolutePath ||
+          pendingOpenPath === artifactAbsolutePath,
+        openArtifactLabel:
+          artifactAbsolutePath && pendingOpenPath === artifactAbsolutePath
+            ? "Opening artifact..."
+            : "Open artifact",
+        openFolderDisabled:
+          deletedOutputs ||
+          !artifactFolderPath ||
+          pendingOpenPath === artifactFolderPath,
+        openFolderLabel:
+          artifactFolderPath && pendingOpenPath === artifactFolderPath
+            ? "Opening folder..."
+            : "Open folder",
+      });
+    },
+  );
 
   const handleDeleteOutputs = useEffectEvent(async () => {
     setIsDeletingOutputs(true);
@@ -438,6 +603,21 @@ export function ProcessDetailFocusScreen({
             className="process-detail-panel"
             description="Terminal state language sourced from the durable release process snapshot."
             title="Final Outcome"
+            actions={
+              onRequestRerun ? (
+                <div className="process-detail-toolbar">
+                  <Button
+                    disabled={isRequestingRerun}
+                    leadingIcon="refresh"
+                    onClick={() => void handleRequestRerun()}
+                    size="sm"
+                    variant="secondary"
+                  >
+                    {isRequestingRerun ? "Rerunning..." : "Rerun process"}
+                  </Button>
+                </div>
+              ) : null
+            }
           >
             <div className="process-detail-panel__step-block">
               <p className="process-detail-panel__step-label">{stepLabel}</p>
@@ -465,11 +645,12 @@ export function ProcessDetailFocusScreen({
 
           <SurfacePanel
             bodyClassName="process-detail-panel__body"
-            description="Retained execution report data captured after the release process reached a terminal state."
+            className="process-detail-report-panel"
+            description="Retained report data captured after this release process reached a terminal state."
             title="Execution Report"
             tone="inset"
             actions={
-              <div className="process-detail-toolbar">
+              <div className="process-detail-toolbar process-detail-toolbar--report-header">
                 {completedSnapshot.executionReport?.report_path ? (
                   <Button
                     disabled={
@@ -486,7 +667,7 @@ export function ProcessDetailFocusScreen({
                     size="sm"
                     variant="ghost"
                   >
-                    Open report
+                    Open report file
                   </Button>
                 ) : null}
                 {retainedDirPath ? (
@@ -499,18 +680,20 @@ export function ProcessDetailFocusScreen({
                     size="sm"
                     variant="ghost"
                   >
-                    Open retained
+                    Open retained folder
                   </Button>
                 ) : null}
                 {retentionAnchorBuildRunId ? (
                   <Button
                     disabled={deletedRetention || isDeletingRetention}
                     leadingIcon="trash"
-                    onClick={() => void handleDeleteRetainedMaterial()}
+                    onClick={() => void handleRequestDeleteRetainedMaterial()}
                     size="sm"
                     variant="ghost"
                   >
-                    {isDeletingRetention ? "Deleting..." : "Delete retained"}
+                    {isDeletingRetention
+                      ? "Deleting..."
+                      : "Delete retained files"}
                   </Button>
                 ) : null}
               </div>
@@ -552,31 +735,22 @@ export function ProcessDetailFocusScreen({
                   </p>
                 ) : null}
 
-                <VerticalAccordion
-                  bodyInset
-                  className="process-detail-log-card"
-                  collapsedToggleLabel="Expand retained report JSON"
-                  expandedToggleLabel="Collapse retained report JSON"
-                  header={
-                    <div className="process-detail-log-card__header">
-                      <div className="process-detail-log-card__title-block">
-                        <p className="process-detail-log-card__title">
-                          Raw retained report JSON
-                        </p>
-                        <p className="process-detail-log-card__copy">
-                          Full JSON payload captured under the retained process
-                          report file.
-                        </p>
-                      </div>
-                    </div>
-                  }
-                  headerSeparated
-                  tone="section"
-                >
-                  <pre className="process-detail-log-preview__content process-detail-log-preview__content--json">
-                    {reportJson}
-                  </pre>
-                </VerticalAccordion>
+                <div className="process-detail-log-preview">
+                  <p className="process-detail-report__copy">
+                    Open the full retained JSON in the viewer when you need raw
+                    details; the inline screen stays compact.
+                  </p>
+                  <div className="process-detail-toolbar">
+                    <Button
+                      leadingIcon="terminal"
+                      onClick={() => void handleOpenReportViewer()}
+                      size="sm"
+                      variant="ghost"
+                    >
+                      View JSON report
+                    </Button>
+                  </div>
+                </div>
               </div>
             ) : (
               <p className="process-detail-report__copy">
@@ -612,7 +786,7 @@ export function ProcessDetailFocusScreen({
                   <Button
                     disabled={deletedOutputs || isDeletingOutputs}
                     leadingIcon="trash"
-                    onClick={() => void handleDeleteOutputs()}
+                    onClick={() => void handleRequestDeleteOutputs()}
                     size="sm"
                     variant="ghost"
                   >
@@ -645,10 +819,6 @@ export function ProcessDetailFocusScreen({
             ) : (
               <div className="process-detail-artifact-list">
                 {completedSnapshot.artifacts.map((artifact) => {
-                  const artifactAbsolutePath =
-                    resolveArtifactAbsolutePath(artifact);
-                  const artifactFolderPath = resolveArtifactFolderPath(artifact);
-
                   return (
                     <div
                       className="process-detail-artifact-card"
@@ -669,38 +839,14 @@ export function ProcessDetailFocusScreen({
 
                         <div className="process-detail-toolbar">
                           <Button
-                            disabled={
-                              deletedOutputs ||
-                              !artifactAbsolutePath ||
-                              pendingOpenPath === artifactAbsolutePath
-                            }
-                            leadingIcon="arrowUpRight"
+                            leadingIcon="search"
                             onClick={() =>
-                              artifactAbsolutePath
-                                ? void handleOpenPath(artifactAbsolutePath)
-                                : undefined
+                              void handleOpenArtifactViewer(artifact)
                             }
                             size="sm"
                             variant="ghost"
                           >
-                            Open artifact
-                          </Button>
-                          <Button
-                            disabled={
-                              deletedOutputs ||
-                              !artifactFolderPath ||
-                              pendingOpenPath === artifactFolderPath
-                            }
-                            leadingIcon="folder"
-                            onClick={() =>
-                              artifactFolderPath
-                                ? void handleOpenPath(artifactFolderPath)
-                                : undefined
-                            }
-                            size="sm"
-                            variant="ghost"
-                          >
-                            Open folder
+                            Inspect artifact
                           </Button>
                         </div>
                       </div>
@@ -859,14 +1005,17 @@ export function ProcessDetailFocusScreen({
                             }
                             leadingIcon="terminal"
                             onClick={() =>
-                              void handleLoadLogPreview(entry.entry_path)
+                              void handleOpenRetainedLogViewer(
+                                entry.entry_path,
+                                entry.entry_name,
+                              )
                             }
                             size="sm"
                             variant="ghost"
                           >
                             {pendingLogPreviewEntryPath === entry.entry_path
-                              ? "Loading preview..."
-                              : "Read entry"}
+                              ? "Loading viewer..."
+                              : "Open viewer"}
                           </Button>
                         </div>
 
@@ -888,18 +1037,10 @@ export function ProcessDetailFocusScreen({
                           </p>
                         ) : null}
 
-                        {logPreview?.payload ? (
-                          <div className="process-detail-log-preview">
-                            <p className="process-detail-log-preview__meta">
-                              {logPreview.payload.truncated
-                                ? `Showing the last ${formatByteSize(DEFAULT_LOG_PREVIEW_MAX_BYTES)} of ${formatByteSize(logPreview.payload.size_bytes)}.`
-                                : `Showing the full log file (${formatByteSize(logPreview.payload.size_bytes)}).`}
-                            </p>
-                            <pre className="process-detail-log-preview__content">
-                              {logPreview.payload.content}
-                            </pre>
-                          </div>
-                        ) : null}
+                        <p className="process-detail-report__copy">
+                          Open the retained log viewer to inspect this entry
+                          without expanding the full log body inline.
+                        </p>
                       </div>
                     </VerticalAccordion>
                   );
@@ -979,6 +1120,16 @@ function isTerminalProcessStatus(status: string) {
   );
 }
 
+function buildRetainedLogViewerMeta(
+  payload: RetainedLogArchiveEntryPreviewPayload,
+) {
+  if (payload.truncated) {
+    return `Showing the last ${formatByteSize(DEFAULT_LOG_PREVIEW_MAX_BYTES)} of ${formatByteSize(payload.size_bytes)} from ${payload.archive_path}.`;
+  }
+
+  return `Showing the full log file (${formatByteSize(payload.size_bytes)}) from ${payload.archive_path}.`;
+}
+
 function buildOngoingProcessDescription(usesLiveSnapshot: boolean) {
   return usesLiveSnapshot
     ? "The shell is rendering the latest runtime snapshot for an ongoing process."
@@ -1047,7 +1198,9 @@ function resolveArtifactFolderPath(artifact: ArtifactInspectionRecord) {
   return artifact.artifact_root_path?.trim() || null;
 }
 
-function formatArtifactActiveLocationSummary(artifact: ArtifactInspectionRecord) {
+function formatArtifactActiveLocationSummary(
+  artifact: ArtifactInspectionRecord,
+) {
   return `${formatArtifactActiveLocationKindLabel(
     artifact.artifact_active_location_kind,
   )}: ${artifact.artifact_active_location_ref}`;
@@ -1074,7 +1227,9 @@ function formatArtifactPublishRunSummary(
   return "Destination reference pending.";
 }
 
-function resolveArtifactPublishRunTone(status: string): "strong" | "neutral" | "muted" {
+function resolveArtifactPublishRunTone(
+  status: string,
+): "strong" | "neutral" | "muted" {
   switch (status.trim().toLocaleLowerCase()) {
     case "succeeded":
       return "strong";

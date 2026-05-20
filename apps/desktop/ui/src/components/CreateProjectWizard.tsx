@@ -7,7 +7,6 @@ import {
 } from "react";
 
 import { Button, IconButton } from "./Button";
-import { RepositoryCredentialComposer } from "./RepositoryCredentialComposer";
 import {
   PublishDestinationsEditor,
   buildCreateProjectPublishTargetsInput,
@@ -31,6 +30,7 @@ import {
   SurfacePanel,
 } from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
+import StepFlow from "./wizard/StepFlow";
 import {
   createRepositoryProject,
   detectRepositoryProvider,
@@ -242,16 +242,6 @@ export function CreateProjectWizard({
     useState<string | null>(null);
   const [pendingRepositoryAccessAction, setPendingRepositoryAccessAction] =
     useState(false);
-  const [showRepositoryCredentialComposer, setShowRepositoryCredentialComposer] =
-    useState(false);
-  const [pendingRepositoryCredentialSave, setPendingRepositoryCredentialSave] =
-    useState(false);
-  const [repositoryCredentialSaveError, setRepositoryCredentialSaveError] =
-    useState<string | null>(null);
-  const [pendingPublishCredentialSave, setPendingPublishCredentialSave] =
-    useState(false);
-  const [publishCredentialSaveError, setPublishCredentialSaveError] =
-    useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pathDiagnostics, setPathDiagnostics] = useState<
@@ -295,13 +285,12 @@ export function CreateProjectWizard({
     pathDiagnostics,
     validatingTargets,
   );
-  const buildTargetReferences: ProjectBuildTargetReference[] = draft.buildTargets.map(
-    (target) => ({
+  const buildTargetReferences: ProjectBuildTargetReference[] =
+    draft.buildTargets.map((target) => ({
       id: target.id,
       buildTargetId: null,
       name: target.name.trim() || "Unnamed target",
-    }),
-  );
+    }));
   const publishDestinationErrors = validatePublishDestinationDrafts(
     draft.publishDestinations,
     buildTargetReferences,
@@ -315,8 +304,9 @@ export function CreateProjectWizard({
     buildTargetReferences,
   );
   const pendingBuildTargetRemoval = pendingBuildTargetRemovalId
-    ? draft.buildTargets.find((target) => target.id === pendingBuildTargetRemovalId) ??
-      null
+    ? (draft.buildTargets.find(
+        (target) => target.id === pendingBuildTargetRemovalId,
+      ) ?? null)
     : null;
   const pendingBuildTargetBindingImpact = pendingBuildTargetRemoval
     ? collectBuildTargetBindingImpact(
@@ -336,9 +326,8 @@ export function CreateProjectWizard({
     repositoryCredentialId,
     isLoadingRepositoryCredentials,
   );
-  const validatingTargetCount = Object.values(validatingTargets).filter(
-    Boolean,
-  ).length;
+  const validatingTargetCount =
+    Object.values(validatingTargets).filter(Boolean).length;
   const currentStepSummary =
     currentStep.key === "identity" ? (
       <MetaRow>
@@ -580,81 +569,13 @@ export function CreateProjectWizard({
             ? "Stored repository credential selected for this project. Creating the project will save the connection."
             : "Repository credential cleared from the draft.",
         );
-        setRepositoryCredentialSaveError(null);
-        setShowRepositoryCredentialComposer(false);
         setSubmitError(null);
       });
-    },
-  );
-
-  const handleOpenRepositoryCredentialComposer = useEffectEvent(() => {
-    startTransition(() => {
-      setShowRepositoryCredentialComposer(true);
-      setRepositoryCredentialSaveError(null);
-      setSubmitError(null);
-    });
-  });
-
-  const handleCloseRepositoryCredentialComposer = useEffectEvent(() => {
-    startTransition(() => {
-      setShowRepositoryCredentialComposer(false);
-      setRepositoryCredentialSaveError(null);
-    });
-  });
-
-  const handleSaveRepositoryCredential = useEffectEvent(
-    async (input: SaveSecretCredentialInput) => {
-      startTransition(() => {
-        setPendingRepositoryCredentialSave(true);
-        setRepositoryCredentialSaveError(null);
-        setSubmitError(null);
-      });
-
-      try {
-        await saveSecretCredential(input);
-        const credentials = await listRepositoryCredentialsEffect();
-        const createdCredential = credentials.find(
-          (credential) => credential.name === input.name.trim(),
-        );
-        if (!createdCredential) {
-          throw new Error(
-            "The saved repository credential could not be reloaded.",
-          );
-        }
-
-        startTransition(() => {
-          setRepositoryCredentials(
-            credentials.filter(isRepositoryCredentialSelectable),
-          );
-          setPublishCredentials(credentials.filter(isItchCredentialSelectable));
-          setRepositoryCredentialsError(null);
-          setIsLoadingRepositoryCredentials(false);
-          setRepositoryCredentialId(createdCredential.credential_id);
-          setRepositoryAccessActionMessage(
-            "Repository credential created and selected for this project.",
-          );
-          setShowRepositoryCredentialComposer(false);
-        });
-      } catch (error) {
-        startTransition(() => {
-          setRepositoryCredentialSaveError(buildProjectErrorMessage(error));
-        });
-      } finally {
-        startTransition(() => {
-          setPendingRepositoryCredentialSave(false);
-        });
-      }
     },
   );
 
   const handleSavePublishCredential = useEffectEvent(
     async (destinationId: string, input: SaveSecretCredentialInput) => {
-      startTransition(() => {
-        setPendingPublishCredentialSave(true);
-        setPublishCredentialSaveError(null);
-        setSubmitError(null);
-      });
-
       try {
         await saveSecretCredential(input);
         const credentials = await listRepositoryCredentialsEffect();
@@ -687,16 +608,9 @@ export function CreateProjectWizard({
                   : destination,
             ),
           }));
-          setPublishCredentialSaveError(null);
         });
       } catch (error) {
-        startTransition(() => {
-          setPublishCredentialSaveError(buildProjectErrorMessage(error));
-        });
-      } finally {
-        startTransition(() => {
-          setPendingPublishCredentialSave(false);
-        });
+        throw new Error(buildProjectErrorMessage(error));
       }
     },
   );
@@ -774,8 +688,6 @@ export function CreateProjectWizard({
 
     startTransition(() => {
       setRepositoryCredentialId(null);
-      setShowRepositoryCredentialComposer(false);
-      setRepositoryCredentialSaveError(null);
     });
   }, [repositoryAccessAssessment?.auth_requirement]);
 
@@ -973,8 +885,8 @@ export function CreateProjectWizard({
 
   const handleRemoveBuildTarget = useEffectEvent((targetId: string) => {
     if (
-      collectBuildTargetBindingImpact(draft.publishDestinations, targetId).length >
-      0
+      collectBuildTargetBindingImpact(draft.publishDestinations, targetId)
+        .length > 0
     ) {
       startTransition(() => {
         setPendingBuildTargetRemovalId(targetId);
@@ -1085,6 +997,18 @@ export function CreateProjectWizard({
     });
   });
 
+  const handleSelectCompletedStep = useEffectEvent((stepKey: WizardStepKey) => {
+    const nextStepIndex = indexOfWizardStep(stepKey);
+
+    if (nextStepIndex > currentStepIndex) {
+      return;
+    }
+
+    startTransition(() => {
+      setCurrentStepIndex(nextStepIndex);
+    });
+  });
+
   const handleSubmitProject = useEffectEvent(async () => {
     const firstInvalidStep = findFirstInvalidStep({
       identityErrors,
@@ -1172,58 +1096,61 @@ export function CreateProjectWizard({
         <p className="feed-banner feed-banner--error">{submitError}</p>
       ) : null}
 
-      <div className="wizard-stage-shell">
-        <SurfacePanel
-          className="wizard-progress-panel"
-          description="Move across completed steps without losing the current project draft."
-          eyebrow="Progress"
-          headerSeparated
-          summary={
-            <MetaRow>
-              <MetaItem label="Current">{currentStep.label}</MetaItem>
-              <MetaItem label="Draft">
-                {draft.name.trim() || "Unnamed project"}
-              </MetaItem>
-            </MetaRow>
-          }
-          title="Wizard Steps"
-          tone="inset"
-        >
-          <div className="wizard-stepper" aria-label="Create project progress">
-            {WIZARD_STEPS.map((step, index) => (
-              <button
-                className={joinClassNames(
-                  "wizard-stepper__item",
-                  index === currentStepIndex && "wizard-stepper__item--current",
-                  index < currentStepIndex && "wizard-stepper__item--complete",
-                )}
-                disabled={index > currentStepIndex}
-                key={step.key}
-                onClick={() => {
-                  if (index <= currentStepIndex) {
-                    startTransition(() => {
-                      setCurrentStepIndex(index);
-                    });
-                  }
-                }}
-                type="button"
+      <StepFlow
+        activeStepKey={currentStep.key}
+        endActions={
+          <>
+            {currentStep.key === "review" ? (
+              <Button
+                disabled={isSubmitting}
+                onClick={() => void handleSubmitProject()}
+                size="sm"
+                variant="primary"
               >
-                <span className="wizard-stepper__index">{index + 1}</span>
-                <span className="wizard-stepper__label">{step.label}</span>
-              </button>
-            ))}
-          </div>
-        </SurfacePanel>
+                {isSubmitting ? "Creating..." : "Create project"}
+              </Button>
+            ) : null}
 
-        <SurfacePanel
-          className="wizard-stage-panel"
-          description={currentStep.description}
-          eyebrow={`Step ${currentStepNumber} of ${WIZARD_STEPS.length}`}
-          headerSeparated
-          summary={currentStepSummary}
-          title={currentStep.label}
-          tone="section"
-        >
+            {showNextAction ? (
+              <Button
+                disabled={isSubmitting || isLoadingRepositoryInventory}
+                onClick={handleAdvanceStep}
+                size="sm"
+                variant="primary"
+              >
+                Next
+              </Button>
+            ) : null}
+          </>
+        }
+        isStepSelectable={(_, index) => index <= currentStepIndex}
+        onStepSelect={handleSelectCompletedStep}
+        progressDescription="Move across completed steps without losing the current project draft."
+        progressEyebrow="Progress"
+        progressSummary={
+          <MetaRow>
+            <MetaItem label="Current">{currentStep.label}</MetaItem>
+            <MetaItem label="Draft">
+              {draft.name.trim() || "Unnamed project"}
+            </MetaItem>
+          </MetaRow>
+        }
+        progressTitle="Wizard Steps"
+        startActions={
+          showPreviousAction ? (
+            <Button
+              disabled={isSubmitting}
+              onClick={handleRetreatStep}
+              size="sm"
+              variant="ghost"
+            >
+              Previous
+            </Button>
+          ) : null
+        }
+        stepSummary={currentStepSummary}
+        steps={WIZARD_STEPS}
+      >
         {currentStep.key === "identity" ? (
           <div className="wizard-form-grid">
             <TextField
@@ -1306,11 +1233,10 @@ export function CreateProjectWizard({
 
             <div className="wizard-callout wizard-callout--compact wizard-callout--support">
               <p className="wizard-callout__copy">
-                Repository projects let the runtime poll a remote Git
-                repository on a fixed cadence and queue automation when a new
-                release tag appears. Only Unity is currently supported; the
-                future engines stay visible so the model does not keep lying
-                about the roadmap.
+                Repository projects let the runtime poll a remote Git repository
+                on a fixed cadence and queue automation when a new release tag
+                appears. Only Unity is currently supported; the future engines
+                stay visible so the model does not keep lying about the roadmap.
               </p>
             </div>
           </div>
@@ -1501,7 +1427,9 @@ export function CreateProjectWizard({
                 touchedFields,
                 "repositoryAccess",
               ) && accessErrors.repositoryAccess ? (
-                <p className="ui-field__error">{accessErrors.repositoryAccess}</p>
+                <p className="ui-field__error">
+                  {accessErrors.repositoryAccess}
+                </p>
               ) : null}
 
               {shouldShowRepositoryLoginAction(repositoryAccessAssessment) ? (
@@ -1509,8 +1437,7 @@ export function CreateProjectWizard({
                   <SelectField
                     disabled={
                       isLoadingRepositoryCredentials ||
-                      pendingRepositoryAccessAction ||
-                      pendingRepositoryCredentialSave
+                      pendingRepositoryAccessAction
                     }
                     hint={formatRepositoryCredentialFieldHint(
                       repositoryAccessAssessment,
@@ -1533,10 +1460,7 @@ export function CreateProjectWizard({
                       <Button
                         leadingIcon="key"
                         onClick={handleBindRepositoryAccess}
-                        disabled={
-                          pendingRepositoryAccessAction ||
-                          pendingRepositoryCredentialSave
-                        }
+                        disabled={pendingRepositoryAccessAction}
                         size="sm"
                         variant={
                           repositoryCredentialId !== null
@@ -1564,42 +1488,15 @@ export function CreateProjectWizard({
                       </Button>
                     ) : null}
 
-                    {!showRepositoryCredentialComposer ? (
-                      <Button
-                        disabled={pendingRepositoryCredentialSave}
-                        leadingIcon="plus"
-                        onClick={handleOpenRepositoryCredentialComposer}
-                        size="sm"
-                        variant="ghost"
-                      >
-                        New credential
-                      </Button>
-                    ) : null}
-
                     {onManageAuth &&
                     supportsShellRepositoryLoginAction(
                       repositoryAccessAssessment,
                     ) ? (
-                      <Button
-                        onClick={onManageAuth}
-                        size="sm"
-                        variant="ghost"
-                      >
+                      <Button onClick={onManageAuth} size="sm" variant="ghost">
                         Open accounts
                       </Button>
                     ) : null}
                   </div>
-
-                  {showRepositoryCredentialComposer &&
-                  repositoryAccessAssessment ? (
-                    <RepositoryCredentialComposer
-                      isSaving={pendingRepositoryCredentialSave}
-                      onCancel={handleCloseRepositoryCredentialComposer}
-                      onSave={handleSaveRepositoryCredential}
-                      providerLabel={repositoryAccessAssessment.provider_label}
-                      saveError={repositoryCredentialSaveError}
-                    />
-                  ) : null}
                 </>
               ) : null}
             </div>
@@ -1623,13 +1520,10 @@ export function CreateProjectWizard({
                       Confirm build target removal
                     </p>
                     <p className="wizard-callout__copy">
-                      Removing
-                      {" "}
+                      Removing{" "}
                       {pendingBuildTargetRemoval.name.trim() ||
-                        "this build target"}
-                      {" "}
-                      also removes publish bindings from
-                      {" "}
+                        "this build target"}{" "}
+                      also removes publish bindings from{" "}
                       {pendingBuildTargetBindingImpact.join(", ")}.
                     </p>
                   </div>
@@ -1868,14 +1762,12 @@ export function CreateProjectWizard({
         {currentStep.key === "publish" ? (
           <PublishDestinationsEditor
             buildTargets={buildTargetReferences}
-            credentialSaveError={publishCredentialSaveError}
             credentials={publishCredentials}
             destinations={draft.publishDestinations}
             disabled={isSubmitting}
             errors={
               attemptedSteps.publish ? publishDestinationErrors : undefined
             }
-            isSavingCredential={pendingPublishCredentialSave}
             onChange={(nextPublishDestinations) => {
               startTransition(() => {
                 setDraft((current) => ({
@@ -1948,7 +1840,9 @@ export function CreateProjectWizard({
           <div className="wizard-review-shell">
             <SurfacePanel
               className="wizard-review-panel"
-              description={draft.repositoryUrl.trim() || "Repository URL not set yet."}
+              description={
+                draft.repositoryUrl.trim() || "Repository URL not set yet."
+              }
               eyebrow="Project"
               headerSeparated
               summary={
@@ -1981,15 +1875,14 @@ export function CreateProjectWizard({
                 {draft.buildTargets.map((target) => (
                   <div className="wizard-summary-list__item" key={target.id}>
                     <div className="wizard-summary-list__title-row">
-                      <strong>
-                        {target.name.trim() || "Unnamed target"}
-                      </strong>
+                      <strong>{target.name.trim() || "Unnamed target"}</strong>
                       <Badge tone="neutral">
                         {target.targetPlatform || "Unity target pending"}
                       </Badge>
                     </div>
                     <p className="wizard-summary-list__copy">
-                      {target.buildMethod.trim() || "Unity build method pending"}
+                      {target.buildMethod.trim() ||
+                        "Unity build method pending"}
                     </p>
                     <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
                       {target.unityExecutablePath.trim() ||
@@ -2022,7 +1915,10 @@ export function CreateProjectWizard({
                   </div>
                 ) : (
                   publishDestinationReviewSummary.map((destination) => (
-                    <div className="wizard-summary-list__item" key={destination.id}>
+                    <div
+                      className="wizard-summary-list__item"
+                      key={destination.id}
+                    >
                       <div className="wizard-summary-list__title-row">
                         <strong>{destination.name}</strong>
                         <Badge tone={destination.enabled ? "strong" : "muted"}>
@@ -2049,7 +1945,9 @@ export function CreateProjectWizard({
                   <div className="wizard-summary-list__title-row">
                     <strong>Unbound build targets</strong>
                     <Badge tone="muted">
-                      {unboundPublishTargetNames.length === 0 ? "none" : "kept local"}
+                      {unboundPublishTargetNames.length === 0
+                        ? "none"
+                        : "kept local"}
                     </Badge>
                   </div>
                   <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
@@ -2103,47 +2001,7 @@ export function CreateProjectWizard({
             </SurfacePanel>
           </div>
         ) : null}
-        </SurfacePanel>
-      </div>
-
-      <footer className="wizard-footer">
-        <div className="wizard-footer__slot wizard-footer__slot--start">
-          {showPreviousAction ? (
-            <Button
-              disabled={isSubmitting}
-              onClick={handleRetreatStep}
-              size="sm"
-              variant="ghost"
-            >
-              Previous
-            </Button>
-          ) : null}
-        </div>
-
-        <div className="wizard-footer__slot wizard-footer__slot--end">
-          {currentStep.key === "review" ? (
-            <Button
-              disabled={isSubmitting}
-              onClick={() => void handleSubmitProject()}
-              size="sm"
-              variant="primary"
-            >
-              {isSubmitting ? "Creating..." : "Create project"}
-            </Button>
-          ) : null}
-
-          {showNextAction ? (
-            <Button
-              disabled={isSubmitting || isLoadingRepositoryInventory}
-              onClick={handleAdvanceStep}
-              size="sm"
-              variant="primary"
-            >
-              Next
-            </Button>
-          ) : null}
-        </div>
-      </footer>
+      </StepFlow>
     </FocusPageFrame>
   );
 }
@@ -2261,7 +2119,8 @@ function validateAccessStep(
 
   if (
     !errors.repositoryUrl &&
-    (normalizedUrl.startsWith("https://") || normalizedUrl.startsWith("http://"))
+    (normalizedUrl.startsWith("https://") ||
+      normalizedUrl.startsWith("http://"))
   ) {
     if (authState.isAssessingRepositoryAccess) {
       errors.repositoryAccess = "Repository access is still being checked.";
@@ -2286,7 +2145,8 @@ function validateAccessStep(
         const providerLabel =
           authState.repositoryAccessAssessment.provider_id === "unknown"
             ? "this host"
-            : authState.repositoryAccessAssessment.provider_label || "this host";
+            : authState.repositoryAccessAssessment.provider_label ||
+              "this host";
         errors.repositoryAccess =
           authState.repositoryAccessAssessment.provider_id === "unknown"
             ? "Private repositories are not supported for this host yet. Only public repositories can be added right now."
@@ -2305,24 +2165,22 @@ function validateAccessStep(
           authState.repositoryAccessAssessment.provider_id === "github" &&
           authState.repositoryAccessAssessment.supports_interactive_login
         ) {
-        if (authState.isLoadingAuthProviders) {
-          errors.repositoryAccess = "GitHub login status is still loading.";
-        } else if (authState.authProviderError) {
-          errors.repositoryAccess =
-            "GitHub login status could not be loaded from the desktop shell.";
-        } else if (authState.githubAuthProvider?.status !== "connected") {
-          errors.repositoryAccess =
-            "Private GitHub repository detected. Log in and connect a GitHub credential, or select another stored repository credential, before setup can continue.";
-        } else {
-          errors.repositoryAccess =
-            "Private GitHub repository detected. Connect a credential to this project before setup can continue.";
-        }
+          if (authState.isLoadingAuthProviders) {
+            errors.repositoryAccess = "GitHub login status is still loading.";
+          } else if (authState.authProviderError) {
+            errors.repositoryAccess =
+              "GitHub login status could not be loaded from the desktop shell.";
+          } else if (authState.githubAuthProvider?.status !== "connected") {
+            errors.repositoryAccess =
+              "Private GitHub repository detected. Log in and connect a GitHub credential, or select another stored repository credential, before setup can continue.";
+          } else {
+            errors.repositoryAccess =
+              "Private GitHub repository detected. Connect a credential to this project before setup can continue.";
+          }
         } else if (authState.repositoryCredentialCount === 0) {
-          errors.repositoryAccess =
-            `Private ${providerLabel} repository detected. No stored repository credentials are available for this project yet.`;
+          errors.repositoryAccess = `Private ${providerLabel} repository detected. No stored repository credentials are available for this project yet.`;
         } else {
-          errors.repositoryAccess =
-            `Private ${providerLabel} repository detected. Select a stored repository credential before setup can continue.`;
+          errors.repositoryAccess = `Private ${providerLabel} repository detected. Select a stored repository credential before setup can continue.`;
         }
       } else {
         errors.repositoryAccess = undefined;
@@ -2892,8 +2750,8 @@ function supportsShellRepositoryLoginAction(
 ) {
   return Boolean(
     assessment?.auth_requirement === "required" &&
-      assessment.supports_interactive_login &&
-      assessment.provider_id === "github",
+    assessment.supports_interactive_login &&
+    assessment.provider_id === "github",
   );
 }
 
@@ -2946,7 +2804,10 @@ function buildRepositoryAccessAssessmentFromDetection(
     };
   }
 
-  if (detection.supports_interactive_login && detection.provider_id === "github") {
+  if (
+    detection.supports_interactive_login &&
+    detection.provider_id === "github"
+  ) {
     return {
       provider_id: detection.provider_id,
       provider_label: detection.provider_label,
@@ -3045,9 +2906,7 @@ function formatRepositoryCredentialKindLabel(kind: string) {
   }
 }
 
-function isRepositoryCredentialSelectable(
-  credential: SecretCredentialSetting,
-) {
+function isRepositoryCredentialSelectable(credential: SecretCredentialSetting) {
   return (
     credential.config_summary.status === "ready" &&
     [

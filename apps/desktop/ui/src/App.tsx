@@ -10,12 +10,20 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { Button, IconButton } from "./components/Button";
 import { AuthProvidersFocusScreen } from "./components/AuthProvidersFocusScreen";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import { CreateProjectWizard } from "./components/CreateProjectWizard";
-import OverlayProvider from "./components/OverlayManager";
+import { useOverlay } from "./components/OverlayManager";
 import { ProcessFeedItem } from "./components/ProcessFeedItem";
 import { ProcessDetailFocusScreen } from "./components/ProcessDetailFocusScreen";
 import { ProjectsFocusScreen } from "./components/ProjectsFocusScreen";
 import { RepositoryProjectDetail } from "./components/RepositoryProjectDetail";
+import SelectListFullScreen, {
+  type SelectListItem,
+} from "./components/SelectListFullScreen";
+import {
+  WorkerStatusQuickView,
+  type WorkerStatusQuickViewResult,
+} from "./components/WorkerStatusQuickView";
 import {
   WorkerStatusIndicator,
   type WorkerStatusTone,
@@ -28,12 +36,19 @@ import {
 } from "./components/ProjectWorkersFocusScreen";
 import {
   loadRepositoryInspection,
+  reconnectRepositoryAuth,
   type RepositoryInspectionEntry,
 } from "./services/projects";
+import { loginWithGithubAuth } from "./services/auth";
 import {
   subscribeToProcessFeedEvents,
   type ProcessFeedRuntimeEvent,
 } from "./services/processFeed";
+import {
+  subscribeToRuntimeEvents,
+  type RuntimeEventRecord,
+} from "./services/runtimeEvents";
+import { rerunReleaseProcess } from "./services/processDetail";
 import {
   loadRuntimeHealth,
   requestRepositoryInstantCheck,
@@ -68,6 +83,8 @@ type WorkerStatusSummary = {
 type WorkerStatusSnapshot = {
   repositories: RepositoryInspectionEntry[];
   inspectionAvailable: boolean;
+  inspectionError: string | null;
+  inspectionStale: boolean;
   runtimeStatus: RuntimeHealthStatus | null;
 };
 
@@ -87,8 +104,6 @@ type AppScreen =
 
 const PROCESS_FEED_PAGE_SIZE = 5;
 const PRODUCT_NAME = "Handy Games Publisher";
-const WORKER_STATUS_REFRESH_INTERVAL_MILLIS = 5_000;
-const WORKER_TOOLTIP_ID = "worker-status-tooltip";
 const EMPTY_PROCESS_FEED_PAGE: ProcessFeedPage = {
   generated_at: "",
   page: 1,
@@ -102,10 +117,22 @@ const EMPTY_PROCESS_FEED_PAGE: ProcessFeedPage = {
 const EMPTY_WORKER_STATUS_SNAPSHOT: WorkerStatusSnapshot = {
   repositories: [],
   inspectionAvailable: false,
+  inspectionError: null,
+  inspectionStale: false,
   runtimeStatus: null,
 };
+const WORKER_STATUS_REPOSITORY_EVENT_TOPICS = new Set<string>([
+  "automation.release_queued",
+  "build.run_started",
+  "build.run_finished",
+  "build.stage_updated",
+  "publish.run_started",
+  "publish.run_finished",
+  "automation.poll_auth_failed",
+]);
 
 function App() {
+  const { dismissTopOverlay, hasOpenOverlay, openOverlay } = useOverlay();
   const [page, setPage] = useState(1);
   const [activeScreen, setActiveScreen] = useState<AppScreen>({ kind: "main" });
   const [activeProjectTitle, setActiveProjectTitle] = useState<string | null>(
@@ -123,13 +150,13 @@ function App() {
   const [workerSnapshot, setWorkerSnapshot] = useState<WorkerStatusSnapshot>(
     EMPTY_WORKER_STATUS_SNAPSHOT,
   );
-  const [isWorkerTooltipOpen, setIsWorkerTooltipOpen] = useState(false);
   const [workerActionError, setWorkerActionError] = useState<string | null>(
     null,
   );
   const [workerActionMessage, setWorkerActionMessage] = useState<string | null>(
     null,
   );
+  const [pendingBulkInstantCheck, setPendingBulkInstantCheck] = useState(false);
   const [pendingRuntimeAction, setPendingRuntimeAction] =
     useState<RuntimeControlAction | null>(null);
   const [pendingInstantCheckRepositoryId, setPendingInstantCheckRepositoryId] =
@@ -137,8 +164,14 @@ function App() {
   const latestRequestIdRef = useRef(0);
   const latestWorkerStatusRequestIdRef = useRef(0);
   const isNavigatingRef = useRef(false);
+  const githubReauthPromptedRepositoryIdsRef = useRef<Set<number>>(new Set());
+  const githubReauthPromptInFlightRef = useRef(false);
   const workerStatus = resolveWorkerStatusSummary(workerSnapshot);
   const projectWorkers = collectProjectWorkers(workerSnapshot.repositories);
+  const workerStatusTooltip = buildWorkerStatusTooltip(
+    workerSnapshot,
+    projectWorkers,
+  );
   const activeProcessDetail =
     activeScreen.kind === "process-detail"
       ? (processPage.items.find(
@@ -213,45 +246,157 @@ function App() {
     void loadProcessFeed(page, "page");
   }, [page]);
 
-  const loadWorkerStatus = useEffectEvent(async () => {
+  async function maybeRecoverGithubRepositoryAuth(
+    repositories: RepositoryInspectionEntry[],
+  ) {
+    const reauthRepositoryIds = new Set(
+      repositories
+        .filter(
+          (repository) =>
+            repository.source_provider_id === "github" &&
+            repository.auth_binding_status === "reauth_required",
+        )
+        .map((repository) => repository.repository_id),
+    );
+
+    for (const repositoryId of githubReauthPromptedRepositoryIdsRef.current) {
+      if (!reauthRepositoryIds.has(repositoryId)) {
+        githubReauthPromptedRepositoryIdsRef.current.delete(repositoryId);
+      }
+    }
+
+    if (githubReauthPromptInFlightRef.current) {
+      return;
+    }
+
+    const repository = repositories.find(
+      (candidate) =>
+        candidate.source_provider_id === "github" &&
+        candidate.auth_binding_status === "reauth_required" &&
+        !githubReauthPromptedRepositoryIdsRef.current.has(
+          candidate.repository_id,
+        ),
+    );
+    if (!repository) {
+      return;
+    }
+
+    githubReauthPromptedRepositoryIdsRef.current.add(repository.repository_id);
+    githubReauthPromptInFlightRef.current = true;
+
+    try {
+      const provider = await loginWithGithubAuth({ force: true });
+      const credentialId =
+        provider.credential_id ?? repository.credentials?.credential_id ?? null;
+      if (!credentialId) {
+        throw new Error(
+          "GitHub relogin completed without a reusable credential id.",
+        );
+      }
+
+      await reconnectRepositoryAuth(repository.repository_id, credentialId);
+      await loadWorkerRepositories();
+    } catch (error) {
+      console.error(
+        "failed to recover GitHub authentication for repository",
+        repository.repository_id,
+        error,
+      );
+    } finally {
+      githubReauthPromptInFlightRef.current = false;
+    }
+  }
+
+  const loadWorkerRepositories = useEffectEvent(async () => {
     const requestId = latestWorkerStatusRequestIdRef.current + 1;
     latestWorkerStatusRequestIdRef.current = requestId;
 
-    const [inspectionResult, healthResult] = await Promise.allSettled([
-      loadRepositoryInspection(),
-      loadRuntimeHealth(),
-    ]);
+    const inspectionResult = await loadRepositoryInspection()
+      .then((value) => ({ status: "fulfilled" as const, value }))
+      .catch((reason) => ({ status: "rejected" as const, reason }));
 
     if (requestId !== latestWorkerStatusRequestIdRef.current) {
       return;
     }
 
-    const nextSnapshot: WorkerStatusSnapshot = {
-      repositories:
-        inspectionResult.status === "fulfilled"
-          ? inspectionResult.value.repositories
-          : [],
-      inspectionAvailable: inspectionResult.status === "fulfilled",
-      runtimeStatus:
-        healthResult.status === "fulfilled" ? healthResult.value.status : null,
-    };
+    startTransition(() => {
+      setWorkerSnapshot((current) => ({
+        ...current,
+        repositories:
+          inspectionResult.status === "fulfilled"
+            ? inspectionResult.value.repositories
+            : current.repositories,
+        inspectionAvailable:
+          inspectionResult.status === "fulfilled"
+            ? true
+            : current.inspectionAvailable,
+        inspectionError:
+          inspectionResult.status === "fulfilled"
+            ? null
+            : buildWorkerInspectionErrorMessage(inspectionResult.reason),
+        inspectionStale:
+          inspectionResult.status === "fulfilled"
+            ? false
+            : current.inspectionAvailable,
+      }));
+    });
+
+    if (inspectionResult.status === "fulfilled") {
+      await maybeRecoverGithubRepositoryAuth(
+        inspectionResult.value.repositories,
+      );
+    }
+  });
+
+  const loadRuntimeStatus = useEffectEvent(async () => {
+    const healthResult = await loadRuntimeHealth()
+      .then((value) => ({ status: "fulfilled" as const, value }))
+      .catch((reason) => ({ status: "rejected" as const, reason }));
 
     startTransition(() => {
-      setWorkerSnapshot(nextSnapshot);
+      setWorkerSnapshot((current) => ({
+        ...current,
+        runtimeStatus:
+          healthResult.status === "fulfilled"
+            ? healthResult.value.status
+            : null,
+      }));
     });
+  });
+
+  const loadWorkerStatus = useEffectEvent(async () => {
+    await Promise.all([loadWorkerRepositories(), loadRuntimeStatus()]);
   });
 
   useEffect(() => {
     void loadWorkerStatus();
-
-    const intervalId = window.setInterval(() => {
-      void loadWorkerStatus();
-    }, WORKER_STATUS_REFRESH_INTERVAL_MILLIS);
-
-    return () => {
-      window.clearInterval(intervalId);
-    };
   }, []);
+
+  const handleRuntimeStatusEvent = useEffectEvent(
+    (event: RuntimeEventRecord) => {
+      if (event.topic !== "runtime.status_changed") {
+        return;
+      }
+
+      const status = event.payload.status;
+      if (
+        status !== "bootstrapping" &&
+        status !== "healthy" &&
+        status !== "shutting_down" &&
+        status !== "stopped" &&
+        status !== "unhealthy"
+      ) {
+        return;
+      }
+
+      startTransition(() => {
+        setWorkerSnapshot((current) => ({
+          ...current,
+          runtimeStatus: status,
+        }));
+      });
+    },
+  );
 
   const handleProcessFeedEvent = useEffectEvent(
     (event: ProcessFeedRuntimeEvent) => {
@@ -259,12 +404,10 @@ function App() {
         startTransition(() => {
           setPage(1);
         });
-        void loadWorkerStatus();
         return;
       }
 
       void loadProcessFeed(page, "event");
-      void loadWorkerStatus();
     },
   );
 
@@ -278,6 +421,45 @@ function App() {
       }
 
       handleProcessFeedEvent(event);
+    })
+      .then((dispose) => {
+        if (disposed) {
+          dispose();
+          return;
+        }
+
+        unsubscribe = dispose;
+      })
+      .catch((error: unknown) => {
+        if (disposed) {
+          return;
+        }
+
+        setFeedError(buildEventSubscriptionErrorMessage(error));
+      });
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+
+    void subscribeToRuntimeEvents((event) => {
+      if (disposed) {
+        return;
+      }
+
+      handleRuntimeStatusEvent(event);
+
+      if (!WORKER_STATUS_REPOSITORY_EVENT_TOPICS.has(event.topic)) {
+        return;
+      }
+
+      void loadWorkerRepositories();
     })
       .then((dispose) => {
         if (disposed) {
@@ -339,6 +521,15 @@ function App() {
     },
   );
 
+  const handleRerunProcess = useEffectEvent(
+    async (process: ProcessFeedRecord) => {
+      await rerunReleaseProcess(process.release_run_id);
+      await loadProcessFeed(1, "event");
+      await loadWorkerStatus();
+      await transitionToScreen({ kind: "main" });
+    },
+  );
+
   const handleToggleMainWindowPinned = useEffectEvent(async () => {
     try {
       const pinned = await invoke<boolean>("set_main_window_pinned", {
@@ -353,7 +544,7 @@ function App() {
     }
   });
 
-  const handleCloseMainWindow = useEffectEvent(async () => {
+  const closeMainWindow = useEffectEvent(async () => {
     try {
       await invoke("close_main_window");
     } catch (error) {
@@ -417,12 +608,60 @@ function App() {
   });
 
   const handleOpenProjectWorkers = useEffectEvent(() => {
-    setIsWorkerTooltipOpen(false);
     setWorkerActionError(null);
     setWorkerActionMessage(null);
     void loadWorkerStatus();
     void transitionToScreen({ kind: "project-workers" });
   });
+
+  const handleRetryWorkerInventory = useEffectEvent(() => {
+    setWorkerActionError(null);
+    setWorkerActionMessage(null);
+    void loadWorkerStatus();
+  });
+
+  const handleOpenWorkerQuickView = useEffectEvent(async () => {
+    void loadWorkerStatus();
+
+    const result = await openOverlay<WorkerStatusQuickViewResult>(
+      WorkerStatusQuickView,
+      {
+        inspectionAvailable: workerSnapshot.inspectionAvailable,
+        projectWorkers,
+        runtimeStatus: workerSnapshot.runtimeStatus,
+      },
+    );
+
+    if (result === "open-project-workers") {
+      handleOpenProjectWorkers();
+    }
+  });
+
+  const confirmRuntimeLifecycleAction = useEffectEvent(
+    async (action: Extract<RuntimeControlAction, "stop" | "restart">) => {
+      const shouldContinue = await openOverlay<boolean>(ConfirmDialog, {
+        cancelLabel:
+          action === "stop" ? "Keep runtime online" : "Keep current state",
+        confirmLabel: action === "stop" ? "Stop runtime" : "Restart runtime",
+        confirmVariant: "secondary",
+        description:
+          action === "stop"
+            ? "Stopping the runtime pauses project workers until the local host is started again."
+            : "Restarting the runtime interrupts active worker supervision while the local host comes back up.",
+        message:
+          action === "stop"
+            ? "Project workers will remain unavailable until the runtime is started again."
+            : "Project workers will briefly disconnect while the runtime restarts.",
+        title: action === "stop" ? "Stop runtime?" : "Restart runtime?",
+      });
+
+      if (!shouldContinue) {
+        return;
+      }
+
+      await runRuntimeLifecycleAction(action);
+    },
+  );
 
   const runRuntimeLifecycleAction = useEffectEvent(
     async (action: RuntimeControlAction) => {
@@ -464,11 +703,100 @@ function App() {
   });
 
   const handleStopRuntime = useEffectEvent(() => {
-    void runRuntimeLifecycleAction("stop");
+    void confirmRuntimeLifecycleAction("stop");
   });
 
   const handleRestartRuntime = useEffectEvent(() => {
-    void runRuntimeLifecycleAction("restart");
+    void confirmRuntimeLifecycleAction("restart");
+  });
+
+  const handleBulkRepositoryInstantCheck = useEffectEvent(async () => {
+    if (
+      pendingBulkInstantCheck ||
+      pendingInstantCheckRepositoryId !== null ||
+      projectWorkers.length === 0
+    ) {
+      return;
+    }
+
+    const selectedRepositoryIds = await openOverlay<string[]>(
+      SelectListFullScreen,
+      {
+        description:
+          "Select one or more project workers and queue an immediate repository check for each of them.",
+        emptyStateCopy:
+          "Refresh the worker inventory if the expected repositories are still missing.",
+        emptyStateTitle: "No project workers matched the current filter.",
+        items: buildProjectWorkerSelectionItems(projectWorkers),
+        selectionLabel: "Selected",
+        selectionMode: "multiple",
+        submitLabel: "Review queued checks",
+        title: "Queue instant checks",
+      },
+    );
+
+    if (!selectedRepositoryIds || selectedRepositoryIds.length === 0) {
+      return;
+    }
+
+    const selectedWorkers = projectWorkers.filter((projectWorker) =>
+      selectedRepositoryIds.includes(String(projectWorker.repositoryId)),
+    );
+
+    if (selectedWorkers.length === 0) {
+      return;
+    }
+
+    const shouldQueue = await openOverlay<boolean>(ConfirmDialog, {
+      cancelLabel: "Back to selection",
+      confirmLabel:
+        selectedWorkers.length === 1 ? "Queue check" : "Queue checks",
+      confirmVariant: "primary",
+      description:
+        "Queue an immediate repository check for each selected worker in sequence.",
+      message: buildBulkInstantCheckConfirmationMessage(selectedWorkers),
+      title: "Queue instant checks?",
+    });
+
+    if (!shouldQueue) {
+      return;
+    }
+
+    let activeWorker: ProjectWorkerEntry | null = null;
+    const queuedWorkers: ProjectWorkerEntry[] = [];
+
+    setWorkerActionError(null);
+    setWorkerActionMessage(null);
+    setPendingBulkInstantCheck(true);
+
+    try {
+      for (const projectWorker of selectedWorkers) {
+        activeWorker = projectWorker;
+        setPendingInstantCheckRepositoryId(projectWorker.repositoryId);
+        await requestRepositoryInstantCheck(projectWorker.repositoryId);
+        queuedWorkers.push(projectWorker);
+      }
+
+      await loadWorkerStatus();
+      startTransition(() => {
+        setWorkerActionMessage(buildBulkInstantCheckMessage(queuedWorkers));
+      });
+    } catch (error) {
+      startTransition(() => {
+        setWorkerActionError(
+          buildBulkRepositoryInstantCheckErrorMessage(
+            error,
+            activeWorker?.repositoryName ?? null,
+            queuedWorkers.length,
+          ),
+        );
+      });
+    } finally {
+      startTransition(() => {
+        setPendingBulkInstantCheck(false);
+        setPendingInstantCheckRepositoryId(null);
+      });
+    }
   });
 
   const handleRepositoryInstantCheck = useEffectEvent(
@@ -529,347 +857,323 @@ function App() {
     void transitionToScreen({ kind: "main" });
   });
 
+  const handleFocusBackAction = useEffectEvent(() => {
+    if (hasOpenOverlay && dismissTopOverlay()) {
+      return;
+    }
+
+    handleReturnFromFocus();
+  });
+
+  const handleRequestShellClose = useEffectEvent(async () => {
+    await closeMainWindow();
+  });
+
+  useEffect(() => {
+    const handleWindowKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.key !== "Escape" || !hasOpenOverlay) {
+        return;
+      }
+
+      if (!dismissTopOverlay()) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    window.addEventListener("keydown", handleWindowKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleWindowKeyDown);
+    };
+  }, [dismissTopOverlay, hasOpenOverlay]);
+
   return (
-    <OverlayProvider>
-      <main className="app-shell">
-        <header className="window-titlebar">
-          <div
-            className="window-titlebar__drag-region"
-            data-tauri-drag-region
-            onMouseDown={(event) => {
-              if (event.button !== 0) {
-                return;
-              }
+    <main className="app-shell">
+      <header className="window-titlebar">
+        <div
+          className="window-titlebar__drag-region"
+          data-tauri-drag-region
+          onMouseDown={(event) => {
+            if (event.button !== 0) {
+              return;
+            }
 
-              void getCurrentWindow()
-                .startDragging()
-                .catch((error) => {
-                  console.error("failed to start window drag", error);
-                });
-            }}
-          >
-            <span className="window-titlebar__title">
-              {resolveWindowTitle(activeScreen, activeProjectTitle)}
-            </span>
-          </div>
-          <div className="window-titlebar__actions">
-            <IconButton
-              aria-pressed={isMainWindowPinned}
-              className="window-titlebar__action window-titlebar__action--pin"
-              icon={isMainWindowPinned ? "unpin" : "pin"}
-              label={isMainWindowPinned ? "Desafixar janela" : "Fixar janela"}
-              onClick={handleToggleMainWindowPinned}
-              size="sm"
-              variant="ghost"
-            />
-            <IconButton
-              className="window-titlebar__action window-titlebar__action--close"
-              icon="close"
-              label="Fechar janela"
-              onClick={handleCloseMainWindow}
-              size="sm"
-              variant="ghost"
-            />
-          </div>
-        </header>
-
-        <div className="app-shell__content">
-          {isScreenBlank ? null : activeScreen.kind === "main" ? (
-            <div className="home-frame">
-              <section className="action-bar" aria-label="Primary actions">
-                <div className="action-bar__leading">
-                  <div
-                    className="worker-status-shell"
-                    onBlurCapture={() => {
-                      setIsWorkerTooltipOpen(false);
-                    }}
-                    onFocusCapture={() => {
-                      setIsWorkerTooltipOpen(true);
-                    }}
-                    onMouseEnter={() => {
-                      setIsWorkerTooltipOpen(true);
-                    }}
-                    onMouseLeave={() => {
-                      setIsWorkerTooltipOpen(false);
-                    }}
-                  >
-                    <WorkerStatusIndicator
-                      animated={workerStatus.animated}
-                      aria-controls={WORKER_TOOLTIP_ID}
-                      expanded={isWorkerTooltipOpen}
-                      label={workerStatus.label}
-                      onClick={handleOpenProjectWorkers}
-                      tone={workerStatus.tone}
-                    />
-
-                    {isWorkerTooltipOpen ? (
-                      <section
-                        className="worker-status-tooltip"
-                        id={WORKER_TOOLTIP_ID}
-                        role="tooltip"
-                      >
-                        <header className="worker-status-tooltip__header">
-                          <h2 className="worker-status-tooltip__title">
-                            Project Workers
-                          </h2>
-                        </header>
-
-                        <div className="worker-status-tooltip__content">
-                          {!workerSnapshot.inspectionAvailable ? (
-                            <p className="worker-status-tooltip__empty">
-                              Loading project worker inventory...
-                            </p>
-                          ) : null}
-
-                          {workerSnapshot.inspectionAvailable &&
-                          projectWorkers.length === 0 ? (
-                            <p className="worker-status-tooltip__empty">
-                              No active project workers configured.
-                            </p>
-                          ) : null}
-
-                          {workerSnapshot.inspectionAvailable &&
-                          projectWorkers.length > 0 ? (
-                            <ul className="worker-status-tooltip__list">
-                              {projectWorkers.map((projectWorker) => (
-                                <li
-                                  className="worker-status-tooltip__item"
-                                  key={projectWorker.repositoryId}
-                                >
-                                  <span className="worker-status-tooltip__project-name">
-                                    {projectWorker.repositoryName}
-                                  </span>
-                                </li>
-                              ))}
-                            </ul>
-                          ) : null}
-                        </div>
-                      </section>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="action-bar__actions">
-                  <IconButton
-                    icon="layout"
-                    label="Projetos"
-                    onClick={handleOpenProjects}
-                    size="sm"
-                    variant="secondary"
-                  />
-                  <IconButton
-                    icon="plus"
-                    label="Criar novo projeto"
-                    onClick={handleOpenCreateProject}
-                    size="sm"
-                    variant="primary"
-                  />
-                </div>
-              </section>
-
-              <section className="process-feed-shell" aria-label="Process list">
-                {transitionError ? (
-                  <p className="feed-banner feed-banner--error">
-                    {transitionError}
-                  </p>
-                ) : null}
-
-                {feedError ? (
-                  <p className="feed-banner feed-banner--error">{feedError}</p>
-                ) : null}
-
-                {isLoadingFeed && processPage.items.length === 0 ? (
-                  <div className="feed-state">
-                    <p className="feed-state__title">Loading process feed...</p>
-                    <p className="feed-state__copy">
-                      The shell is querying the runtime for recent build and
-                      publishing activity.
-                    </p>
-                  </div>
-                ) : null}
-
-                {!isLoadingFeed && processPage.items.length === 0 ? (
-                  <div className="feed-state">
-                    <p className="feed-state__title">
-                      No processes recorded yet.
-                    </p>
-                    <p className="feed-state__copy">
-                      New build or publishing runs will appear here as soon as
-                      the runtime creates them.
-                    </p>
-                  </div>
-                ) : null}
-
-                {processPage.items.length > 0 ? (
-                  <div className="process-list" aria-live="polite">
-                    {processPage.items.map((process) => (
-                      <ProcessFeedItem
-                        key={process.release_run_id}
-                        onOpenDetail={handleOpenProcessDetail}
-                        process={process}
-                      />
-                    ))}
-                  </div>
-                ) : null}
-
-                {processPage.total_pages > 1 ? (
-                  <footer className="pagination-bar">
-                    <div className="pagination-bar__actions">
-                      <Button
-                        disabled={
-                          !processPage.has_previous_page || isLoadingFeed
-                        }
-                        onClick={() =>
-                          startTransition(() => {
-                            setPage(processPage.page - 1);
-                          })
-                        }
-                        size="sm"
-                        variant="ghost"
-                      >
-                        Previous
-                      </Button>
-                      <Button
-                        disabled={!processPage.has_next_page || isLoadingFeed}
-                        onClick={() =>
-                          startTransition(() => {
-                            setPage(processPage.page + 1);
-                          })
-                        }
-                        size="sm"
-                        variant="secondary"
-                      >
-                        Next
-                      </Button>
-                    </div>
-                  </footer>
-                ) : null}
-              </section>
-
-              <section
-                className="action-bar action-bar--home-bottom"
-                aria-label="Secondary actions"
-              >
-                <div className="action-bar__actions">
-                  <IconButton
-                    icon="key"
-                    label="Auth"
-                    onClick={handleOpenAuthProviders}
-                    size="sm"
-                    variant="ghost"
-                  />
-                  <IconButton
-                    icon="settings"
-                    label="Settings"
-                    onClick={handleOpenSettings}
-                    size="sm"
-                    variant="ghost"
-                  />
-                </div>
-              </section>
-            </div>
-          ) : (
-            <div className="focus-frame">
-              <section
-                className="action-bar action-bar--focus"
-                aria-label="Process detail actions"
-              >
-                <div className="action-bar__actions action-bar__actions--leading">
-                  <IconButton
-                    icon="arrowLeft"
-                    label={resolveFocusBackLabel(activeScreen)}
-                    onClick={handleReturnFromFocus}
-                    size="sm"
-                    variant="ghost"
-                  />
-                </div>
-              </section>
-
-              <section
-                className={
-                  activeScreen.kind === "create-project"
-                    ? "focus-screen-shell focus-screen-shell--wizard"
-                    : activeScreen.kind === "auth-providers"
-                      ? "focus-screen-shell focus-screen-shell--auth-providers"
-                      : activeScreen.kind === "project-workers"
-                        ? "focus-screen-shell focus-screen-shell--project-workers"
-                        : activeScreen.kind === "project-list"
-                          ? "focus-screen-shell focus-screen-shell--project-list"
-                          : activeScreen.kind === "project-detail"
-                            ? "focus-screen-shell focus-screen-shell--project-detail"
-                            : activeScreen.kind === "process-detail"
-                              ? "focus-screen-shell focus-screen-shell--process-detail"
-                              : "focus-screen-shell"
-                }
-                aria-label="Focus screen"
-              >
-                {transitionError ? (
-                  <p className="feed-banner feed-banner--error">
-                    {transitionError}
-                  </p>
-                ) : null}
-
-                {activeScreen.kind === "create-project" ? (
-                  <CreateProjectWizard
-                    onCreated={handleProjectCreated}
-                    onManageAuth={handleOpenAuthProvidersFromWizard}
-                  />
-                ) : null}
-
-                {activeScreen.kind === "auth-providers" ? (
-                  <AuthProvidersFocusScreen />
-                ) : null}
-
-                {activeScreen.kind === "settings" ? (
-                  <p className="focus-screen-shell__title">Settings</p>
-                ) : null}
-
-                {activeScreen.kind === "project-list" ? (
-                  <ProjectsFocusScreen
-                    highlightedRepositoryId={
-                      activeScreen.highlightedRepositoryId
-                    }
-                    onOpenProject={handleOpenProjectDetail}
-                  />
-                ) : null}
-
-                {activeScreen.kind === "project-workers" ? (
-                  <ProjectWorkersFocusScreen
-                    actionError={workerActionError}
-                    actionMessage={workerActionMessage}
-                    inspectionAvailable={workerSnapshot.inspectionAvailable}
-                    onInstantCheck={handleRepositoryInstantCheck}
-                    onRestartRuntime={handleRestartRuntime}
-                    onStartRuntime={handleStartRuntime}
-                    onStopRuntime={handleStopRuntime}
-                    pendingInstantCheckRepositoryId={
-                      pendingInstantCheckRepositoryId
-                    }
-                    pendingRuntimeAction={pendingRuntimeAction}
-                    projectWorkers={projectWorkers}
-                    runtimeStatus={workerSnapshot.runtimeStatus}
-                  />
-                ) : null}
-
-                {activeScreen.kind === "project-detail" ? (
-                  <RepositoryProjectDetail
-                    onProjectNameResolved={handleProjectNameResolved}
-                    repositoryId={activeScreen.repositoryId}
-                  />
-                ) : null}
-
-                {activeScreen.kind === "process-detail" ? (
-                  <ProcessDetailFocusScreen
-                    process={activeProcessDetail}
-                    usesLiveSnapshot={activeProcessDetailUsesLiveSnapshot}
-                  />
-                ) : null}
-              </section>
-            </div>
-          )}
+            void getCurrentWindow()
+              .startDragging()
+              .catch((error) => {
+                console.error("failed to start window drag", error);
+              });
+          }}
+        >
+          <span className="window-titlebar__title">
+            {resolveWindowTitle(activeScreen, activeProjectTitle)}
+          </span>
         </div>
-      </main>
-    </OverlayProvider>
+        <div className="window-titlebar__actions">
+          <IconButton
+            aria-pressed={isMainWindowPinned}
+            className="window-titlebar__action window-titlebar__action--pin"
+            icon={isMainWindowPinned ? "unpin" : "pin"}
+            label={isMainWindowPinned ? "Desafixar janela" : "Fixar janela"}
+            onClick={handleToggleMainWindowPinned}
+            size="sm"
+            variant="ghost"
+          />
+          <IconButton
+            className="window-titlebar__action window-titlebar__action--close"
+            icon="close"
+            label="Fechar janela"
+            onClick={handleRequestShellClose}
+            size="sm"
+            variant="ghost"
+          />
+        </div>
+      </header>
+
+      <div className="app-shell__content">
+        {isScreenBlank ? null : activeScreen.kind === "main" ? (
+          <div className="home-frame">
+            <section className="action-bar" aria-label="Primary actions">
+              <div className="action-bar__leading">
+                <div className="worker-status-shell">
+                  <WorkerStatusIndicator
+                    animated={workerStatus.animated}
+                    aria-haspopup="dialog"
+                    label={workerStatus.label}
+                    onClick={() => {
+                      void handleOpenWorkerQuickView();
+                    }}
+                    tone={workerStatus.tone}
+                    title={workerStatusTooltip}
+                  />
+                </div>
+              </div>
+
+              <div className="action-bar__actions">
+                <IconButton
+                  icon="layout"
+                  label="Projetos"
+                  onClick={handleOpenProjects}
+                  size="sm"
+                  variant="secondary"
+                />
+                <IconButton
+                  icon="plus"
+                  label="Criar novo projeto"
+                  onClick={handleOpenCreateProject}
+                  size="sm"
+                  variant="primary"
+                />
+              </div>
+            </section>
+
+            <section className="process-feed-shell" aria-label="Process list">
+              {transitionError ? (
+                <p className="feed-banner feed-banner--error">
+                  {transitionError}
+                </p>
+              ) : null}
+
+              {feedError ? (
+                <p className="feed-banner feed-banner--error">{feedError}</p>
+              ) : null}
+
+              {isLoadingFeed && processPage.items.length === 0 ? (
+                <div className="feed-state">
+                  <p className="feed-state__title">Loading process feed...</p>
+                  <p className="feed-state__copy">
+                    The shell is querying the runtime for recent build and
+                    publishing activity.
+                  </p>
+                </div>
+              ) : null}
+
+              {!isLoadingFeed && processPage.items.length === 0 ? (
+                <div className="feed-state">
+                  <p className="feed-state__title">
+                    No processes recorded yet.
+                  </p>
+                  <p className="feed-state__copy">
+                    New build or publishing runs will appear here as soon as the
+                    runtime creates them.
+                  </p>
+                </div>
+              ) : null}
+
+              {processPage.items.length > 0 ? (
+                <div className="process-list" aria-live="polite">
+                  {processPage.items.map((process) => (
+                    <ProcessFeedItem
+                      key={process.release_run_id}
+                      onOpenDetail={handleOpenProcessDetail}
+                      process={process}
+                    />
+                  ))}
+                </div>
+              ) : null}
+
+              {processPage.total_pages > 1 ? (
+                <footer className="pagination-bar">
+                  <div className="pagination-bar__actions">
+                    <Button
+                      disabled={!processPage.has_previous_page || isLoadingFeed}
+                      onClick={() =>
+                        startTransition(() => {
+                          setPage(processPage.page - 1);
+                        })
+                      }
+                      size="sm"
+                      variant="ghost"
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      disabled={!processPage.has_next_page || isLoadingFeed}
+                      onClick={() =>
+                        startTransition(() => {
+                          setPage(processPage.page + 1);
+                        })
+                      }
+                      size="sm"
+                      variant="secondary"
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </footer>
+              ) : null}
+            </section>
+
+            <section
+              className="action-bar action-bar--home-bottom"
+              aria-label="Secondary actions"
+            >
+              <div className="action-bar__actions">
+                <IconButton
+                  icon="key"
+                  label="Auth"
+                  onClick={handleOpenAuthProviders}
+                  size="sm"
+                  variant="ghost"
+                />
+                <IconButton
+                  icon="settings"
+                  label="Settings"
+                  onClick={handleOpenSettings}
+                  size="sm"
+                  variant="ghost"
+                />
+              </div>
+            </section>
+          </div>
+        ) : (
+          <div className="focus-frame">
+            <section
+              className="action-bar action-bar--focus"
+              aria-label="Process detail actions"
+            >
+              <div className="action-bar__actions action-bar__actions--leading">
+                <IconButton
+                  icon="arrowLeft"
+                  label={resolveFocusBackLabel(activeScreen)}
+                  onClick={handleFocusBackAction}
+                  size="sm"
+                  variant="ghost"
+                />
+              </div>
+            </section>
+
+            <section
+              className={
+                activeScreen.kind === "create-project"
+                  ? "focus-screen-shell focus-screen-shell--wizard"
+                  : activeScreen.kind === "auth-providers"
+                    ? "focus-screen-shell focus-screen-shell--auth-providers"
+                    : activeScreen.kind === "project-workers"
+                      ? "focus-screen-shell focus-screen-shell--project-workers"
+                      : activeScreen.kind === "project-list"
+                        ? "focus-screen-shell focus-screen-shell--project-list"
+                        : activeScreen.kind === "project-detail"
+                          ? "focus-screen-shell focus-screen-shell--project-detail"
+                          : activeScreen.kind === "process-detail"
+                            ? "focus-screen-shell focus-screen-shell--process-detail"
+                            : "focus-screen-shell"
+              }
+              aria-label="Focus screen"
+            >
+              {transitionError ? (
+                <p className="feed-banner feed-banner--error">
+                  {transitionError}
+                </p>
+              ) : null}
+
+              {activeScreen.kind === "create-project" ? (
+                <CreateProjectWizard
+                  onCreated={handleProjectCreated}
+                  onManageAuth={handleOpenAuthProvidersFromWizard}
+                />
+              ) : null}
+
+              {activeScreen.kind === "auth-providers" ? (
+                <AuthProvidersFocusScreen />
+              ) : null}
+
+              {activeScreen.kind === "settings" ? (
+                <p className="focus-screen-shell__title">Settings</p>
+              ) : null}
+
+              {activeScreen.kind === "project-list" ? (
+                <ProjectsFocusScreen
+                  highlightedRepositoryId={activeScreen.highlightedRepositoryId}
+                  onOpenProject={handleOpenProjectDetail}
+                />
+              ) : null}
+
+              {activeScreen.kind === "project-workers" ? (
+                <ProjectWorkersFocusScreen
+                  actionError={workerActionError}
+                  actionMessage={workerActionMessage}
+                  inspectionAvailable={workerSnapshot.inspectionAvailable}
+                  inspectionError={workerSnapshot.inspectionError}
+                  inspectionStale={workerSnapshot.inspectionStale}
+                  onBulkInstantCheck={handleBulkRepositoryInstantCheck}
+                  onInstantCheck={handleRepositoryInstantCheck}
+                  onRestartRuntime={handleRestartRuntime}
+                  onRetryInventory={handleRetryWorkerInventory}
+                  onStartRuntime={handleStartRuntime}
+                  onStopRuntime={handleStopRuntime}
+                  pendingBulkInstantCheck={pendingBulkInstantCheck}
+                  pendingInstantCheckRepositoryId={
+                    pendingInstantCheckRepositoryId
+                  }
+                  pendingRuntimeAction={pendingRuntimeAction}
+                  projectWorkers={projectWorkers}
+                  runtimeStatus={workerSnapshot.runtimeStatus}
+                />
+              ) : null}
+
+              {activeScreen.kind === "project-detail" ? (
+                <RepositoryProjectDetail
+                  onProjectNameResolved={handleProjectNameResolved}
+                  repositoryId={activeScreen.repositoryId}
+                />
+              ) : null}
+
+              {activeScreen.kind === "process-detail" ? (
+                <ProcessDetailFocusScreen
+                  onRequestRerun={handleRerunProcess}
+                  process={activeProcessDetail}
+                  usesLiveSnapshot={activeProcessDetailUsesLiveSnapshot}
+                />
+              ) : null}
+            </section>
+          </div>
+        )}
+      </div>
+    </main>
   );
 }
 
@@ -919,6 +1223,16 @@ function buildWindowTransitionErrorMessage(error: unknown): string {
   return "The desktop shell could not transition the current window.";
 }
 
+function buildWorkerInspectionErrorMessage(error: unknown): string {
+  const message = readErrorMessage(error);
+
+  if (message) {
+    return message;
+  }
+
+  return "The desktop shell could not refresh the project worker inventory.";
+}
+
 function buildRuntimeActionMessage(action: RuntimeControlAction): string {
   switch (action) {
     case "start":
@@ -928,6 +1242,16 @@ function buildRuntimeActionMessage(action: RuntimeControlAction): string {
     case "restart":
       return "Runtime restart requested.";
   }
+}
+
+function buildBulkInstantCheckMessage(
+  queuedWorkers: ProjectWorkerEntry[],
+): string {
+  if (queuedWorkers.length === 1) {
+    return `Instant check queued for ${queuedWorkers[0].repositoryName}.`;
+  }
+
+  return `Instant checks queued for ${queuedWorkers.length} projects.`;
 }
 
 function buildRuntimeActionErrorMessage(
@@ -956,6 +1280,52 @@ function buildRepositoryInstantCheckErrorMessage(
   return `The desktop shell could not queue an instant check for ${repositoryName}.`;
 }
 
+function buildBulkRepositoryInstantCheckErrorMessage(
+  error: unknown,
+  repositoryName: string | null,
+  queuedProjectCount: number,
+) {
+  const message = readErrorMessage(error);
+
+  if (message) {
+    return message;
+  }
+
+  if (repositoryName && queuedProjectCount > 0) {
+    return `The desktop shell could not continue the bulk instant check while queueing ${repositoryName} after ${queuedProjectCount} ${queuedProjectCount === 1 ? "project" : "projects"}.`;
+  }
+
+  if (repositoryName) {
+    return `The desktop shell could not queue a bulk instant check for ${repositoryName}.`;
+  }
+
+  return "The desktop shell could not queue the selected bulk instant checks.";
+}
+
+function buildProjectWorkerSelectionItems(
+  projectWorkers: ProjectWorkerEntry[],
+): SelectListItem[] {
+  return projectWorkers.map((projectWorker) => ({
+    id: String(projectWorker.repositoryId),
+    label: projectWorker.repositoryName,
+    subtitle: `${projectWorker.buildTargets.length} ${projectWorker.buildTargets.length === 1 ? "target" : "targets"} • poll ${projectWorker.pollingIntervalSeconds}s`,
+  }));
+}
+
+function buildBulkInstantCheckConfirmationMessage(
+  projectWorkers: ProjectWorkerEntry[],
+) {
+  const workerNames = projectWorkers.map(
+    (projectWorker) => projectWorker.repositoryName,
+  );
+
+  if (workerNames.length === 1) {
+    return `Queue an immediate repository check for ${workerNames[0]}.`;
+  }
+
+  return `Queue immediate repository checks for ${workerNames.join(", ")}.`;
+}
+
 function readErrorMessage(error: unknown): string | null {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -972,6 +1342,25 @@ function resolveWorkerStatusSummary(
   snapshot: WorkerStatusSnapshot,
 ): WorkerStatusSummary {
   const projectWorkers = collectProjectWorkers(snapshot.repositories);
+
+  if (snapshot.inspectionError && !snapshot.inspectionAvailable) {
+    return {
+      tone: "warning",
+      label:
+        "Project worker inventory is unavailable until repository inspection succeeds again.",
+      animated: false,
+    };
+  }
+
+  if (snapshot.inspectionStale) {
+    return {
+      tone: "warning",
+      label: `Project worker inventory may be stale for ${formatProjectCount(
+        projectWorkers.length,
+      )} while repository inspection recovers.`,
+      animated: false,
+    };
+  }
 
   if (!snapshot.inspectionAvailable) {
     return {
@@ -1077,6 +1466,41 @@ function formatProjectCount(projectCount: number) {
 
 function formatBuildTargetCount(buildTargetCount: number) {
   return `${buildTargetCount} build target${buildTargetCount === 1 ? "" : "s"}`;
+}
+
+function buildWorkerStatusTooltip(
+  snapshot: WorkerStatusSnapshot,
+  projectWorkers: ProjectWorkerEntry[],
+) {
+  if (snapshot.inspectionError && !snapshot.inspectionAvailable) {
+    return snapshot.inspectionError;
+  }
+
+  if (snapshot.inspectionStale) {
+    return `Showing the last known worker snapshot while repository inspection recovers. ${projectWorkers.length > 0 ? buildActiveWorkersTooltip(projectWorkers) : ""}`.trim();
+  }
+
+  if (!snapshot.inspectionAvailable) {
+    return "Loading active workers...";
+  }
+
+  if (projectWorkers.length === 0) {
+    return "No active workers configured.";
+  }
+
+  return buildActiveWorkersTooltip(projectWorkers);
+}
+
+function buildActiveWorkersTooltip(projectWorkers: ProjectWorkerEntry[]) {
+  return `Active workers: ${projectWorkers
+    .map((projectWorker) => {
+      const buildTargetNames = projectWorker.buildTargets
+        .map((buildTarget) => buildTarget.name)
+        .join(", ");
+
+      return `${projectWorker.repositoryName} (${buildTargetNames})`;
+    })
+    .join(" · ")}`;
 }
 
 function formatRuntimeStatus(status: RuntimeHealthStatus) {

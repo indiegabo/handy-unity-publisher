@@ -19,6 +19,8 @@ type OverlayEntry = {
 };
 
 type OverlayContextValue = {
+  dismissTopOverlay: (value?: any) => boolean;
+  hasOpenOverlay: boolean;
   openOverlay: <T = any>(
     Component: React.ComponentType<any>,
     props?: any,
@@ -26,6 +28,8 @@ type OverlayContextValue = {
 };
 
 const OverlayContext = createContext<OverlayContextValue>({
+  dismissTopOverlay: () => false,
+  hasOpenOverlay: false,
   openOverlay: () => Promise.resolve(null),
 });
 
@@ -105,6 +109,20 @@ export const OverlayProvider: React.FC<
     }
   }, []);
 
+  const dismissTopOverlay = useCallback(
+    (value: any = null) => {
+      const topEntry = stackRef.current[stackRef.current.length - 1];
+
+      if (!topEntry) {
+        return false;
+      }
+
+      closeById(topEntry.id, value);
+      return true;
+    },
+    [closeById],
+  );
+
   const overlays = (
     <>
       {stack.map((entry) => {
@@ -137,7 +155,13 @@ export const OverlayProvider: React.FC<
   );
 
   return (
-    <OverlayContext.Provider value={{ openOverlay }}>
+    <OverlayContext.Provider
+      value={{
+        dismissTopOverlay,
+        hasOpenOverlay: stack.length > 0,
+        openOverlay,
+      }}
+    >
       {children}
       {overlays}
     </OverlayContext.Provider>

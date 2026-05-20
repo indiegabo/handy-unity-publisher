@@ -13,6 +13,7 @@ type RepositoryCredentialComposerProps = {
   onCancel: () => void;
   onSave: (input: SaveSecretCredentialInput) => Promise<void> | void;
   providerLabel: string;
+  renderSurface?: boolean;
   saveError: string | null;
   scope?: "repository" | "publish";
 };
@@ -53,6 +54,7 @@ export function RepositoryCredentialComposer({
   onCancel,
   onSave,
   providerLabel,
+  renderSurface = true,
   saveError,
   scope = "repository",
 }: RepositoryCredentialComposerProps) {
@@ -70,7 +72,9 @@ export function RepositoryCredentialComposer({
       ? PUBLISH_CREDENTIAL_KIND_OPTIONS
       : REPOSITORY_CREDENTIAL_KIND_OPTIONS;
   const panelTitle =
-    scope === "publish" ? "New publish credential" : "New repository credential";
+    scope === "publish"
+      ? "New publish credential"
+      : "New repository credential";
   const panelDescription =
     scope === "publish"
       ? `Create one reusable ${providerLabel} credential and bind it to this publish destination.`
@@ -80,36 +84,8 @@ export function RepositoryCredentialComposer({
       ? `${providerLabel} publish credential`
       : `${providerLabel} repository credential`;
 
-  const handleDraftFieldChange = (
-    field: keyof RepositoryCredentialDraft,
-    value: string,
-  ) => {
-    setDraft((current) => ({
-      ...current,
-      [field]: value,
-    }));
-    setErrors((current) => ({
-      ...current,
-      [field]: undefined,
-    }));
-  };
-
-  const handleSave = async () => {
-    const nextErrors = validateRepositoryCredentialDraft(draft);
-    if (hasRepositoryCredentialDraftErrors(nextErrors)) {
-      setErrors(nextErrors);
-      return;
-    }
-
-    await onSave(buildSaveSecretCredentialInput(draft));
-  };
-
-  return (
-    <SurfacePanel
-      description={panelDescription}
-      tone="inset"
-      title={panelTitle}
-    >
+  const content = (
+    <>
       <TextField
         autoComplete="off"
         error={errors.name}
@@ -158,7 +134,7 @@ export function RepositoryCredentialComposer({
             value={draft.password}
           />
         </>
-        ) : draft.kind === "git-http-bearer" ? (
+      ) : draft.kind === "git-http-bearer" ? (
         <TextField
           autoComplete="new-password"
           error={errors.token}
@@ -205,6 +181,44 @@ export function RepositoryCredentialComposer({
           Cancel
         </Button>
       </div>
+    </>
+  );
+
+  const handleDraftFieldChange = (
+    field: keyof RepositoryCredentialDraft,
+    value: string,
+  ) => {
+    setDraft((current) => ({
+      ...current,
+      [field]: value,
+    }));
+    setErrors((current) => ({
+      ...current,
+      [field]: undefined,
+    }));
+  };
+
+  const handleSave = async () => {
+    const nextErrors = validateRepositoryCredentialDraft(draft);
+    if (hasRepositoryCredentialDraftErrors(nextErrors)) {
+      setErrors(nextErrors);
+      return;
+    }
+
+    await onSave(buildSaveSecretCredentialInput(draft));
+  };
+
+  if (!renderSurface) {
+    return content;
+  }
+
+  return (
+    <SurfacePanel
+      description={panelDescription}
+      tone="inset"
+      title={panelTitle}
+    >
+      {content}
     </SurfacePanel>
   );
 }
@@ -260,9 +274,9 @@ function buildSaveSecretCredentialInput(
           ? JSON.stringify({
               api_key: draft.apiKey.trim(),
             })
-        : JSON.stringify({
-            token: draft.token.trim(),
-          }),
+          : JSON.stringify({
+              token: draft.token.trim(),
+            }),
     kind: draft.kind,
     name: draft.name.trim(),
   };

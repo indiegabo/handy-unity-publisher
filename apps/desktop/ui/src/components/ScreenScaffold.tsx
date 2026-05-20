@@ -3,8 +3,10 @@ import type { ReactNode } from "react";
 import { FocusPageFrame } from "./Surface";
 
 export type ScreenScaffoldProps = {
+  eyebrow?: string;
   title?: string;
   subtitle?: string;
+  summary?: ReactNode;
   actions?: ReactNode;
   children?: ReactNode;
   footer?: ReactNode;
@@ -12,8 +14,10 @@ export type ScreenScaffoldProps = {
 };
 
 const ScreenScaffold = ({
+  eyebrow,
   title,
   subtitle,
+  summary,
   actions,
   children,
   footer,
@@ -25,6 +29,8 @@ const ScreenScaffold = ({
       bodyClassName="screen-scaffold__body"
       className={joinClassNames("screen-scaffold", className)}
       description={subtitle}
+      eyebrow={eyebrow}
+      summary={summary}
       title={title ?? ""}
     >
       {children}

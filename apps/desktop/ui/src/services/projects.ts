@@ -280,6 +280,14 @@ export async function loadRepositoryInspection(): Promise<RepositoryInspectionSe
     return invoke<RepositoryInspectionSettings>("repository_inspection");
 }
 
+export async function loadRepositoryProjectDetail(
+    repositoryId: number,
+): Promise<RepositoryInspectionEntry> {
+    return invoke<RepositoryInspectionEntry>("repository_project_detail", {
+        repositoryId,
+    });
+}
+
 export async function assessRepositoryAccess(
     repositoryUrl: string,
 ): Promise<RepositoryAccessAssessment> {

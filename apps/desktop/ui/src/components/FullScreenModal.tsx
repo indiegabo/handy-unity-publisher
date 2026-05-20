@@ -39,10 +39,11 @@ const FullScreenModal = ({
       return;
     }
 
-    const preferredFocusTarget = container.querySelector<HTMLElement>(
-      "[data-overlay-autofocus]",
-    );
     const focusableNodes = getFocusableNodes(container);
+    const preferredFocusTarget = resolvePreferredFocusTarget(
+      container,
+      focusableNodes,
+    );
     const nextFocusTarget =
       preferredFocusTarget ?? focusableNodes[0] ?? container;
 
@@ -138,6 +139,19 @@ export default FullScreenModal;
 function getFocusableNodes(container: HTMLElement) {
   return Array.from(
     container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+  );
+}
+
+function resolvePreferredFocusTarget(
+  container: HTMLElement,
+  focusableNodes: HTMLElement[],
+) {
+  const preferredFocusTargets = Array.from(
+    container.querySelectorAll<HTMLElement>("[data-overlay-autofocus]"),
+  );
+
+  return preferredFocusTargets.find((candidate) =>
+    focusableNodes.some((node) => node === candidate),
   );
 }
 

@@ -1,30 +1,36 @@
 import { startTransition, useEffect, useEffectEvent, useState } from "react";
 
 import { Button } from "./Button";
+import AuthProviderConnectionModal from "./AuthProviderConnectionModal";
+import {
+  type AuthProviderConnectionResult,
+  buildAuthProviderActionLabel,
+  buildAuthProviderLifecycleSnapshot,
+  formatAuthProviderStatus,
+  formatBoundRepositoryCount,
+  resolveAuthProviderTone,
+} from "./authProviderPresentation";
 import {
   Badge,
   FocusPageFrame,
   MetaItem,
   MetaRow,
   SurfacePanel,
-  type BadgeTone,
 } from "./Surface";
-import {
-  loadAuthProviders,
-  loginWithGithubAuth,
-  type AuthProviderStatus,
-} from "../services/auth";
+import { useOverlay } from "./OverlayManager";
+import { loadAuthProviders, type AuthProviderStatus } from "../services/auth";
 
 type AuthProvidersFocusScreenProps = {};
 
 export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
+  const { openOverlay } = useOverlay();
   const [providers, setProviders] = useState<AuthProviderStatus[]>([]);
+  const [lastConnectionResults, setLastConnectionResults] = useState<
+    Record<string, AuthProviderConnectionResult>
+  >({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
-  const [pendingProviderId, setPendingProviderId] = useState<string | null>(
-    null,
-  );
 
   const loadProviders = useEffectEvent(async () => {
     setIsLoading(true);
@@ -48,31 +54,34 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
     void loadProviders();
   }, []);
 
-  const handleGithubLogin = useEffectEvent(async () => {
-    setPendingProviderId("github");
-    setActionMessage(null);
+  const handleOpenConnectionFlow = useEffectEvent(
+    async (provider: AuthProviderStatus) => {
+      setActionMessage(null);
 
-    try {
-      const provider = await loginWithGithubAuth();
+      const connectionResult = await openOverlay<AuthProviderConnectionResult>(
+        AuthProviderConnectionModal,
+        {
+          provider,
+        },
+      );
+
+      if (!connectionResult) {
+        return;
+      }
+
       startTransition(() => {
-        setProviders([provider]);
-        setError(null);
-        setActionMessage(
-          `GitHub login connected. ${formatBoundRepositoryCount(
-            provider.bound_repository_count,
-          )} currently connect to it explicitly.`,
+        setProviders((current) =>
+          mergeAuthProviderInventory(current, connectionResult.provider),
         );
+        setLastConnectionResults((current) => ({
+          ...current,
+          [connectionResult.provider.provider_id]: connectionResult,
+        }));
+        setError(null);
+        setActionMessage(connectionResult.message);
       });
-    } catch (loginError) {
-      startTransition(() => {
-        setError(buildAuthProviderErrorMessage(loginError));
-      });
-    } finally {
-      startTransition(() => {
-        setPendingProviderId(null);
-      });
-    }
-  });
+    },
+  );
 
   const connectedProviderCount = providers.filter(
     (provider) => provider.status === "connected",
@@ -145,7 +154,7 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
 
         <SurfacePanel
           className="auth-provider-section"
-          description="Host-backed login providers available to the desktop shell."
+          description="Host-backed login providers available to the desktop shell. Open the guided connection overlay only when one provider needs to be created, rebound, or refreshed."
           eyebrow="Provider Inventory"
           headerSeparated
           title="Available Accounts"
@@ -153,59 +162,85 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
         >
           {providers.length > 0 ? (
             <div className="auth-provider-grid">
-              {providers.map((provider) => (
-                <section
-                  className="auth-provider-card"
-                  key={provider.provider_id}
-                >
-                  <header className="auth-provider-card__header">
-                    <div className="auth-provider-card__title-block">
-                      <h3 className="auth-provider-card__title">
-                        {provider.label}
-                      </h3>
-                      <p className="auth-provider-card__copy">
-                        {provider.instance_url}
-                      </p>
+              {providers.map((provider) => {
+                const lifecycleSnapshot = buildAuthProviderLifecycleSnapshot(
+                  provider,
+                  lastConnectionResults[provider.provider_id],
+                );
+
+                return (
+                  <section
+                    className="auth-provider-card"
+                    key={provider.provider_id}
+                  >
+                    <header className="auth-provider-card__header">
+                      <div className="auth-provider-card__title-block">
+                        <h3 className="auth-provider-card__title">
+                          {provider.label}
+                        </h3>
+                        <p className="auth-provider-card__copy">
+                          {provider.instance_url}
+                        </p>
+                      </div>
+                      <Badge tone={resolveAuthProviderTone(provider.status)}>
+                        {formatAuthProviderStatus(provider.status)}
+                      </Badge>
+                    </header>
+
+                    <p className="auth-provider-card__copy">
+                      {provider.status_message}
+                    </p>
+
+                    <MetaRow className="auth-provider-card__summary">
+                      <MetaItem label="Credential">
+                        {provider.credential_name || "No reusable credential"}
+                      </MetaItem>
+                      <MetaItem label="Usage">
+                        {formatBoundRepositoryCount(
+                          provider.bound_repository_count,
+                        )}
+                      </MetaItem>
+                    </MetaRow>
+
+                    <MetaRow className="auth-provider-card__summary">
+                      <MetaItem label="Stored">
+                        {lifecycleSnapshot.storedAtLabel}
+                      </MetaItem>
+                      <MetaItem label="Refreshed">
+                        {lifecycleSnapshot.refreshedAtLabel}
+                      </MetaItem>
+                    </MetaRow>
+
+                    <MetaRow className="auth-provider-card__summary">
+                      <MetaItem label="Lifecycle">
+                        {lifecycleSnapshot.lifecycleLabel}
+                      </MetaItem>
+                      <MetaItem label="Next step">
+                        {lifecycleSnapshot.nextActionLabel}
+                      </MetaItem>
+                    </MetaRow>
+
+                    <div className="auth-provider-card__actions">
+                      <Button
+                        onClick={() => {
+                          void handleOpenConnectionFlow(provider);
+                        }}
+                        size="sm"
+                        variant={
+                          provider.status === "connected"
+                            ? "secondary"
+                            : "primary"
+                        }
+                      >
+                        {buildAuthProviderActionLabel(
+                          provider,
+                          lastConnectionResults[provider.provider_id],
+                        )}
+                      </Button>
                     </div>
-                    <Badge tone={resolveAuthProviderTone(provider.status)}>
-                      {formatAuthProviderStatus(provider.status)}
-                    </Badge>
-                  </header>
-
-                  <p className="auth-provider-card__copy">
-                    {provider.status_message}
-                  </p>
-
-                  <MetaRow className="auth-provider-card__summary">
-                    <MetaItem label="Credential">
-                      {provider.credential_name || "No reusable credential"}
-                    </MetaItem>
-                    <MetaItem label="Usage">
-                      {formatBoundRepositoryCount(
-                        provider.bound_repository_count,
-                      )}
-                    </MetaItem>
-                  </MetaRow>
-
-                  <div className="auth-provider-card__actions">
-                    <Button
-                      disabled={pendingProviderId === provider.provider_id}
-                      leadingIcon="arrowUpRight"
-                      onClick={() => void handleGithubLogin()}
-                      size="sm"
-                      variant={
-                        provider.status === "connected" ? "secondary" : "primary"
-                      }
-                    >
-                      {pendingProviderId === provider.provider_id
-                        ? "Connecting..."
-                        : provider.status === "connected"
-                          ? "Reconnect with browser"
-                          : "Log in with browser"}
-                    </Button>
-                  </div>
-                </section>
-              ))}
+                  </section>
+                );
+              })}
             </div>
           ) : null}
         </SurfacePanel>
@@ -214,32 +249,21 @@ export function AuthProvidersFocusScreen({}: AuthProvidersFocusScreenProps) {
   );
 }
 
-function resolveAuthProviderTone(status: string): BadgeTone {
-  switch (status) {
-    case "connected":
-      return "strong";
-    case "disconnected":
-      return "neutral";
-    default:
-      return "muted";
-  }
-}
+function mergeAuthProviderInventory(
+  currentProviders: AuthProviderStatus[],
+  nextProvider: AuthProviderStatus,
+) {
+  const providerIndex = currentProviders.findIndex(
+    (provider) => provider.provider_id === nextProvider.provider_id,
+  );
 
-function formatAuthProviderStatus(status: string) {
-  switch (status) {
-    case "connected":
-      return "connected";
-    case "disconnected":
-      return "ready to connect";
-    default:
-      return "unavailable";
+  if (providerIndex === -1) {
+    return [nextProvider, ...currentProviders];
   }
-}
 
-function formatBoundRepositoryCount(boundRepositoryCount: number) {
-  return `${boundRepositoryCount} repository project${
-    boundRepositoryCount === 1 ? "" : "s"
-  }`;
+  return currentProviders.map((provider) =>
+    provider.provider_id === nextProvider.provider_id ? nextProvider : provider,
+  );
 }
 
 function buildAuthProviderErrorMessage(error: unknown): string {

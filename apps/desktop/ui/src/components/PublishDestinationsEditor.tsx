@@ -2,10 +2,14 @@ import { useState, type ReactElement } from "react";
 
 import { Button, IconButton } from "./Button";
 import { SelectField, TextField, type SelectOption } from "./Field";
+import { useOverlay } from "./OverlayManager";
 import { PathPickerField } from "./PathPickerField";
-import { RepositoryCredentialComposer } from "./RepositoryCredentialComposer";
-import { Badge } from "./Surface";
+import SelectListFullScreen, {
+  type SelectListItem,
+} from "./SelectListFullScreen";
+import { Badge, SurfacePanel } from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
+import CredentialComposerModal from "./forms/CredentialComposerModal";
 import type {
   CreateRepositoryProjectPublishTargetInput,
   RepositoryPublishTargetInspection,
@@ -83,8 +87,6 @@ type PublishDestinationsEditorProps = {
   destinations: PublishDestinationDraft[];
   disabled?: boolean;
   errors?: PublishDestinationValidationErrors;
-  isSavingCredential?: boolean;
-  credentialSaveError?: string | null;
   onChange: (next: PublishDestinationDraft[]) => void;
   onSaveCredential?: (
     destinationId: string,
@@ -101,6 +103,7 @@ const BINDING_STATUS_OPTIONS = [
   { label: "Enabled", value: "enabled" },
   { label: "Disabled", value: "disabled" },
 ] as const;
+const BINDING_SELECTOR_OVERLAY_THRESHOLD = 8;
 
 export function PublishDestinationsEditor({
   buildTargets,
@@ -108,28 +111,22 @@ export function PublishDestinationsEditor({
   destinations,
   disabled = false,
   errors,
-  isSavingCredential = false,
-  credentialSaveError = null,
   onChange,
   onSaveCredential,
 }: PublishDestinationsEditorProps) {
+  const { openOverlay } = useOverlay();
   const [showDestinationMenu, setShowDestinationMenu] = useState(false);
   const [pendingDestinationRemovalId, setPendingDestinationRemovalId] =
     useState<string | null>(null);
   const [pendingBindingTargetSelections, setPendingBindingTargetSelections] =
     useState<Record<string, string>>({});
-  const [credentialComposerDestinationId, setCredentialComposerDestinationId] =
-    useState<string | null>(null);
 
   const handleAddDestination = (kind: PublishDestinationKind) => {
     if (destinations.some((destination) => destination.kind === kind)) {
       return;
     }
 
-    onChange([
-      ...destinations,
-      createEmptyPublishDestinationDraft(kind),
-    ]);
+    onChange([...destinations, createEmptyPublishDestinationDraft(kind)]);
     setShowDestinationMenu(false);
   };
 
@@ -177,7 +174,9 @@ export function PublishDestinationsEditor({
   };
 
   const handleDestinationRemovalRequest = (destinationId: string) => {
-    const destination = destinations.find((entry) => entry.id === destinationId);
+    const destination = destinations.find(
+      (entry) => entry.id === destinationId,
+    );
     if (!destination) {
       return;
     }
@@ -203,8 +202,23 @@ export function PublishDestinationsEditor({
     setPendingDestinationRemovalId(null);
   };
 
+  const handleOpenCredentialComposer = async (destinationId: string) => {
+    if (disabled || !onSaveCredential) {
+      return;
+    }
+
+    await openOverlay<SaveSecretCredentialInput>(CredentialComposerModal, {
+      onSubmit: (input: SaveSecretCredentialInput) =>
+        onSaveCredential(destinationId, input),
+      providerLabel: "Itch.io",
+      scope: "publish",
+    });
+  };
+
   const handleAddBinding = (destinationId: string) => {
-    const destination = destinations.find((entry) => entry.id === destinationId);
+    const destination = destinations.find(
+      (entry) => entry.id === destinationId,
+    );
     if (!destination) {
       return;
     }
@@ -264,9 +278,9 @@ export function PublishDestinationsEditor({
   };
 
   const pendingDestinationRemoval = pendingDestinationRemovalId
-    ? destinations.find(
+    ? (destinations.find(
         (destination) => destination.id === pendingDestinationRemovalId,
-      ) ?? null
+      ) ?? null)
     : null;
   const pendingRemovalTargets = pendingDestinationRemoval
     ? collectPublishDestinationBindingTargets(
@@ -324,12 +338,13 @@ export function PublishDestinationsEditor({
         <div className="wizard-callout wizard-callout--compact wizard-callout--auth">
           <div className="wizard-callout__header">
             <div>
-              <p className="wizard-callout__title">Confirm destination removal</p>
+              <p className="wizard-callout__title">
+                Confirm destination removal
+              </p>
               <p className="wizard-callout__copy">
-                Removing {formatPublishDestinationTitle(pendingDestinationRemoval)}
-                {" "}
-                also removes persisted bindings for
-                {" "}
+                Removing{" "}
+                {formatPublishDestinationTitle(pendingDestinationRemoval)} also
+                removes persisted bindings for{" "}
                 {pendingRemovalTargets.join(", ") || "its bound build targets"}.
               </p>
             </div>
@@ -359,7 +374,9 @@ export function PublishDestinationsEditor({
 
       {destinations.length === 0 ? (
         <div className="feed-state">
-          <p className="feed-state__title">No publish destinations configured.</p>
+          <p className="feed-state__title">
+            No publish destinations configured.
+          </p>
         </div>
       ) : null}
 
@@ -389,7 +406,9 @@ export function PublishDestinationsEditor({
                     disabled={disabled}
                     icon="trash"
                     label={`Remove ${adapter.label} destination`}
-                    onClick={() => handleDestinationRemovalRequest(destination.id)}
+                    onClick={() =>
+                      handleDestinationRemovalRequest(destination.id)
+                    }
                     size="sm"
                     variant="ghost"
                   />
@@ -413,15 +432,10 @@ export function PublishDestinationsEditor({
           >
             <AdapterComponent
               buildTargets={buildTargets}
-              credentialSaveError={credentialSaveError}
               credentials={credentials}
               destination={destination}
               destinationErrors={destinationErrors}
               disabled={disabled}
-              isCredentialComposerOpen={
-                credentialComposerDestinationId === destination.id
-              }
-              isSavingCredential={isSavingCredential}
               onAddBinding={() => handleAddBinding(destination.id)}
               onBindingChange={(bindingId, patch) =>
                 handleBindingChange(destination.id, bindingId, patch)
@@ -429,6 +443,9 @@ export function PublishDestinationsEditor({
               onDestinationChange={(patch) =>
                 handleDestinationChange(destination.id, patch)
               }
+              onOpenCredentialComposer={() => {
+                void handleOpenCredentialComposer(destination.id);
+              }}
               onPendingBindingTargetChange={(nextTargetId) =>
                 setPendingBindingTargetSelections((current) => ({
                   ...current,
@@ -437,12 +454,6 @@ export function PublishDestinationsEditor({
               }
               onRemoveBinding={(bindingId) =>
                 handleRemoveBinding(destination.id, bindingId)
-              }
-              onSaveCredential={onSaveCredential}
-              onToggleCredentialComposer={(nextOpen) =>
-                setCredentialComposerDestinationId(
-                  nextOpen ? destination.id : null,
-                )
               }
               pendingBindingTargetId={pendingBindingTargetId}
             />
@@ -455,26 +466,19 @@ export function PublishDestinationsEditor({
 
 type PublishDestinationAdapterComponentProps = {
   buildTargets: ProjectBuildTargetReference[];
-  credentialSaveError: string | null;
   credentials: SecretCredentialSetting[];
   destination: PublishDestinationDraft;
   destinationErrors: PublishDestinationDraftErrors;
   disabled: boolean;
-  isCredentialComposerOpen: boolean;
-  isSavingCredential: boolean;
   onAddBinding: () => void;
   onBindingChange: (
     bindingId: string,
     patch: Partial<PublishDestinationBindingDraft>,
   ) => void;
   onDestinationChange: (patch: Partial<PublishDestinationDraft>) => void;
+  onOpenCredentialComposer?: () => void;
   onPendingBindingTargetChange: (nextTargetId: string) => void;
   onRemoveBinding: (bindingId: string) => void;
-  onSaveCredential?: (
-    destinationId: string,
-    input: SaveSecretCredentialInput,
-  ) => Promise<void> | void;
-  onToggleCredentialComposer: (nextOpen: boolean) => void;
   pendingBindingTargetId: string;
 };
 
@@ -522,17 +526,26 @@ function FilesystemPublishDestinationAdapter({
   pendingBindingTargetId,
 }: PublishDestinationAdapterComponentProps) {
   return (
-    <div className="wizard-form-grid">
-      <SelectField
-        label="Status"
-        onChange={(event) =>
-          onDestinationChange({
-            enabled: event.currentTarget.value === "enabled",
-          })
-        }
-        options={DESTINATION_STATUS_OPTIONS}
-        value={destination.enabled ? "enabled" : "disabled"}
-      />
+    <>
+      <SurfacePanel
+        bodyClassName="wizard-form-grid"
+        className="project-detail-form-grid__span-full"
+        description="Configure the lifecycle state for this filesystem publish destination. Bound target paths stay with each individual binding."
+        headerSeparated
+        title="Destination identity"
+        tone="inset"
+      >
+        <SelectField
+          label="Status"
+          onChange={(event) =>
+            onDestinationChange({
+              enabled: event.currentTarget.value === "enabled",
+            })
+          }
+          options={DESTINATION_STATUS_OPTIONS}
+          value={destination.enabled ? "enabled" : "disabled"}
+        />
+      </SurfacePanel>
 
       <PublishDestinationBindingsSection
         buildTargets={buildTargets}
@@ -568,26 +581,22 @@ function FilesystemPublishDestinationAdapter({
           />
         )}
       />
-    </div>
+    </>
   );
 }
 
 function ItchPublishDestinationAdapter({
   buildTargets,
-  credentialSaveError,
   credentials,
   destination,
   destinationErrors,
   disabled,
-  isCredentialComposerOpen,
-  isSavingCredential,
   onAddBinding,
   onBindingChange,
   onDestinationChange,
+  onOpenCredentialComposer,
   onPendingBindingTargetChange,
   onRemoveBinding,
-  onSaveCredential,
-  onToggleCredentialComposer,
   pendingBindingTargetId,
 }: PublishDestinationAdapterComponentProps) {
   const publishCredentialOptions = buildPublishCredentialOptions(
@@ -596,112 +605,113 @@ function ItchPublishDestinationAdapter({
   );
 
   return (
-    <div className="wizard-form-grid">
-      <SelectField
-        label="Status"
-        onChange={(event) =>
-          onDestinationChange({
-            enabled: event.currentTarget.value === "enabled",
-          })
+    <>
+      <SurfacePanel
+        bodyClassName="wizard-form-grid"
+        className="project-detail-form-grid__span-full"
+        description="Define the operator-facing identity and host executable path for this Itch publish destination."
+        headerSeparated
+        title="Destination identity"
+        tone="inset"
+      >
+        <SelectField
+          label="Status"
+          onChange={(event) =>
+            onDestinationChange({
+              enabled: event.currentTarget.value === "enabled",
+            })
+          }
+          options={DESTINATION_STATUS_OPTIONS}
+          value={destination.enabled ? "enabled" : "disabled"}
+        />
+
+        <TextField
+          error={destinationErrors.itchAccountName}
+          label="Itch account name"
+          onChange={(event) =>
+            onDestinationChange({
+              itchAccountName: event.currentTarget.value,
+            })
+          }
+          placeholder="indiegabo"
+          value={destination.itchAccountName}
+        />
+
+        <TextField
+          error={destinationErrors.itchGameSlug}
+          label="Itch game slug"
+          onChange={(event) =>
+            onDestinationChange({
+              itchGameSlug: event.currentTarget.value,
+            })
+          }
+          placeholder="revolutions"
+          value={destination.itchGameSlug}
+        />
+
+        <PathPickerField
+          buttonLabel="Pick butler"
+          clearLabel="Reset"
+          clearable
+          dialogTitle="Select butler executable"
+          disabled={disabled}
+          error={destinationErrors.itchButlerPath}
+          filters={[
+            {
+              name: "Butler",
+              extensions: ["exe", "cmd", "bat", "sh"],
+            },
+          ]}
+          label="Butler executable"
+          onClear={() =>
+            onDestinationChange({
+              itchButlerPath: "",
+            })
+          }
+          onPathPicked={(path) =>
+            onDestinationChange({
+              itchButlerPath: path,
+            })
+          }
+          pickerKind="file"
+          value={destination.itchButlerPath}
+        />
+      </SurfacePanel>
+
+      <SurfacePanel
+        actions={
+          onOpenCredentialComposer ? (
+            <Button
+              disabled={disabled}
+              leadingIcon="plus"
+              onClick={onOpenCredentialComposer}
+              size="sm"
+              variant="ghost"
+            >
+              New credential
+            </Button>
+          ) : null
         }
-        options={DESTINATION_STATUS_OPTIONS}
-        value={destination.enabled ? "enabled" : "disabled"}
-      />
-
-      <TextField
-        error={destinationErrors.itchAccountName}
-        label="Itch account name"
-        onChange={(event) =>
-          onDestinationChange({
-            itchAccountName: event.currentTarget.value,
-          })
-        }
-        placeholder="indiegabo"
-        value={destination.itchAccountName}
-      />
-
-      <TextField
-        error={destinationErrors.itchGameSlug}
-        label="Itch game slug"
-        onChange={(event) =>
-          onDestinationChange({
-            itchGameSlug: event.currentTarget.value,
-          })
-        }
-        placeholder="revolutions"
-        value={destination.itchGameSlug}
-      />
-
-      <PathPickerField
-        buttonLabel="Pick butler"
-        clearLabel="Reset"
-        clearable
-        dialogTitle="Select butler executable"
-        disabled={disabled}
-        error={destinationErrors.itchButlerPath}
-        filters={[
-          {
-            name: "Butler",
-            extensions: ["exe", "cmd", "bat", "sh"],
-          },
-        ]}
-        label="Butler executable"
-        onClear={() =>
-          onDestinationChange({
-            itchButlerPath: "",
-          })
-        }
-        onPathPicked={(path) =>
-          onDestinationChange({
-            itchButlerPath: path,
-          })
-        }
-        pickerKind="file"
-        value={destination.itchButlerPath}
-      />
-
-      <div className="project-detail-form-grid__span-full">
-        <div className="project-detail-target-card">
-          <SelectField
-            error={destinationErrors.credentialsId}
-            label="Credential"
-            onChange={(event) =>
-              onDestinationChange({
-                credentialsId: event.currentTarget.value
-                  ? Number(event.currentTarget.value)
-                  : null,
-              })
-            }
-            options={publishCredentialOptions}
-            value={destination.credentialsId?.toString() ?? ""}
-          />
-
-          <div className="wizard-callout__actions">
-            {onSaveCredential ? (
-              <Button
-                disabled={disabled || isSavingCredential}
-                leadingIcon="plus"
-                onClick={() => onToggleCredentialComposer(true)}
-                size="sm"
-                variant="ghost"
-              >
-                New credential
-              </Button>
-            ) : null}
-          </div>
-
-          {isCredentialComposerOpen && onSaveCredential ? (
-            <RepositoryCredentialComposer
-              isSaving={isSavingCredential}
-              onCancel={() => onToggleCredentialComposer(false)}
-              onSave={(input) => onSaveCredential(destination.id, input)}
-              providerLabel="Itch.io"
-              saveError={credentialSaveError}
-              scope="publish"
-            />
-          ) : null}
-        </div>
-      </div>
+        className="project-detail-form-grid__span-full"
+        description="Choose the stored publish credential that should back Butler uploads for this destination."
+        headerSeparated
+        title="Credential state"
+        tone="inset"
+      >
+        <SelectField
+          error={destinationErrors.credentialsId}
+          label="Credential"
+          onChange={(event) =>
+            onDestinationChange({
+              credentialsId: event.currentTarget.value
+                ? Number(event.currentTarget.value)
+                : null,
+            })
+          }
+          options={publishCredentialOptions}
+          value={destination.credentialsId?.toString() ?? ""}
+        />
+      </SurfacePanel>
 
       <PublishDestinationBindingsSection
         buildTargets={buildTargets}
@@ -728,7 +738,6 @@ function ItchPublishDestinationAdapter({
                   itchChannel: event.currentTarget.value,
                 })
               }
-              placeholder="windows-stable"
               value={binding.itchChannel}
             />
 
@@ -746,7 +755,7 @@ function ItchPublishDestinationAdapter({
           </>
         )}
       />
-    </div>
+    </>
   );
 }
 
@@ -762,27 +771,76 @@ function PublishDestinationBindingsSection({
   pendingBindingTargetId,
   renderBindingFields,
 }: PublishDestinationBindingsSectionProps) {
+  const { openOverlay } = useOverlay();
   const availableBindingTargets = buildTargets.filter(
     (target) =>
       !destination.bindings.some(
         (binding) => binding.buildTargetDraftId === target.id,
       ),
   );
+  const pendingBindingTarget = availableBindingTargets.find(
+    (target) => target.id === pendingBindingTargetId,
+  );
+  const shouldUseBindingSelectorOverlay =
+    availableBindingTargets.length >= BINDING_SELECTOR_OVERLAY_THRESHOLD;
+
+  const handleOpenBindingTargetSelector = async () => {
+    if (disabled || availableBindingTargets.length === 0) {
+      return;
+    }
+
+    const selectedTargetId = await openOverlay<string>(SelectListFullScreen, {
+      description:
+        "Search the unbound build targets and select one result to bind to this publish destination.",
+      emptyStateCopy:
+        "Every currently available build target is already bound to this destination.",
+      emptyStateTitle: "No unbound build targets are available.",
+      items: buildBindingTargetItems(availableBindingTargets),
+      title: "Select build target",
+    });
+
+    if (selectedTargetId) {
+      onPendingBindingTargetChange(selectedTargetId);
+    }
+  };
 
   return (
-    <>
+    <SurfacePanel
+      bodyClassName="wizard-form-grid"
+      className="project-detail-form-grid__span-full"
+      description="Bind build targets to this destination and configure the per-target delivery fields each binding requires."
+      headerSeparated
+      title="Target bindings"
+      tone="inset"
+    >
       <div className="project-detail-form-grid__span-full">
         <div className="project-detail-target-card">
           <div className="wizard-callout__actions">
-            <SelectField
-              disabled={disabled || availableBindingTargets.length === 0}
-              label="Target"
-              onChange={(event) =>
-                onPendingBindingTargetChange(event.currentTarget.value)
-              }
-              options={buildBindingTargetOptions(availableBindingTargets)}
-              value={pendingBindingTargetId}
-            />
+            {shouldUseBindingSelectorOverlay ? (
+              <Button
+                disabled={disabled || availableBindingTargets.length === 0}
+                leadingIcon="search"
+                onClick={() => {
+                  void handleOpenBindingTargetSelector();
+                }}
+                size="sm"
+                variant="ghost"
+              >
+                {pendingBindingTarget
+                  ? `Target: ${pendingBindingTarget.name}`
+                  : "Select target"}
+              </Button>
+            ) : (
+              <SelectField
+                disabled={disabled || availableBindingTargets.length === 0}
+                label="Target"
+                onChange={(event) =>
+                  onPendingBindingTargetChange(event.currentTarget.value)
+                }
+                options={buildBindingTargetOptions(availableBindingTargets)}
+                value={pendingBindingTargetId}
+              />
+            )}
             <Button
               disabled={
                 disabled ||
@@ -812,8 +870,12 @@ function PublishDestinationBindingsSection({
         ) : (
           <div className="project-detail-status-grid">
             {destination.bindings.map((binding) => {
-              const bindingErrors = destinationErrors.bindings[binding.id] ?? {};
-              const buildTarget = resolveBindingBuildTarget(binding, buildTargets);
+              const bindingErrors =
+                destinationErrors.bindings[binding.id] ?? {};
+              const buildTarget = resolveBindingBuildTarget(
+                binding,
+                buildTargets,
+              );
 
               return (
                 <div className="project-detail-target-card" key={binding.id}>
@@ -855,7 +917,8 @@ function PublishDestinationBindingsSection({
                       binding,
                       bindingErrors,
                       disabled,
-                      onBindingChange: (patch) => onBindingChange(binding.id, patch),
+                      onBindingChange: (patch) =>
+                        onBindingChange(binding.id, patch),
                     })}
                   </div>
                 </div>
@@ -864,7 +927,7 @@ function PublishDestinationBindingsSection({
           </div>
         )}
       </div>
-    </>
+    </SurfacePanel>
   );
 }
 
@@ -915,7 +978,8 @@ export function buildPublishDestinationDrafts(
             `binding-${publishTarget.publish_target_id}-${binding.build_target_id}`,
           ),
           buildTargetDraftId:
-            target?.id || createDraftId(`missing-target-${binding.build_target_id}`),
+            target?.id ||
+            createDraftId(`missing-target-${binding.build_target_id}`),
           buildTargetId: binding.build_target_id,
           buildTargetName: binding.build_target_name,
           enabled: binding.enabled,
@@ -947,9 +1011,9 @@ export function hasPublishDestinationValidationErrors(
 ) {
   return Boolean(
     errors.root ||
-      Object.values(errors.destinations).some((destination) =>
-        hasPublishDestinationDraftErrors(destination),
-      ),
+    Object.values(errors.destinations).some((destination) =>
+      hasPublishDestinationDraftErrors(destination),
+    ),
   );
 }
 
@@ -1014,14 +1078,12 @@ export function validatePublishDestinationDrafts(
         if (!binding.itchChannel.trim()) {
           bindingErrors.itchChannel = "Itch channel is required.";
         } else if (binding.itchChannel.includes(":")) {
-          bindingErrors.itchChannel =
-            "Itch channel must not contain ':'.";
+          bindingErrors.itchChannel = "Itch channel must not contain ':'.";
         }
       }
 
       if (binding.enabled && buildTarget && destination.kind === "filesystem") {
-        const current =
-          consumingBindingsByTarget.get(buildTarget.id) ?? [];
+        const current = consumingBindingsByTarget.get(buildTarget.id) ?? [];
         current.push(formatPublishDestinationTitle(destination));
         consumingBindingsByTarget.set(buildTarget.id, current);
       }
@@ -1032,7 +1094,9 @@ export function validatePublishDestinationDrafts(
     errors.destinations[destination.id] = destinationErrors;
   }
 
-  const conflictingTargets = Array.from(consumingBindingsByTarget.entries()).filter(
+  const conflictingTargets = Array.from(
+    consumingBindingsByTarget.entries(),
+  ).filter(
     ([, destinationNamesForTarget]) => destinationNamesForTarget.length > 1,
   );
 
@@ -1100,11 +1164,14 @@ export function buildCreateProjectPublishTargetsInput(
     kind: destination.kind,
     enabled: destination.enabled,
     config_json: JSON.stringify(buildPublishTargetConfig(destination)),
-    credentials_id: destination.kind === "itch" ? destination.credentialsId : null,
+    credentials_id:
+      destination.kind === "itch" ? destination.credentialsId : null,
     bindings: destination.bindings.map((binding) => {
       const buildTarget = resolveBindingBuildTarget(binding, buildTargets);
       return {
-        build_target_name: (buildTarget?.name || binding.buildTargetName).trim(),
+        build_target_name: (
+          buildTarget?.name || binding.buildTargetName
+        ).trim(),
         enabled: binding.enabled,
         options_json: JSON.stringify(
           buildPublishBindingOptions(destination.kind, binding),
@@ -1124,12 +1191,15 @@ export function buildUpdateProjectPublishTargetsInput(
     kind: destination.kind,
     enabled: destination.enabled,
     config_json: JSON.stringify(buildPublishTargetConfig(destination)),
-    credentials_id: destination.kind === "itch" ? destination.credentialsId : null,
+    credentials_id:
+      destination.kind === "itch" ? destination.credentialsId : null,
     bindings: destination.bindings.map((binding) => {
       const buildTarget = resolveBindingBuildTarget(binding, buildTargets);
       return {
         build_target_id: buildTarget?.buildTargetId ?? binding.buildTargetId,
-        build_target_name: (buildTarget?.name || binding.buildTargetName).trim(),
+        build_target_name: (
+          buildTarget?.name || binding.buildTargetName
+        ).trim(),
         enabled: binding.enabled,
         options_json: JSON.stringify(
           buildPublishBindingOptions(destination.kind, binding),
@@ -1243,6 +1313,18 @@ function buildBindingTargetOptions(
   ];
 }
 
+function buildBindingTargetItems(
+  buildTargets: ProjectBuildTargetReference[],
+): SelectListItem[] {
+  return buildTargets.map((target) => ({
+    id: target.id,
+    label: target.name,
+    subtitle: target.buildTargetId
+      ? `Build target id ${target.buildTargetId}`
+      : "Draft-only build target",
+  }));
+}
+
 function buildPublishCredentialOptions(
   credentials: SecretCredentialSetting[],
   selectedCredentialId: number | null,
@@ -1317,7 +1399,8 @@ function resolveBindingBuildTarget(
   buildTargets: ProjectBuildTargetReference[],
 ) {
   return (
-    buildTargets.find((target) => target.id === binding.buildTargetDraftId) ?? null
+    buildTargets.find((target) => target.id === binding.buildTargetDraftId) ??
+    null
   );
 }
 
@@ -1391,13 +1474,13 @@ function hasPublishDestinationDraftErrors(
 ) {
   return Boolean(
     errors.credentialsId ||
-      errors.itchAccountName ||
-      errors.itchGameSlug ||
-      errors.itchButlerPath ||
-      errors.bindingsRoot ||
-      Object.values(errors.bindings).some((bindingErrors) =>
-        hasPublishDestinationBindingErrors(bindingErrors),
-      ),
+    errors.itchAccountName ||
+    errors.itchGameSlug ||
+    errors.itchButlerPath ||
+    errors.bindingsRoot ||
+    Object.values(errors.bindings).some((bindingErrors) =>
+      hasPublishDestinationBindingErrors(bindingErrors),
+    ),
   );
 }
 
@@ -1405,9 +1488,7 @@ function hasPublishDestinationBindingErrors(
   errors: PublishDestinationBindingErrors,
 ) {
   return Boolean(
-    errors.buildTarget ||
-      errors.filesystemDirectoryPath ||
-      errors.itchChannel,
+    errors.buildTarget || errors.filesystemDirectoryPath || errors.itchChannel,
   );
 }
 

@@ -208,6 +208,14 @@ export async function deleteReleaseProcessOutputs(
     return normalizeReleaseProcessOutputsDeleteReport(payload);
 }
 
+export async function rerunReleaseProcess(
+    releaseRunId: number,
+): Promise<void> {
+    return invoke<void>("rerun_release_process", {
+        releaseRunId,
+    });
+}
+
 export async function deleteBuildLog(
     buildRunId: number,
 ): Promise<BuildLogDeleteReport> {
