@@ -1,403 +1,379 @@
-# Focus Screen UI Hierarchy Execution Breakdown
+# Focus screen UI hierarchy execution breakdown
 
 ## Purpose
 
-This document breaks the focus-screen hierarchy plan into small execution
-packages that are ready to implement in the desktop UI.
+This document breaks the focus-screen hierarchy and overlay initiative into
+implementation-ready work packages for the desktop UI.
 
-Each package is scoped to a narrow surface, names the expected file targets,
-states what must not change, and defines a minimal validation step.
+Each package is intentionally narrow.
+It names the target surfaces, states what must not change, and defines the
+minimum validation step required before the next package starts.
 
-## Scope Lock
+## Scope lock
 
-- the `main` screen is out of scope and must remain visually unchanged
+- the main feed remains an accepted visual baseline
+- shell-level overlay governance and back handling in `App.tsx` are in scope
+  when required by focus-screen behavior
 - runtime contracts, Tauri command shapes, and repository workflow logic are
-  out of scope unless a UI slice cannot be completed without a thin shell
+  out of scope unless a slice cannot be completed without thin shell
   adjustment
-- this breakdown is for focused screens only
+- this breakdown is for focus-screen delivery, not broad UI redesign work
 
-## Delivery Rules
+## Delivery rules
 
 - prefer extending shared primitives before adding one-off wrappers
 - keep the compact dark operator-facing style
 - do not widen the work package once implementation has started
 - validate each package with `npm run build --prefix apps/desktop/ui`
+- when a package introduces a new overlay contract, add focused automated
+  coverage if the surrounding test harness allows it
 
-## Execution Order
+## Recommended execution order
 
-1. shared foundations
-2. project list
-3. edit project
-4. create project
-5. auth providers and project workers
-6. consistency sweep
+1. contract alignment and shared foundations
+2. shell overlay governance
+3. high-ROI focus screens: projects list and repository editor
+4. staged and credential-heavy flows
+5. heavy inspection surfaces
+6. consistency, accessibility, and validation sweep
 
-## Work Package 0 - Baseline Guardrails
+## Work package 0 - Contract alignment
 
 ### Objective
 
-Freeze the current scope boundaries before visual refactor work begins.
+Remove contradictions between planning documents before implementation keeps
+drifting.
 
-### Target Files
+### Target files
 
+- `planning/focus-page-tasklists.md`
+- `planning/ui-focus-mental-model.md`
 - `planning/focus-screen-ui-hierarchy-plan.md`
 - `planning/focus-screen-ui-hierarchy-execution-breakdown.md`
 
 ### Tasks
 
-- keep the `main` screen explicitly out of scope in planning documents
-- keep focus-screen work ordered by dependency rather than by convenience
-- require UI build validation for every package
+- align scope language so the main feed remains visually stable while shell-
+  level overlay behavior in `App.tsx` is still allowed
+- state one consistent overlay result contract across all documents
+- define one shared definition of done and validation rhythm
 
-### Done When
+### Out of scope
 
-- implementation documents explicitly exclude the `main` screen
-- the next work packages can be executed independently
+- code changes in this package
+
+### Done when
+
+- planning documents no longer disagree about scope or ownership
+- implementation work can refer to one consistent vocabulary
 
 ### Validation
 
-- confirm planning text still matches the intended execution scope
+- manual document review for scope, terminology, and sequence consistency
 
-## Work Package 1 - Shared Foundations
+## Work package 1 - Shared overlay and scaffold foundations
 
 ### Objective
 
-Add the shared primitives and stylesheet structure required for page, section,
-and item hierarchy without changing the `main` screen.
+Stabilize the primitives that all later screens depend on.
 
-### Target Files
+### Target files
 
-- `apps/desktop/ui/src/components/Surface.tsx`
-- `apps/desktop/ui/src/components/VerticalAccordion.tsx`
-- `apps/desktop/ui/src/styles.css`
-- `apps/desktop/ui/src/App.tsx` only if a focus-screen wrapper needs a thin
-  integration change that does not affect the `main` branch
+- `apps/desktop/ui/src/components/OverlayManager.tsx`
+- `apps/desktop/ui/src/components/FullScreenModal.tsx`
+- `apps/desktop/ui/src/components/ScreenScaffold.tsx`
+- `apps/desktop/ui/src/components/InputWithPicker.tsx`
+- `apps/desktop/ui/src/components/FullScreenFileBrowser.tsx`
+- `apps/desktop/ui/src/components/OverlayManager.test.tsx`
+- `apps/desktop/ui/src/components/FullScreenModal.test.tsx`
 
 ### Tasks
 
-- add a reusable focus-page frame primitive or surface variant for page-level
-  headers and body spacing
-- split primary section surface treatment from inset child surface treatment
-- add one reusable metadata-row or summary-row pattern
-- strengthen the shared accordion body separation model for section use
-- define a stronger page, section, and item type ladder in shared CSS
+- guarantee promise-based overlay opening and typed result resolution
+- guarantee focus trap, scroll lock, and focus restoration semantics
+- guarantee page header and content rhythm can be expressed through one shared
+  scaffold
+- guarantee picker fallback flows work without forcing inline complexity into
+  calling screens
 
-### Out Of Scope
+### Out of scope
 
-- rewriting individual focus screens beyond the minimum integration needed to
-  prove the shared primitives
-- any change to the `main` screen layout, spacing, or action bars
+- screen-specific visual polish beyond what is required to prove the shared
+  primitives
 
-### Done When
+### Done when
 
-- the component kit can express page frame, section panel, inset item surface,
-  and summary row without one-off markup
-- shared CSS contains distinct hierarchy rules rather than one generic panel
-  treatment reused everywhere
+- focus screens can open blocking subtasks without ad-hoc modal code
+- the shared scaffold can express page identity and actions consistently
+- tests cover the base overlay behavior contract
 
 ### Validation
 
 - `npm run build --prefix apps/desktop/ui`
+- relevant unit tests for overlay foundations
 
-## Work Package 2 - Project List Frame
+## Work package 2 - Shell overlay governance and back precedence
 
 ### Objective
 
-Turn the project list into the first fully upgraded focus screen using the new
-hierarchy model.
+Make dismissal rules deterministic at the shell root.
 
-### Target Files
+### Target files
+
+- `apps/desktop/ui/src/App.tsx`
+- any shell-level navigation helpers or overlay host glue used by `App.tsx`
+
+### Tasks
+
+- identify every overlay or popover entry point currently governed outside the
+  shared overlay system
+- ensure overlay dismissal outranks focus-screen pop
+- ensure root-level exit handling only runs after overlays and focus screens
+  are exhausted
+- migrate `WorkerStatusIndicator` or similar shell-level quick actions to a
+  governed overlay path
+
+### Out of scope
+
+- visually redesigning the main feed
+- changing business actions exposed by the main feed
+
+### Done when
+
+- the shell root follows one dismissal rule for close, Back, and Escape
+- global overlays no longer bypass the overlay manager
+
+### Validation
+
+- `npm run build --prefix apps/desktop/ui`
+- focused integration coverage for Back-closes-overlay-first behavior when the
+  test harness makes it practical
+
+## Work package 3 - Projects list upgrade
+
+### Objective
+
+Use the projects list as the first complete proof that the new hierarchy model
+improves scan speed without reducing density.
+
+### Target files
 
 - `apps/desktop/ui/src/components/ProjectsFocusScreen.tsx`
-- `apps/desktop/ui/src/components/Surface.tsx` only if the shared primitives
-  still need a small extension
-- `apps/desktop/ui/src/styles.css`
+- shared project-list child components under `apps/desktop/ui/src/components`
+- `apps/desktop/ui/src/styles.css` only if shared tokens still need extension
 
 ### Tasks
 
-- add a page-level header with title, description, and refresh action
-- place the list inside one dominant section surface
-- make the repository name the first scan anchor in each entry
-- demote secondary facts into a quieter metadata row
-- keep new-project highlighting visible without making the row louder than the
-  rest of the list
+- strengthen page header and dominant list section ownership
+- preserve repository identity as the first scan anchor
+- demote secondary facts into consistent metadata rows
+- ensure quick actions or selection flows use managed overlays where they help
+- verify loading, empty, refresh, and error states still read as one coherent
+  page
 
-### Out Of Scope
+### Out of scope
 
-- changing repository inspection data shape
-- adding filters, search, or new business actions
+- changing repository data shape
+- inventing new project-management features
 
-### Done When
+### Done when
 
-- the page reads as one coherent screen rather than a panel dropped into space
-- each project entry has a clear reading order: name, URL, primary state,
-  secondary summary
-- badge count is reduced to decision-relevant status only
+- entries can be scanned vertically without reading every chip
+- quick actions feel attached to the list workflow, not bolted onto it
 
 ### Validation
 
 - `npm run build --prefix apps/desktop/ui`
+- focused test or manual QA path covering at least one overlay-return flow
 
-## Work Package 3 - Project List Item Density Pass
-
-### Objective
-
-Refine the project entry treatment after the new page frame lands so the list
-stays dense but easier to scan.
-
-### Target Files
-
-- `apps/desktop/ui/src/components/ProjectsFocusScreen.tsx`
-- `apps/desktop/ui/src/styles.css`
-
-### Tasks
-
-- simplify card or row internals so title, URL, and status no longer compete
-- reduce redundant badge use and replace secondary pills with muted text where
-  possible
-- ensure hover, focus, and highlighted states remain distinct and accessible
-
-### Out Of Scope
-
-- changing navigation behavior or selection rules
-
-### Done When
-
-- entries can be scanned vertically without parsing every badge
-- interaction states remain clear and visually subordinate to content
-
-### Validation
-
-- `npm run build --prefix apps/desktop/ui`
-
-## Work Package 4 - Edit Project Page Header
+## Work package 4 - Repository editor and publish destination ergonomics
 
 ### Objective
 
-Give project detail a stable page-level frame for identity and save actions
-before touching the deeper section internals.
+Improve the largest editing surface first, then carry the same discipline into
+publish destination editing where inline complexity is currently highest.
 
-### Target Files
+### Target files
 
 - `apps/desktop/ui/src/components/RepositoryProjectDetail.tsx`
-- `apps/desktop/ui/src/styles.css`
+- `apps/desktop/ui/src/components/PathPickerField.tsx`
+- `apps/desktop/ui/src/components/PublishDestinationsEditor.tsx`
+- `apps/desktop/ui/src/components/RepositoryCredentialComposer.tsx`
+- new supporting form components under `apps/desktop/ui/src/components/forms`
 
 ### Tasks
 
-- add a page header that establishes project identity and page purpose
-- move save and reload actions into a stable page-level or section-level action
-  cluster with clear ownership
-- expose compact project summary facts in a consistent row
+- preserve page-level identity and save ownership
+- clarify section summaries and nested editor ownership
+- move credential composition into overlay-based subflows
+- move large target binding or picker work into managed selection surfaces
+- preserve validation, dirty-state, save, and reload behavior exactly
 
-### Out Of Scope
+### Out of scope
 
-- refactoring build-target internals in the same slice
-- changing persistence, validation, or save behavior
+- runtime store changes
+- changing project or publish data contracts
 
-### Done When
+### Done when
 
-- the edit screen announces itself before the first accordion section begins
-- save actions no longer feel buried inside the first content block
+- the editor is easier to scan and navigate without changing what save means
+- nested editors are clearly children of their parent sections
+- credential and binding complexity no longer depends on cramped inline UI
 
 ### Validation
 
 - `npm run build --prefix apps/desktop/ui`
+- focused form or integration tests for save behavior if present
+- manual QA for long-form keyboard navigation and cancel safety
 
-## Work Package 5 - Edit Project Section Separation
-
-### Objective
-
-Make section boundaries and nested target ownership obvious inside project
-detail.
-
-### Target Files
-
-- `apps/desktop/ui/src/components/RepositoryProjectDetail.tsx`
-- `apps/desktop/ui/src/components/VerticalAccordion.tsx` only if a shared
-  section-header refinement is still needed
-- `apps/desktop/ui/src/styles.css`
-
-### Tasks
-
-- strengthen accordion header and body separation
-- surface summary facts in collapsed section headers where useful
-- render nested build target editors as inset child surfaces
-- ensure runtime-status tiles read as section content rather than unrelated
-  cards
-
-### Out Of Scope
-
-- adding new project settings fields
-- altering build-target data contracts
-
-### Done When
-
-- accordion sections remain understandable while collapsed
-- expanded bodies feel visually owned by the section header above them
-- build targets clearly read as children of the `Build Targets` section
-
-### Validation
-
-- `npm run build --prefix apps/desktop/ui`
-
-## Work Package 6 - Create Project Wizard Frame
+## Work package 5 - Wizard and auth flow staging
 
 ### Objective
 
-Separate wizard-level structure from step-level content.
+Make staged flows explicit, recoverable, and overlay-aware.
 
-### Target Files
+### Target files
 
 - `apps/desktop/ui/src/components/CreateProjectWizard.tsx`
-- `apps/desktop/ui/src/styles.css`
-
-### Tasks
-
-- add a persistent page frame for the full wizard
-- keep the stepper as progress support rather than the dominant page header
-- give each step a stronger contextual header or summary region
-- keep form input regions visually distinct from support content
-
-### Out Of Scope
-
-- changing step order
-- changing repository creation contract or validation rules
-
-### Done When
-
-- the wizard reads as one page with step transitions, not a sequence of loosely
-  related panels
-- step context is understandable before reading the fields themselves
-
-### Validation
-
-- `npm run build --prefix apps/desktop/ui`
-
-## Work Package 7 - Create Project Support And Review Surfaces
-
-### Objective
-
-Demote auxiliary callouts and strengthen the final review step.
-
-### Target Files
-
-- `apps/desktop/ui/src/components/CreateProjectWizard.tsx`
-- `apps/desktop/ui/src/styles.css`
-
-### Tasks
-
-- reclassify auth and explanatory callouts as support content
-- prevent support cards from competing with the active form region
-- make the review step the strongest confirmation surface in the wizard
-- reduce badge noise in the review summary
-
-### Out Of Scope
-
-- changing authentication flow behavior
-- adding new wizard steps
-
-### Done When
-
-- callouts help orientation without acting like peer sections
-- the review step reads as a final checkpoint with clear summary hierarchy
-
-### Validation
-
-- `npm run build --prefix apps/desktop/ui`
-
-## Work Package 8 - Auth Providers Alignment
-
-### Objective
-
-Bring auth providers into the same page, section, and item hierarchy model.
-
-### Target Files
-
 - `apps/desktop/ui/src/components/AuthProvidersFocusScreen.tsx`
-- `apps/desktop/ui/src/styles.css`
+- new flow helpers under `apps/desktop/ui/src/components/wizard`
+- new auth overlays under `apps/desktop/ui/src/components/auth`
 
 ### Tasks
 
-- wrap the screen in the shared page-frame pattern
-- keep provider cards subordinate to the page's primary section
-- standardize metadata rows and badge usage with the rest of the focus screens
+- implement or adopt `StepFlow` for staged transitions
+- ensure auth or credential overlays return typed results into the parent flow
+- keep support content secondary to the active step
+- define cancel, close, retry, and review behavior explicitly
 
-### Out Of Scope
+### Out of scope
 
-- authentication provider logic changes
+- changing repository creation semantics
+- redesigning provider back-end integration
 
-### Done When
+### Done when
 
-- auth providers feel visually related to the list, wizard, and edit screens
+- the wizard reads like one transaction instead of loose panels
+- auth binding behaves like a first-class subflow with safe cancellation
 
 ### Validation
 
 - `npm run build --prefix apps/desktop/ui`
+- focused integration coverage for one successful auth or credential return path
+- manual QA for step transitions and dismiss behavior
 
-## Work Package 9 - Project Workers Alignment
+## Work package 6 - Project workers operational hierarchy
 
 ### Objective
 
-Bring project workers into the same hierarchy model without flattening the
-operational density of the screen.
+Preserve density while clarifying which status belongs to the runtime as a
+whole and which status belongs to a specific worker or project group.
 
-### Target Files
+### Target files
 
 - `apps/desktop/ui/src/components/ProjectWorkersFocusScreen.tsx`
-- `apps/desktop/ui/src/styles.css`
+- supporting worker components under `apps/desktop/ui/src/components/workers`
 
 ### Tasks
 
-- add a shared page-frame header
-- clarify the distinction between runtime-wide status and per-project worker
-  items
-- normalize status chips and metadata rows to the shared conventions
+- extract runtime toolbar and worker group components where needed
+- separate runtime-wide summary from per-worker sections
+- move destructive or bulk controls behind governed overlays
+- define empty, stale, and partial data states clearly
 
-### Out Of Scope
+### Out of scope
 
-- runtime control behavior changes
-- worker inspection payload changes
+- changing runtime behavior
+- changing worker payload shapes
 
-### Done When
+### Done when
 
-- the runtime summary and per-project worker entries stop competing for the
-  same visual rank
+- runtime summary and worker inventory no longer compete visually
+- destructive controls have explicit confirmation paths
 
 ### Validation
 
 - `npm run build --prefix apps/desktop/ui`
+- focused manual QA for destructive-action cancellation and successful bulk
+  action flow
 
-## Work Package 10 - Consistency Sweep
+## Work package 7 - Process detail heavy viewers
 
 ### Objective
 
-Remove leftover inconsistencies after the screen-specific slices land.
+Move large inspection content into dedicated viewers without weakening the base
+outcome screen.
 
-### Target Files
+### Target files
+
+- `apps/desktop/ui/src/components/ProcessDetailFocusScreen.tsx`
+- new modules under `apps/desktop/ui/src/components/process`
+- `apps/desktop/ui/src/components/LogViewerModal.tsx`
+
+### Tasks
+
+- extract process detail panels into smaller modules
+- move long logs into a dedicated viewer overlay
+- add artifact viewing and download affordances
+- ensure cleanup or retention actions use explicit confirmation
+
+### Out of scope
+
+- changing process data contracts
+- building a full artifact browser beyond the needs of the current screen
+
+### Done when
+
+- long logs are no longer rendered as heavy inline blobs by default
+- artifacts and outputs can be inspected without losing the surrounding process
+  context
+
+### Validation
+
+- `npm run build --prefix apps/desktop/ui`
+- focused manual QA for copy, select, download, and dismiss behavior
+
+## Work package 8 - Consistency, accessibility, and test sweep
+
+### Objective
+
+Remove leftover divergence after the screen-specific slices land.
+
+### Target files
 
 - `apps/desktop/ui/src/styles.css`
 - any touched focus-screen component that still diverges from the shared model
+- overlay or screen tests that still miss critical behavior
 
 ### Tasks
 
-- normalize title spacing and copy spacing
-- normalize badge tones and metadata placement
+- normalize title spacing, metadata rows, and chip tone usage
 - remove local overrides that duplicate the shared hierarchy model
-- confirm no focus-screen-specific styling leaked into the `main` screen
+- verify keyboard entry, focus restoration, and screen-reader naming
+- confirm no focus-screen-specific styling leaked into the main feed
+- add missing integration coverage for representative overlay families
 
-### Done When
+### Out of scope
 
-- focused screens share one visual grammar
-- the `main` screen remains unchanged
-- redundant local CSS has been reduced
+- new feature work unrelated to consistency or validation
+
+### Done when
+
+- focused screens share one visual and interaction grammar
+- the main feed remains visually stable
+- required build and test checks pass for the touched surfaces
 
 ### Validation
 
 - `npm run build --prefix apps/desktop/ui`
+- relevant unit and integration tests
+- concise manual QA checklist for keyboard, contrast, density, and dismiss
+  behavior
 
-## Recommended Execution Rhythm
+## Recommended execution rhythm
 
-- keep each work package small enough to review in one pass
+- keep each package small enough to review in one pass
 - run validation immediately after each package lands
-- avoid mixing foundation work with multiple screen rewrites in one change
+- avoid mixing foundation work with multiple unrelated screen rewrites in one
+  change
 - prefer landing shared primitives before styling around their absence
