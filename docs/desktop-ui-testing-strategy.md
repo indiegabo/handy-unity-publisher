@@ -111,6 +111,27 @@ That future layer would be responsible for:
 Until that exists, browser-backed Playwright tests plus focused screen
 integration tests are the correct combination for UI confidence.
 
+## Native Tauri close-out expectations
+
+For shell-visible changes, automated UI coverage is necessary but not
+sufficient.
+
+Run a host-visible Tauri pass with `npm start` whenever a slice changes:
+
+- the main feed baseline or action bars
+- focus-screen routing or Back behavior
+- overlay precedence or dismissal behavior
+- staged flows or draft guards
+- long-content viewers
+- visual hierarchy, density, or contrast of operator-facing surfaces
+
+The goal is not broad exploratory QA. The goal is to confirm the specific
+shell-visible contract touched by the slice in the real window.
+
+Recommended source of truth for what to check: use the relevant items from
+`docs/focus-screen-development-guide.md` and the historical close-out record in
+`planning/focus-page-tasklists.md`.
+
 ## What each layer is allowed to claim
 
 This distinction matters because test reporting should not lie.
@@ -166,6 +187,7 @@ For most UI work in this repository, validate in this order:
 1. targeted component or screen integration test
 2. focused desktop UI build
 3. browser-backed Playwright flow for critical operator paths
+4. native Tauri close-out pass when the change is shell-visible
 
 Commands:
 

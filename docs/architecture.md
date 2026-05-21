@@ -45,10 +45,28 @@ The shell is responsible for:
 The shell remains intentionally thin. Orchestration rules belong in runtime
 crates, not in window bindings.
 
-The current visible UI is a compact React + TypeScript + Vite showcase built
-from reusable dark-theme primitives under `apps/desktop/ui/src/components`.
-The Tauri command surface for diagnostics and management remains in place
-behind that shell while the broader operator views are rebuilt.
+The current visible UI is a compact React + TypeScript + Vite desktop shell
+built from reusable dark-theme primitives under `apps/desktop/ui/src/components`.
+It now uses a dispatch-board main feed plus focus-screen working views,
+managed overlays, and staged transactions instead of the earlier placeholder
+framing.
+
+### Desktop UI Interaction System
+
+The desktop UI follows one stable interaction model.
+
+- The main feed is the dispatch board. It stays visually compact and routes the
+  operator into work, but it is not another focus screen.
+- A focus screen is the route-level working context for one operational task.
+- Blocking subtasks are implemented as managed overlays that resolve through
+  the shared `openOverlay` contract.
+- Ordered multi-step work uses `StepFlow`.
+- Shared viewers, selectors, and confirmation surfaces such as
+  `SelectListFullScreen`, `LogViewerModal`, `ArtifactViewer`, and
+  `ConfirmDialog` are the default building blocks for subordinate tasks.
+
+Contributor-facing implementation rules for this system live in
+`docs/focus-screen-development-guide.md`.
 
 ### Bundled Runtime
 
@@ -189,8 +207,8 @@ Its current operator-visible behavior is:
 
 The runtime diagnostics, repository inspection, and credential management
 commands still exist behind the shell, and the current popup UI now renders a
-compact dark showcase of the reusable component system that future operator
-views will extend.
+compact dispatch board plus focus-screen system that future operator views
+must extend through the shared screen, overlay, and section grammar.
 
 ### Runtime Commands
 

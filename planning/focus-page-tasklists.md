@@ -291,7 +291,7 @@ Track checklist:
       running and show a clear operator warning.
 - [x] Move credential composers to `CredentialComposerModal` overlays.
 - [x] Extract stable summary rows for collapsed build-target and publish-
-  destination sections.
+      destination sections.
   - Current status: collapsed build targets now show a stable execution
     summary for build method, Unity executable readiness, and bound publish
     destinations before the editor is reopened, while publish destinations
@@ -299,7 +299,7 @@ Track checklist:
 - [x] Preserve dirty-state detection, save, reload, and validation semantics
       after extraction.
 - [x] Separate support content, inline warnings, and actionable editors so the
-  operator can see ownership immediately.
+      operator can see ownership immediately.
   - Current status: the destinations tab now renders `Draft impact` as a
     dedicated support panel beside the actionable editor instead of a generic
     inline wizard callout, so draft guidance no longer competes with the edit
@@ -345,19 +345,19 @@ Track checklist:
 - [x] Ensure step-level validation failures are local, legible, and do not
       corrupt adjacent steps.
   - Current status: repository inventory failures now block only the affected
-  identity or access steps, while colocated retry actions recover inventory,
-  accounts, credentials, and access checks without forcing a full wizard
-  restart. Focused wizard coverage now also locks late-step path validation
-  to the `Paths` step so invalid overrides stop advancement without leaking
-  the review surface into the failure state.
+    identity or access steps, while colocated retry actions recover inventory,
+    accounts, credentials, and access checks without forcing a full wizard
+    restart. Focused wizard coverage now also locks late-step path validation
+    to the `Paths` step so invalid overrides stop advancement without leaking
+    the review surface into the failure state.
 - [x] Add integration coverage for cancel, resume, confirm, and overlay-return
       behavior.
   - Current status: focused wizard and app coverage now locks the retryable
     inventory failure path, explicit cancel delegation, GitHub login result
     wiring, final-review confirmation gating, unsaved draft discard
-  confirmation, draft resume from saved snapshots, review reconfirmation
-  after leaving the final step, and draft resume after returning from auth
-  providers.
+    confirmation, draft resume from saved snapshots, review reconfirmation
+    after leaving the final step, and draft resume after returning from auth
+    providers.
 
 Current status:
 
@@ -568,7 +568,7 @@ Current status:
 - [x] Verify focus restoration to the invoking control.
 - [x] Verify keyboard escape routes, tab order, and button labeling.
 - [x] Verify screen-reader naming for page headers, modal titles, and
-  destructive confirmations.
+      destructive confirmations.
 
 Current status:
 
@@ -808,6 +808,60 @@ Short manual QA checklist:
 - Overlay dismissal: verify close button, cancel action, and successful resolve
   paths restore focus to the invoking control when the control still exists.
 
+### Native Tauri close-out definition of done
+
+Treat the focus-screen mission as complete only after one operator-visible
+desktop session satisfies every check below in the real Tauri shell.
+
+- [x] Verify the main feed layout and action bars match the accepted baseline,
+      with no unexpected spacing, wrapping, clipping, or action drift.
+  - Current status: verified in an operator-visible Tauri session against the
+    accepted main-feed baseline.
+- [x] Verify opening the worker quick view from the main feed and dismissing it
+      with `Escape` and the close button keeps the operator on the main feed
+      and restores focus to the trigger.
+  - Current status: verified in an operator-visible Tauri session for both
+    `Escape` dismissal and close-button dismissal from the main feed.
+- [x] Verify opening a picker or selection overlay from a focus screen and
+      pressing `Escape` dismisses only the overlay while leaving the underlying
+      focus screen intact.
+  - Current status: verified in an operator-visible Tauri session from the
+    project-list picker flow, with focus restored to the invoking control.
+- [x] Verify Back from a focus screen pops the screen only when no overlay is
+      open, and dismisses the overlay first when one is present.
+  - Current status: verified in an operator-visible Tauri session from the
+    project-list flow with both overlay-first dismissal and normal return to
+    the main feed.
+- [x] Verify one long-content viewer path (`LogViewerModal` or
+      `ArtifactViewer`) remains readable at the default desktop shell size and
+      restores focus to the invoking control on close.
+  - Current status: verified in an operator-visible Tauri session through a
+    process-detail viewer path, including readable content and focus
+    restoration on close.
+- [x] Verify one staged flow (`CreateProjectWizard` or auth-provider
+      reconnect) preserves readable hierarchy, explicit cancel behavior, and a
+      safe return to the previous shell context.
+  - Current status: verified in an operator-visible Tauri session through the
+    create-project wizard, including dirty-draft guard behavior and safe
+    return to the previous shell context.
+- [x] Verify contrast and density remain acceptable in the real window for
+      error banners, disabled controls, muted badges, focus outlines,
+      focus-screen headers, and modal toolbars.
+  - Current status: verified in an operator-visible Tauri session across the
+    main feed, focus screens, and overlay surfaces at the default desktop shell
+    size.
+
+Close-out rule:
+
+- When every check above passes in a visible Tauri session, mark the remaining
+  shell-level manual item as complete and treat the focus-screen mission as
+  done.
+- Current status: every close-out check above has now been verified in an
+  operator-visible Tauri session, so the focus-screen mission can be treated
+  as complete.
+- If the automation environment remains blind, record the native-shell blocker
+  explicitly instead of reopening completed React or runtime slices.
+
 ## Recommended sequencing
 
 1. Harden shared overlay, scaffold, and test infrastructure.
@@ -822,13 +876,10 @@ Short manual QA checklist:
 
 ## Immediate implementation checklist
 
-The next execution slice should prioritize a live native Tauri QA pass from an
-operator-visible desktop session. The cross-screen feedback-state sweep is now
-complete, the latest wizard retry slice is covered, and the remaining
-uncertainty for this mission is visual parity and interaction behavior in the
-real shell rather than missing retry contracts in the React harness. If the
-automation environment stays blind, record the blocker and move the next code
-slice to the remaining publish-destination and long-form editor work.
+The native Tauri close-out definition above has now been satisfied in an
+operator-visible desktop session. The focus-screen mission can be treated as
+complete. Any follow-up work from this point should be scoped as a new slice
+rather than unresolved close-out debt from the original focus-screen mission.
 
 ### Slice 01 - Shell overlay governance in `App.tsx`
 
@@ -901,28 +952,31 @@ Automated:
 Manual QA:
 
 - [x] Cover picker-overlay `Escape` dismissal before any focus-screen
-  navigation occurs.
+      navigation occurs.
   - Current status: focused owner tests plus Playwright shell coverage now
     lock picker dismissal precedence and focus restoration without relying on
     manual shell observation.
 - [x] Cover worker quick-surface dismissal behavior against the shared overlay
-  contract.
+      contract.
   - Current status: `App` and `WorkerStatusQuickView` coverage now lock
     autofocus, `Escape`, close-button dismissal, and focus restoration.
 - [x] Cover back-action return behavior from focus screens when no overlay is
-  open.
+      open.
   - Current status: `App` integration coverage plus Playwright shell coverage
     now lock normal Back return behavior without an overlay in front.
-- [ ] Confirm the main feed layout and action bars remain visually unchanged.
+- [x] Confirm the main feed layout and action bars remain visually unchanged.
+  - Current status: verified in an operator-visible Tauri session against the
+    accepted main-feed baseline.
 
 Automated proxy coverage now proves overlay-first `Escape` dismissal, overlay
 focus restoration, Back without an open overlay, worker quick-view
 autofocus in the React harness, runtime-event-driven worker status updates,
-and shell-level picker or back flows in Playwright. A live Tauri pass is still
-required for the remaining visual-parity item above if native window parity
-must be observed. The current automation environment can launch the app, but it does
-not expose a capturable interactive shell surface for trustworthy visual
-verification.
+and shell-level picker or back flows in Playwright. The main-feed baseline has
+now also been verified in an operator-visible Tauri session. Any remaining
+native-shell QA belongs to the broader close-out definition of done above, not
+to this shell-governance slice. The automation environment can launch the app,
+but it does not expose a capturable interactive shell surface for trustworthy
+visual verification.
 
 #### Stop conditions for this slice
 

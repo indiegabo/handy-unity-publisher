@@ -45,9 +45,9 @@ normal document window.
 - the `Quit` tray action marks the shell as intentionally exiting and then runs
   the normal runtime shutdown path
 
-The current visible UI is a compact React + TypeScript + Vite showcase built
-from reusable dark-theme components. It verifies the Tauri command bridge and
-anchors the operator-facing design system for the next shell views.
+The current visible UI is a compact React + TypeScript + Vite desktop shell
+built from reusable dark-theme components. It now uses a dispatch-board main
+feed plus focus-screen working views, managed overlays, and staged flows.
 
 ## Repository Layout
 
@@ -102,8 +102,8 @@ Install the JavaScript workspace dependencies and the local Tauri CLI once:
 npm install
 ```
 
-Preview the desktop UI component showcase in a browser while iterating on the
-shared primitives:
+Preview the desktop UI in a browser while iterating on shared primitives and
+focus-screen surfaces:
 
 ```bash
 npm run dev --prefix apps/desktop/ui
@@ -173,6 +173,8 @@ repository root.
 ## Documentation Map
 
 - [docs/architecture.md](docs/architecture.md)
+- [docs/focus-screen-development-guide.md](docs/focus-screen-development-guide.md)
+- [docs/desktop-ui-testing-strategy.md](docs/desktop-ui-testing-strategy.md)
 - [docs/tauri-runtime-dev-loop.md](docs/tauri-runtime-dev-loop.md)
 - [docs/pipeline-yaml-guide.md](docs/pipeline-yaml-guide.md)
 - [docs/unity-adapter-contract.md](docs/unity-adapter-contract.md)
@@ -197,9 +199,12 @@ repository root.
 
 - Repository manifests define polling, build targets, publish targets, and
   build-to-publish bindings.
-- The desktop shell is the primary operator surface and currently ships as a
-  dense dark showcase of reusable components while the larger operator views
-  are being rebuilt.
+- The desktop shell is the primary operator surface and now ships as a
+  dispatch-board main feed plus a focus-screen system with managed overlays and
+  staged flows.
+- New screens and refactors should follow
+  [docs/focus-screen-development-guide.md](docs/focus-screen-development-guide.md)
+  instead of inventing ad-hoc local UI patterns.
 - Runtime crates stay focused and explicit. Shell bindings stay thin.
 - Operator-facing recovery paths should be available in the app before the
   documentation asks for manual host intervention.

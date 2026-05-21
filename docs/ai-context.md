@@ -89,8 +89,11 @@ The desktop shell currently ships as a tray-resident popup:
 - closing the window hides it to tray and keeps the runtime alive
 - tray clicks and the `Open HGP` menu action reopen the popup
 - the `Quit` tray action exits the shell and triggers runtime shutdown
-- the visible UI is currently a compact dark showcase of reusable React
-  components wired to the Tauri command bridge
+- the visible UI now uses a dispatch-board main feed plus focus-screen working
+  views, shared section grammar, and overlay-driven subtasks built from
+  reusable React primitives
+- screen, overlay, and staged-flow work under `apps/desktop/ui` should follow
+  `docs/focus-screen-development-guide.md`
 
 The shell still exposes Tauri commands for:
 
@@ -123,9 +126,12 @@ cargo check -p desktop-shell -j 1 -q
 cargo test -p runtime-store -q
 ```
 
-When changing the desktop UI, validate the touched React + TypeScript slice
-with `npm run build --prefix apps/desktop/ui`, then rerun the narrow
-desktop-shell compile check.
+When changing the desktop UI, follow
+`docs/focus-screen-development-guide.md`, validate the touched React +
+TypeScript slice with `npm run build --prefix apps/desktop/ui`, then rerun the
+narrow desktop-shell compile check. If the change alters shell-visible
+navigation, overlay precedence, staged flows, or the dense focus-screen
+grammar, also run the relevant native Tauri close-out checks from the guide.
 
 ## Documentation Priorities
 
@@ -142,12 +148,17 @@ desktop-shell compile check.
 - Treat the desktop shell as the primary operator surface.
 - Prefer the reusable desktop UI primitives under
   `apps/desktop/ui/src/components` before creating one-off controls.
+- Treat the main feed as a dispatch board rather than another focus screen.
+- Use `ScreenScaffold`, managed overlays, and `StepFlow` before inventing new
+  route or dialog patterns.
 - Keep desktop UI work compact, dark, and tool-oriented.
 - Do not invent alternate onboarding or packaging models in documentation.
 
 ## Required Reads For Common Tasks
 
 - Read `docs/architecture.md` before broad architectural edits.
+- Read `docs/focus-screen-development-guide.md` before adding or refactoring a
+  screen, overlay, or staged flow under `apps/desktop/ui`.
 - Read `docs/pipeline-yaml-guide.md` before editing manifests under
   `pipelines/`.
 - Read `docs/unity-adapter-contract.md` before inventing or changing Unity

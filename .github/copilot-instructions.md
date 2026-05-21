@@ -171,6 +171,13 @@ existing snippet".
 - Prefer extending the shared primitives under
   `apps/desktop/ui/src/components` before creating ad hoc buttons, inputs,
   panels, badges, or icons.
+- Treat the main feed as a dispatch board rather than another focus screen;
+  preserve its accepted baseline while changing shell routing or quick actions.
+- For any new or refactored screen, overlay, or staged flow under
+  `apps/desktop/ui`, follow `docs/focus-screen-development-guide.md`.
+- New route-level working surfaces should adopt `ScreenScaffold`, managed
+  overlays, typed `openOverlay` results, and `StepFlow` before inventing local
+  page-shell or dialog patterns.
 - Keep the UI compact, operator-facing, and dense rather than marketing-led or
   dashboard-bloated.
 - Preserve the established dark monochrome theme with black and gray surfaces,
@@ -178,6 +185,9 @@ existing snippet".
   unless a deliberate exception is required.
 - Treat **Yaak** and **Hoppscotch** as the primary visual references for
   density, hierarchy, and tooling ergonomics.
+- When a desktop-UI change is shell-visible, finish with focused automated
+  validation plus the relevant native Tauri close-out checks from
+  `docs/focus-screen-development-guide.md` before calling the slice complete.
 - Keep shell-facing UI logic thin; runtime orchestration rules still belong in
   Rust crates and Tauri commands remain narrow bindings.
 
