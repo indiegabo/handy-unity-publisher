@@ -9,6 +9,7 @@ import {
 
 import { Button, IconButton } from "./Button";
 import { BuildTargetRemovalCallout } from "./BuildTargetRemovalCallout";
+import FullScreenModal from "./FullScreenModal";
 import { type IconName } from "./Icon";
 import FormSection from "./forms/FormSection";
 import {
@@ -42,6 +43,7 @@ import {
   detectRepositoryProvider,
   disconnectRepositoryAuth,
   loadSecretSettings,
+  removeRepositoryProject,
   loadRepositoryProjectDetail,
   reconnectRepositoryAuth,
   saveSecretCredential,
@@ -52,6 +54,8 @@ import {
   type RepositoryPublishBindingInspection,
   type RepositoryInspectionEntry,
   type RepositoryProviderDetection,
+  type RemoveRepositoryProjectReport,
+  type RemoveRepositoryProjectStrategy,
   type SaveSecretCredentialInput,
   type SecretCredentialSetting,
   type UnityExecutableValidation,
@@ -65,6 +69,7 @@ import {
 
 type RepositoryProjectDetailProps = {
   onProjectNameResolved?: (repositoryName: string) => void;
+  onProjectRemoved?: (report: RemoveRepositoryProjectReport) => void;
   repositoryId: number;
 };
 
@@ -188,6 +193,7 @@ const PROJECT_DETAIL_SECTION_TABS: Array<{
 
 export function RepositoryProjectDetail({
   onProjectNameResolved,
+  onProjectRemoved,
   repositoryId,
 }: RepositoryProjectDetailProps) {
   const [repository, setRepository] =
@@ -245,6 +251,11 @@ export function RepositoryProjectDetail({
   );
   const [pendingBuildTargetRemovalId, setPendingBuildTargetRemovalId] =
     useState<string | null>(null);
+  const [isProjectRemovalOpen, setIsProjectRemovalOpen] = useState(false);
+  const [isRemovingProject, setIsRemovingProject] = useState(false);
+  const [projectRemovalError, setProjectRemovalError] = useState<string | null>(
+    null,
+  );
   const [hasLoadedAuthProviders, setHasLoadedAuthProviders] = useState(false);
   const [hasLoadedCredentials, setHasLoadedCredentials] = useState(false);
   const nextBuildTargetIdRef = useRef(1);
@@ -316,6 +327,10 @@ export function RepositoryProjectDetail({
       setSectionOpenState(
         buildProjectDetailSectionState(DEFAULT_PROJECT_DETAIL_SECTION),
       );
+      setPendingBuildTargetRemovalId(null);
+      setIsProjectRemovalOpen(false);
+      setIsRemovingProject(false);
+      setProjectRemovalError(null);
       setHasLoadedAuthProviders(false);
       setHasLoadedCredentials(false);
       setGithubAuthProvider(null);
@@ -958,6 +973,7 @@ export function RepositoryProjectDetail({
       !repository ||
       !draft ||
       isSaving ||
+      isRemovingProject ||
       hasActiveRepositoryProcesses(repository)
     ) {
       return;
@@ -1081,6 +1097,63 @@ export function RepositoryProjectDetail({
   const handleReloadProject = useEffectEvent(() => {
     void loadRepositoryDetail(true);
   });
+
+  const handleOpenProjectRemoval = useEffectEvent(() => {
+    if (!repository || isSaving || isRemovingProject || isEditingLocked) {
+      return;
+    }
+
+    startTransition(() => {
+      setProjectRemovalError(null);
+      setIsProjectRemovalOpen(true);
+    });
+  });
+
+  const handleCloseProjectRemoval = useEffectEvent(() => {
+    if (isRemovingProject) {
+      return;
+    }
+
+    startTransition(() => {
+      setProjectRemovalError(null);
+      setIsProjectRemovalOpen(false);
+    });
+  });
+
+  const handleRemoveProject = useEffectEvent(
+    async (strategy: RemoveRepositoryProjectStrategy) => {
+      if (!repository || isRemovingProject) {
+        return;
+      }
+
+      setIsRemovingProject(true);
+      setProjectRemovalError(null);
+
+      try {
+        const report = await removeRepositoryProject({
+          repository_id: repository.repository_id,
+          strategy,
+        });
+
+        startTransition(() => {
+          setProjectRemovalError(null);
+          setIsProjectRemovalOpen(false);
+        });
+
+        onProjectRemoved?.(report);
+      } catch (removeProjectError) {
+        startTransition(() => {
+          setProjectRemovalError(
+            buildProjectRemoveErrorMessage(removeProjectError),
+          );
+        });
+      } finally {
+        startTransition(() => {
+          setIsRemovingProject(false);
+        });
+      }
+    },
+  );
 
   if (isLoading) {
     return (
@@ -1243,6 +1316,7 @@ export function RepositoryProjectDetail({
   const runningWorkCount =
     repository.running_build_runs + repository.running_publish_runs;
   const isEditingLocked = hasActiveRepositoryProcesses(repository);
+  const isProjectMutationPending = isSaving || isRemovingProject;
 
   return (
     <div className="project-detail-shell">
@@ -1250,6 +1324,17 @@ export function RepositoryProjectDetail({
         actions={
           <div className="project-detail-toolbar">
             <Button
+              className="project-detail-toolbar__remove"
+              disabled={isProjectMutationPending || isEditingLocked}
+              leadingIcon="trash"
+              onClick={handleOpenProjectRemoval}
+              size="sm"
+              variant="secondary"
+            >
+              Remove Project
+            </Button>
+            <Button
+              disabled={isProjectMutationPending}
               leadingIcon="refresh"
               onClick={handleReloadProject}
               size="sm"
@@ -1258,7 +1343,9 @@ export function RepositoryProjectDetail({
               Reload
             </Button>
             <Button
-              disabled={!hasPendingChanges || isSaving || isEditingLocked}
+              disabled={
+                !hasPendingChanges || isProjectMutationPending || isEditingLocked
+              }
               onClick={() => void handleSaveProject()}
               size="sm"
               variant="primary"
@@ -2026,6 +2113,16 @@ export function RepositoryProjectDetail({
             </div>
           </fieldset>
         </div>
+        {isProjectRemovalOpen ? (
+          <ProjectRemovalDialog
+            hasPendingChanges={hasPendingChanges}
+            isRemoving={isRemovingProject}
+            onCancel={handleCloseProjectRemoval}
+            onRemove={handleRemoveProject}
+            projectName={draft?.name.trim() || repository.repository_name}
+            removalError={projectRemovalError}
+          />
+        ) : null}
       </FocusPageFrame>
     </div>
   );
@@ -2768,6 +2865,122 @@ function buildProjectSaveErrorMessage(error: unknown): string {
   }
 
   return "The desktop shell could not save the project changes.";
+}
+
+function buildProjectRemoveErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  if (typeof error === "string" && error.trim()) {
+    return error.trim();
+  }
+
+  return "The desktop shell could not remove the project.";
+}
+
+type ProjectRemovalDialogProps = {
+  hasPendingChanges: boolean;
+  isRemoving: boolean;
+  onCancel: () => void;
+  onRemove: (strategy: RemoveRepositoryProjectStrategy) => void;
+  projectName: string;
+  removalError: string | null;
+};
+
+function ProjectRemovalDialog({
+  hasPendingChanges,
+  isRemoving,
+  onCancel,
+  onRemove,
+  projectName,
+  removalError,
+}: ProjectRemovalDialogProps) {
+  const resolvedProjectName = projectName.trim() || "this project";
+
+  return (
+    <FullScreenModal
+      className="project-removal-dialog__modal"
+      description="Choose whether HGP should only remove the project from SQLite or also purge runtime-owned files from disk."
+      dismissible={!isRemoving}
+      onResolve={() => onCancel()}
+      title={`Remove ${resolvedProjectName}?`}
+    >
+      <div className="project-removal-dialog">
+        <p className="project-removal-dialog__copy">
+          {hasPendingChanges
+            ? "Unsaved edits will be discarded when the project is removed."
+            : "Select how thoroughly HGP should remove this project from the app."}
+        </p>
+
+        {removalError ? (
+          <p className="feed-banner feed-banner--error">{removalError}</p>
+        ) : null}
+
+        <div className="project-removal-dialog__options">
+          <section className="project-removal-dialog__option">
+            <div>
+              <h3 className="project-removal-dialog__option-title">
+                Remove from App Only
+              </h3>
+              <p className="project-removal-dialog__option-copy">
+                Deletes the project from SQLite and keeps workspaces, artifacts,
+                logs, and retained files on disk.
+              </p>
+            </div>
+
+            <div className="project-removal-dialog__option-actions">
+              <Button
+                disabled={isRemoving}
+                onClick={() => onRemove("detach")}
+                size="sm"
+                variant="primary"
+              >
+                Remove from App Only
+              </Button>
+            </div>
+          </section>
+
+          <section className="project-removal-dialog__option">
+            <div>
+              <h3 className="project-removal-dialog__option-title">
+                Purge Total
+              </h3>
+              <p className="project-removal-dialog__option-copy">
+                Deletes the project from SQLite and removes runtime-owned
+                workspaces, artifacts, logs, and retained files collected for
+                this project.
+              </p>
+            </div>
+
+            <div className="project-removal-dialog__option-actions">
+              <Button
+                className="project-removal-dialog__action--purge"
+                disabled={isRemoving}
+                onClick={() => onRemove("purge")}
+                size="sm"
+                variant="secondary"
+              >
+                Purge Total
+              </Button>
+            </div>
+          </section>
+        </div>
+
+        <div className="confirm-dialog__actions">
+          <Button
+            data-overlay-autofocus
+            disabled={isRemoving}
+            onClick={onCancel}
+            size="sm"
+            variant="ghost"
+          >
+            Cancel
+          </Button>
+        </div>
+      </div>
+    </FullScreenModal>
+  );
 }
 
 function createEmptyValidationErrors(): RepositoryProjectValidationErrors {

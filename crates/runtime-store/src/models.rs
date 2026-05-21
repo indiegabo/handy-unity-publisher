@@ -815,6 +815,54 @@ pub struct UpdateRepositoryProjectInput {
     pub publish_targets: Vec<UpdateRepositoryProjectPublishTargetInput>,
 }
 
+/// Selects how one managed repository project should be removed from the
+/// local runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoveRepositoryProjectStrategy {
+    /// Removes the repository registration from SQLite while leaving runtime
+    /// files on disk.
+    Detach,
+    /// Removes the repository registration and returns the runtime-owned paths
+    /// that should be purged from disk.
+    Purge,
+}
+
+impl RemoveRepositoryProjectStrategy {
+    /// Returns the stable shell-facing label used by serialized reports.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Detach => "detach",
+            Self::Purge => "purge",
+        }
+    }
+}
+
+/// Defines the durable payload required to remove one managed repository
+/// project together with its queued and historical runtime state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveRepositoryProjectInput {
+    pub repository_id: i64,
+    pub strategy: RemoveRepositoryProjectStrategy,
+}
+
+/// Reports the durable runtime state removed for one managed repository
+/// project together with any runtime-owned paths that should be purged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveRepositoryProjectReport {
+    pub repository_id: i64,
+    pub repository_name: String,
+    pub strategy: RemoveRepositoryProjectStrategy,
+    pub release_run_count: u64,
+    pub build_run_count: u64,
+    pub publish_run_count: u64,
+    pub queue_message_count: u64,
+    pub coordination_lease_count: u64,
+    pub idempotency_key_count: u64,
+    pub directory_paths: Vec<String>,
+    pub file_paths: Vec<String>,
+}
+
 /// Defines the durable repository auth assessment that should be persisted for
 /// one managed repository project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

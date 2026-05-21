@@ -18,6 +18,7 @@ const {
   loadRepositoryProjectDetailMock,
   loadSecretSettingsMock,
   loginWithGithubAuthMock,
+  removeRepositoryProjectMock,
   reconnectRepositoryAuthMock,
   saveSecretCredentialMock,
   updateRepositoryProjectMock,
@@ -30,6 +31,7 @@ const {
   loadRepositoryProjectDetailMock: vi.fn(),
   loadSecretSettingsMock: vi.fn(),
   loginWithGithubAuthMock: vi.fn(),
+  removeRepositoryProjectMock: vi.fn(),
   reconnectRepositoryAuthMock: vi.fn(),
   saveSecretCredentialMock: vi.fn(),
   updateRepositoryProjectMock: vi.fn(),
@@ -42,6 +44,7 @@ vi.mock("../services/projects", () => ({
   disconnectRepositoryAuth: disconnectRepositoryAuthMock,
   loadRepositoryProjectDetail: loadRepositoryProjectDetailMock,
   loadSecretSettings: loadSecretSettingsMock,
+  removeRepositoryProject: removeRepositoryProjectMock,
   reconnectRepositoryAuth: reconnectRepositoryAuthMock,
   saveSecretCredential: saveSecretCredentialMock,
   updateRepositoryProject: updateRepositoryProjectMock,
@@ -66,6 +69,7 @@ beforeEach(() => {
   loadRepositoryProjectDetailMock.mockResolvedValue(buildRepositoryDetail());
   loadSecretSettingsMock.mockResolvedValue(buildSecretSettings());
   loginWithGithubAuthMock.mockResolvedValue(buildGithubAuthProvider());
+  removeRepositoryProjectMock.mockResolvedValue(buildProjectRemovalReport());
   reconnectRepositoryAuthMock.mockResolvedValue(undefined);
   saveSecretCredentialMock.mockResolvedValue(undefined);
   updateRepositoryProjectMock.mockResolvedValue(undefined);
@@ -845,6 +849,68 @@ describe("RepositoryProjectDetail", () => {
     expect(updateRepositoryProjectMock).not.toHaveBeenCalled();
   });
 
+  it("removes the project from the app only and notifies the caller", async () => {
+    const onProjectRemoved = vi.fn();
+
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        onProjectRemoved={onProjectRemoved}
+        repositoryId={1}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Project" }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "Remove Revolutions?" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove from App Only" }),
+    );
+
+    await waitFor(() => {
+      expect(removeRepositoryProjectMock).toHaveBeenCalledWith({
+        repository_id: 1,
+        strategy: "detach",
+      });
+    });
+
+    await waitFor(() => {
+      expect(onProjectRemoved).toHaveBeenCalledWith(
+        expect.objectContaining({
+          repository_id: 1,
+          strategy: "detach",
+        }),
+      );
+    });
+  });
+
+  it("purges project runtime files when purge total is selected", async () => {
+    removeRepositoryProjectMock.mockResolvedValue(
+      buildProjectRemovalReport({ strategy: "purge" }),
+    );
+
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        onProjectRemoved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Remove Project" }));
+    fireEvent.click(screen.getByRole("button", { name: "Purge Total" }));
+
+    await waitFor(() => {
+      expect(removeRepositoryProjectMock).toHaveBeenCalledWith({
+        repository_id: 1,
+        strategy: "purge",
+      });
+    });
+  });
+
   it("locks project editing while related processes are running", async () => {
     loadRepositoryProjectDetailMock.mockResolvedValue(
       buildRepositoryDetail({
@@ -884,6 +950,7 @@ describe("RepositoryProjectDetail", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save Changes" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Remove Project" })).toBeDisabled();
 
     const buildTargetsTab = screen.getByRole("tab", { name: "Build Targets" });
     expect(buildTargetsTab).toBeDisabled();
@@ -1093,6 +1160,26 @@ function buildItchPublishTarget({
     kind: "itch",
     name: "Itch stable",
     publish_target_id: 5,
+  };
+}
+
+function buildProjectRemovalReport(
+  overrides: Partial<Record<string, unknown>> = {},
+) {
+  return {
+    repository_id: 1,
+    repository_name: "Revolutions",
+    strategy: "detach",
+    release_run_count: 1,
+    build_run_count: 1,
+    publish_run_count: 0,
+    queue_message_count: 1,
+    coordination_lease_count: 0,
+    idempotency_key_count: 1,
+    removed_paths: [],
+    missing_paths: [],
+    skipped_paths: [],
+    ...overrides,
   };
 }
 

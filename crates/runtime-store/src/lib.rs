@@ -59,6 +59,30 @@ pub const RECOVERY_INTERRUPTION_KIND_SYSTEM: &str = "system_interruption";
 
 static TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepositoryProjectRemovalRecord {
+    id: i64,
+    name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetQueueMessage {
+    id: i64,
+    leased_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepositoryProjectRemovalRuntimeState {
+    release_run_ids: HashSet<i64>,
+    build_run_ids: HashSet<i64>,
+    publish_run_ids: HashSet<i64>,
+    queue_messages: Vec<TargetQueueMessage>,
+    coordination_lease_names: Vec<String>,
+    idempotency_keys: Vec<String>,
+    directory_paths: Vec<String>,
+    file_paths: Vec<String>,
+}
+
 struct Migration {
     name: &'static str,
     sql: &'static str,
@@ -111,6 +135,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "0009_build_target_runner_model_cleanup.sql",
         sql: include_str!("../migrations/0009_build_target_runner_model_cleanup.sql"),
         transactional: false,
+    },
+    Migration {
+        name: "0009_execution_retention.sql",
+        sql: include_str!("../migrations/0009_execution_retention.sql"),
+        transactional: true,
     },
     Migration {
         name: "0010_engine_contract_model.sql",
@@ -1333,6 +1362,76 @@ impl LocalCoordinator {
         transaction.commit().map_err(sqlite_error)?;
 
         Ok(())
+    }
+
+    /// Removes one managed repository project together with queued runtime
+    /// coordination rows and returns runtime-owned paths that may be purged.
+    pub fn remove_repository_project(
+        &self,
+        input: RemoveRepositoryProjectInput,
+    ) -> io::Result<RemoveRepositoryProjectReport> {
+        require_positive_identifier(input.repository_id, "repository id")?;
+
+        let mut connection = open_connection(&self.database_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+
+        let repository = Self::load_repository_project_removal_record(
+            &transaction,
+            input.repository_id,
+        )?;
+        let runtime_state = Self::load_repository_project_removal_runtime_state(
+            &transaction,
+            input.repository_id,
+            matches!(input.strategy, RemoveRepositoryProjectStrategy::Purge),
+        )?;
+
+        Self::reject_repository_project_removal_if_active(
+            &transaction,
+            input.repository_id,
+            &repository.name,
+            &runtime_state,
+        )?;
+
+        Self::delete_target_queue_messages(&transaction, &runtime_state.queue_messages)?;
+        Self::delete_target_coordination_leases(
+            &transaction,
+            &runtime_state.coordination_lease_names,
+        )?;
+        Self::delete_target_idempotency_keys(
+            &transaction,
+            &runtime_state.idempotency_keys,
+        )?;
+
+        let deleted = transaction
+            .execute(
+                "DELETE FROM repositories WHERE id = ?",
+                [repository.id],
+            )
+            .map_err(sqlite_error)?;
+        if deleted == 0 {
+            return Err(not_found_error(format!(
+                "repository {} was not found",
+                repository.id
+            )));
+        }
+
+        transaction.commit().map_err(sqlite_error)?;
+
+        Ok(RemoveRepositoryProjectReport {
+            repository_id: repository.id,
+            repository_name: repository.name,
+            strategy: input.strategy,
+            release_run_count: runtime_state.release_run_ids.len() as u64,
+            build_run_count: runtime_state.build_run_ids.len() as u64,
+            publish_run_count: runtime_state.publish_run_ids.len() as u64,
+            queue_message_count: runtime_state.queue_messages.len() as u64,
+            coordination_lease_count: runtime_state.coordination_lease_names.len() as u64,
+            idempotency_key_count: runtime_state.idempotency_keys.len() as u64,
+            directory_paths: runtime_state.directory_paths,
+            file_paths: runtime_state.file_paths,
+        })
     }
 
     /// Updates the credentials binding stored for one publish target row.
@@ -4293,6 +4392,573 @@ fn remove_release_run_rebuild_cleanup_paths(
             not_found_error(format!(
                 "queued release run {release_run_id} could not be reloaded"
             ))
+        })
+    }
+
+    fn load_repository_project_removal_record(
+        transaction: &Transaction<'_>,
+        repository_id: i64,
+    ) -> io::Result<RepositoryProjectRemovalRecord> {
+        transaction
+            .query_row(
+                "
+                SELECT id, name
+                FROM repositories
+                WHERE id = ?
+                ",
+                [repository_id],
+                |row| {
+                    Ok(RepositoryProjectRemovalRecord {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(sqlite_error)?
+            .ok_or_else(|| not_found_error(format!("repository {repository_id} was not found")))
+    }
+
+    fn load_repository_project_removal_runtime_state(
+        transaction: &Transaction<'_>,
+        repository_id: i64,
+        collect_paths: bool,
+    ) -> io::Result<RepositoryProjectRemovalRuntimeState> {
+        let release_run_ids = Self::load_release_run_ids_for_repository(
+            transaction,
+            repository_id,
+        )?;
+        let build_run_ids = Self::load_build_run_ids_for_repository(
+            transaction,
+            repository_id,
+        )?;
+        let publish_run_ids = Self::load_publish_run_ids_for_repository(
+            transaction,
+            repository_id,
+        )?;
+        let queue_messages = Self::load_target_queue_messages(
+            transaction,
+            repository_id,
+            &release_run_ids,
+            &build_run_ids,
+            &publish_run_ids,
+        )?;
+        let coordination_lease_names = Self::load_target_coordination_lease_names(
+            transaction,
+            &release_run_ids,
+            &build_run_ids,
+            &publish_run_ids,
+        )?;
+        let idempotency_keys = Self::load_target_idempotency_keys(
+            transaction,
+            &release_run_ids,
+            &build_run_ids,
+            &publish_run_ids,
+        )?;
+        let (directory_paths, file_paths) = if collect_paths {
+            Self::load_repository_project_removal_paths(transaction, repository_id)?
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        Ok(RepositoryProjectRemovalRuntimeState {
+            release_run_ids,
+            build_run_ids,
+            publish_run_ids,
+            queue_messages,
+            coordination_lease_names,
+            idempotency_keys,
+            directory_paths,
+            file_paths,
+        })
+    }
+
+    fn reject_repository_project_removal_if_active(
+        transaction: &Transaction<'_>,
+        repository_id: i64,
+        repository_name: &str,
+        runtime_state: &RepositoryProjectRemovalRuntimeState,
+    ) -> io::Result<()> {
+        let has_running_process_work =
+            Self::repository_has_running_process_work_in_transaction(
+                transaction,
+                repository_id,
+            )?;
+        let has_leased_queue_messages = runtime_state
+            .queue_messages
+            .iter()
+            .any(|message| message.leased_by.is_some());
+
+        if !(has_running_process_work || has_leased_queue_messages) {
+            return Ok(());
+        }
+
+        Err(io::Error::new(
+            ErrorKind::WouldBlock,
+            format!(
+                "repository project {repository_name:?} cannot be removed while related runtime work is active"
+            ),
+        ))
+    }
+
+    fn repository_has_running_process_work_in_transaction(
+        transaction: &Transaction<'_>,
+        repository_id: i64,
+    ) -> io::Result<bool> {
+        let running_release_count: i64 = transaction
+            .query_row(
+                "
+                SELECT COUNT(1)
+                FROM release_runs
+                WHERE repository_id = ?
+                  AND status = ?
+                ",
+                params![repository_id, ReleaseStatus::Running.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_error)?;
+        if running_release_count > 0 {
+            return Ok(true);
+        }
+
+        let running_build_count: i64 = transaction
+            .query_row(
+                "
+                SELECT COUNT(1)
+                FROM build_runs br
+                JOIN release_runs rr ON rr.id = br.release_run_id
+                WHERE rr.repository_id = ?
+                  AND br.status = ?
+                ",
+                params![repository_id, BuildStatus::Running.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_error)?;
+        if running_build_count > 0 {
+            return Ok(true);
+        }
+
+        let running_publish_count: i64 = transaction
+            .query_row(
+                "
+                SELECT COUNT(1)
+                FROM publish_runs pr
+                JOIN release_runs rr ON rr.id = pr.release_run_id
+                WHERE rr.repository_id = ?
+                  AND pr.status = ?
+                ",
+                params![repository_id, PublishStatus::Running.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_error)?;
+
+        Ok(running_publish_count > 0)
+    }
+
+    fn load_release_run_ids_for_repository(
+        transaction: &Transaction<'_>,
+        repository_id: i64,
+    ) -> io::Result<HashSet<i64>> {
+        Self::load_identifier_set_for_repository(
+            transaction,
+            "
+            SELECT id
+            FROM release_runs
+            WHERE repository_id = ?
+            ",
+            repository_id,
+        )
+    }
+
+    fn load_build_run_ids_for_repository(
+        transaction: &Transaction<'_>,
+        repository_id: i64,
+    ) -> io::Result<HashSet<i64>> {
+        Self::load_identifier_set_for_repository(
+            transaction,
+            "
+            SELECT br.id
+            FROM build_runs br
+            JOIN release_runs rr ON rr.id = br.release_run_id
+            WHERE rr.repository_id = ?
+            ",
+            repository_id,
+        )
+    }
+
+    fn load_publish_run_ids_for_repository(
+        transaction: &Transaction<'_>,
+        repository_id: i64,
+    ) -> io::Result<HashSet<i64>> {
+        Self::load_identifier_set_for_repository(
+            transaction,
+            "
+            SELECT pr.id
+            FROM publish_runs pr
+            JOIN release_runs rr ON rr.id = pr.release_run_id
+            WHERE rr.repository_id = ?
+            ",
+            repository_id,
+        )
+    }
+
+    fn load_identifier_set_for_repository(
+        transaction: &Transaction<'_>,
+        sql: &str,
+        repository_id: i64,
+    ) -> io::Result<HashSet<i64>> {
+        let mut statement = transaction.prepare(sql).map_err(sqlite_error)?;
+        let rows = statement
+            .query_map([repository_id], |row| row.get::<_, i64>(0))
+            .map_err(sqlite_error)?;
+
+        let mut identifiers = HashSet::new();
+        for row in rows {
+            identifiers.insert(row.map_err(sqlite_error)?);
+        }
+
+        Ok(identifiers)
+    }
+
+    fn load_target_queue_messages(
+        transaction: &Transaction<'_>,
+        repository_id: i64,
+        release_run_ids: &HashSet<i64>,
+        build_run_ids: &HashSet<i64>,
+        publish_run_ids: &HashSet<i64>,
+    ) -> io::Result<Vec<TargetQueueMessage>> {
+        let mut statement = transaction
+            .prepare(
+                "
+                SELECT id, queue_name, payload, leased_by
+                FROM worker_queue_messages
+                ORDER BY id ASC
+                ",
+            )
+            .map_err(sqlite_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(sqlite_error)?;
+
+        let mut queue_messages = Vec::new();
+        for row in rows {
+            let (message_id, queue_name, payload, leased_by) = row.map_err(sqlite_error)?;
+            let belongs_to_repository = match queue_name.as_str() {
+                RELEASE_RUN_QUEUE_NAME => serde_json::from_slice::<ReleaseDispatchJob>(&payload)
+                    .map(|job| job.repository_id == repository_id)
+                    .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?,
+                BUILD_RUN_QUEUE_NAME => serde_json::from_slice::<BuildDispatchJob>(&payload)
+                    .map(|job| {
+                        release_run_ids.contains(&job.release_run_id)
+                            || build_run_ids.contains(&job.build_run_id)
+                    })
+                    .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?,
+                PUBLISH_RUN_QUEUE_NAME => serde_json::from_slice::<PublishDispatchJob>(&payload)
+                    .map(|job| {
+                        release_run_ids.contains(&job.release_run_id)
+                            || build_run_ids.contains(&job.build_run_id)
+                            || publish_run_ids.contains(&job.publish_run_id)
+                    })
+                    .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?,
+                _ => false,
+            };
+
+            if belongs_to_repository {
+                queue_messages.push(TargetQueueMessage {
+                    id: message_id,
+                    leased_by: leased_by
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty()),
+                });
+            }
+        }
+
+        Ok(queue_messages)
+    }
+
+    fn load_target_coordination_lease_names(
+        transaction: &Transaction<'_>,
+        release_run_ids: &HashSet<i64>,
+        build_run_ids: &HashSet<i64>,
+        publish_run_ids: &HashSet<i64>,
+    ) -> io::Result<Vec<String>> {
+        let mut statement = transaction
+            .prepare(
+                "
+                SELECT name
+                FROM worker_coordination_leases
+                ORDER BY name ASC
+                ",
+            )
+            .map_err(sqlite_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(sqlite_error)?;
+
+        let mut names = Vec::new();
+        for row in rows {
+            let name = row.map_err(sqlite_error)?;
+            if Self::matches_release_lock_name(&name, release_run_ids)
+                || Self::matches_build_lock_name(&name, build_run_ids)
+                || Self::matches_publish_lock_name(&name, publish_run_ids)
+            {
+                names.push(name);
+            }
+        }
+
+        Ok(names)
+    }
+
+    fn load_target_idempotency_keys(
+        transaction: &Transaction<'_>,
+        release_run_ids: &HashSet<i64>,
+        build_run_ids: &HashSet<i64>,
+        publish_run_ids: &HashSet<i64>,
+    ) -> io::Result<Vec<String>> {
+        let mut statement = transaction
+            .prepare(
+                "
+                SELECT idempotency_key
+                FROM worker_idempotency_keys
+                ORDER BY idempotency_key ASC
+                ",
+            )
+            .map_err(sqlite_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(sqlite_error)?;
+
+        let mut keys = Vec::new();
+        for row in rows {
+            let key = row.map_err(sqlite_error)?;
+            if Self::matches_release_idempotency_key(&key, release_run_ids)
+                || Self::matches_build_idempotency_key(&key, build_run_ids)
+                || Self::matches_publish_idempotency_key(&key, publish_run_ids)
+            {
+                keys.push(key);
+            }
+        }
+
+        Ok(keys)
+    }
+
+    fn load_repository_project_removal_paths(
+        transaction: &Transaction<'_>,
+        repository_id: i64,
+    ) -> io::Result<(Vec<String>, Vec<String>)> {
+        let mut directory_paths = HashSet::new();
+        Self::collect_string_values_for_repository_query(
+            transaction,
+            "
+            SELECT workspace_path
+            FROM build_runs br
+            JOIN release_runs rr ON rr.id = br.release_run_id
+            WHERE rr.repository_id = ?
+            ",
+            repository_id,
+            &mut directory_paths,
+        )?;
+        Self::collect_string_values_for_repository_query(
+            transaction,
+            "
+            SELECT artifact_root_path
+            FROM build_runs br
+            JOIN release_runs rr ON rr.id = br.release_run_id
+            WHERE rr.repository_id = ?
+            ",
+            repository_id,
+            &mut directory_paths,
+        )?;
+        Self::collect_string_values_for_repository_query(
+            transaction,
+            "
+            SELECT ecr.workspace_path
+            FROM execution_cleanup_records ecr
+            LEFT JOIN build_runs br ON br.id = ecr.build_run_id
+            LEFT JOIN release_runs brr ON brr.id = br.release_run_id
+            LEFT JOIN publish_runs pr ON pr.id = ecr.publish_run_id
+            LEFT JOIN release_runs prr ON prr.id = pr.release_run_id
+            WHERE COALESCE(brr.repository_id, prr.repository_id) = ?
+            ",
+            repository_id,
+            &mut directory_paths,
+        )?;
+
+        let mut file_paths = HashSet::new();
+        Self::collect_string_values_for_repository_query(
+            transaction,
+            "
+            SELECT log_path
+            FROM build_runs br
+            JOIN release_runs rr ON rr.id = br.release_run_id
+            WHERE rr.repository_id = ?
+            ",
+            repository_id,
+            &mut file_paths,
+        )?;
+        Self::collect_string_values_for_repository_query(
+            transaction,
+            "
+            SELECT brs.log_path
+            FROM build_run_steps brs
+            JOIN build_runs br ON br.id = brs.build_run_id
+            JOIN release_runs rr ON rr.id = br.release_run_id
+            WHERE rr.repository_id = ?
+            ",
+            repository_id,
+            &mut file_paths,
+        )?;
+        Self::collect_string_values_for_repository_query(
+            transaction,
+            "
+            SELECT ref.path
+            FROM retained_execution_files ref
+            LEFT JOIN build_runs br ON br.id = ref.build_run_id
+            LEFT JOIN release_runs brr ON brr.id = br.release_run_id
+            LEFT JOIN publish_runs pr ON pr.id = ref.publish_run_id
+            LEFT JOIN release_runs prr ON prr.id = pr.release_run_id
+            WHERE COALESCE(brr.repository_id, prr.repository_id) = ?
+            ",
+            repository_id,
+            &mut file_paths,
+        )?;
+
+        let mut directory_paths = directory_paths.into_iter().collect::<Vec<_>>();
+        directory_paths.sort();
+        let mut file_paths = file_paths.into_iter().collect::<Vec<_>>();
+        file_paths.sort();
+
+        Ok((directory_paths, file_paths))
+    }
+
+    fn collect_string_values_for_repository_query(
+        transaction: &Transaction<'_>,
+        sql: &str,
+        repository_id: i64,
+        values: &mut HashSet<String>,
+    ) -> io::Result<()> {
+        let mut statement = transaction.prepare(sql).map_err(sqlite_error)?;
+        let rows = statement
+            .query_map([repository_id], |row| row.get::<_, Option<String>>(0))
+            .map_err(sqlite_error)?;
+
+        for row in rows {
+            let value = row.map_err(sqlite_error)?;
+            let Some(value) = value else {
+                continue;
+            };
+
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+
+            values.insert(value.to_string());
+        }
+
+        Ok(())
+    }
+
+    fn delete_target_queue_messages(
+        transaction: &Transaction<'_>,
+        queue_messages: &[TargetQueueMessage],
+    ) -> io::Result<()> {
+        let mut statement = transaction
+            .prepare("DELETE FROM worker_queue_messages WHERE id = ?")
+            .map_err(sqlite_error)?;
+        for queue_message in queue_messages {
+            statement
+                .execute([queue_message.id])
+                .map_err(sqlite_error)?;
+        }
+
+        Ok(())
+    }
+
+    fn delete_target_coordination_leases(
+        transaction: &Transaction<'_>,
+        coordination_lease_names: &[String],
+    ) -> io::Result<()> {
+        let mut statement = transaction
+            .prepare("DELETE FROM worker_coordination_leases WHERE name = ?")
+            .map_err(sqlite_error)?;
+        for coordination_lease_name in coordination_lease_names {
+            statement
+                .execute([coordination_lease_name])
+                .map_err(sqlite_error)?;
+        }
+
+        Ok(())
+    }
+
+    fn delete_target_idempotency_keys(
+        transaction: &Transaction<'_>,
+        idempotency_keys: &[String],
+    ) -> io::Result<()> {
+        let mut statement = transaction
+            .prepare("DELETE FROM worker_idempotency_keys WHERE idempotency_key = ?")
+            .map_err(sqlite_error)?;
+        for idempotency_key in idempotency_keys {
+            statement
+                .execute([idempotency_key])
+                .map_err(sqlite_error)?;
+        }
+
+        Ok(())
+    }
+
+    fn matches_release_lock_name(name: &str, release_run_ids: &HashSet<i64>) -> bool {
+        release_run_ids.iter().any(|release_run_id| {
+            name == format!("release-run:{release_run_id}:dispatch")
+                || name == format!("release-plan:{release_run_id}")
+        })
+    }
+
+    fn matches_build_lock_name(name: &str, build_run_ids: &HashSet<i64>) -> bool {
+        build_run_ids
+            .iter()
+            .any(|build_run_id| name == format!("build-run:{build_run_id}:dispatch"))
+    }
+
+    fn matches_publish_lock_name(name: &str, publish_run_ids: &HashSet<i64>) -> bool {
+        publish_run_ids.iter().any(|publish_run_id| {
+            name == format!("publish-run:{publish_run_id}:dispatch")
+        })
+    }
+
+    fn matches_release_idempotency_key(
+        key: &str,
+        release_run_ids: &HashSet<i64>,
+    ) -> bool {
+        release_run_ids.iter().any(|release_run_id| {
+            key == format!("release-run:{release_run_id}:queued")
+        })
+    }
+
+    fn matches_build_idempotency_key(
+        key: &str,
+        build_run_ids: &HashSet<i64>,
+    ) -> bool {
+        build_run_ids.iter().any(|build_run_id| {
+            key == format!("build-run:{build_run_id}:queued")
+                || key.starts_with(&format!("build-run:{build_run_id}:"))
+        })
+    }
+
+    fn matches_publish_idempotency_key(
+        key: &str,
+        publish_run_ids: &HashSet<i64>,
+    ) -> bool {
+        publish_run_ids.iter().any(|publish_run_id| {
+            key == format!("publish-run:{publish_run_id}:queued")
+                || key.starts_with(&format!("publish-run:{publish_run_id}:"))
         })
     }
 

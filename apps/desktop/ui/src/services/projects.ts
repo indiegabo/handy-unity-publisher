@@ -276,6 +276,28 @@ export type UpdateRepositoryProjectInput = {
     publish_targets: UpdateRepositoryProjectPublishTargetInput[];
 };
 
+export type RemoveRepositoryProjectStrategy = "detach" | "purge";
+
+export type RemoveRepositoryProjectInput = {
+    repository_id: number;
+    strategy: RemoveRepositoryProjectStrategy;
+};
+
+export type RemoveRepositoryProjectReport = {
+    repository_id: number;
+    repository_name: string;
+    strategy: RemoveRepositoryProjectStrategy;
+    release_run_count: number;
+    build_run_count: number;
+    publish_run_count: number;
+    queue_message_count: number;
+    coordination_lease_count: number;
+    idempotency_key_count: number;
+    removed_paths: string[];
+    missing_paths: string[];
+    skipped_paths: string[];
+};
+
 export async function loadRepositoryInspection(): Promise<RepositoryInspectionSettings> {
     return invoke<RepositoryInspectionSettings>("repository_inspection");
 }
@@ -352,6 +374,14 @@ export async function updateRepositoryProject(
     input: UpdateRepositoryProjectInput,
 ): Promise<void> {
     return invoke<void>("update_repository_project", {
+        input,
+    });
+}
+
+export async function removeRepositoryProject(
+    input: RemoveRepositoryProjectInput,
+): Promise<RemoveRepositoryProjectReport> {
+    return invoke<RemoveRepositoryProjectReport>("remove_repository_project", {
         input,
     });
 }

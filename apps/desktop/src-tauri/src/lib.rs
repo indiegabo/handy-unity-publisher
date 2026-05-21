@@ -50,6 +50,9 @@ use runtime_store::{
     ManualReleaseDispatchInput,
     CreatedRepositoryProjectRecord,
     PollingRepositoryRecord as StorePollingRepositoryRecord,
+    RemoveRepositoryProjectInput as StoreRemoveRepositoryProjectInput,
+    RemoveRepositoryProjectReport as StoreRemoveRepositoryProjectReport,
+    RemoveRepositoryProjectStrategy,
     RepositoryAutomationStatus as StoreRepositoryAutomationStatus,
     UpdateRepositoryAuthStateInput as StoreUpdateRepositoryAuthStateInput,
     UpdateRepositoryProjectBuildTargetInput as StoreUpdateRepositoryProjectBuildTargetInput,
@@ -560,6 +563,12 @@ struct UpdateRepositoryProjectCommandInput {
     publish_targets: Vec<UpdateRepositoryProjectPublishTargetCommandInput>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+struct RemoveRepositoryProjectCommandInput {
+    repository_id: i64,
+    strategy: RemoveRepositoryProjectStrategy,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct RepositoryInstantCheckInput {
     repository_id: i64,
@@ -821,9 +830,31 @@ struct BuildLogDeleteReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RepositoryProjectDeleteReport {
+    repository_id: i64,
+    repository_name: String,
+    strategy: RemoveRepositoryProjectStrategy,
+    release_run_count: u64,
+    build_run_count: u64,
+    publish_run_count: u64,
+    queue_message_count: u64,
+    coordination_lease_count: u64,
+    idempotency_key_count: u64,
+    removed_paths: Vec<PathBuf>,
+    missing_paths: Vec<PathBuf>,
+    skipped_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ApplicationVersionInfo {
     product_name: String,
     app_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct NormalizedRepositoryProjectRemovalPaths {
+    directory_paths: Vec<PathBuf>,
+    file_paths: Vec<PathBuf>,
 }
 
 fn main_window(app_handle: &AppHandle) -> Result<WebviewWindow, String> {
@@ -1052,6 +1083,7 @@ pub fn run() {
             validate_unity_executable_path,
             create_repository_project,
             update_repository_project,
+            remove_repository_project,
             runtime_health,
             runtime_logs,
             runtime_directories,
@@ -1253,6 +1285,14 @@ fn update_repository_project(
 ) -> Result<(), String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     persist_repository_project_update(&config, input).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn remove_repository_project(
+    input: RemoveRepositoryProjectCommandInput,
+) -> Result<RepositoryProjectDeleteReport, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    persist_repository_project_removal(&config, input).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -3177,6 +3217,151 @@ fn persist_repository_project_update(
     Ok(())
 }
 
+fn persist_repository_project_removal(
+    config: &RuntimeConfig,
+    input: RemoveRepositoryProjectCommandInput,
+) -> io::Result<RepositoryProjectDeleteReport> {
+    if input.repository_id <= 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "repository_id must be a positive integer",
+        ));
+    }
+
+    let storage = writable_secret_storage(config)?;
+    let report = LocalCoordinator::new(&storage).remove_repository_project(
+        StoreRemoveRepositoryProjectInput {
+            repository_id: input.repository_id,
+            strategy: input.strategy,
+        },
+    )?;
+
+    let mut removed_paths = Vec::new();
+    let mut missing_paths = Vec::new();
+    let mut skipped_paths = Vec::new();
+    if matches!(report.strategy, RemoveRepositoryProjectStrategy::Purge) {
+        purge_repository_project_files(
+            &report,
+            &mut removed_paths,
+            &mut missing_paths,
+            &mut skipped_paths,
+        )?;
+    }
+
+    Ok(RepositoryProjectDeleteReport {
+        repository_id: report.repository_id,
+        repository_name: report.repository_name,
+        strategy: report.strategy,
+        release_run_count: report.release_run_count,
+        build_run_count: report.build_run_count,
+        publish_run_count: report.publish_run_count,
+        queue_message_count: report.queue_message_count,
+        coordination_lease_count: report.coordination_lease_count,
+        idempotency_key_count: report.idempotency_key_count,
+        removed_paths,
+        missing_paths,
+        skipped_paths,
+    })
+}
+
+fn purge_repository_project_files(
+    report: &StoreRemoveRepositoryProjectReport,
+    removed_paths: &mut Vec<PathBuf>,
+    missing_paths: &mut Vec<PathBuf>,
+    skipped_paths: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    let normalized = normalize_repository_project_removal_paths(
+        &report.directory_paths,
+        &report.file_paths,
+        skipped_paths,
+    );
+
+    for path in normalized.directory_paths {
+        remove_directory_path(&path, removed_paths, missing_paths)?;
+    }
+
+    for path in normalized.file_paths {
+        remove_file_path(&path, removed_paths, missing_paths)?;
+    }
+
+    Ok(())
+}
+
+fn normalize_repository_project_removal_paths(
+    directory_paths: &[String],
+    file_paths: &[String],
+    skipped_paths: &mut Vec<PathBuf>,
+) -> NormalizedRepositoryProjectRemovalPaths {
+    let mut directory_paths = normalize_repository_project_path_list(
+        directory_paths,
+        skipped_paths,
+    );
+    directory_paths.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+
+    let mut normalized_directory_paths = Vec::new();
+    for path in directory_paths {
+        if normalized_directory_paths
+            .iter()
+            .any(|ancestor| path.starts_with(ancestor))
+        {
+            continue;
+        }
+
+        normalized_directory_paths.push(path);
+    }
+
+    let mut normalized_file_paths = normalize_repository_project_path_list(
+        file_paths,
+        skipped_paths,
+    );
+    normalized_file_paths.sort();
+    normalized_file_paths.retain(|path| {
+        !normalized_directory_paths
+            .iter()
+            .any(|ancestor| path.starts_with(ancestor))
+    });
+
+    NormalizedRepositoryProjectRemovalPaths {
+        directory_paths: normalized_directory_paths,
+        file_paths: normalized_file_paths,
+    }
+}
+
+fn normalize_repository_project_path_list(
+    paths: &[String],
+    skipped_paths: &mut Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut seen_paths = HashSet::new();
+    let mut normalized_paths = Vec::new();
+
+    for raw_path in paths {
+        let trimmed_path = raw_path.trim();
+        if trimmed_path.is_empty() {
+            continue;
+        }
+
+        let path = PathBuf::from(trimmed_path);
+        if !path.is_absolute() {
+            skipped_paths.push(path);
+            continue;
+        }
+
+        let dedupe_key = path.to_string_lossy().to_string();
+        if !seen_paths.insert(dedupe_key) {
+            continue;
+        }
+
+        normalized_paths.push(path);
+    }
+
+    normalized_paths
+}
+
 fn persist_repository_auth_state_snapshot(
     storage: &StorageLayout,
     repository_id: i64,
@@ -4199,6 +4384,7 @@ mod tests {
         persist_repository_auth_disconnect,
         persist_repository_auth_reconnect,
         persist_repository_project,
+        persist_repository_project_removal,
         persist_repository_project_update,
         persist_publish_target_secret_binding,
         persist_secret_credential,
@@ -4213,6 +4399,7 @@ mod tests {
         CreateRepositoryProjectBuildTargetCommandInput,
         CreateRepositoryProjectCommandInput,
         ProcessFeedInput,
+        RemoveRepositoryProjectCommandInput,
         RepositoryAccessAssessment,
         RepositoryAccessAssessmentInput,
         RepositoryProviderDetection,
@@ -4232,7 +4419,8 @@ mod tests {
     };
     use runtime_store::{
         initialize_database, open_connection, LocalCoordinator,
-        ManualReleaseDispatchInput, StorageLayout,
+        ManualReleaseDispatchInput, RemoveRepositoryProjectStrategy,
+        StorageLayout,
     };
     use rusqlite::params;
     use std::path::{Path, PathBuf};
@@ -6842,5 +7030,559 @@ mod tests {
         );
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn persist_repository_project_removal_detaches_project_and_keeps_runtime_files() {
+        let root = std::env::temp_dir().join("desktop-shell-project-remove-detach-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+        let fixture = seed_repository_project_removal_fixture(&storage, &root);
+
+        let report = persist_repository_project_removal(
+            &config,
+            RemoveRepositoryProjectCommandInput {
+                repository_id: fixture.repository_id,
+                strategy: RemoveRepositoryProjectStrategy::Detach,
+            },
+        )
+        .expect("repository detach should succeed");
+
+        assert_eq!(report.repository_id, fixture.repository_id);
+        assert_eq!(report.strategy, RemoveRepositoryProjectStrategy::Detach);
+        assert!(report.removed_paths.is_empty());
+        assert!(report.missing_paths.is_empty());
+        assert!(report.skipped_paths.is_empty());
+        assert!(fixture.workspace_path.exists());
+        assert!(fixture.artifact_root_path.exists());
+        assert!(fixture.build_log_path.exists());
+        assert!(fixture.stage_log_path.exists());
+        assert!(fixture.retained_file_path.exists());
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        let repository_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM repositories WHERE id = ?",
+                [fixture.repository_id],
+                |row| row.get(0),
+            )
+            .expect("repository count should load");
+        let release_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM release_runs WHERE repository_id = ?",
+                [fixture.repository_id],
+                |row| row.get(0),
+            )
+            .expect("release count should load");
+        let build_count: i64 = connection
+            .query_row(
+                "
+                SELECT COUNT(1)
+                FROM build_runs br
+                JOIN release_runs rr ON rr.id = br.release_run_id
+                WHERE rr.repository_id = ?
+                ",
+                [fixture.repository_id],
+                |row| row.get(0),
+            )
+            .expect("build count should load");
+        let publish_count: i64 = connection
+            .query_row(
+                "
+                SELECT COUNT(1)
+                FROM publish_runs pr
+                JOIN release_runs rr ON rr.id = pr.release_run_id
+                WHERE rr.repository_id = ?
+                ",
+                [fixture.repository_id],
+                |row| row.get(0),
+            )
+            .expect("publish count should load");
+        let queue_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM worker_queue_messages",
+                [],
+                |row| row.get(0),
+            )
+            .expect("queue count should load");
+        let lease_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM worker_coordination_leases",
+                [],
+                |row| row.get(0),
+            )
+            .expect("lease count should load");
+        let idempotency_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM worker_idempotency_keys",
+                [],
+                |row| row.get(0),
+            )
+            .expect("idempotency count should load");
+
+        assert_eq!(repository_count, 0);
+        assert_eq!(release_count, 0);
+        assert_eq!(build_count, 0);
+        assert_eq!(publish_count, 0);
+        assert_eq!(queue_count, 0);
+        assert_eq!(lease_count, 0);
+        assert_eq!(idempotency_count, 0);
+
+        drop(connection);
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn persist_repository_project_removal_purges_runtime_files() {
+        let root = std::env::temp_dir().join("desktop-shell-project-remove-purge-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+        let fixture = seed_repository_project_removal_fixture(&storage, &root);
+
+        let report = persist_repository_project_removal(
+            &config,
+            RemoveRepositoryProjectCommandInput {
+                repository_id: fixture.repository_id,
+                strategy: RemoveRepositoryProjectStrategy::Purge,
+            },
+        )
+        .expect("repository purge should succeed");
+
+        assert_eq!(report.repository_id, fixture.repository_id);
+        assert_eq!(report.strategy, RemoveRepositoryProjectStrategy::Purge);
+        assert!(report.missing_paths.is_empty());
+        assert!(report.skipped_paths.is_empty());
+        assert!(report.removed_paths.contains(&fixture.workspace_path));
+        assert!(report.removed_paths.contains(&fixture.artifact_root_path));
+        assert!(report.removed_paths.contains(&fixture.build_log_path));
+        assert!(report.removed_paths.contains(&fixture.stage_log_path));
+        assert!(report.removed_paths.contains(&fixture.retained_file_path));
+        assert!(!fixture.workspace_path.exists());
+        assert!(!fixture.artifact_root_path.exists());
+        assert!(!fixture.build_log_path.exists());
+        assert!(!fixture.stage_log_path.exists());
+        assert!(!fixture.retained_file_path.exists());
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        let repository_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM repositories WHERE id = ?",
+                [fixture.repository_id],
+                |row| row.get(0),
+            )
+            .expect("repository count should load");
+        let queue_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM worker_queue_messages",
+                [],
+                |row| row.get(0),
+            )
+            .expect("queue count should load");
+        let lease_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM worker_coordination_leases",
+                [],
+                |row| row.get(0),
+            )
+            .expect("lease count should load");
+        let idempotency_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM worker_idempotency_keys",
+                [],
+                |row| row.get(0),
+            )
+            .expect("idempotency count should load");
+
+        assert_eq!(repository_count, 0);
+        assert_eq!(queue_count, 0);
+        assert_eq!(lease_count, 0);
+        assert_eq!(idempotency_count, 0);
+
+        drop(connection);
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    struct RepositoryProjectRemovalFixture {
+        repository_id: i64,
+        workspace_path: PathBuf,
+        artifact_root_path: PathBuf,
+        build_log_path: PathBuf,
+        stage_log_path: PathBuf,
+        retained_file_path: PathBuf,
+    }
+
+    fn seed_repository_project_removal_fixture(
+        storage: &StorageLayout,
+        root: &Path,
+    ) -> RepositoryProjectRemovalFixture {
+        let workspace_path = root.join("runtime-workspaces").join("release-run-91");
+        let artifact_root_path = root.join("runtime-artifacts").join("build-run-91");
+        let build_log_path = root.join("runtime-logs").join("build-run-91.log");
+        let stage_log_path = root
+            .join("runtime-logs")
+            .join("steps")
+            .join("build-run-91-stage-01.log");
+        let retained_file_path = root
+            .join("retained-files")
+            .join("build-run-91-report.json");
+
+        std::fs::create_dir_all(&workspace_path).expect("workspace directory should create");
+        std::fs::create_dir_all(&artifact_root_path)
+            .expect("artifact directory should create");
+        std::fs::create_dir_all(build_log_path.parent().expect("log parent should exist"))
+            .expect("log directory should create");
+        std::fs::create_dir_all(stage_log_path.parent().expect("stage log parent should exist"))
+            .expect("stage log directory should create");
+        std::fs::create_dir_all(
+            retained_file_path.parent().expect("retained parent should exist"),
+        )
+        .expect("retained directory should create");
+        std::fs::write(workspace_path.join("README.txt"), "workspace")
+            .expect("workspace file should write");
+        std::fs::write(artifact_root_path.join("game.zip"), "artifact")
+            .expect("artifact file should write");
+        std::fs::write(&build_log_path, "build log")
+            .expect("build log should write");
+        std::fs::write(&stage_log_path, "stage log")
+            .expect("stage log should write");
+        std::fs::write(&retained_file_path, "{\"status\":\"retained\"}")
+            .expect("retained file should write");
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params![
+                    "removal-repo",
+                    "https://example.com/removal-repo.git",
+                    "unity"
+                ],
+            )
+            .expect("repository should insert");
+        let repository_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO build_targets (
+                    repository_id,
+                    name,
+                    build_kind,
+                    runner_type,
+                    contract_json,
+                    config_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ",
+                params![
+                    repository_id,
+                    "windows-player",
+                    "player",
+                    "host-native",
+                    r#"{"unity":{"targetPlatform":"StandaloneWindows64","buildMethod":"CI.Build.Perform"}}"#,
+                    "{}",
+                ],
+            )
+            .expect("build target should insert");
+        let build_target_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO publish_targets (repository_id, name, kind) VALUES (?, ?, ?)",
+                params![repository_id, "filesystem-release", "filesystem"],
+            )
+            .expect("publish target should insert");
+        let publish_target_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO release_runs (
+                    repository_id,
+                    git_tag,
+                    git_commit,
+                    engine_version,
+                    status
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ",
+                params![
+                    repository_id,
+                    "v1.9.1",
+                    "deadbeef",
+                    "2022.3.20f1",
+                    "queued",
+                ],
+            )
+            .expect("release run should insert");
+        let release_run_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO build_runs (
+                    release_run_id,
+                    build_target_id,
+                    engine_version,
+                    image_ref,
+                    status,
+                    workspace_path,
+                    log_path,
+                    artifact_root_path
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ",
+                params![
+                    release_run_id,
+                    build_target_id,
+                    "2022.3.20f1",
+                    "host-native",
+                    "queued",
+                    workspace_path.display().to_string(),
+                    build_log_path.display().to_string(),
+                    artifact_root_path.display().to_string(),
+                ],
+            )
+            .expect("build run should insert");
+        let build_run_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO build_run_steps (
+                    build_run_id,
+                    position,
+                    step_key,
+                    step_label,
+                    status,
+                    log_path,
+                    last_message
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ",
+                params![
+                    build_run_id,
+                    1,
+                    "checkout-repository",
+                    "Checkout Repository",
+                    "succeeded",
+                    stage_log_path.display().to_string(),
+                    "checked out source",
+                ],
+            )
+            .expect("build stage should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO artifacts (
+                    build_run_id,
+                    name,
+                    kind,
+                    path,
+                    active_location_kind,
+                    active_location_ref
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ",
+                params![
+                    build_run_id,
+                    "game.zip",
+                    "archive",
+                    "game.zip",
+                    "runtime_artifact",
+                    artifact_root_path.join("game.zip").display().to_string(),
+                ],
+            )
+            .expect("artifact should insert");
+        let artifact_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO publish_runs (
+                    release_run_id,
+                    build_run_id,
+                    publish_target_id,
+                    artifact_id,
+                    status,
+                    execution_contract_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ",
+                params![
+                    release_run_id,
+                    build_run_id,
+                    publish_target_id,
+                    artifact_id,
+                    "queued",
+                    "{}",
+                ],
+            )
+            .expect("publish run should insert");
+        let publish_run_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "
+                INSERT INTO retained_execution_files (
+                    build_run_id,
+                    role,
+                    path,
+                    status
+                )
+                VALUES (?, ?, ?, ?)
+                ",
+                params![
+                    build_run_id,
+                    "execution_report",
+                    retained_file_path.display().to_string(),
+                    "retained",
+                ],
+            )
+            .expect("retained execution file should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO worker_queue_messages (queue_name, payload)
+                VALUES (?, ?)
+                ",
+                params![
+                    "release-runs",
+                    format!(
+                        "{{\"release_run_id\":{release_run_id},\"repository_id\":{repository_id},\"git_tag\":\"v1.9.1\",\"git_commit\":\"deadbeef\",\"trigger_source\":\"manual\",\"trigger_rule_id\":null}}"
+                    )
+                    .into_bytes(),
+                ],
+            )
+            .expect("release queue message should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO worker_queue_messages (queue_name, payload)
+                VALUES (?, ?)
+                ",
+                params![
+                    "build-runs",
+                    format!(
+                        "{{\"build_run_id\":{build_run_id},\"release_run_id\":{release_run_id},\"build_target_id\":{build_target_id},\"engine_version\":\"2022.3.20f1\",\"image_ref\":\"host-native\"}}"
+                    )
+                    .into_bytes(),
+                ],
+            )
+            .expect("build queue message should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO worker_queue_messages (queue_name, payload)
+                VALUES (?, ?)
+                ",
+                params![
+                    "publish-runs",
+                    format!(
+                        "{{\"publish_run_id\":{publish_run_id},\"release_run_id\":{release_run_id},\"build_run_id\":{build_run_id},\"publish_target_id\":{publish_target_id},\"artifact_id\":{artifact_id}}}"
+                    )
+                    .into_bytes(),
+                ],
+            )
+            .expect("publish queue message should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO worker_coordination_leases (
+                    name,
+                    token,
+                    lease_expires_at_unix_millis
+                ) VALUES (?, ?, ?)
+                ",
+                params![format!("release-plan:{release_run_id}"), "lock-a", 9_999_999_999_i64],
+            )
+            .expect("release coordination lease should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO worker_coordination_leases (
+                    name,
+                    token,
+                    lease_expires_at_unix_millis
+                ) VALUES (?, ?, ?)
+                ",
+                params![
+                    format!("build-run:{build_run_id}:dispatch"),
+                    "lock-b",
+                    9_999_999_999_i64,
+                ],
+            )
+            .expect("build coordination lease should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO worker_coordination_leases (
+                    name,
+                    token,
+                    lease_expires_at_unix_millis
+                ) VALUES (?, ?, ?)
+                ",
+                params![
+                    format!("publish-run:{publish_run_id}:dispatch"),
+                    "lock-c",
+                    9_999_999_999_i64,
+                ],
+            )
+            .expect("publish coordination lease should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO worker_idempotency_keys (
+                    idempotency_key,
+                    claim_expires_at_unix_millis
+                ) VALUES (?, ?)
+                ",
+                params![
+                    format!("release-run:{release_run_id}:queued"),
+                    9_999_999_999_i64,
+                ],
+            )
+            .expect("release idempotency key should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO worker_idempotency_keys (
+                    idempotency_key,
+                    claim_expires_at_unix_millis
+                ) VALUES (?, ?)
+                ",
+                params![
+                    format!("build-run:{build_run_id}:queued"),
+                    9_999_999_999_i64,
+                ],
+            )
+            .expect("build idempotency key should insert");
+        connection
+            .execute(
+                "
+                INSERT INTO worker_idempotency_keys (
+                    idempotency_key,
+                    claim_expires_at_unix_millis
+                ) VALUES (?, ?)
+                ",
+                params![
+                    format!("publish-run:{publish_run_id}:queued"),
+                    9_999_999_999_i64,
+                ],
+            )
+            .expect("publish idempotency key should insert");
+        drop(connection);
+
+        RepositoryProjectRemovalFixture {
+            repository_id,
+            workspace_path,
+            artifact_root_path,
+            build_log_path,
+            stage_log_path,
+            retained_file_path,
+        }
     }
 }

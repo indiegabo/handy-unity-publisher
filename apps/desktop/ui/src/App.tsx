@@ -695,6 +695,17 @@ function App() {
     });
   });
 
+  const handleProjectRemoved = useEffectEvent(() => {
+    startTransition(() => {
+      setActiveProjectTitle(null);
+    });
+
+    void transitionToScreen({
+      kind: "project-list",
+      highlightedRepositoryId: null,
+    });
+  });
+
   const handleOpenProjectDetail = useEffectEvent(
     (repositoryId: number, repositoryName?: string) => {
       startTransition(() => {
@@ -1408,6 +1419,7 @@ function App() {
               {activeScreen.kind === "project-detail" ? (
                 <RepositoryProjectDetail
                   onProjectNameResolved={handleProjectNameResolved}
+                  onProjectRemoved={handleProjectRemoved}
                   repositoryId={activeScreen.repositoryId}
                 />
               ) : null}

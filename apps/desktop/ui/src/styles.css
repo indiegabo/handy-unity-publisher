@@ -2062,6 +2062,65 @@ button {
   justify-content: end;
 }
 
+.project-removal-dialog__modal .full-screen-modal__body,
+.project-removal-dialog,
+.project-removal-dialog__options {
+  display: grid;
+  gap: 10px;
+}
+
+.project-removal-dialog__modal .full-screen-modal__body {
+  align-content: start;
+  justify-items: start;
+  min-height: 0;
+}
+
+.project-removal-dialog {
+  width: min(520px, 100%);
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.project-removal-dialog__copy,
+.project-removal-dialog__option-copy {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.project-removal-dialog__option {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.project-removal-dialog__option-title {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.project-removal-dialog__option-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.project-removal-dialog__action--purge,
+.project-detail-toolbar__remove {
+  border-color: rgba(255, 124, 124, 0.35);
+  color: rgb(255, 192, 192);
+}
+
+.project-removal-dialog__action--purge:hover,
+.project-detail-toolbar__remove:hover {
+  background: rgba(255, 124, 124, 0.08);
+}
+
 .select-list-modal__summary-strip {
   display: grid;
   gap: 8px;
@@ -2766,6 +2825,10 @@ button {
 
 .project-detail-toolbar {
   justify-content: flex-end;
+}
+
+.project-detail-toolbar__remove {
+  margin-right: auto;
 }
 
 .project-detail-form-grid {
