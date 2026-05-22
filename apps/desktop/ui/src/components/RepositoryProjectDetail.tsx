@@ -395,7 +395,11 @@ export function RepositoryProjectDetail({
         setRepositoryCredentials(
           credentials.filter(isRepositoryCredentialSelectable),
         );
-        setPublishCredentials(credentials.filter(isItchCredentialSelectable));
+        setPublishCredentials(
+          credentials.filter(
+            (credential) => credential.kind === "itch-api-key",
+          ),
+        );
         setRepositoryCredentialsError(null);
         setIsLoadingRepositoryCredentials(false);
       });
@@ -925,12 +929,10 @@ export function RepositoryProjectDetail({
   const handleSavePublishCredential = useEffectEvent(
     async (destinationId: string, input: SaveSecretCredentialInput) => {
       try {
-        await saveSecretCredential(input);
+        const createdCredentialId = await saveSecretCredential(input);
         const credentials = await listRepositoryCredentialsEffect();
         const createdCredential = credentials.find(
-          (credential) =>
-            credential.name === input.name.trim() &&
-            credential.kind === input.kind,
+          (credential) => credential.credential_id === createdCredentialId,
         );
         if (!createdCredential) {
           throw new Error(
@@ -942,7 +944,11 @@ export function RepositoryProjectDetail({
           setRepositoryCredentials(
             credentials.filter(isRepositoryCredentialSelectable),
           );
-          setPublishCredentials(credentials.filter(isItchCredentialSelectable));
+          setPublishCredentials(
+            credentials.filter(
+              (credential) => credential.kind === "itch-api-key",
+            ),
+          );
           setDraft((currentDraft) => {
             if (!currentDraft) {
               return currentDraft;
@@ -962,6 +968,8 @@ export function RepositoryProjectDetail({
             };
           });
         });
+
+        return createdCredential.credential_id;
       } catch (error) {
         throw new Error(buildProjectSaveErrorMessage(error));
       }
@@ -1344,7 +1352,9 @@ export function RepositoryProjectDetail({
             </Button>
             <Button
               disabled={
-                !hasPendingChanges || isProjectMutationPending || isEditingLocked
+                !hasPendingChanges ||
+                isProjectMutationPending ||
+                isEditingLocked
               }
               onClick={() => void handleSaveProject()}
               size="sm"
@@ -1860,10 +1870,11 @@ export function RepositoryProjectDetail({
                       const diagnostics = pathDiagnostics[target.id];
                       const fieldErrors =
                         validationErrors.buildTargets[target.id] ?? {};
-                      const bindingDestinations = collectBuildTargetBindingImpact(
-                        draft.publishDestinations,
-                        target.id,
-                      );
+                      const bindingDestinations =
+                        collectBuildTargetBindingImpact(
+                          draft.publishDestinations,
+                          target.id,
+                        );
                       const isOpen = Boolean(expandedTargetIds[target.id]);
 
                       return (
@@ -2453,7 +2464,9 @@ function formatCollapsedBuildTargetUnitySummary(
   return diagnostics.status === "ready" ? "Ready" : "Needs review";
 }
 
-function formatCollapsedBuildTargetBindingSummary(bindingDestinations: string[]) {
+function formatCollapsedBuildTargetBindingSummary(
+  bindingDestinations: string[],
+) {
   if (bindingDestinations.length === 0) {
     return "No publish bindings";
   }
@@ -2833,13 +2846,6 @@ function isRepositoryCredentialSelectable(credential: SecretCredentialSetting) {
       "git-http-bearer",
       "git-http-github-host-login",
     ].includes(credential.kind)
-  );
-}
-
-function isItchCredentialSelectable(credential: SecretCredentialSetting) {
-  return (
-    credential.kind === "itch-api-key" &&
-    credential.config_summary.status === "ready"
   );
 }
 
@@ -3614,7 +3620,6 @@ function arePublishDestinationDraftsEqual(
       destination.enabled === candidate.enabled &&
       destination.itchAccountName.trim() === candidate.itchAccountName.trim() &&
       destination.itchGameSlug.trim() === candidate.itchGameSlug.trim() &&
-      destination.itchButlerPath.trim() === candidate.itchButlerPath.trim() &&
       destination.credentialsId === candidate.credentialsId &&
       arePublishDestinationBindingDraftsEqual(
         destination.bindings,

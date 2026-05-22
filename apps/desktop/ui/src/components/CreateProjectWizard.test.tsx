@@ -17,6 +17,7 @@ const {
   detectRepositoryProviderMock,
   loadRepositoryInspectionMock,
   loadSecretSettingsMock,
+  loadUnityAdapterSettingsMock,
   saveSecretCredentialMock,
   validateUnityExecutablePathMock,
   loadAuthProvidersMock,
@@ -26,6 +27,7 @@ const {
   detectRepositoryProviderMock: vi.fn(),
   loadRepositoryInspectionMock: vi.fn(),
   loadSecretSettingsMock: vi.fn(),
+  loadUnityAdapterSettingsMock: vi.fn(),
   saveSecretCredentialMock: vi.fn(),
   validateUnityExecutablePathMock: vi.fn(),
   loadAuthProvidersMock: vi.fn(),
@@ -37,6 +39,7 @@ vi.mock("../services/projects", () => ({
   detectRepositoryProvider: detectRepositoryProviderMock,
   loadRepositoryInspection: loadRepositoryInspectionMock,
   loadSecretSettings: loadSecretSettingsMock,
+  loadUnityAdapterSettings: loadUnityAdapterSettingsMock,
   saveSecretCredential: saveSecretCredentialMock,
   validateUnityExecutablePath: validateUnityExecutablePathMock,
 }));
@@ -56,7 +59,8 @@ beforeEach(() => {
   detectRepositoryProviderMock.mockResolvedValue(buildRepositoryProvider());
   loadRepositoryInspectionMock.mockResolvedValue({ repositories: [] });
   loadSecretSettingsMock.mockResolvedValue(buildSecretSettings());
-  saveSecretCredentialMock.mockResolvedValue(undefined);
+  loadUnityAdapterSettingsMock.mockResolvedValue(buildUnityAdapterSettings());
+  saveSecretCredentialMock.mockResolvedValue(303);
   validateUnityExecutablePathMock.mockResolvedValue(
     buildUnityExecutableValidation(),
   );
@@ -65,12 +69,28 @@ beforeEach(() => {
 });
 
 describe("CreateProjectWizard", () => {
+  it("shows the active step inside a compact status header", async () => {
+    render(<CreateProjectWizard onCreated={vi.fn()} onManageAuth={vi.fn()} />);
+
+    expect(await screen.findByText("1. Identity")).toBeInTheDocument();
+    expect(screen.getByText("1 of 6")).toBeInTheDocument();
+
+    fireEvent.change(await screen.findByLabelText("Project name"), {
+      target: { value: "Red Horizon" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    expect(await screen.findByText("2. Repository")).toBeInTheDocument();
+    expect(screen.getByText("2 of 6")).toBeInTheDocument();
+  });
+
   it("renders access guidance inside a dedicated support panel", async () => {
     render(<CreateProjectWizard onCreated={vi.fn()} onManageAuth={vi.fn()} />);
 
     expect(
-      await screen.findByRole("heading", { name: "Repository projects" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("heading", { name: "Project adapters" }),
+    ).not.toBeInTheDocument();
 
     fireEvent.change(await screen.findByLabelText("Project name"), {
       target: { value: "Red Horizon" },
@@ -81,9 +101,101 @@ describe("CreateProjectWizard", () => {
     expect(
       await screen.findByRole("heading", { name: "Repository access" }),
     ).toBeInTheDocument();
+    expect(screen.getByText("2. Repository")).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: "Repository" }),
+      screen.queryByRole("textbox", { name: "Default branch" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows an unavailable state instead of repository fields for local workspace access", async () => {
+    render(
+      <CreateProjectWizard
+        initialSnapshot={buildLocalAccessStepSnapshot()}
+        onCreated={vi.fn()}
+        onManageAuth={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("2. Workspace")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Local workspace source" }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The create-project wizard does not have a local workspace source adapter yet, so repository-specific fields stay hidden for this draft.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "Repository URL" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows an unavailable state instead of Unity fields for unsupported engines", async () => {
+    render(
+      <CreateProjectWizard
+        initialSnapshot={buildGodotTargetsStepSnapshot()}
+        onCreated={vi.fn()}
+        onManageAuth={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("3. Build Targets")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Godot build target setup does not have a create-project adapter yet.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Godot target adapter" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Unity target platform"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("lists detected Unity editors and fills the executable path from the selected install", async () => {
+    render(
+      <CreateProjectWizard
+        initialSnapshot={buildUnityTargetsStepSnapshot()}
+        onCreated={vi.fn()}
+        onManageAuth={vi.fn()}
+      />,
+    );
+
+    const installedEditorsSelect = await screen.findByRole("combobox", {
+      name: "Installed Unity editors",
+    });
+
+    expect(installedEditorsSelect).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Choose Unity executable" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "6000.1.9f1" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "6000.3.11f1" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "6000.4.3f1" }),
+    ).toBeInTheDocument();
+
+    fireEvent.change(installedEditorsSelect, {
+      target: {
+        value: "C:/Program Files/Unity/Hub/Editor/6000.4.3f1/Editor/Unity.exe",
+      },
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByDisplayValue(
+          "C:/Program Files/Unity/Hub/Editor/6000.4.3f1/Editor/Unity.exe",
+        ),
+      ).toBeInTheDocument();
+      expect(validateUnityExecutablePathMock).toHaveBeenCalledWith(
+        "C:/Program Files/Unity/Hub/Editor/6000.4.3f1/Editor/Unity.exe",
+      );
+    });
   });
 
   it("delegates explicit cancel requests through the wizard footer", () => {
@@ -114,9 +226,9 @@ describe("CreateProjectWizard", () => {
     expect(
       await screen.findByRole("heading", { name: "Repository access" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("textbox", { name: "Repository URL" }),
-    ).toHaveValue("https://github.com/indiegabo/red-horizon.git");
+    expect(screen.getByRole("textbox", { name: "Repository URL" })).toHaveValue(
+      "https://github.com/indiegabo/red-horizon.git",
+    );
     expect(
       screen.getByRole("combobox", { name: "Repository visibility" }),
     ).toHaveValue("public");
@@ -240,7 +352,7 @@ describe("CreateProjectWizard", () => {
     });
   });
 
-  it("requires explicit review confirmation before creating the project", async () => {
+  it("creates the project directly from the review step", async () => {
     const onCreated = vi.fn();
 
     render(
@@ -259,14 +371,6 @@ describe("CreateProjectWizard", () => {
       expect(screen.getAllByText("Public").length).toBeGreaterThan(0);
     });
 
-    expect(createButton).toBeDisabled();
-
-    fireEvent.click(
-      screen.getByLabelText(
-        "I reviewed the repository access, targets, publish destinations, and path overrides for this project.",
-      ),
-    );
-
     expect(createButton).toBeEnabled();
 
     fireEvent.click(createButton);
@@ -275,40 +379,6 @@ describe("CreateProjectWizard", () => {
       expect(createRepositoryProjectMock).toHaveBeenCalledTimes(1);
       expect(onCreated).toHaveBeenCalledWith(1);
     });
-  });
-
-  it("requires a fresh review confirmation after leaving the review step", async () => {
-    render(
-      <CreateProjectWizard
-        initialSnapshot={buildConfirmedReviewSnapshot()}
-        onCreated={vi.fn()}
-        onManageAuth={vi.fn()}
-      />,
-    );
-
-    const createButton = await screen.findByRole("button", {
-      name: "Create project",
-    });
-
-    expect(createButton).toBeEnabled();
-    expect(screen.getByText("Ready to create")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Previous" }));
-
-    expect(await screen.findByRole("heading", { name: "Paths" })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Next" }));
-
-    expect(
-      await screen.findByRole("heading", { name: "Final confirmation" }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create project" })).toBeDisabled();
-    expect(screen.getByText("Pending confirmation")).toBeInTheDocument();
-    expect(
-      screen.getByLabelText(
-        "I reviewed the repository access, targets, publish destinations, and path overrides for this project.",
-      ),
-    ).not.toBeChecked();
   });
 
   it("keeps late-step path validation local instead of advancing into review", async () => {
@@ -320,14 +390,10 @@ describe("CreateProjectWizard", () => {
       />,
     );
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Next" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Next" }));
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("heading", { name: "Paths" }),
-      ).toBeInTheDocument();
+      expect(screen.getByText("5. Paths")).toBeInTheDocument();
       expect(
         screen.getByText("Artifacts root override must be an absolute path."),
       ).toBeInTheDocument();
@@ -365,7 +431,6 @@ function buildReviewSnapshot(): CreateProjectWizardSnapshot {
             "C:/Program Files/Unity/Hub/Editor/6000.0.23f1/Editor/Unity.exe",
         },
       ],
-      defaultBranch: "main",
       engineKind: "unity",
       name: "Red Horizon",
       pollingIntervalSeconds: "300",
@@ -383,7 +448,6 @@ function buildReviewSnapshot(): CreateProjectWizardSnapshot {
     },
     pendingBuildTargetRemovalId: null,
     repositoryCredentialId: null,
-    reviewConfirmed: false,
     touchedFields: {},
   };
 }
@@ -398,7 +462,6 @@ function buildInvalidPathStepSnapshot(): CreateProjectWizardSnapshot {
       ...snapshot.draft,
       artifactsRootOverride: "relative/artifacts",
     },
-    reviewConfirmed: false,
   };
 }
 
@@ -406,14 +469,95 @@ function buildAccessStepSnapshot(): CreateProjectWizardSnapshot {
   return {
     ...buildReviewSnapshot(),
     currentStepIndex: 1,
-    reviewConfirmed: false,
   };
 }
 
-function buildConfirmedReviewSnapshot(): CreateProjectWizardSnapshot {
+function buildLocalAccessStepSnapshot(): CreateProjectWizardSnapshot {
+  const snapshot = buildReviewSnapshot();
+
+  return {
+    ...snapshot,
+    currentStepIndex: 1,
+    draft: {
+      ...snapshot.draft,
+      engineKind: "unity",
+      projectKind: "local",
+      repositoryUrl: "",
+    },
+  };
+}
+
+function buildGodotTargetsStepSnapshot(): CreateProjectWizardSnapshot {
+  const snapshot = buildReviewSnapshot();
+
+  return {
+    ...snapshot,
+    currentStepIndex: 2,
+    draft: {
+      ...snapshot.draft,
+      engineKind: "godot",
+    },
+  };
+}
+
+function buildUnityTargetsStepSnapshot(): CreateProjectWizardSnapshot {
   return {
     ...buildReviewSnapshot(),
-    reviewConfirmed: true,
+    currentStepIndex: 2,
+    pathDiagnostics: {
+      "target-1": null,
+    },
+  };
+}
+
+function buildUnityAdapterSettings() {
+  return {
+    capability_profile: {
+      discovered_editors: [
+        {
+          executable_exists: false,
+          executable_is_file: false,
+          executable_path:
+            "C:/Program Files/Unity/Hub/Editor/6000.1.9f1/Editor/Unity.exe",
+          install_root_path:
+            "C:/Program Files/Unity/Hub/Editor/6000.1.9f1/Editor",
+          message:
+            "Unity editor 6000.1.9f1 was found under C:/Program Files/Unity/Hub/Editor/6000.1.9f1/Editor but the expected executable path C:/Program Files/Unity/Hub/Editor/6000.1.9f1/Editor/Unity.exe is not a regular file.",
+          source: "unity_hub_editor_root",
+          status: "error_missing_executable",
+          supported_build_targets: [],
+          version: "6000.1.9f1",
+        },
+        {
+          executable_exists: true,
+          executable_is_file: true,
+          executable_path:
+            "C:/Program Files/Unity/Hub/Editor/6000.3.11f1/Editor/Unity.exe",
+          install_root_path:
+            "C:/Program Files/Unity/Hub/Editor/6000.3.11f1/Editor",
+          message:
+            "Discovered Unity editor 6000.3.11f1 via unity_hub_editor_root at C:/Program Files/Unity/Hub/Editor/6000.3.11f1/Editor/Unity.exe.",
+          source: "unity_hub_editor_root",
+          status: "ready",
+          supported_build_targets: ["windows"],
+          version: "6000.3.11f1",
+        },
+        {
+          executable_exists: true,
+          executable_is_file: true,
+          executable_path:
+            "C:/Program Files/Unity/Hub/Editor/6000.4.3f1/Editor/Unity.exe",
+          install_root_path:
+            "C:/Program Files/Unity/Hub/Editor/6000.4.3f1/Editor",
+          message:
+            "Discovered Unity editor 6000.4.3f1 via unity_hub_editor_root at C:/Program Files/Unity/Hub/Editor/6000.4.3f1/Editor/Unity.exe.",
+          source: "unity_hub_editor_root",
+          status: "ready",
+          supported_build_targets: ["windows"],
+          version: "6000.4.3f1",
+        },
+      ],
+    },
   };
 }
 

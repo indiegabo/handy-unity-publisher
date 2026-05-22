@@ -9,7 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { Button, IconButton } from "./components/Button";
-import { Icon, type IconName } from "./components/Icon";
+import { type IconName } from "./components/Icon";
 import { AuthProvidersFocusScreen } from "./components/AuthProvidersFocusScreen";
 import { type AuthProviderConnectionResult } from "./components/authProviderPresentation";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -100,17 +100,6 @@ type ShellNavigationAction = {
   variant: "primary" | "secondary" | "ghost";
 };
 
-type RuntimeToastTone = "info" | "success" | "warning";
-
-type RuntimeToast = {
-  id: string;
-  icon: IconName;
-  message: string;
-  releaseRunId: number | null;
-  title: string;
-  tone: RuntimeToastTone;
-};
-
 type AppScreen =
   | { kind: "main" }
   | { kind: "create-project" }
@@ -183,7 +172,6 @@ function App() {
   const [isLoadingFeed, setIsLoadingFeed] = useState(true);
   const [, setIsRefreshingFeed] = useState(false);
   const [feedError, setFeedError] = useState<string | null>(null);
-  const [runtimeToasts, setRuntimeToasts] = useState<RuntimeToast[]>([]);
   const [workerSnapshot, setWorkerSnapshot] = useState<WorkerStatusSnapshot>(
     EMPTY_WORKER_STATUS_SNAPSHOT,
   );
@@ -215,6 +203,7 @@ function App() {
     workerSnapshot,
     projectWorkers,
   );
+  const workerStatusTooltip = buildWorkerStatusTooltip(projectWorkers);
   const activeProcessDetail =
     activeScreen.kind === "process-detail"
       ? (processPage.items.find(
@@ -470,28 +459,6 @@ function App() {
     },
   );
 
-  const dismissRuntimeToast = useEffectEvent((toastId: string) => {
-    startTransition(() => {
-      setRuntimeToasts((current) =>
-        current.filter((toast) => toast.id !== toastId),
-      );
-    });
-  });
-
-  const handleRuntimeToastEvent = useEffectEvent((event: RuntimeEventRecord) => {
-    const toast = buildRuntimeToast(event);
-
-    if (!toast) {
-      return;
-    }
-
-    startTransition(() => {
-      setRuntimeToasts((current) =>
-        [toast, ...current.filter((entry) => entry.id !== toast.id)].slice(0, 3),
-      );
-    });
-  });
-
   const handleProcessFeedEvent = useEffectEvent(
     (event: ProcessFeedRuntimeEvent) => {
       if (PROCESS_FEED_RESET_PAGE_EVENT_TOPICS.has(event.topic) && page !== 1) {
@@ -547,7 +514,6 @@ function App() {
         return;
       }
 
-      handleRuntimeToastEvent(event);
       handleRuntimeStatusEvent(event);
 
       if (!WORKER_STATUS_REPOSITORY_EVENT_TOPICS.has(event.topic)) {
@@ -1061,9 +1027,8 @@ function App() {
     },
   ];
   const focusBackLabel = resolveFocusBackLabel(activeScreen);
-  const focusScreenShellClassName = resolveFocusScreenShellClassName(
-    activeScreen,
-  );
+  const focusScreenShellClassName =
+    resolveFocusScreenShellClassName(activeScreen);
 
   useEffect(() => {
     const handleWindowKeyDown = (event: KeyboardEvent) => {
@@ -1130,88 +1095,6 @@ function App() {
       </header>
 
       <div className="app-shell__content">
-        {runtimeToasts.length > 0 ? (
-          <section
-            aria-label="Runtime notifications"
-            className="runtime-notification-rail"
-          >
-            <div aria-live="polite" className="runtime-notification-rail__stack">
-              {runtimeToasts.map((toast) => {
-                const linkedProcess =
-                  toast.releaseRunId === null
-                    ? null
-                    : (processPage.items.find(
-                        (process) => process.release_run_id === toast.releaseRunId,
-                      ) ?? null);
-                const canOpenLinkedProcess =
-                  linkedProcess !== null &&
-                  !(
-                    activeScreen.kind === "process-detail" &&
-                    activeProcessDetail?.release_run_id ===
-                      linkedProcess.release_run_id
-                  );
-
-                return (
-                  <div
-                    aria-atomic="true"
-                    className={joinClassNames(
-                      "runtime-notification-card",
-                      `runtime-notification-card--${toast.tone}`,
-                      "ui-panel",
-                      "ui-panel--inset",
-                      "ui-panel--header-separated",
-                    )}
-                    key={toast.id}
-                    role={toast.tone === "warning" ? "alert" : "status"}
-                  >
-                    <div className="ui-panel__header runtime-notification-card__header">
-                      <div className="runtime-notification-card__title-row">
-                        <span className="runtime-notification-card__icon-shell">
-                          <Icon
-                            className="runtime-notification-card__icon"
-                            name={toast.icon}
-                          />
-                        </span>
-                        <div className="ui-panel__title-block">
-                          <p className="ui-panel__eyebrow">Runtime event</p>
-                          <p className="ui-panel__title">{toast.title}</p>
-                        </div>
-                      </div>
-                      <IconButton
-                        className="runtime-notification-card__dismiss"
-                        icon="close"
-                        label={`Dismiss ${toast.title}`}
-                        onClick={() => dismissRuntimeToast(toast.id)}
-                        size="sm"
-                        variant="ghost"
-                      />
-                    </div>
-                    <div className="ui-panel__body runtime-notification-card__body">
-                      <p className="runtime-notification-card__message">
-                        {toast.message}
-                      </p>
-                      {canOpenLinkedProcess ? (
-                        <div className="runtime-notification-card__actions">
-                          <Button
-                            onClick={() => {
-                              dismissRuntimeToast(toast.id);
-                              handleOpenProcessDetail(linkedProcess);
-                            }}
-                            size="sm"
-                            variant="ghost"
-                          >
-                            {`Open process detail #${linkedProcess.release_run_id}`}
-                          </Button>
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        ) : null}
-
         {isScreenBlank ? null : activeScreen.kind === "main" ? (
           <div className="home-frame">
             <section className="action-bar" aria-label="Primary actions">
@@ -1226,6 +1109,7 @@ function App() {
                       void handleOpenWorkerQuickView();
                     }}
                     tone={workerStatus.tone}
+                    title={workerStatusTooltip}
                   />
                 </div>
               </div>
@@ -1781,6 +1665,16 @@ function buildActiveWorkersDescription(projectWorkers: ProjectWorkerEntry[]) {
     .join(" · ")}`;
 }
 
+function buildWorkerStatusTooltip(projectWorkers: ProjectWorkerEntry[]) {
+  if (projectWorkers.length === 0) {
+    return undefined;
+  }
+
+  return projectWorkers
+    .map((projectWorker) => projectWorker.repositoryName)
+    .join(", ");
+}
+
 function formatRuntimeStatus(status: RuntimeHealthStatus) {
   return status.replace(/_/g, " ");
 }
@@ -1846,144 +1740,6 @@ function resolveFocusScreenShellClassName(activeScreen: AppScreen) {
     default:
       return "focus-screen-shell";
   }
-}
-
-function buildRuntimeToast(event: RuntimeEventRecord): RuntimeToast | null {
-  switch (event.topic) {
-    case "automation.poll_auth_failed":
-      return {
-        id: event.event_id,
-        icon: "alertCircle",
-        message: event.summary,
-        releaseRunId: event.release_run_id,
-        title: "Repository polling stopped",
-        tone: "warning",
-      };
-    case "automation.release_queued":
-      if (event.user_requested) {
-        return null;
-      }
-
-      return {
-        id: event.event_id,
-        icon: "queue",
-        message: event.summary,
-        releaseRunId: event.release_run_id,
-        title: "Automatic release queued",
-        tone: "info",
-      };
-    case "build.run_started":
-      if (event.user_requested) {
-        return null;
-      }
-
-      return {
-        id: event.event_id,
-        icon: "play",
-        message: event.summary,
-        releaseRunId: event.release_run_id,
-        title: "Automatic build started",
-        tone: "info",
-      };
-    case "build.run_finished":
-      if (event.user_requested) {
-        return null;
-      }
-
-      return {
-        id: event.event_id,
-        ...resolveFinishedBuildToastPresentation(event),
-        message: event.summary,
-        releaseRunId: event.release_run_id,
-      };
-    case "publish.run_started":
-      if (event.user_requested) {
-        return null;
-      }
-
-      return {
-        id: event.event_id,
-        icon: "arrowUpRight",
-        message: event.summary,
-        releaseRunId: event.release_run_id,
-        title: "Automatic publish started",
-        tone: "info",
-      };
-    case "publish.run_finished":
-      if (event.user_requested) {
-        return null;
-      }
-
-      return {
-        id: event.event_id,
-        ...resolveFinishedPublishToastPresentation(event),
-        message: event.summary,
-        releaseRunId: event.release_run_id,
-      };
-    default:
-      return null;
-  }
-}
-
-function resolveFinishedBuildToastPresentation(
-  event: RuntimeEventRecord,
-): Pick<RuntimeToast, "icon" | "title" | "tone"> {
-  switch (readRuntimeEventStatus(event.payload)) {
-    case "failed":
-      return {
-        icon: "alertCircle",
-        title: "Automatic build failed",
-        tone: "warning",
-      };
-    case "canceled":
-      return {
-        icon: "close",
-        title: "Automatic build canceled",
-        tone: "warning",
-      };
-    default:
-      return {
-        icon: "checkCircle",
-        title: "Automatic build finished",
-        tone: "success",
-      };
-  }
-}
-
-function resolveFinishedPublishToastPresentation(
-  event: RuntimeEventRecord,
-): Pick<RuntimeToast, "icon" | "title" | "tone"> {
-  switch (readRuntimeEventStatus(event.payload)) {
-    case "failed":
-      return {
-        icon: "alertCircle",
-        title: "Automatic publish failed",
-        tone: "warning",
-      };
-    case "canceled":
-    case "cancelled":
-      return {
-        icon: "close",
-        title: "Automatic publish canceled",
-        tone: "warning",
-      };
-    default:
-      return {
-        icon: "checkCircle",
-        title: "Automatic publish finished",
-        tone: "success",
-      };
-  }
-}
-
-function readRuntimeEventStatus(payload: Record<string, unknown>) {
-  const status = payload.status;
-
-  return typeof status === "string" ? status.trim().toLowerCase() : null;
-}
-
-function joinClassNames(...tokens: Array<string | false | null | undefined>) {
-  return tokens.filter(Boolean).join(" ");
 }
 
 export default App;

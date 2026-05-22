@@ -11,6 +11,26 @@ export type UnityExecutableValidation = {
     message: string;
 };
 
+export type DiscoveredUnityEditor = {
+    version: string;
+    source: string;
+    install_root_path: string;
+    executable_path: string;
+    executable_exists: boolean;
+    executable_is_file: boolean;
+    supported_build_targets: string[];
+    status: string;
+    message: string;
+};
+
+export type HostCapabilityProfile = {
+    discovered_editors: DiscoveredUnityEditor[];
+};
+
+export type UnityAdapterSettings = {
+    capability_profile: HostCapabilityProfile;
+};
+
 export type RepositoryCredentialReference = {
     credential_id: number;
     name: string;
@@ -336,8 +356,8 @@ export async function loadSecretSettings(): Promise<SecretSettings> {
 
 export async function saveSecretCredential(
     input: SaveSecretCredentialInput,
-): Promise<void> {
-    return invoke<void>("save_secret_credential", {
+): Promise<number> {
+    return invoke<number>("save_secret_credential", {
         input,
     });
 }
@@ -360,6 +380,10 @@ export async function validateUnityExecutablePath(
     return invoke<UnityExecutableValidation>("validate_unity_executable_path", {
         path,
     });
+}
+
+export async function loadUnityAdapterSettings(): Promise<UnityAdapterSettings> {
+    return invoke<UnityAdapterSettings>("unity_adapter_settings");
 }
 
 export async function createRepositoryProject(

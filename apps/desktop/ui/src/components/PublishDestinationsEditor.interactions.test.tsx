@@ -30,6 +30,170 @@ afterEach(() => {
 });
 
 describe("PublishDestinationsEditor interactions", () => {
+  it("adds a destination through the overlay and returns to a quick view card", async () => {
+    render(<Harness editingMode="overlay" initialDestinations={[]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add destination" }));
+
+    expect(
+      screen.getByRole("menu", { name: "Destination list" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Itch" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Add Itch destination",
+    });
+
+    expect(within(dialog).getByLabelText("Itch account name")).toHaveFocus();
+    expect(
+      within(dialog).queryByText(
+        "Configure one publish destination, then return to the wizard with a compact quick view.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByLabelText("Destination type"),
+    ).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("Status")).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByText(
+        "Define the operator-facing identity and host executable path for this Itch publish destination.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByText(
+        "Choose the stored publish credential that should back Butler uploads for this destination.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByText(
+        "Bind build targets to this destination and configure the per-target delivery fields each binding requires.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("heading", { name: "Access" }),
+    ).toBeInTheDocument();
+
+    fireEvent.change(
+      await within(dialog).findByLabelText("Itch account name"),
+      {
+        target: { value: "indiegabo" },
+      },
+    );
+    fireEvent.change(within(dialog).getByLabelText("Itch game slug"), {
+      target: { value: "red-horizon" },
+    });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add target" }));
+    expect(within(dialog).queryByLabelText("Status")).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByText(
+        "Use the Itch channel that should receive this build target artifact.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByText(
+        "Optional template. Leave empty to use the git tag as the userversion.",
+      ),
+    ).not.toBeInTheDocument();
+
+    fireEvent.change(await within(dialog).findByLabelText("Itch channel"), {
+      target: { value: "windows" },
+    });
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Add destination" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Add Itch destination" }),
+      ).not.toBeInTheDocument();
+    });
+
+    expect(screen.getByRole("heading", { name: "Itch" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Itch account name"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("omits destination status controls when creating a folder destination", async () => {
+    render(<Harness editingMode="overlay" initialDestinations={[]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add destination" }));
+    fireEvent.click(screen.getByRole("button", { name: "Folder" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Add Folder destination",
+    });
+
+    expect(within(dialog).queryByLabelText("Status")).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("heading", { name: "Destination identity" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("heading", { name: "Target bindings" }),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Target")).toHaveFocus();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add target" }));
+
+    expect(within(dialog).queryByLabelText("Status")).not.toBeInTheDocument();
+  });
+
+  it("reopens an existing destination in the overlay with its current data", async () => {
+    render(
+      <Harness
+        editingMode="overlay"
+        initialDestinations={[
+          {
+            ...createEmptyPublishDestinationDraft(),
+            bindings: [
+              {
+                id: "binding-windows",
+                buildTargetDraftId: BUILD_TARGETS[0].id,
+                buildTargetId: BUILD_TARGETS[0].buildTargetId,
+                buildTargetName: BUILD_TARGETS[0].name,
+                enabled: true,
+                filesystemDirectoryPath: "D:/published/windows",
+                itchChannel: "",
+                itchUserversionTemplate: "",
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Edit Folder destination",
+    });
+
+    expect(
+      within(dialog).getByDisplayValue("D:/published/windows"),
+    ).toBeInTheDocument();
+
+    fireEvent.change(within(dialog).getAllByLabelText("Status")[0], {
+      target: { value: "disabled" },
+    });
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save destination" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Edit Folder destination" }),
+      ).not.toBeInTheDocument();
+    });
+
+    expect(screen.getByText("Disabled")).toBeInTheDocument();
+  });
+
   it("opens the destination list, blocks duplicates, and adds the clicked destination", () => {
     render(
       <Harness
@@ -104,6 +268,12 @@ describe("PublishDestinationsEditor interactions", () => {
     expect(
       screen.getByRole("button", { name: "Remove binding for Windows" }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText("No unbound build targets available."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add target" }),
+    ).not.toBeInTheDocument();
   });
 
   it("asks for confirmation before removing a destination with bindings", () => {
@@ -536,10 +706,12 @@ describe("PublishDestinationsEditor interactions", () => {
 
 function Harness({
   buildTargets = BUILD_TARGETS,
+  editingMode = "inline",
   initialDestinations,
   onSaveCredential,
 }: {
   buildTargets?: ProjectBuildTargetReference[];
+  editingMode?: "inline" | "overlay";
   initialDestinations: PublishDestinationDraft[];
   onSaveCredential?: (
     destinationId: string,
@@ -554,6 +726,7 @@ function Harness({
         buildTargets={buildTargets}
         credentials={[]}
         destinations={destinations}
+        editingMode={editingMode}
         onChange={setDestinations}
         onSaveCredential={onSaveCredential}
       />

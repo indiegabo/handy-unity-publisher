@@ -70,7 +70,6 @@ describe("PublishDestinationsEditor helpers", () => {
                     config_json: JSON.stringify({
                         account_name: "indiegabo",
                         game_slug: "red-horizon",
-                        butler_path: "C:/tools/butler.exe",
                     }),
                     credentials: {
                         credential_id: 90,
@@ -112,7 +111,6 @@ describe("PublishDestinationsEditor helpers", () => {
                 config_json: JSON.stringify({
                     account_name: "indiegabo",
                     game_slug: "red-horizon",
-                    butler_path: "C:/tools/butler.exe",
                 }),
                 credentials_id: 90,
                 bindings: [

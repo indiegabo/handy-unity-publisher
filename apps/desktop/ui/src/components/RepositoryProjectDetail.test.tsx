@@ -71,7 +71,7 @@ beforeEach(() => {
   loginWithGithubAuthMock.mockResolvedValue(buildGithubAuthProvider());
   removeRepositoryProjectMock.mockResolvedValue(buildProjectRemovalReport());
   reconnectRepositoryAuthMock.mockResolvedValue(undefined);
-  saveSecretCredentialMock.mockResolvedValue(undefined);
+  saveSecretCredentialMock.mockResolvedValue(303);
   updateRepositoryProjectMock.mockResolvedValue(undefined);
   validateUnityExecutablePathMock.mockResolvedValue(
     buildUnityExecutableValidation(),
@@ -273,10 +273,14 @@ describe("RepositoryProjectDetail", () => {
 
     fireEvent.click(await screen.findByRole("tab", { name: "Build Targets" }));
 
-    expect(await screen.findByText("Builder.PerformWindows")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Builder.PerformWindows"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.getByText("No publish bindings")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Unity build method")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Unity build method"),
+    ).not.toBeInTheDocument();
     expect(
       document.querySelector(
         ".project-detail-target-card__summary-strip.ui-summary-strip",
@@ -285,7 +289,9 @@ describe("RepositoryProjectDetail", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
 
-    expect(await screen.findByLabelText("Unity build method")).toBeInTheDocument();
+    expect(
+      await screen.findByLabelText("Unity build method"),
+    ).toBeInTheDocument();
   });
 
   it("uses shared summary strips in project detail section headers", async () => {
@@ -568,8 +574,6 @@ describe("RepositoryProjectDetail", () => {
       destinationStatusSelect,
       within(panel).getByRole("textbox", { name: "Itch account name" }),
       within(panel).getByRole("textbox", { name: "Itch game slug" }),
-      within(panel).getByRole("button", { name: "Pick butler" }),
-      within(panel).getByRole("button", { name: "Reset" }),
       within(panel).getByRole("button", { name: "New credential" }),
       within(panel).getByRole("combobox", { name: "Credential" }),
       within(panel).getByRole("combobox", { name: "Target" }),
@@ -620,8 +624,11 @@ describe("RepositoryProjectDetail", () => {
       }),
     );
 
+    const panel = await screen.findByRole("tabpanel", {
+      name: "Publish Destinations",
+    });
     const itchAccordion = (
-      await screen.findByRole("heading", { name: "Itch" })
+      await within(panel).findByRole("heading", { name: "Itch" })
     ).closest(".vertical-accordion");
 
     expect(itchAccordion).not.toBeNull();
@@ -668,7 +675,6 @@ describe("RepositoryProjectDetail", () => {
               config_json: JSON.stringify({
                 account_name: "indiegabo",
                 game_slug: "red-horizon-redux",
-                butler_path: "C:/tools/butler.exe",
               }),
               credentials_id: 202,
               enabled: true,
@@ -688,6 +694,81 @@ describe("RepositoryProjectDetail", () => {
       expect(
         screen.getByRole("button", { name: "Save Changes" }),
       ).toBeDisabled();
+    });
+  });
+
+  it("shows the saved publish credential name instead of the current-id fallback", async () => {
+    loadRepositoryProjectDetailMock.mockResolvedValue(
+      buildRepositoryDetail({
+        publish_targets: [
+          {
+            ...buildItchPublishTarget({
+              channel: "windows-stable",
+              gameSlug: "red-horizon",
+            }),
+            credentials: {
+              config_message:
+                "stored credential config_json is missing required keys: api_key",
+              config_status: "incomplete_config",
+              credential_id: 303,
+              kind: "itch-api-key",
+              name: "My Key",
+            },
+          },
+        ],
+      }),
+    );
+    loadSecretSettingsMock.mockResolvedValue(
+      buildSecretSettings({
+        credentials: [
+          ...buildSecretSettings().credentials,
+          buildItchSecretCredential({
+            credential_id: 303,
+            name: "My Key",
+            status: "incomplete_config",
+            message:
+              "stored credential config_json is missing required keys: api_key",
+            top_level_keys: [],
+            missing_required_keys: ["api_key"],
+          }),
+        ],
+      }),
+    );
+
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("tab", {
+        name: "Publish Destinations",
+      }),
+    );
+
+    const itchAccordion = (
+      await screen.findByRole("heading", { name: "Itch" })
+    ).closest(".vertical-accordion");
+
+    expect(itchAccordion).not.toBeNull();
+
+    if (itchAccordion?.getAttribute("data-state") !== "open") {
+      fireEvent.click(
+        within(itchAccordion as HTMLElement).getByRole("button", {
+          name: "Expand section",
+        }),
+      );
+    }
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: "Credential" })).toHaveValue(
+        "303",
+      );
+      expect(
+        screen.getByRole("combobox", { name: "Credential" }),
+      ).toHaveDisplayValue("My Key");
     });
   });
 
@@ -860,7 +941,9 @@ describe("RepositoryProjectDetail", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Remove Project" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Remove Project" }),
+    );
 
     expect(
       await screen.findByRole("dialog", { name: "Remove Revolutions?" }),
@@ -900,7 +983,9 @@ describe("RepositoryProjectDetail", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Remove Project" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Remove Project" }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Purge Total" }));
 
     await waitFor(() => {
@@ -950,7 +1035,9 @@ describe("RepositoryProjectDetail", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save Changes" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Remove Project" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Remove Project" }),
+    ).toBeDisabled();
 
     const buildTargetsTab = screen.getByRole("tab", { name: "Build Targets" });
     expect(buildTargetsTab).toBeDisabled();
@@ -1062,7 +1149,14 @@ function buildRepositoryProvider() {
   };
 }
 
-function buildSecretSettings() {
+function buildSecretSettings(
+  overrides: Partial<{
+    credentials: Array<Record<string, unknown>>;
+    storage_model: string;
+    supported_credential_kinds: string[];
+    warnings: string[];
+  }> = {},
+) {
   return {
     credentials: [
       {
@@ -1107,6 +1201,38 @@ function buildSecretSettings() {
       "itch-api-key",
     ],
     warnings: [],
+    ...overrides,
+  };
+}
+
+function buildItchSecretCredential({
+  credential_id,
+  message,
+  missing_required_keys,
+  name,
+  status,
+  top_level_keys,
+}: {
+  credential_id: number;
+  message: string;
+  missing_required_keys: string[];
+  name: string;
+  status: string;
+  top_level_keys: string[];
+}) {
+  return {
+    config_summary: {
+      message,
+      missing_required_keys,
+      status,
+      top_level_keys,
+    },
+    created_at: "2026-05-19T00:00:00Z",
+    credential_id,
+    kind: "itch-api-key",
+    name,
+    storage_model: "sqlite-config-json-and-keyring-references",
+    updated_at: "2026-05-19T00:00:00Z",
   };
 }
 
@@ -1147,7 +1273,6 @@ function buildItchPublishTarget({
     config_json: JSON.stringify({
       account_name: "indiegabo",
       game_slug: gameSlug,
-      butler_path: "C:/tools/butler.exe",
     }),
     credentials: {
       config_message: "Itch API key is present.",

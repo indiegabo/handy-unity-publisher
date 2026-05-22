@@ -2,14 +2,21 @@ import { useState, type ReactElement } from "react";
 
 import { Button, IconButton } from "./Button";
 import { SelectField, TextField, type SelectOption } from "./Field";
+import FullScreenModal from "./FullScreenModal";
 import { useOverlay } from "./OverlayManager";
 import { PathPickerField } from "./PathPickerField";
+import { RepositoryCredentialComposer } from "./RepositoryCredentialComposer";
 import SelectListFullScreen, {
   type SelectListItem,
 } from "./SelectListFullScreen";
-import { Badge, MetaItem, MetaRow, SummaryStrip, SurfacePanel } from "./Surface";
+import {
+  Badge,
+  MetaItem,
+  MetaRow,
+  SummaryStrip,
+  SurfacePanel,
+} from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
-import CredentialComposerModal from "./forms/CredentialComposerModal";
 import type {
   CreateRepositoryProjectPublishTargetInput,
   RepositoryPublishTargetInspection,
@@ -45,7 +52,6 @@ export type PublishDestinationDraft = {
   enabled: boolean;
   itchAccountName: string;
   itchGameSlug: string;
-  itchButlerPath: string;
   credentialsId: number | null;
   bindings: PublishDestinationBindingDraft[];
 };
@@ -61,7 +67,6 @@ export type PublishDestinationDraftErrors = {
   credentialsId?: string;
   itchAccountName?: string;
   itchGameSlug?: string;
-  itchButlerPath?: string;
   bindingsRoot?: string;
   bindings: Record<string, PublishDestinationBindingErrors>;
 };
@@ -78,20 +83,23 @@ export type PublishDestinationReviewSummary = {
   enabled: boolean;
   bindingTargetNames: string[];
   missingCredential: boolean;
-  usesHostTransportProbe: boolean;
 };
+
+export type PublishDestinationEditingMode = "inline" | "overlay";
+export type PublishCredentialSaveResult = number | null | void;
 
 type PublishDestinationsEditorProps = {
   buildTargets: ProjectBuildTargetReference[];
   credentials: SecretCredentialSetting[];
   destinations: PublishDestinationDraft[];
   disabled?: boolean;
+  editingMode?: PublishDestinationEditingMode;
   errors?: PublishDestinationValidationErrors;
   onChange: (next: PublishDestinationDraft[]) => void;
   onSaveCredential?: (
     destinationId: string,
     input: SaveSecretCredentialInput,
-  ) => Promise<void> | void;
+  ) => Promise<PublishCredentialSaveResult> | PublishCredentialSaveResult;
 };
 
 const DESTINATION_STATUS_OPTIONS = [
@@ -110,6 +118,7 @@ export function PublishDestinationsEditor({
   credentials,
   destinations,
   disabled = false,
+  editingMode = "inline",
   errors,
   onChange,
   onSaveCredential,
@@ -120,6 +129,9 @@ export function PublishDestinationsEditor({
     useState<string | null>(null);
   const [pendingBindingTargetSelections, setPendingBindingTargetSelections] =
     useState<Record<string, string>>({});
+  const availableDestinationKinds = listPublishDestinationKinds().filter(
+    (kind) => !destinations.some((destination) => destination.kind === kind),
+  );
 
   const handleAddDestination = (kind: PublishDestinationKind) => {
     if (destinations.some((destination) => destination.kind === kind)) {
@@ -207,12 +219,75 @@ export function PublishDestinationsEditor({
       return;
     }
 
-    await openOverlay<SaveSecretCredentialInput>(CredentialComposerModal, {
-      onSubmit: (input: SaveSecretCredentialInput) =>
-        onSaveCredential(destinationId, input),
-      providerLabel: "Itch.io",
-      scope: "publish",
+    await openOverlay<number>(PublishCredentialComposerOverlay, {
+      destinationId,
+      onSubmit: onSaveCredential,
     });
+  };
+
+  const handleOpenDestinationCreateOverlay = async (
+    kind: PublishDestinationKind,
+  ) => {
+    if (disabled || !availableDestinationKinds.includes(kind)) {
+      return;
+    }
+
+    setShowDestinationMenu(false);
+
+    const createdDestination = await openOverlay<PublishDestinationDraft>(
+      PublishDestinationEditorOverlay,
+      {
+        buildTargets,
+        credentials,
+        existingDestinations: destinations,
+        initialDestination: createEmptyPublishDestinationDraft(kind),
+        mode: "create",
+        onSaveCredential,
+      },
+    );
+
+    if (!createdDestination) {
+      return;
+    }
+
+    onChange([...destinations, createdDestination]);
+  };
+
+  const handleOpenDestinationEditOverlay = async (destinationId: string) => {
+    if (disabled) {
+      return;
+    }
+
+    const currentDestination = destinations.find(
+      (destination) => destination.id === destinationId,
+    );
+    if (!currentDestination) {
+      return;
+    }
+
+    const updatedDestination = await openOverlay<PublishDestinationDraft>(
+      PublishDestinationEditorOverlay,
+      {
+        buildTargets,
+        credentials,
+        existingDestinations: destinations.filter(
+          (destination) => destination.id !== destinationId,
+        ),
+        initialDestination: clonePublishDestinationDraft(currentDestination),
+        mode: "edit",
+        onSaveCredential,
+      },
+    );
+
+    if (!updatedDestination) {
+      return;
+    }
+
+    onChange(
+      destinations.map((destination) =>
+        destination.id === destinationId ? updatedDestination : destination,
+      ),
+    );
   };
 
   const handleAddBinding = (destinationId: string) => {
@@ -292,42 +367,83 @@ export function PublishDestinationsEditor({
   return (
     <div className="project-detail-target-list">
       <div className="publish-destination-toolbar">
-        <div className="publish-destination-menu">
-          <Button
-            disabled={disabled}
-            leadingIcon="plus"
-            onClick={() => setShowDestinationMenu((current) => !current)}
-            size="sm"
-            variant="secondary"
-          >
-            Add destination
-          </Button>
-          {showDestinationMenu ? (
-            <div
-              aria-label="Destination list"
-              className="publish-destination-menu__popover"
-              role="menu"
+        {editingMode === "overlay" ? (
+          <div className="publish-destination-menu">
+            <Button
+              disabled={disabled || availableDestinationKinds.length === 0}
+              leadingIcon="plus"
+              onClick={() => setShowDestinationMenu((current) => !current)}
+              size="sm"
+              variant="secondary"
             >
-              {listPublishDestinationKinds().map((kind) => {
-                const alreadyAdded = destinations.some(
-                  (destination) => destination.kind === kind,
-                );
+              Add destination
+            </Button>
+            {showDestinationMenu ? (
+              <div
+                aria-label="Destination list"
+                className="publish-destination-menu__popover"
+                role="menu"
+              >
+                {listPublishDestinationKinds().map((kind) => {
+                  const alreadyAdded = destinations.some(
+                    (destination) => destination.kind === kind,
+                  );
 
-                return (
-                  <button
-                    className="publish-destination-menu__item"
-                    disabled={disabled || alreadyAdded}
-                    key={kind}
-                    onClick={() => handleAddDestination(kind)}
-                    type="button"
-                  >
-                    {formatPublishDestinationKindLabel(kind)}
-                  </button>
-                );
-              })}
-            </div>
-          ) : null}
-        </div>
+                  return (
+                    <button
+                      className="publish-destination-menu__item"
+                      disabled={disabled || alreadyAdded}
+                      key={kind}
+                      onClick={() => {
+                        void handleOpenDestinationCreateOverlay(kind);
+                      }}
+                      type="button"
+                    >
+                      {formatPublishDestinationKindLabel(kind)}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <div className="publish-destination-menu">
+            <Button
+              disabled={disabled}
+              leadingIcon="plus"
+              onClick={() => setShowDestinationMenu((current) => !current)}
+              size="sm"
+              variant="secondary"
+            >
+              Add destination
+            </Button>
+            {showDestinationMenu ? (
+              <div
+                aria-label="Destination list"
+                className="publish-destination-menu__popover"
+                role="menu"
+              >
+                {listPublishDestinationKinds().map((kind) => {
+                  const alreadyAdded = destinations.some(
+                    (destination) => destination.kind === kind,
+                  );
+
+                  return (
+                    <button
+                      className="publish-destination-menu__item"
+                      disabled={disabled || alreadyAdded}
+                      key={kind}
+                      onClick={() => handleAddDestination(kind)}
+                      type="button"
+                    >
+                      {formatPublishDestinationKindLabel(kind)}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+        )}
       </div>
 
       {errors?.root ? (
@@ -396,6 +512,76 @@ export function PublishDestinationsEditor({
         const adapter = getPublishDestinationAdapter(destination.kind);
         const AdapterComponent = adapter.Component;
 
+        if (editingMode === "overlay") {
+          const destinationErrorPreview =
+            formatPublishDestinationErrorPreview(destinationErrors);
+
+          return (
+            <SurfacePanel
+              actions={
+                <div className="publish-destination-quick-view__actions">
+                  <Button
+                    disabled={disabled}
+                    onClick={() => {
+                      void handleOpenDestinationEditOverlay(destination.id);
+                    }}
+                    size="sm"
+                    variant="ghost"
+                  >
+                    Edit
+                  </Button>
+                  <Button
+                    disabled={disabled}
+                    leadingIcon="trash"
+                    onClick={() =>
+                      handleDestinationRemovalRequest(destination.id)
+                    }
+                    size="sm"
+                    variant="ghost"
+                  >
+                    Remove
+                  </Button>
+                </div>
+              }
+              className="publish-destination-quick-view"
+              key={destination.id}
+              summary={
+                <MetaRow className="wizard-target-card__summary">
+                  <MetaItem label="Status">
+                    {destination.enabled ? "Enabled" : "Disabled"}
+                  </MetaItem>
+                  <MetaItem label="Bindings">
+                    {formatPublishDestinationBindingCount(
+                      bindingTargetNames.length,
+                    )}
+                  </MetaItem>
+                  <MetaItem label="Targets">
+                    {formatPublishDestinationBindingPreview(bindingTargetNames)}
+                  </MetaItem>
+                  <MetaItem
+                    label={destination.kind === "itch" ? "Credential" : "Mode"}
+                  >
+                    {formatPublishDestinationOperationalSummary(destination)}
+                  </MetaItem>
+                </MetaRow>
+              }
+              title={formatPublishDestinationTitle(destination)}
+              tone="inset"
+            >
+              {destinationErrorPreview ? (
+                <p className="ui-field__error">{destinationErrorPreview}</p>
+              ) : (
+                <p className="project-detail-target-card__copy project-detail-target-card__copy--muted">
+                  {buildPublishDestinationQuickViewCopy(
+                    destination,
+                    bindingTargetNames,
+                  )}
+                </p>
+              )}
+            </SurfacePanel>
+          );
+        }
+
         return (
           <VerticalAccordion
             bodyClassName="wizard-target-card__body"
@@ -436,10 +622,14 @@ export function PublishDestinationsEditor({
                       )}
                     </MetaItem>
                     <MetaItem label="Targets">
-                      {formatPublishDestinationBindingPreview(bindingTargetNames)}
+                      {formatPublishDestinationBindingPreview(
+                        bindingTargetNames,
+                      )}
                     </MetaItem>
                     <MetaItem
-                      label={destination.kind === "itch" ? "Credential" : "Mode"}
+                      label={
+                        destination.kind === "itch" ? "Credential" : "Mode"
+                      }
                     >
                       {formatPublishDestinationOperationalSummary(destination)}
                     </MetaItem>
@@ -478,11 +668,267 @@ export function PublishDestinationsEditor({
                 handleRemoveBinding(destination.id, bindingId)
               }
               pendingBindingTargetId={pendingBindingTargetId}
+              showDestinationStatus
             />
           </VerticalAccordion>
         );
       })}
     </div>
+  );
+}
+
+type PublishDestinationEditorMode = "create" | "edit";
+
+type PublishDestinationEditorOverlayProps = {
+  buildTargets: ProjectBuildTargetReference[];
+  credentials: SecretCredentialSetting[];
+  existingDestinations: PublishDestinationDraft[];
+  initialDestination: PublishDestinationDraft;
+  mode: PublishDestinationEditorMode;
+  onResolve?: (value?: PublishDestinationDraft | null) => void;
+  onSaveCredential?: (
+    destinationId: string,
+    input: SaveSecretCredentialInput,
+  ) => Promise<PublishCredentialSaveResult> | PublishCredentialSaveResult;
+};
+
+function PublishDestinationEditorOverlay({
+  buildTargets,
+  credentials,
+  existingDestinations,
+  initialDestination,
+  mode,
+  onResolve,
+  onSaveCredential,
+}: PublishDestinationEditorOverlayProps) {
+  const { openOverlay } = useOverlay();
+  const [draft, setDraft] = useState(() =>
+    clonePublishDestinationDraft(initialDestination),
+  );
+  const [pendingBindingTargetSelection, setPendingBindingTargetSelection] =
+    useState("");
+  const [attemptedSave, setAttemptedSave] = useState(false);
+  const validationErrors = validatePublishDestinationDrafts(
+    [...existingDestinations, draft],
+    buildTargets,
+  );
+  const destinationErrors = attemptedSave
+    ? (validationErrors.destinations[draft.id] ??
+      createEmptyPublishDestinationErrors())
+    : createEmptyPublishDestinationErrors();
+  const pendingBindingTargetId = resolvePendingBindingTargetId(
+    draft,
+    buildTargets,
+    pendingBindingTargetSelection,
+  );
+  const adapter = getPublishDestinationAdapter(draft.kind);
+  const AdapterComponent = adapter.Component;
+  const isCreateMode = mode === "create";
+
+  const handleDestinationChange = (patch: Partial<PublishDestinationDraft>) => {
+    setDraft((current) => {
+      const nextDraft = {
+        ...current,
+        ...patch,
+      };
+
+      if (patch.kind) {
+        nextDraft.name = derivePublishDestinationName(patch.kind);
+      }
+
+      if (patch.kind === "filesystem") {
+        nextDraft.credentialsId = null;
+      }
+
+      return nextDraft;
+    });
+  };
+
+  const handleBindingChange = (
+    bindingId: string,
+    patch: Partial<PublishDestinationBindingDraft>,
+  ) => {
+    setDraft((current) => ({
+      ...current,
+      bindings: current.bindings.map((binding) =>
+        binding.id === bindingId ? { ...binding, ...patch } : binding,
+      ),
+    }));
+  };
+
+  const handleAddBinding = () => {
+    const selectedTarget = buildTargets.find(
+      (target) => target.id === pendingBindingTargetId,
+    );
+    if (!selectedTarget) {
+      return;
+    }
+
+    if (
+      draft.bindings.some(
+        (binding) => binding.buildTargetDraftId === selectedTarget.id,
+      )
+    ) {
+      return;
+    }
+
+    setDraft((current) => ({
+      ...current,
+      bindings: [
+        ...current.bindings,
+        createEmptyPublishDestinationBindingDraft(selectedTarget),
+      ],
+    }));
+    setPendingBindingTargetSelection("");
+  };
+
+  const handleRemoveBinding = (bindingId: string) => {
+    setDraft((current) => ({
+      ...current,
+      bindings: current.bindings.filter((binding) => binding.id !== bindingId),
+    }));
+  };
+
+  const handleOpenCredentialComposer = async () => {
+    if (!onSaveCredential) {
+      return;
+    }
+
+    const createdCredentialId = await openOverlay<number>(
+      PublishCredentialComposerOverlay,
+      {
+        destinationId: draft.id,
+        onSubmit: onSaveCredential,
+      },
+    );
+
+    if (typeof createdCredentialId === "number") {
+      setDraft((current) => ({
+        ...current,
+        credentialsId: createdCredentialId,
+      }));
+    }
+  };
+
+  const handleSave = () => {
+    setAttemptedSave(true);
+
+    if (hasPublishDestinationValidationErrors(validationErrors)) {
+      return;
+    }
+
+    onResolve?.(draft);
+  };
+
+  return (
+    <FullScreenModal
+      className="publish-destination-editor-modal"
+      description={
+        isCreateMode
+          ? undefined
+          : "Update the selected publish destination and return to the wizard when its delivery rules are ready."
+      }
+      footer={
+        <div className="publish-destination-editor-modal__footer">
+          <Button onClick={() => onResolve?.(null)} size="sm" variant="ghost">
+            Cancel
+          </Button>
+          <Button
+            leadingIcon="plus"
+            onClick={handleSave}
+            size="sm"
+            variant="primary"
+          >
+            {isCreateMode ? "Add destination" : "Save destination"}
+          </Button>
+        </div>
+      }
+      onResolve={onResolve}
+      title={
+        isCreateMode
+          ? `Add ${formatPublishDestinationKindLabel(draft.kind)} destination`
+          : `Edit ${formatPublishDestinationKindLabel(draft.kind)} destination`
+      }
+    >
+      {attemptedSave && validationErrors.root ? (
+        <p className="feed-banner feed-banner--error">
+          {validationErrors.root}
+        </p>
+      ) : null}
+
+      <div className="project-detail-form-grid publish-destination-editor-modal__content">
+        <AdapterComponent
+          buildTargets={buildTargets}
+          credentials={credentials}
+          destination={draft}
+          destinationErrors={destinationErrors}
+          disabled={false}
+          onAddBinding={handleAddBinding}
+          onBindingChange={handleBindingChange}
+          onDestinationChange={handleDestinationChange}
+          onOpenCredentialComposer={() => {
+            void handleOpenCredentialComposer();
+          }}
+          onPendingBindingTargetChange={setPendingBindingTargetSelection}
+          onRemoveBinding={handleRemoveBinding}
+          pendingBindingTargetId={pendingBindingTargetId}
+          showDestinationStatus={!isCreateMode}
+        />
+      </div>
+    </FullScreenModal>
+  );
+}
+
+type PublishCredentialComposerOverlayProps = {
+  destinationId: string;
+  onResolve?: (value?: number | null) => void;
+  onSubmit?: (
+    destinationId: string,
+    input: SaveSecretCredentialInput,
+  ) => Promise<PublishCredentialSaveResult> | PublishCredentialSaveResult;
+};
+
+function PublishCredentialComposerOverlay({
+  destinationId,
+  onResolve,
+  onSubmit,
+}: PublishCredentialComposerOverlayProps) {
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const handleSave = async (input: SaveSecretCredentialInput) => {
+    setIsSaving(true);
+    setSaveError(null);
+
+    try {
+      const createdCredentialId = await onSubmit?.(destinationId, input);
+      onResolve?.(
+        typeof createdCredentialId === "number" ? createdCredentialId : null,
+      );
+    } catch (error) {
+      setSaveError(buildPublishCredentialComposerErrorMessage(error));
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <FullScreenModal
+      description="Create one reusable Itch.io credential and bind it to the selected publish destination."
+      dismissible={!isSaving}
+      onResolve={onResolve}
+      title="New publish credential"
+    >
+      <RepositoryCredentialComposer
+        isSaving={isSaving}
+        onCancel={() => onResolve?.(null)}
+        onSave={handleSave}
+        providerLabel="Itch.io"
+        renderSurface={false}
+        saveError={saveError}
+        scope="publish"
+      />
+    </FullScreenModal>
   );
 }
 
@@ -502,6 +948,7 @@ type PublishDestinationAdapterComponentProps = {
   onPendingBindingTargetChange: (nextTargetId: string) => void;
   onRemoveBinding: (bindingId: string) => void;
   pendingBindingTargetId: string;
+  showDestinationStatus: boolean;
 };
 
 type PublishDestinationAdapterDefinition = {
@@ -518,7 +965,9 @@ type PublishDestinationBindingFieldRendererProps = {
 };
 
 type PublishDestinationBindingsSectionProps = {
+  autoFocusTargetSelector?: boolean;
   buildTargets: ProjectBuildTargetReference[];
+  description?: string;
   destination: PublishDestinationDraft;
   destinationErrors: PublishDestinationDraftErrors;
   disabled: boolean;
@@ -533,6 +982,8 @@ type PublishDestinationBindingsSectionProps = {
   renderBindingFields: (
     props: PublishDestinationBindingFieldRendererProps,
   ) => ReactElement;
+  showBindingStatus?: boolean;
+  title?: string;
 };
 
 function FilesystemPublishDestinationAdapter({
@@ -546,30 +997,35 @@ function FilesystemPublishDestinationAdapter({
   onPendingBindingTargetChange,
   onRemoveBinding,
   pendingBindingTargetId,
+  showDestinationStatus,
 }: PublishDestinationAdapterComponentProps) {
   return (
     <>
-      <SurfacePanel
-        bodyClassName="wizard-form-grid"
-        className="project-detail-form-grid__span-full"
-        description="Configure the lifecycle state for this filesystem publish destination. Bound target paths stay with each individual binding."
-        headerSeparated
-        title="Destination identity"
-        tone="inset"
-      >
-        <SelectField
-          label="Status"
-          onChange={(event) =>
-            onDestinationChange({
-              enabled: event.currentTarget.value === "enabled",
-            })
-          }
-          options={DESTINATION_STATUS_OPTIONS}
-          value={destination.enabled ? "enabled" : "disabled"}
-        />
-      </SurfacePanel>
+      {showDestinationStatus ? (
+        <SurfacePanel
+          bodyClassName="wizard-form-grid"
+          className="project-detail-form-grid__span-full"
+          description="Configure the lifecycle state for this filesystem publish destination. Bound target paths stay with each individual binding."
+          headerSeparated
+          title="Destination identity"
+          tone="inset"
+        >
+          <SelectField
+            data-overlay-autofocus
+            label="Status"
+            onChange={(event) =>
+              onDestinationChange({
+                enabled: event.currentTarget.value === "enabled",
+              })
+            }
+            options={DESTINATION_STATUS_OPTIONS}
+            value={destination.enabled ? "enabled" : "disabled"}
+          />
+        </SurfacePanel>
+      ) : null}
 
       <PublishDestinationBindingsSection
+        autoFocusTargetSelector={!showDestinationStatus}
         buildTargets={buildTargets}
         destination={destination}
         destinationErrors={destinationErrors}
@@ -602,6 +1058,7 @@ function FilesystemPublishDestinationAdapter({
             value={binding.filesystemDirectoryPath}
           />
         )}
+        showBindingStatus={showDestinationStatus}
       />
     </>
   );
@@ -620,34 +1077,44 @@ function ItchPublishDestinationAdapter({
   onPendingBindingTargetChange,
   onRemoveBinding,
   pendingBindingTargetId,
+  showDestinationStatus,
 }: PublishDestinationAdapterComponentProps) {
   const publishCredentialOptions = buildPublishCredentialOptions(
     credentials,
     destination.credentialsId,
   );
+  const showExpandedCopy = showDestinationStatus;
 
   return (
     <>
       <SurfacePanel
         bodyClassName="wizard-form-grid"
         className="project-detail-form-grid__span-full"
-        description="Define the operator-facing identity and host executable path for this Itch publish destination."
+        description={
+          showExpandedCopy
+            ? "Define the operator-facing identity and upload settings for this Itch publish destination."
+            : undefined
+        }
         headerSeparated
-        title="Destination identity"
+        title={showExpandedCopy ? "Destination identity" : "Destination"}
         tone="inset"
       >
-        <SelectField
-          label="Status"
-          onChange={(event) =>
-            onDestinationChange({
-              enabled: event.currentTarget.value === "enabled",
-            })
-          }
-          options={DESTINATION_STATUS_OPTIONS}
-          value={destination.enabled ? "enabled" : "disabled"}
-        />
+        {showDestinationStatus ? (
+          <SelectField
+            data-overlay-autofocus
+            label="Status"
+            onChange={(event) =>
+              onDestinationChange({
+                enabled: event.currentTarget.value === "enabled",
+              })
+            }
+            options={DESTINATION_STATUS_OPTIONS}
+            value={destination.enabled ? "enabled" : "disabled"}
+          />
+        ) : null}
 
         <TextField
+          data-overlay-autofocus={!showDestinationStatus}
           error={destinationErrors.itchAccountName}
           label="Itch account name"
           onChange={(event) =>
@@ -670,34 +1137,6 @@ function ItchPublishDestinationAdapter({
           placeholder="revolutions"
           value={destination.itchGameSlug}
         />
-
-        <PathPickerField
-          buttonLabel="Pick butler"
-          clearLabel="Reset"
-          clearable
-          dialogTitle="Select butler executable"
-          disabled={disabled}
-          error={destinationErrors.itchButlerPath}
-          filters={[
-            {
-              name: "Butler",
-              extensions: ["exe", "cmd", "bat", "sh"],
-            },
-          ]}
-          label="Butler executable"
-          onClear={() =>
-            onDestinationChange({
-              itchButlerPath: "",
-            })
-          }
-          onPathPicked={(path) =>
-            onDestinationChange({
-              itchButlerPath: path,
-            })
-          }
-          pickerKind="file"
-          value={destination.itchButlerPath}
-        />
       </SurfacePanel>
 
       <SurfacePanel
@@ -715,9 +1154,13 @@ function ItchPublishDestinationAdapter({
           ) : null
         }
         className="project-detail-form-grid__span-full"
-        description="Choose the stored publish credential that should back Butler uploads for this destination."
+        description={
+          showExpandedCopy
+            ? "Choose the stored publish credential that should back Butler uploads for this destination."
+            : undefined
+        }
         headerSeparated
-        title="Credential state"
+        title={showExpandedCopy ? "Credential state" : "Access"}
         tone="inset"
       >
         <SelectField
@@ -737,6 +1180,11 @@ function ItchPublishDestinationAdapter({
 
       <PublishDestinationBindingsSection
         buildTargets={buildTargets}
+        description={
+          showExpandedCopy
+            ? "Bind build targets to this destination and configure the per-target delivery fields each binding requires."
+            : undefined
+        }
         destination={destination}
         destinationErrors={destinationErrors}
         disabled={disabled}
@@ -753,7 +1201,11 @@ function ItchPublishDestinationAdapter({
           <>
             <TextField
               error={bindingErrors.itchChannel}
-              hint="Use the Itch channel that should receive this build target artifact."
+              hint={
+                showExpandedCopy
+                  ? "Use the Itch channel that should receive this build target artifact."
+                  : undefined
+              }
               label="Itch channel"
               onChange={(event) =>
                 handleBindingFieldChange({
@@ -764,7 +1216,11 @@ function ItchPublishDestinationAdapter({
             />
 
             <TextField
-              hint="Optional template. Leave empty to use the git tag as the userversion."
+              hint={
+                showExpandedCopy
+                  ? "Optional template. Leave empty to use the git tag as the userversion."
+                  : undefined
+              }
               label="Itch userversion template"
               onChange={(event) =>
                 handleBindingFieldChange({
@@ -776,13 +1232,16 @@ function ItchPublishDestinationAdapter({
             />
           </>
         )}
+        showBindingStatus={showDestinationStatus}
       />
     </>
   );
 }
 
 function PublishDestinationBindingsSection({
+  autoFocusTargetSelector = false,
   buildTargets,
+  description,
   destination,
   destinationErrors,
   disabled,
@@ -792,6 +1251,8 @@ function PublishDestinationBindingsSection({
   onRemoveBinding,
   pendingBindingTargetId,
   renderBindingFields,
+  showBindingStatus = true,
+  title = "Target bindings",
 }: PublishDestinationBindingsSectionProps) {
   const { openOverlay } = useOverlay();
   const availableBindingTargets = buildTargets.filter(
@@ -803,6 +1264,7 @@ function PublishDestinationBindingsSection({
   const pendingBindingTarget = availableBindingTargets.find(
     (target) => target.id === pendingBindingTargetId,
   );
+  const hasAvailableBindingTargets = availableBindingTargets.length > 0;
   const shouldUseBindingSelectorOverlay =
     availableBindingTargets.length >= BINDING_SELECTOR_OVERLAY_THRESHOLD;
 
@@ -830,17 +1292,30 @@ function PublishDestinationBindingsSection({
     <SurfacePanel
       bodyClassName="wizard-form-grid"
       className="project-detail-form-grid__span-full"
-      description="Bind build targets to this destination and configure the per-target delivery fields each binding requires."
+      description={description}
       headerSeparated
-      title="Target bindings"
+      title={title}
       tone="inset"
     >
       <div className="project-detail-form-grid__span-full">
         <div className="project-detail-target-card">
-          <div className="wizard-callout__actions">
-            {shouldUseBindingSelectorOverlay ? (
+          <div className="publish-destination-bindings-toolbar">
+            {!hasAvailableBindingTargets ? (
+              <div
+                aria-live="polite"
+                className="publish-destination-bindings-toolbar__empty-state"
+                role="status"
+              >
+                <span className="ui-field__label">Target</span>
+                <div className="publish-destination-bindings-toolbar__empty-value">
+                  No unbound build targets available.
+                </div>
+              </div>
+            ) : shouldUseBindingSelectorOverlay ? (
               <Button
-                disabled={disabled || availableBindingTargets.length === 0}
+                className="publish-destination-bindings-toolbar__selector-button"
+                data-overlay-autofocus={autoFocusTargetSelector}
+                disabled={disabled}
                 leadingIcon="search"
                 onClick={() => {
                   void handleOpenBindingTargetSelector();
@@ -854,7 +1329,9 @@ function PublishDestinationBindingsSection({
               </Button>
             ) : (
               <SelectField
-                disabled={disabled || availableBindingTargets.length === 0}
+                className="publish-destination-bindings-toolbar__selector"
+                data-overlay-autofocus={autoFocusTargetSelector}
+                disabled={disabled}
                 label="Target"
                 onChange={(event) =>
                   onPendingBindingTargetChange(event.currentTarget.value)
@@ -863,19 +1340,18 @@ function PublishDestinationBindingsSection({
                 value={pendingBindingTargetId}
               />
             )}
-            <Button
-              disabled={
-                disabled ||
-                availableBindingTargets.length === 0 ||
-                !pendingBindingTargetId
-              }
-              leadingIcon="plus"
-              onClick={onAddBinding}
-              size="sm"
-              variant="secondary"
-            >
-              Add target
-            </Button>
+            {hasAvailableBindingTargets ? (
+              <Button
+                className="publish-destination-bindings-toolbar__add"
+                disabled={disabled || !pendingBindingTargetId}
+                leadingIcon="plus"
+                onClick={onAddBinding}
+                size="sm"
+                variant="secondary"
+              >
+                Add target
+              </Button>
+            ) : null}
           </div>
 
           {destinationErrors.bindingsRoot ? (
@@ -901,39 +1377,39 @@ function PublishDestinationBindingsSection({
 
               return (
                 <div className="project-detail-target-card" key={binding.id}>
-                  <div className="project-detail-target-card__header">
-                    <div className="project-detail-target-card__title-block">
+                  <div className="publish-destination-binding-card__header">
+                    <div className="publish-destination-binding-card__title-block">
                       <h4 className="project-detail-target-card__title">
                         {buildTarget?.name || binding.buildTargetName}
                       </h4>
                     </div>
 
-                    <div className="project-detail-target-card__badges">
-                      <IconButton
-                        className="wizard-target-card__remove"
-                        disabled={disabled}
-                        icon="trash"
-                        label={`Remove binding for ${
-                          buildTarget?.name || binding.buildTargetName
-                        }`}
-                        onClick={() => onRemoveBinding(binding.id)}
-                        size="sm"
-                        variant="ghost"
-                      />
-                    </div>
+                    <IconButton
+                      className="publish-destination-binding-card__remove"
+                      disabled={disabled}
+                      icon="trash"
+                      label={`Remove binding for ${
+                        buildTarget?.name || binding.buildTargetName
+                      }`}
+                      onClick={() => onRemoveBinding(binding.id)}
+                      size="sm"
+                      variant="ghost"
+                    />
                   </div>
 
                   <div className="wizard-form-grid">
-                    <SelectField
-                      label="Status"
-                      onChange={(event) =>
-                        onBindingChange(binding.id, {
-                          enabled: event.currentTarget.value === "enabled",
-                        })
-                      }
-                      options={BINDING_STATUS_OPTIONS}
-                      value={binding.enabled ? "enabled" : "disabled"}
-                    />
+                    {showBindingStatus ? (
+                      <SelectField
+                        label="Status"
+                        onChange={(event) =>
+                          onBindingChange(binding.id, {
+                            enabled: event.currentTarget.value === "enabled",
+                          })
+                        }
+                        options={BINDING_STATUS_OPTIONS}
+                        value={binding.enabled ? "enabled" : "disabled"}
+                      />
+                    ) : null}
 
                     {renderBindingFields({
                       binding,
@@ -964,7 +1440,6 @@ export function createEmptyPublishDestinationDraft(
     enabled: true,
     itchAccountName: "",
     itchGameSlug: "",
-    itchButlerPath: "",
     credentialsId: null,
     bindings: [],
   };
@@ -987,7 +1462,6 @@ export function buildPublishDestinationDrafts(
       enabled: publishTarget.enabled,
       itchAccountName: readJsonStringField(config, "account_name") || "",
       itchGameSlug: readJsonStringField(config, "game_slug") || "",
-      itchButlerPath: readJsonStringField(config, "butler_path") || "",
       credentialsId: publishTarget.credentials?.credential_id ?? null,
       bindings: publishTarget.bindings.map((binding) => {
         const target = buildTargets.find(
@@ -1062,13 +1536,6 @@ export function validatePublishDestinationDrafts(
       }
       if (!destination.itchGameSlug.trim()) {
         destinationErrors.itchGameSlug = "Itch game slug is required.";
-      }
-      if (
-        destination.itchButlerPath.trim() &&
-        !looksLikeAbsolutePath(destination.itchButlerPath)
-      ) {
-        destinationErrors.itchButlerPath =
-          "Butler path must be absolute when provided.";
       }
     }
 
@@ -1291,8 +1758,6 @@ export function buildPublishDestinationReviewSummary(
       ),
       missingCredential:
         destination.kind === "itch" && destination.credentialsId === null,
-      usesHostTransportProbe:
-        destination.kind === "itch" && !destination.itchButlerPath.trim(),
     };
   });
 }
@@ -1372,8 +1837,14 @@ function buildPublishCredentialOptions(
       (credential) => credential.credential_id === selectedCredentialId,
     )
   ) {
+    const selectedCredential = credentials.find(
+      (credential) => credential.credential_id === selectedCredentialId,
+    );
+
     options.push({
-      label: `Current credential #${selectedCredentialId}`,
+      label:
+        selectedCredential?.name ||
+        `Current credential #${selectedCredentialId}`,
       value: selectedCredentialId.toString(),
     });
   }
@@ -1390,9 +1861,6 @@ function buildPublishTargetConfig(destination: PublishDestinationDraft) {
     account_name: destination.itchAccountName.trim(),
     game_slug: destination.itchGameSlug.trim(),
   };
-  if (destination.itchButlerPath.trim()) {
-    config.butler_path = destination.itchButlerPath.trim();
-  }
   return config;
 }
 
@@ -1491,12 +1959,93 @@ function formatPublishDestinationOperationalSummary(
   return destination.credentialsId === null ? "Missing" : "Configured";
 }
 
+function buildPublishDestinationQuickViewCopy(
+  destination: PublishDestinationDraft,
+  bindingTargetNames: string[],
+) {
+  if (destination.kind === "filesystem") {
+    return bindingTargetNames.length === 0
+      ? "No build targets are currently bound to this folder destination."
+      : "Artifacts will move into the configured folder for each bound build target.";
+  }
+
+  return destination.credentialsId === null
+    ? "Select a publish credential before this Itch destination can upload bound targets."
+    : "Bound targets will upload to Itch with the selected credential and per-target channels.";
+}
+
+function formatPublishDestinationErrorPreview(
+  errors: PublishDestinationDraftErrors,
+) {
+  const messages = collectPublishDestinationErrorMessages(errors);
+
+  if (messages.length === 0) {
+    return null;
+  }
+
+  if (messages.length === 1) {
+    return messages[0];
+  }
+
+  return `${messages[0]} +${messages.length - 1} more`;
+}
+
+function collectPublishDestinationErrorMessages(
+  errors: PublishDestinationDraftErrors,
+) {
+  const messages: string[] = [];
+
+  for (const candidate of [
+    errors.credentialsId,
+    errors.itchAccountName,
+    errors.itchGameSlug,
+    errors.bindingsRoot,
+  ]) {
+    if (candidate) {
+      messages.push(candidate);
+    }
+  }
+
+  for (const bindingErrors of Object.values(errors.bindings)) {
+    for (const candidate of [
+      bindingErrors.buildTarget,
+      bindingErrors.filesystemDirectoryPath,
+      bindingErrors.itchChannel,
+    ]) {
+      if (candidate) {
+        messages.push(candidate);
+      }
+    }
+  }
+
+  return Array.from(new Set(messages));
+}
+
 function derivePublishDestinationName(kind: PublishDestinationKind) {
   return formatPublishDestinationKindLabel(kind);
 }
 
 function listPublishDestinationKinds(): PublishDestinationKind[] {
   return ["filesystem", "itch"];
+}
+
+function clonePublishDestinationDraft(destination: PublishDestinationDraft) {
+  return {
+    ...destination,
+    bindings: destination.bindings.map((binding) => ({ ...binding })),
+  };
+}
+
+function buildPublishCredentialComposerErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  if (typeof error === "string" && error.trim()) {
+    return error.trim();
+  }
+
+  return "The desktop shell could not save the credential.";
 }
 
 function getPublishDestinationAdapter(
@@ -1524,7 +2073,6 @@ function hasPublishDestinationDraftErrors(
     errors.credentialsId ||
     errors.itchAccountName ||
     errors.itchGameSlug ||
-    errors.itchButlerPath ||
     errors.bindingsRoot ||
     Object.values(errors.bindings).some((bindingErrors) =>
       hasPublishDestinationBindingErrors(bindingErrors),

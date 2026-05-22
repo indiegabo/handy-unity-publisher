@@ -22,7 +22,10 @@ import {
 } from "./PublishDestinationsEditor";
 import { SelectField, TextField, type SelectOption } from "./Field";
 import { PathPickerField } from "./PathPickerField";
-import { RepositoryEngineField } from "./RepositoryEngineField";
+import {
+  REPOSITORY_ENGINE_OPTIONS,
+  RepositoryEngineField,
+} from "./RepositoryEngineField";
 import {
   Badge,
   FocusPageFrame,
@@ -32,21 +35,23 @@ import {
 } from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
 import { type AuthProviderConnectionResult } from "./authProviderPresentation";
-import StepFlow from "./wizard/StepFlow";
 import {
   createRepositoryProject,
   detectRepositoryProvider,
   loadSecretSettings,
   loadRepositoryInspection,
+  loadUnityAdapterSettings,
   saveSecretCredential,
   validateUnityExecutablePath,
   type CreateRepositoryProjectInput,
+  type DiscoveredUnityEditor,
   type RepositoryAccessAssessment,
   type RepositoryEngineKind,
   type RepositoryProviderDetection,
   type SaveSecretCredentialInput,
   type RepositoryInspectionEntry,
   type SecretCredentialSetting,
+  type UnityAdapterSettings,
   type UnityExecutableValidation,
 } from "../services/projects";
 import {
@@ -69,7 +74,6 @@ export type ProjectDraft = {
   name: string;
   repositoryUrl: string;
   repositoryVisibility: "public" | "private";
-  defaultBranch: string;
   pollingIntervalSeconds: string;
   artifactsRootOverride: string;
   workspaceRootOverride: string;
@@ -110,7 +114,6 @@ export type CreateProjectWizardSnapshot = {
   pathDiagnostics: Record<string, UnityExecutableValidation | null>;
   pendingBuildTargetRemovalId: string | null;
   repositoryCredentialId: number | null;
-  reviewConfirmed: boolean;
   touchedFields: Record<string, boolean>;
 };
 
@@ -128,44 +131,40 @@ type CreateProjectWizardProps = {
 
 type ValidationTimerMap = Record<string, number | undefined>;
 
-const WIZARD_STEPS: Array<{
+type WizardStepDefinition = {
   key: WizardStepKey;
   label: string;
   description: string;
-}> = [
-  {
-    key: "identity",
-    label: "Identity",
-    description:
-      "Name the project first, then choose how HGP should register it.",
-  },
-  {
-    key: "access",
-    label: "Repository",
-    description: "Declare the remote, branch hints, and polling cadence.",
-  },
-  {
-    key: "targets",
-    label: "Build Targets",
-    description: "Compose the host-native Unity targets that HGP will execute.",
-  },
-  {
-    key: "publish",
-    label: "Publish Destinations",
-    description:
-      "Bind build targets to publish destinations and validate destination-specific policy before save.",
-  },
-  {
-    key: "paths",
-    label: "Paths",
-    description:
-      "Choose optional repository-specific artifact and workspace paths.",
-  },
-  {
-    key: "review",
-    label: "Review",
-    description: "Review the resulting project and finalize the registration.",
-  },
+};
+
+type ProjectSourceWizardAdapter = {
+  kind: "repository" | "local-unsupported";
+  stepLabel: string;
+  stepDescription: string;
+  supportTitle: string;
+  supportDescription: string;
+  supportCopy: string;
+  unsupportedMessage: string | null;
+};
+
+type BuildTargetWizardAdapter = {
+  kind: "unity" | "engine-unsupported";
+  stepLabel: string;
+  stepDescription: string;
+  supportTitle: string;
+  supportDescription: string;
+  supportCopy: string;
+  reviewDescription: string;
+  unsupportedMessage: string | null;
+};
+
+const WIZARD_STEP_ORDER: readonly WizardStepKey[] = [
+  "identity",
+  "access",
+  "targets",
+  "publish",
+  "paths",
+  "review",
 ];
 
 const PROJECT_KIND_OPTIONS = [
@@ -270,6 +269,13 @@ export function CreateProjectWizard({
     useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [unityAdapterSettings, setUnityAdapterSettings] =
+    useState<UnityAdapterSettings | null>(null);
+  const [isLoadingUnityAdapterSettings, setIsLoadingUnityAdapterSettings] =
+    useState(true);
+  const [unityAdapterSettingsError, setUnityAdapterSettingsError] = useState<
+    string | null
+  >(null);
   const [pathDiagnostics, setPathDiagnostics] = useState<
     Record<string, UnityExecutableValidation | null>
   >(() => ({
@@ -293,9 +299,6 @@ export function CreateProjectWizard({
   });
   const [pendingBuildTargetRemovalId, setPendingBuildTargetRemovalId] =
     useState<string | null>(initialSnapshot.pendingBuildTargetRemovalId);
-  const [reviewConfirmed, setReviewConfirmed] = useState(
-    initialSnapshot.reviewConfirmed,
-  );
   const nextBuildTargetIdRef = useRef(
     resolveNextBuildTargetIndex(initialSnapshot.draft.buildTargets),
   );
@@ -304,27 +307,44 @@ export function CreateProjectWizard({
   const accessAssessmentTimerRef = useRef<number | undefined>(undefined);
   const accessAssessmentTokenRef = useRef(0);
 
-  const currentStep = WIZARD_STEPS[currentStepIndex];
+  const projectSourceStepAdapter = resolveProjectSourceWizardAdapter(
+    draft.projectKind,
+  );
+  const buildTargetStepAdapter = resolveBuildTargetWizardAdapter(
+    draft.engineKind,
+    draft.projectKind,
+  );
+  const wizardSteps = buildWizardSteps(
+    projectSourceStepAdapter,
+    buildTargetStepAdapter,
+  );
+  const currentStep = wizardSteps[currentStepIndex];
   const currentStepNumber = currentStepIndex + 1;
   const showPreviousAction = currentStepIndex > 0;
   const showNextAction = currentStep.key !== "review";
   const identityErrors = validateIdentityStep(draft, repositoryInventory);
-  const accessErrors = validateAccessStep(draft, repositoryInventory, {
-    repositoryAccessAssessment,
-    isAssessingRepositoryAccess,
-    repositoryAccessError,
-    repositoryCredentialId,
-    githubAuthProvider,
-    isLoadingAuthProviders,
-    authProviderError,
-    isLoadingRepositoryCredentials,
-    repositoryCredentialsError,
-    repositoryCredentialCount: repositoryCredentials.length,
-  });
+  const accessErrors = validateAccessStep(
+    draft,
+    repositoryInventory,
+    {
+      repositoryAccessAssessment,
+      isAssessingRepositoryAccess,
+      repositoryAccessError,
+      repositoryCredentialId,
+      githubAuthProvider,
+      isLoadingAuthProviders,
+      authProviderError,
+      isLoadingRepositoryCredentials,
+      repositoryCredentialsError,
+      repositoryCredentialCount: repositoryCredentials.length,
+    },
+    projectSourceStepAdapter,
+  );
   const targetErrors = validateTargetsStep(
     draft,
     pathDiagnostics,
     validatingTargets,
+    buildTargetStepAdapter,
   );
   const buildTargetReferences: ProjectBuildTargetReference[] =
     draft.buildTargets.map((target) => ({
@@ -367,78 +387,8 @@ export function CreateProjectWizard({
     repositoryCredentialId,
     isLoadingRepositoryCredentials,
   );
-  const validatingTargetCount =
-    Object.values(validatingTargets).filter(Boolean).length;
-  const currentStepSummary =
-    currentStep.key === "identity" ? (
-      <MetaRow>
-        <MetaItem label="Name">
-          {draft.name.trim() || "Pending project name"}
-        </MetaItem>
-        <MetaItem label="Mode">
-          {formatProjectKindLabel(draft.projectKind)}
-        </MetaItem>
-        <MetaItem label="Engine">{draft.engineKind}</MetaItem>
-      </MetaRow>
-    ) : currentStep.key === "access" ? (
-      <MetaRow>
-        <MetaItem label="Remote">
-          {draft.repositoryUrl.trim() ? "Configured" : "Pending"}
-        </MetaItem>
-        <MetaItem label="Poll">
-          {`${draft.pollingIntervalSeconds.trim() || "0"}s`}
-        </MetaItem>
-        <MetaItem label="Access">{repositoryAccessSummary}</MetaItem>
-      </MetaRow>
-    ) : currentStep.key === "targets" ? (
-      <MetaRow>
-        <MetaItem label="Targets">
-          {formatWizardTargetCount(draft.buildTargets.length)}
-        </MetaItem>
-        <MetaItem label="Validation">
-          {validatingTargetCount > 0
-            ? `${validatingTargetCount} running`
-            : "Idle"}
-        </MetaItem>
-      </MetaRow>
-    ) : currentStep.key === "publish" ? (
-      <MetaRow>
-        <MetaItem label="Destinations">
-          {`${draft.publishDestinations.length}`}
-        </MetaItem>
-        <MetaItem label="Bound targets">
-          {publishDestinationReviewSummary.reduce(
-            (total, destination) =>
-              total + destination.bindingTargetNames.length,
-            0,
-          )}
-        </MetaItem>
-        <MetaItem label="Validation">
-          {hasPublishDestinationValidationErrors(publishDestinationErrors)
-            ? "Needs review"
-            : "Ready"}
-        </MetaItem>
-      </MetaRow>
-    ) : currentStep.key === "paths" ? (
-      <MetaRow>
-        <MetaItem label="Artifacts">
-          {formatOverrideState(draft.artifactsRootOverride)}
-        </MetaItem>
-        <MetaItem label="Workspace">
-          {formatOverrideState(draft.workspaceRootOverride)}
-        </MetaItem>
-      </MetaRow>
-    ) : (
-      <MetaRow>
-        <MetaItem label="Project">
-          {draft.name.trim() || "Unnamed project"}
-        </MetaItem>
-        <MetaItem label="Targets">
-          {formatWizardTargetCount(draft.buildTargets.length)}
-        </MetaItem>
-        <MetaItem label="Access">{repositoryAccessSummary}</MetaItem>
-      </MetaRow>
-    );
+  const discoveredUnityEditors =
+    listSelectableUnityEditors(unityAdapterSettings);
   const currentStepBlockedByInventory =
     (currentStep.key === "identity" || currentStep.key === "access") &&
     (isLoadingRepositoryInventory || inventoryError !== null);
@@ -469,7 +419,6 @@ export function CreateProjectWizard({
       },
       pendingBuildTargetRemovalId,
       repositoryCredentialId,
-      reviewConfirmed,
       touchedFields: {
         ...touchedFields,
       },
@@ -483,7 +432,6 @@ export function CreateProjectWizard({
     pathDiagnostics,
     pendingBuildTargetRemovalId,
     repositoryCredentialId,
-    reviewConfirmed,
     touchedFields,
   ]);
 
@@ -534,6 +482,27 @@ export function CreateProjectWizard({
     return settings.credentials;
   });
 
+  const loadUnityAdapterSettingsEffect = useEffectEvent(async () => {
+    setIsLoadingUnityAdapterSettings(true);
+    setUnityAdapterSettingsError(null);
+
+    try {
+      const settings = await loadUnityAdapterSettings();
+
+      startTransition(() => {
+        setUnityAdapterSettings(settings);
+        setUnityAdapterSettingsError(null);
+        setIsLoadingUnityAdapterSettings(false);
+      });
+    } catch (error) {
+      startTransition(() => {
+        setUnityAdapterSettings(null);
+        setUnityAdapterSettingsError(buildProjectErrorMessage(error));
+        setIsLoadingUnityAdapterSettings(false);
+      });
+    }
+  });
+
   const loadRepositoryCredentialsEffect = useEffectEvent(async () => {
     setIsLoadingRepositoryCredentials(true);
     setRepositoryCredentialsError(null);
@@ -545,7 +514,11 @@ export function CreateProjectWizard({
         setRepositoryCredentials(
           credentials.filter(isRepositoryCredentialSelectable),
         );
-        setPublishCredentials(credentials.filter(isItchCredentialSelectable));
+        setPublishCredentials(
+          credentials.filter(
+            (credential) => credential.kind === "itch-api-key",
+          ),
+        );
         setRepositoryCredentialsError(null);
         setIsLoadingRepositoryCredentials(false);
       });
@@ -668,12 +641,10 @@ export function CreateProjectWizard({
   const handleSavePublishCredential = useEffectEvent(
     async (destinationId: string, input: SaveSecretCredentialInput) => {
       try {
-        await saveSecretCredential(input);
+        const createdCredentialId = await saveSecretCredential(input);
         const credentials = await listRepositoryCredentialsEffect();
         const createdCredential = credentials.find(
-          (credential) =>
-            credential.name === input.name.trim() &&
-            credential.kind === input.kind,
+          (credential) => credential.credential_id === createdCredentialId,
         );
 
         if (!createdCredential) {
@@ -686,7 +657,11 @@ export function CreateProjectWizard({
           setRepositoryCredentials(
             credentials.filter(isRepositoryCredentialSelectable),
           );
-          setPublishCredentials(credentials.filter(isItchCredentialSelectable));
+          setPublishCredentials(
+            credentials.filter(
+              (credential) => credential.kind === "itch-api-key",
+            ),
+          );
           setDraft((current) => ({
             ...current,
             publishDestinations: current.publishDestinations.map(
@@ -700,6 +675,8 @@ export function CreateProjectWizard({
             ),
           }));
         });
+
+        return createdCredential.credential_id;
       } catch (error) {
         throw new Error(buildProjectErrorMessage(error));
       }
@@ -710,6 +687,7 @@ export function CreateProjectWizard({
     void loadRepositoryInventoryEffect();
     void loadAuthProvidersEffect();
     void loadRepositoryCredentialsEffect();
+    void loadUnityAdapterSettingsEffect();
 
     return () => {
       if (accessAssessmentTimerRef.current !== undefined) {
@@ -724,6 +702,10 @@ export function CreateProjectWizard({
   }, []);
 
   useEffect(() => {
+    if (buildTargetStepAdapter.kind !== "unity") {
+      return;
+    }
+
     for (const target of draft.buildTargets) {
       const unityExecutablePath = target.unityExecutablePath.trim();
 
@@ -737,7 +719,12 @@ export function CreateProjectWizard({
 
       scheduleUnityExecutableValidation(target.id, unityExecutablePath, 0);
     }
-  }, [draft.buildTargets, pathDiagnostics, validatingTargets]);
+  }, [
+    buildTargetStepAdapter.kind,
+    draft.buildTargets,
+    pathDiagnostics,
+    validatingTargets,
+  ]);
 
   useEffect(() => {
     const normalizedUrl = draft.repositoryUrl.trim();
@@ -800,16 +787,6 @@ export function CreateProjectWizard({
       setRepositoryCredentialId(null);
     });
   }, [repositoryAccessAssessment]);
-
-  useEffect(() => {
-    if (currentStep.key === "review" || !reviewConfirmed) {
-      return;
-    }
-
-    startTransition(() => {
-      setReviewConfirmed(false);
-    });
-  }, [currentStep.key, reviewConfirmed]);
 
   useEffect(() => {
     if (
@@ -1194,7 +1171,7 @@ export function CreateProjectWizard({
 
     startTransition(() => {
       setCurrentStepIndex((current) =>
-        Math.min(current + 1, WIZARD_STEPS.length - 1),
+        Math.min(current + 1, WIZARD_STEP_ORDER.length - 1),
       );
     });
   });
@@ -1205,23 +1182,7 @@ export function CreateProjectWizard({
     });
   });
 
-  const handleSelectCompletedStep = useEffectEvent((stepKey: WizardStepKey) => {
-    const nextStepIndex = indexOfWizardStep(stepKey);
-
-    if (nextStepIndex > currentStepIndex) {
-      return;
-    }
-
-    startTransition(() => {
-      setCurrentStepIndex(nextStepIndex);
-    });
-  });
-
   const handleSubmitProject = useEffectEvent(async () => {
-    if (!reviewConfirmed) {
-      return;
-    }
-
     const firstInvalidStep = findFirstInvalidStep({
       identityErrors,
       accessErrors,
@@ -1280,297 +1241,1103 @@ export function CreateProjectWizard({
   });
 
   const currentStepSupport =
-    currentStep.key === "identity" ? (
-      <SurfacePanel
-        className="wizard-support-panel"
-        description="Context for how this registration model behaves inside the local runtime."
-        eyebrow="Support"
-        headerSeparated
-        title="Repository projects"
-        tone="inset"
-      >
-        <p className="wizard-callout__copy">
-          Repository projects let the runtime poll a remote Git repository on a
-          fixed cadence and queue automation when a new release tag appears.
-          Only Unity is currently supported; the future engines stay visible so
-          the model does not keep lying about the roadmap.
-        </p>
-      </SurfacePanel>
-    ) : currentStep.key === "access" ? (
-      <SurfacePanel
-        actions={
-          <Badge
-            tone={resolveRepositoryAccessBadgeTone(
-              repositoryAccessAssessment,
-              isAssessingRepositoryAccess,
-              repositoryAccessError,
-            )}
-          >
-            {formatRepositoryAccessStatus(
-              draft.repositoryUrl,
-              repositoryAccessAssessment,
-              isAssessingRepositoryAccess,
-              repositoryAccessError,
-            )}
-          </Badge>
-        }
-        className="wizard-support-panel"
-        description={resolveRepositoryAccessCopy(
-          draft.repositoryUrl,
-          repositoryAccessAssessment,
-          isAssessingRepositoryAccess,
-          repositoryAccessError,
-        )}
-        eyebrow="Support"
-        headerSeparated
-        summary={
-          draft.repositoryUrl.trim() ||
-          isAssessingRepositoryAccess ||
-          repositoryAccessAssessment ||
-          repositoryAccessError ? (
-            <MetaRow className="wizard-callout__meta">
-              <MetaItem label="Provider">
-                {formatRepositoryAccessProviderLabel(
-                  repositoryAccessAssessment,
-                  isAssessingRepositoryAccess,
-                  repositoryAccessError,
-                )}
-              </MetaItem>
-              <MetaItem label="Visibility">
-                {formatRepositoryVisibilityLabel(
-                  repositoryAccessAssessment,
-                  isAssessingRepositoryAccess,
-                  repositoryAccessError,
-                )}
-              </MetaItem>
-              <MetaItem label="Login">
-                {formatRepositoryLoginStatus(
-                  repositoryAccessAssessment,
-                  githubAuthProvider,
-                  isLoadingAuthProviders,
-                )}
-              </MetaItem>
-              <MetaItem label="Connection">
-                {formatRepositoryBindingStatus(
-                  repositoryAccessAssessment,
-                  repositoryCredentialId,
-                  pendingRepositoryAccessAction,
-                )}
-              </MetaItem>
-            </MetaRow>
-          ) : undefined
-        }
-        title="Repository access"
-        tone="inset"
-      >
-        {repositoryAccessActionMessage ? (
-          <p className="feed-banner feed-banner--info">
-            {repositoryAccessActionMessage}
-          </p>
-        ) : null}
-
-        {shouldShowFieldError(
-          attemptedSteps.access,
-          touchedFields,
-          "repositoryAccess",
-        ) && accessErrors.repositoryAccess ? (
-          <p className="ui-field__error">{accessErrors.repositoryAccess}</p>
-        ) : null}
-
-        {repositoryAccessError ||
-        authProviderError ||
-        repositoryCredentialsError ? (
-          <div className="wizard-callout__actions">
-            {repositoryAccessError ? (
-              <Button
-                disabled={isAssessingRepositoryAccess}
-                leadingIcon="refresh"
-                onClick={handleRetryRepositoryAccessCheck}
-                size="sm"
-                variant="secondary"
-              >
-                {isAssessingRepositoryAccess
-                  ? "Retrying access check..."
-                  : "Retry access check"}
-              </Button>
-            ) : null}
-
-            {authProviderError ? (
-              <Button
-                disabled={isLoadingAuthProviders}
-                leadingIcon="refresh"
-                onClick={handleRetryAuthProviders}
-                size="sm"
-                variant="secondary"
-              >
-                {isLoadingAuthProviders
-                  ? "Retrying accounts..."
-                  : "Retry accounts"}
-              </Button>
-            ) : null}
-
-            {repositoryCredentialsError ? (
-              <Button
-                disabled={isLoadingRepositoryCredentials}
-                leadingIcon="refresh"
-                onClick={handleRetryRepositoryCredentials}
-                size="sm"
-                variant="secondary"
-              >
-                {isLoadingRepositoryCredentials
-                  ? "Retrying credentials..."
-                  : "Retry credentials"}
-              </Button>
-            ) : null}
-          </div>
-        ) : null}
-
-        {shouldShowRepositoryLoginAction(repositoryAccessAssessment) ? (
-          <>
-            <SelectField
-              disabled={
-                isLoadingRepositoryCredentials || pendingRepositoryAccessAction
-              }
-              hint={formatRepositoryCredentialFieldHint(
+    currentStep.key === "access" ? (
+      projectSourceStepAdapter.kind === "repository" ? (
+        <SurfacePanel
+          actions={
+            <Badge
+              tone={resolveRepositoryAccessBadgeTone(
                 repositoryAccessAssessment,
-                isLoadingRepositoryCredentials,
+                isAssessingRepositoryAccess,
+                repositoryAccessError,
               )}
-              label="Repository credential"
-              onChange={(event) =>
-                handleRepositoryCredentialSelectionChange(
-                  event.currentTarget.value,
-                )
-              }
-              options={repositoryCredentialOptions}
-              value={repositoryCredentialId?.toString() ?? ""}
-            />
-
-            <div className="wizard-callout__actions">
-              {supportsShellRepositoryLoginAction(
+            >
+              {formatRepositoryAccessStatus(
+                draft.repositoryUrl,
                 repositoryAccessAssessment,
-              ) ? (
+                isAssessingRepositoryAccess,
+                repositoryAccessError,
+              )}
+            </Badge>
+          }
+          className="wizard-support-panel"
+          description={resolveRepositoryAccessCopy(
+            draft.repositoryUrl,
+            repositoryAccessAssessment,
+            isAssessingRepositoryAccess,
+            repositoryAccessError,
+          )}
+          eyebrow="Support"
+          headerSeparated
+          summary={
+            draft.repositoryUrl.trim() ||
+            isAssessingRepositoryAccess ||
+            repositoryAccessAssessment ||
+            repositoryAccessError ? (
+              <MetaRow className="wizard-callout__meta">
+                <MetaItem label="Provider">
+                  {formatRepositoryAccessProviderLabel(
+                    repositoryAccessAssessment,
+                    isAssessingRepositoryAccess,
+                    repositoryAccessError,
+                  )}
+                </MetaItem>
+                <MetaItem label="Visibility">
+                  {formatRepositoryVisibilityLabel(
+                    repositoryAccessAssessment,
+                    isAssessingRepositoryAccess,
+                    repositoryAccessError,
+                  )}
+                </MetaItem>
+                <MetaItem label="Login">
+                  {formatRepositoryLoginStatus(
+                    repositoryAccessAssessment,
+                    githubAuthProvider,
+                    isLoadingAuthProviders,
+                  )}
+                </MetaItem>
+                <MetaItem label="Connection">
+                  {formatRepositoryBindingStatus(
+                    repositoryAccessAssessment,
+                    repositoryCredentialId,
+                    pendingRepositoryAccessAction,
+                  )}
+                </MetaItem>
+              </MetaRow>
+            ) : undefined
+          }
+          title="Repository access"
+          tone="inset"
+        >
+          {repositoryAccessActionMessage ? (
+            <p className="feed-banner feed-banner--info">
+              {repositoryAccessActionMessage}
+            </p>
+          ) : null}
+
+          {shouldShowFieldError(
+            attemptedSteps.access,
+            touchedFields,
+            "repositoryAccess",
+          ) && accessErrors.repositoryAccess ? (
+            <p className="ui-field__error">{accessErrors.repositoryAccess}</p>
+          ) : null}
+
+          {repositoryAccessError ||
+          authProviderError ||
+          repositoryCredentialsError ? (
+            <div className="wizard-callout__actions">
+              {repositoryAccessError ? (
                 <Button
-                  leadingIcon="key"
-                  onClick={handleBindRepositoryAccess}
-                  disabled={pendingRepositoryAccessAction}
+                  disabled={isAssessingRepositoryAccess}
+                  leadingIcon="refresh"
+                  onClick={handleRetryRepositoryAccessCheck}
                   size="sm"
-                  variant={
-                    repositoryCredentialId !== null ? "secondary" : "primary"
-                  }
+                  variant="secondary"
                 >
-                  {pendingRepositoryAccessAction
-                    ? "Connecting login..."
-                    : formatRepositoryBindingActionLabel(
-                        repositoryAccessAssessment,
-                        githubAuthProvider,
-                        repositoryCredentialId,
-                      )}
+                  {isAssessingRepositoryAccess
+                    ? "Retrying access check..."
+                    : "Retry access check"}
                 </Button>
               ) : null}
 
-              {repositoryCredentialId !== null ? (
+              {authProviderError ? (
                 <Button
-                  onClick={handleClearRepositoryAccessBinding}
+                  disabled={isLoadingAuthProviders}
+                  leadingIcon="refresh"
+                  onClick={handleRetryAuthProviders}
                   size="sm"
-                  variant="ghost"
+                  variant="secondary"
                 >
-                  Disconnect
+                  {isLoadingAuthProviders
+                    ? "Retrying accounts..."
+                    : "Retry accounts"}
                 </Button>
               ) : null}
 
-              {onManageAuth &&
-              supportsShellRepositoryLoginAction(repositoryAccessAssessment) ? (
-                <Button onClick={onManageAuth} size="sm" variant="ghost">
-                  Open accounts
+              {repositoryCredentialsError ? (
+                <Button
+                  disabled={isLoadingRepositoryCredentials}
+                  leadingIcon="refresh"
+                  onClick={handleRetryRepositoryCredentials}
+                  size="sm"
+                  variant="secondary"
+                >
+                  {isLoadingRepositoryCredentials
+                    ? "Retrying credentials..."
+                    : "Retry credentials"}
                 </Button>
               ) : null}
             </div>
-          </>
-        ) : null}
-      </SurfacePanel>
-    ) : currentStep.key === "review" ? (
-      <SurfacePanel
-        actions={
-          <Badge tone={reviewConfirmed ? "strong" : "muted"}>
-            {reviewConfirmed ? "Ready to create" : "Pending confirmation"}
-          </Badge>
-        }
-        className="wizard-support-panel"
-        description="Review the repository access, targets, publish bindings, and path overrides below before the shell saves this project."
-        eyebrow="Support"
-        headerSeparated
-        title="Final confirmation"
-        tone="inset"
-      >
-        <label className="wizard-review-confirmation">
-          <input
-            checked={reviewConfirmed}
-            className="wizard-review-confirmation__input"
-            onChange={(event) => {
-              setReviewConfirmed(event.currentTarget.checked);
-            }}
-            type="checkbox"
-          />
-          <span className="wizard-review-confirmation__copy">
-            I reviewed the repository access, targets, publish destinations, and
-            path overrides for this project.
-          </span>
-        </label>
-      </SurfacePanel>
+          ) : null}
+
+          {shouldShowRepositoryLoginAction(repositoryAccessAssessment) ? (
+            <>
+              <SelectField
+                disabled={
+                  isLoadingRepositoryCredentials ||
+                  pendingRepositoryAccessAction
+                }
+                hint={formatRepositoryCredentialFieldHint(
+                  repositoryAccessAssessment,
+                  isLoadingRepositoryCredentials,
+                )}
+                label="Repository credential"
+                onChange={(event) =>
+                  handleRepositoryCredentialSelectionChange(
+                    event.currentTarget.value,
+                  )
+                }
+                options={repositoryCredentialOptions}
+                value={repositoryCredentialId?.toString() ?? ""}
+              />
+
+              <div className="wizard-callout__actions">
+                {supportsShellRepositoryLoginAction(
+                  repositoryAccessAssessment,
+                ) ? (
+                  <Button
+                    leadingIcon="key"
+                    onClick={handleBindRepositoryAccess}
+                    disabled={pendingRepositoryAccessAction}
+                    size="sm"
+                    variant={
+                      repositoryCredentialId !== null ? "secondary" : "primary"
+                    }
+                  >
+                    {pendingRepositoryAccessAction
+                      ? "Connecting login..."
+                      : formatRepositoryBindingActionLabel(
+                          repositoryAccessAssessment,
+                          githubAuthProvider,
+                          repositoryCredentialId,
+                        )}
+                  </Button>
+                ) : null}
+
+                {repositoryCredentialId !== null ? (
+                  <Button
+                    onClick={handleClearRepositoryAccessBinding}
+                    size="sm"
+                    variant="ghost"
+                  >
+                    Disconnect
+                  </Button>
+                ) : null}
+
+                {onManageAuth &&
+                supportsShellRepositoryLoginAction(
+                  repositoryAccessAssessment,
+                ) ? (
+                  <Button onClick={onManageAuth} size="sm" variant="ghost">
+                    Open accounts
+                  </Button>
+                ) : null}
+              </div>
+            </>
+          ) : null}
+        </SurfacePanel>
+      ) : (
+        <SurfacePanel
+          className="wizard-support-panel"
+          description={projectSourceStepAdapter.supportDescription}
+          eyebrow="Support"
+          headerSeparated
+          title={projectSourceStepAdapter.supportTitle}
+          tone="inset"
+        >
+          <p className="wizard-callout__copy">
+            {projectSourceStepAdapter.supportCopy}
+          </p>
+        </SurfacePanel>
+      )
     ) : null;
+
+  const wizardStageContentClassName = joinClassNames(
+    "wizard-stage-content-shell",
+    currentStepSupport ? "wizard-stage-content-shell--with-support" : undefined,
+  );
+  const stagePanelClassName = joinClassNames(
+    "wizard-stage-panel",
+    currentStep.key === "targets" && "wizard-stage-panel--full-bleed",
+  );
+  const stagePanelTone = currentStep.key === "targets" ? "ghost" : "section";
 
   return (
     <FocusPageFrame
       bodyClassName="wizard-shell__body"
       className="wizard-shell"
-      description="Register a repository project, define how HGP should poll it, and declare the Unity targets the runtime will execute."
       eyebrow="Create Project"
       summary={
         <MetaRow>
-          <MetaItem label="Step">
-            {`${currentStepNumber} of ${WIZARD_STEPS.length}`}
-          </MetaItem>
           <MetaItem label="Mode">
             {formatProjectKindLabel(draft.projectKind)}
           </MetaItem>
-          <MetaItem label="Engine">{draft.engineKind}</MetaItem>
+          <MetaItem label="Engine">
+            {formatRepositoryEngineKindLabel(draft.engineKind)}
+          </MetaItem>
           <MetaItem label="Targets">
             {formatWizardTargetCount(draft.buildTargets.length)}
           </MetaItem>
         </MetaRow>
       }
-      title="Create Project"
     >
-      {inventoryError ? (
-        <>
-          <p className="feed-banner feed-banner--error">{inventoryError}</p>
-          <div className="wizard-callout__actions">
-            <Button
-              disabled={isLoadingRepositoryInventory}
-              leadingIcon="refresh"
-              onClick={handleRetryRepositoryInventory}
-              size="sm"
-              variant="secondary"
-            >
-              {isLoadingRepositoryInventory
-                ? "Retrying inventory..."
-                : "Retry inventory load"}
-            </Button>
+      {inventoryError || submitError ? (
+        <div className="wizard-shell__messages">
+          {inventoryError ? (
+            <>
+              <p className="feed-banner feed-banner--error">{inventoryError}</p>
+              <div className="wizard-callout__actions">
+                <Button
+                  disabled={isLoadingRepositoryInventory}
+                  leadingIcon="refresh"
+                  onClick={handleRetryRepositoryInventory}
+                  size="sm"
+                  variant="secondary"
+                >
+                  {isLoadingRepositoryInventory
+                    ? "Retrying inventory..."
+                    : "Retry inventory load"}
+                </Button>
+              </div>
+            </>
+          ) : null}
+
+          {submitError ? (
+            <p className="feed-banner feed-banner--error">{submitError}</p>
+          ) : null}
+        </div>
+      ) : null}
+
+      <section className="wizard-layout">
+        <header aria-label="Wizard status" className="wizard-layout__header">
+          <div className="wizard-layout__header-main">
+            <p className="wizard-layout__step-label">
+              {`${currentStepNumber}. ${currentStep.label}`}
+            </p>
+            <span aria-hidden="true" className="wizard-layout__separator">
+              |
+            </span>
+            <p className="wizard-layout__step-count">
+              {`${currentStepNumber} of ${wizardSteps.length}`}
+            </p>
           </div>
-        </>
-      ) : null}
+        </header>
 
-      {submitError ? (
-        <p className="feed-banner feed-banner--error">{submitError}</p>
-      ) : null}
+        <div className="wizard-layout__body">
+          <div className={wizardStageContentClassName}>
+            <SurfacePanel className={stagePanelClassName} tone={stagePanelTone}>
+              {currentStep.key === "identity" ? (
+                <div className="wizard-form-grid">
+                  <TextField
+                    error={
+                      shouldShowFieldError(
+                        attemptedSteps.identity,
+                        touchedFields,
+                        "name",
+                      )
+                        ? identityErrors.name
+                        : undefined
+                    }
+                    label="Project name"
+                    onBlur={() => markFieldTouched("name")}
+                    onChange={(event) => {
+                      const nextValue = event.currentTarget.value;
+                      startTransition(() => {
+                        setDraft((current) => ({
+                          ...current,
+                          name: nextValue,
+                        }));
+                      });
+                      markFieldTouched("name");
+                    }}
+                    placeholder="Red Horizon"
+                    value={draft.name}
+                  />
 
-      <StepFlow
-        activeStepKey={currentStep.key}
-        endActions={
-          <>
+                  <SelectField
+                    error={
+                      shouldShowFieldError(
+                        attemptedSteps.identity,
+                        touchedFields,
+                        "projectKind",
+                      )
+                        ? identityErrors.projectKind
+                        : undefined
+                    }
+                    label="Project kind"
+                    onBlur={() => markFieldTouched("projectKind")}
+                    onChange={(event) => {
+                      const projectKind = event.currentTarget
+                        .value as ProjectDraft["projectKind"];
+                      startTransition(() => {
+                        setDraft((current) => ({
+                          ...current,
+                          projectKind,
+                        }));
+                      });
+                      markFieldTouched("projectKind");
+                    }}
+                    options={PROJECT_KIND_OPTIONS}
+                    value={draft.projectKind}
+                  />
+
+                  <RepositoryEngineField
+                    error={
+                      shouldShowFieldError(
+                        attemptedSteps.identity,
+                        touchedFields,
+                        "engineKind",
+                      )
+                        ? identityErrors.engineKind
+                        : undefined
+                    }
+                    onBlur={() => markFieldTouched("engineKind")}
+                    onChange={(event) => {
+                      const engineKind = event.currentTarget
+                        .value as ProjectDraft["engineKind"];
+                      startTransition(() => {
+                        setDraft((current) => ({
+                          ...current,
+                          engineKind,
+                        }));
+                      });
+                      markFieldTouched("engineKind");
+                    }}
+                    value={draft.engineKind}
+                  />
+                </div>
+              ) : null}
+
+              {currentStep.key === "access" ? (
+                projectSourceStepAdapter.kind === "repository" ? (
+                  <div className="wizard-form-grid">
+                    <TextField
+                      error={
+                        shouldShowFieldError(
+                          attemptedSteps.access,
+                          touchedFields,
+                          "repositoryUrl",
+                        )
+                          ? accessErrors.repositoryUrl
+                          : undefined
+                      }
+                      hint="Use the HTTPS remote that HGP will poll and clone."
+                      label="Repository URL"
+                      leadingIcon="server"
+                      onBlur={() => {
+                        markFieldTouched("repositoryUrl");
+                        markFieldTouched("repositoryAccess");
+                      }}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.value;
+                        startTransition(() => {
+                          setDraft((current) => ({
+                            ...current,
+                            repositoryUrl: nextValue,
+                          }));
+                        });
+                        markFieldTouched("repositoryUrl");
+                        markFieldTouched("repositoryAccess");
+                      }}
+                      placeholder="https://github.com/org/project.git"
+                      value={draft.repositoryUrl}
+                    />
+                    <SelectField
+                      hint="Tell HGP whether this remote should be treated as public or private."
+                      label="Repository visibility"
+                      onBlur={() => markFieldTouched("repositoryAccess")}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget
+                          .value as ProjectDraft["repositoryVisibility"];
+                        startTransition(() => {
+                          setDraft((current) => ({
+                            ...current,
+                            repositoryVisibility: nextValue,
+                          }));
+                        });
+                        markFieldTouched("repositoryAccess");
+                      }}
+                      options={REPOSITORY_VISIBILITY_OPTIONS}
+                      value={draft.repositoryVisibility}
+                    />
+                    <TextField
+                      error={
+                        shouldShowFieldError(
+                          attemptedSteps.access,
+                          touchedFields,
+                          "pollingIntervalSeconds",
+                        )
+                          ? accessErrors.pollingIntervalSeconds
+                          : undefined
+                      }
+                      hint="Polling stays operator-visible. The runtime requires at least 5 seconds."
+                      label="Polling interval (seconds)"
+                      min={5}
+                      onBlur={() => markFieldTouched("pollingIntervalSeconds")}
+                      onChange={(event) => {
+                        const nextValue = event.currentTarget.value;
+                        startTransition(() => {
+                          setDraft((current) => ({
+                            ...current,
+                            pollingIntervalSeconds: nextValue,
+                          }));
+                        });
+                        markFieldTouched("pollingIntervalSeconds");
+                      }}
+                      step={5}
+                      type="number"
+                      value={draft.pollingIntervalSeconds}
+                    />
+                  </div>
+                ) : (
+                  <div className="wizard-form-grid">
+                    {shouldShowStepError(attemptedSteps.access) &&
+                    accessErrors.repositoryAccess ? (
+                      <p className="feed-banner feed-banner--error">
+                        {accessErrors.repositoryAccess}
+                      </p>
+                    ) : null}
+
+                    {renderWizardAdapterUnavailableState(
+                      projectSourceStepAdapter.unsupportedMessage ??
+                        projectSourceStepAdapter.supportCopy,
+                    )}
+                  </div>
+                )
+              ) : null}
+
+              {currentStep.key === "targets" ? (
+                buildTargetStepAdapter.kind === "unity" ? (
+                  <div className="wizard-targets-shell">
+                    {shouldShowStepError(attemptedSteps.targets) &&
+                    targetErrors.root ? (
+                      <p className="feed-banner feed-banner--error">
+                        {targetErrors.root}
+                      </p>
+                    ) : null}
+
+                    {pendingBuildTargetRemoval ? (
+                      <BuildTargetRemovalCallout
+                        bindingImpact={pendingBuildTargetBindingImpact}
+                        onCancel={() => setPendingBuildTargetRemovalId(null)}
+                        onConfirm={handleConfirmBuildTargetRemoval}
+                        targetName={pendingBuildTargetRemoval.name}
+                      />
+                    ) : null}
+
+                    {draft.buildTargets.map((target, index) => {
+                      const diagnostics = pathDiagnostics[target.id];
+                      const fieldErrors = targetErrors.targets[target.id] ?? {};
+                      const detectedUnityEditorOptions =
+                        buildDetectedUnityEditorOptions(
+                          discoveredUnityEditors,
+                          isLoadingUnityAdapterSettings,
+                          unityAdapterSettingsError,
+                        );
+                      const detectedUnityEditorValue =
+                        resolveDetectedUnityEditorValue(
+                          target.unityExecutablePath,
+                          discoveredUnityEditors,
+                        );
+
+                      return (
+                        <VerticalAccordion
+                          bodyClassName="wizard-target-card__body"
+                          className="wizard-target-card"
+                          collapsedToggleLabel={`Expand build target ${index + 1}`}
+                          expandedToggleLabel={`Collapse build target ${index + 1}`}
+                          header={
+                            <div className="wizard-target-card__header">
+                              <div className="wizard-target-card__top-row">
+                                <p className="wizard-target-card__eyebrow">
+                                  Build target {index + 1}
+                                </p>
+                              </div>
+
+                              <IconButton
+                                className="wizard-target-card__remove"
+                                disabled={draft.buildTargets.length === 1}
+                                icon="trash"
+                                label={`Remove build target ${index + 1}`}
+                                onClick={() =>
+                                  handleRemoveBuildTarget(target.id)
+                                }
+                                size="sm"
+                                variant="ghost"
+                              />
+
+                              <div className="wizard-target-card__title-block">
+                                <h3 className="wizard-target-card__title">
+                                  {target.name.trim() || "Unnamed target"}
+                                </h3>
+                              </div>
+
+                              <div className="wizard-target-card__badges">
+                                {diagnostics ? (
+                                  <Badge
+                                    tone={
+                                      diagnostics.status === "ready"
+                                        ? "strong"
+                                        : "muted"
+                                    }
+                                  >
+                                    {formatDiagnosticStatus(diagnostics.status)}
+                                  </Badge>
+                                ) : null}
+                              </div>
+                            </div>
+                          }
+                          headerSeparated
+                          key={target.id}
+                          onOpenChange={(nextOpen) =>
+                            handleTargetAccordionChange(target.id, nextOpen)
+                          }
+                          open={Boolean(expandedTargetIds[target.id])}
+                          tone="section"
+                          triggerMode="button"
+                        >
+                          <div className="wizard-form-grid wizard-form-grid--targets">
+                            <TextField
+                              error={
+                                shouldShowFieldError(
+                                  attemptedSteps.targets,
+                                  touchedFields,
+                                  buildTargetFieldKey(target.id, "name"),
+                                )
+                                  ? fieldErrors.name
+                                  : undefined
+                              }
+                              hint="Keep the target name stable. It becomes part of the artifact file name."
+                              label="Target name"
+                              onBlur={() =>
+                                markFieldTouched(
+                                  buildTargetFieldKey(target.id, "name"),
+                                )
+                              }
+                              onChange={(event) => {
+                                updateBuildTarget(target.id, {
+                                  name: event.currentTarget.value,
+                                });
+                                markFieldTouched(
+                                  buildTargetFieldKey(target.id, "name"),
+                                );
+                              }}
+                              placeholder="Windows"
+                              value={target.name}
+                            />
+                            <SelectField
+                              error={
+                                shouldShowFieldError(
+                                  attemptedSteps.targets,
+                                  touchedFields,
+                                  buildTargetFieldKey(
+                                    target.id,
+                                    "targetPlatform",
+                                  ),
+                                )
+                                  ? fieldErrors.targetPlatform
+                                  : undefined
+                              }
+                              hint="This writes the Unity targetPlatform contract field directly."
+                              label="Unity target platform"
+                              onBlur={() =>
+                                markFieldTouched(
+                                  buildTargetFieldKey(
+                                    target.id,
+                                    "targetPlatform",
+                                  ),
+                                )
+                              }
+                              onChange={(event) => {
+                                updateBuildTarget(target.id, {
+                                  targetPlatform:
+                                    normalizeUnityTargetPlatformValue(
+                                      event.currentTarget.value,
+                                    ),
+                                });
+                                markFieldTouched(
+                                  buildTargetFieldKey(
+                                    target.id,
+                                    "targetPlatform",
+                                  ),
+                                );
+                              }}
+                              options={PLATFORM_OPTIONS}
+                              value={normalizeUnityTargetPlatformValue(
+                                target.targetPlatform,
+                              )}
+                            />
+                            <TextField
+                              error={
+                                shouldShowFieldError(
+                                  attemptedSteps.targets,
+                                  touchedFields,
+                                  buildTargetFieldKey(target.id, "buildMethod"),
+                                )
+                                  ? fieldErrors.buildMethod
+                                  : undefined
+                              }
+                              hint="Point this at a real static Unity method, for example Builder.PerformWindows."
+                              label="Unity build method"
+                              onBlur={() =>
+                                markFieldTouched(
+                                  buildTargetFieldKey(target.id, "buildMethod"),
+                                )
+                              }
+                              onChange={(event) => {
+                                updateBuildTarget(target.id, {
+                                  buildMethod: event.currentTarget.value,
+                                });
+                                markFieldTouched(
+                                  buildTargetFieldKey(target.id, "buildMethod"),
+                                );
+                              }}
+                              placeholder="Builder.PerformWindows"
+                              value={target.buildMethod}
+                            />
+                            <SelectField
+                              disabled={
+                                isSubmitting ||
+                                isLoadingUnityAdapterSettings ||
+                                detectedUnityEditorOptions.length <= 1
+                              }
+                              hint={buildDetectedUnityEditorHint(
+                                unityAdapterSettingsError,
+                                discoveredUnityEditors.length,
+                              )}
+                              label="Installed Unity editors"
+                              onChange={(event) => {
+                                const selectedPath =
+                                  event.currentTarget.value.trim();
+
+                                if (!selectedPath) {
+                                  return;
+                                }
+
+                                handlePickUnityExecutablePath(
+                                  target.id,
+                                  selectedPath,
+                                );
+                              }}
+                              options={detectedUnityEditorOptions}
+                              value={detectedUnityEditorValue}
+                            />
+                            <PathPickerField
+                              buttonLabel="Choose Unity executable"
+                              disabled={isSubmitting}
+                              dialogTitle="Select Unity Editor executable"
+                              error={
+                                shouldShowFieldError(
+                                  attemptedSteps.targets,
+                                  touchedFields,
+                                  buildTargetFieldKey(
+                                    target.id,
+                                    "unityExecutablePath",
+                                  ),
+                                )
+                                  ? fieldErrors.unityExecutablePath
+                                  : undefined
+                              }
+                              filters={[
+                                {
+                                  name: "Unity Editor",
+                                  extensions: ["exe", "app"],
+                                },
+                              ]}
+                              hint="Select the host-local Unity Editor executable that should run this target."
+                              label="Unity executable"
+                              onError={handlePathPickerError}
+                              onPathPicked={(selectedPath) =>
+                                handlePickUnityExecutablePath(
+                                  target.id,
+                                  selectedPath,
+                                )
+                              }
+                              pickerKind="file"
+                              placeholder="C:/Program Files/Unity/Hub/Editor/.../Unity.exe"
+                              value={target.unityExecutablePath}
+                            />
+
+                            {diagnostics ? (
+                              <p
+                                className={joinClassNames(
+                                  "wizard-target-card__diagnostic",
+                                  diagnostics.status !== "ready" &&
+                                    "wizard-target-card__diagnostic--error",
+                                )}
+                              >
+                                {diagnostics.message}
+                              </p>
+                            ) : null}
+
+                            {validatingTargets[target.id] ? (
+                              <p className="wizard-target-card__diagnostic">
+                                Validating Unity executable path...
+                              </p>
+                            ) : null}
+                          </div>
+                        </VerticalAccordion>
+                      );
+                    })}
+
+                    <div className="wizard-targets-shell__footer">
+                      <Button
+                        leadingIcon="plus"
+                        onClick={handleAddBuildTarget}
+                        size="sm"
+                        variant="secondary"
+                      >
+                        Add target
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="wizard-form-grid">
+                    {shouldShowStepError(attemptedSteps.targets) &&
+                    targetErrors.root ? (
+                      <p className="feed-banner feed-banner--error">
+                        {targetErrors.root}
+                      </p>
+                    ) : null}
+
+                    {renderWizardAdapterUnavailableState(
+                      buildTargetStepAdapter.unsupportedMessage ??
+                        buildTargetStepAdapter.supportCopy,
+                    )}
+                  </div>
+                )
+              ) : null}
+
+              {currentStep.key === "publish" ? (
+                <PublishDestinationsEditor
+                  buildTargets={buildTargetReferences}
+                  credentials={publishCredentials}
+                  destinations={draft.publishDestinations}
+                  disabled={isSubmitting}
+                  editingMode="overlay"
+                  errors={
+                    attemptedSteps.publish
+                      ? publishDestinationErrors
+                      : undefined
+                  }
+                  onChange={(nextPublishDestinations) => {
+                    startTransition(() => {
+                      setDraft((current) => ({
+                        ...current,
+                        publishDestinations: nextPublishDestinations,
+                      }));
+                    });
+                  }}
+                  onSaveCredential={handleSavePublishCredential}
+                />
+              ) : null}
+
+              {currentStep.key === "paths" ? (
+                <div className="wizard-form-grid">
+                  <PathPickerField
+                    buttonLabel="Choose artifacts root"
+                    clearable
+                    disabled={isSubmitting}
+                    dialogTitle="Select artifacts root directory"
+                    error={
+                      shouldShowFieldError(
+                        attemptedSteps.paths,
+                        touchedFields,
+                        "artifactsRootOverride",
+                      )
+                        ? pathErrors.artifactsRootOverride
+                        : undefined
+                    }
+                    hint="Optional. Override the artifact root for this repository only."
+                    label="Artifacts root override"
+                    onClear={() =>
+                      handleProjectPathCleared("artifactsRootOverride")
+                    }
+                    onError={handlePathPickerError}
+                    onPathPicked={(selectedPath) =>
+                      handleProjectPathPicked(
+                        "artifactsRootOverride",
+                        selectedPath,
+                      )
+                    }
+                    pickerKind="directory"
+                    placeholder="C:/builds/red-horizon"
+                    value={draft.artifactsRootOverride}
+                  />
+
+                  <PathPickerField
+                    buttonLabel="Choose workspace root"
+                    clearable
+                    disabled={isSubmitting}
+                    dialogTitle="Select managed workspace root directory"
+                    error={
+                      shouldShowFieldError(
+                        attemptedSteps.paths,
+                        touchedFields,
+                        "workspaceRootOverride",
+                      )
+                        ? pathErrors.workspaceRootOverride
+                        : undefined
+                    }
+                    hint="Optional. Override the managed checkout root for this repository only."
+                    label="Workspace root override"
+                    onClear={() =>
+                      handleProjectPathCleared("workspaceRootOverride")
+                    }
+                    onError={handlePathPickerError}
+                    onPathPicked={(selectedPath) =>
+                      handleProjectPathPicked(
+                        "workspaceRootOverride",
+                        selectedPath,
+                      )
+                    }
+                    pickerKind="directory"
+                    placeholder="C:/workspaces/red-horizon"
+                    value={draft.workspaceRootOverride}
+                  />
+                </div>
+              ) : null}
+
+              {currentStep.key === "review" ? (
+                <div className="wizard-review-shell">
+                  <SurfacePanel
+                    className="wizard-review-panel"
+                    description={formatProjectSourceReviewDescription(draft)}
+                    eyebrow="Project"
+                    headerSeparated
+                    summary={
+                      <MetaRow>
+                        <MetaItem label="Engine">
+                          {formatRepositoryEngineKindLabel(draft.engineKind)}
+                        </MetaItem>
+                        <MetaItem label="Poll">
+                          {`${draft.pollingIntervalSeconds.trim() || "0"}s`}
+                        </MetaItem>
+                        <MetaItem
+                          label={
+                            draft.projectKind === "repository"
+                              ? "Access"
+                              : "Source"
+                          }
+                        >
+                          {draft.projectKind === "repository"
+                            ? repositoryAccessSummary
+                            : formatProjectSourceAdapterStatus(
+                                projectSourceStepAdapter,
+                              )}
+                        </MetaItem>
+                      </MetaRow>
+                    }
+                    title={draft.name.trim() || "Unnamed project"}
+                    tone="inset"
+                  >
+                    <p className="wizard-summary-panel__copy">
+                      {formatProjectKindLabel(draft.projectKind)} with
+                      {` ${formatWizardTargetCount(draft.buildTargets.length)} configured for registration.`}
+                    </p>
+                  </SurfacePanel>
+
+                  <SurfacePanel
+                    className="wizard-review-panel"
+                    description={buildTargetStepAdapter.reviewDescription}
+                    eyebrow="Build Targets"
+                    headerSeparated
+                    title="Target Review"
+                    tone="inset"
+                  >
+                    {buildTargetStepAdapter.kind === "unity" ? (
+                      <div className="wizard-summary-list">
+                        {draft.buildTargets.map((target) => (
+                          <div
+                            className="wizard-summary-list__item"
+                            key={target.id}
+                          >
+                            <div className="wizard-summary-list__title-row">
+                              <strong>
+                                {target.name.trim() || "Unnamed target"}
+                              </strong>
+                              <Badge tone="neutral">
+                                {target.targetPlatform ||
+                                  "Unity target pending"}
+                              </Badge>
+                            </div>
+                            <p className="wizard-summary-list__copy">
+                              {target.buildMethod.trim() ||
+                                "Unity build method pending"}
+                            </p>
+                            <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
+                              {target.unityExecutablePath.trim() ||
+                                "Unity executable pending"}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="wizard-summary-list">
+                        <div className="wizard-summary-list__item">
+                          <div className="wizard-summary-list__title-row">
+                            <strong>
+                              {buildTargetStepAdapter.supportTitle}
+                            </strong>
+                            <Badge tone="muted">unavailable</Badge>
+                          </div>
+                          <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
+                            {buildTargetStepAdapter.unsupportedMessage ??
+                              buildTargetStepAdapter.supportCopy}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </SurfacePanel>
+
+                  <SurfacePanel
+                    className="wizard-review-panel"
+                    description="Destination-specific publish bindings and credential readiness."
+                    eyebrow="Publish Destinations"
+                    headerSeparated
+                    title="Destination Review"
+                    tone="inset"
+                  >
+                    <div className="wizard-summary-list">
+                      {publishDestinationReviewSummary.length === 0 ? (
+                        <div className="wizard-summary-list__item">
+                          <div className="wizard-summary-list__title-row">
+                            <strong>No publish destinations configured</strong>
+                            <Badge tone="muted">valid</Badge>
+                          </div>
+                          <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
+                            Every build target will keep its artifact under the
+                            runtime-managed output root.
+                          </p>
+                        </div>
+                      ) : (
+                        publishDestinationReviewSummary.map((destination) => (
+                          <div
+                            className="wizard-summary-list__item"
+                            key={destination.id}
+                          >
+                            <div className="wizard-summary-list__title-row">
+                              <strong>{destination.name}</strong>
+                              <Badge
+                                tone={destination.enabled ? "strong" : "muted"}
+                              >
+                                {destination.kindLabel}
+                              </Badge>
+                            </div>
+                            <p className="wizard-summary-list__copy">
+                              {destination.bindingTargetNames.length > 0
+                                ? destination.bindingTargetNames.join(", ")
+                                : "No build targets bound yet."}
+                            </p>
+                            <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
+                              {destination.missingCredential
+                                ? "Credential still missing."
+                                : "Uploads are managed automatically by HGP for the selected channels."}
+                            </p>
+                          </div>
+                        ))
+                      )}
+
+                      <div className="wizard-summary-list__item">
+                        <div className="wizard-summary-list__title-row">
+                          <strong>Unbound build targets</strong>
+                          <Badge tone="muted">
+                            {unboundPublishTargetNames.length === 0
+                              ? "none"
+                              : "kept local"}
+                          </Badge>
+                        </div>
+                        <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
+                          {unboundPublishTargetNames.length > 0
+                            ? unboundPublishTargetNames.join(", ")
+                            : "Every configured build target is bound to at least one publish destination."}
+                        </p>
+                      </div>
+                    </div>
+                  </SurfacePanel>
+
+                  <SurfacePanel
+                    className="wizard-review-panel"
+                    description="Project-specific overrides for artifacts and managed workspaces."
+                    eyebrow="Paths"
+                    headerSeparated
+                    title="Path Review"
+                    tone="inset"
+                  >
+                    <div className="wizard-summary-list">
+                      <div className="wizard-summary-list__item">
+                        <div className="wizard-summary-list__title-row">
+                          <strong>Artifacts root</strong>
+                          <Badge tone="muted">
+                            {draft.artifactsRootOverride.trim()
+                              ? "override"
+                              : "default"}
+                          </Badge>
+                        </div>
+                        <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
+                          {draft.artifactsRootOverride.trim() ||
+                            "Use the runtime default artifact root."}
+                        </p>
+                      </div>
+
+                      <div className="wizard-summary-list__item">
+                        <div className="wizard-summary-list__title-row">
+                          <strong>Workspace root</strong>
+                          <Badge tone="muted">
+                            {draft.workspaceRootOverride.trim()
+                              ? "override"
+                              : "default"}
+                          </Badge>
+                        </div>
+                        <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
+                          {draft.workspaceRootOverride.trim() ||
+                            "Use the runtime default managed checkout root."}
+                        </p>
+                      </div>
+                    </div>
+                  </SurfacePanel>
+                </div>
+              ) : null}
+            </SurfacePanel>
+
+            {currentStepSupport ? (
+              <div className="wizard-stage-support-shell">
+                {currentStepSupport}
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        <footer className="wizard-footer">
+          <div className="wizard-footer__slot wizard-footer__slot--start">
+            {onRequestClose ? (
+              <Button
+                disabled={isSubmitting}
+                onClick={onRequestClose}
+                size="sm"
+                variant="ghost"
+              >
+                Cancel
+              </Button>
+            ) : null}
+
+            {showPreviousAction ? (
+              <Button
+                disabled={isSubmitting}
+                onClick={handleRetreatStep}
+                size="sm"
+                variant="ghost"
+              >
+                Previous
+              </Button>
+            ) : null}
+          </div>
+
+          <div className="wizard-footer__slot wizard-footer__slot--end">
             {currentStep.key === "review" ? (
               <Button
-                disabled={isSubmitting || !reviewConfirmed}
+                disabled={isSubmitting}
                 onClick={() => void handleSubmitProject()}
                 size="sm"
                 variant="primary"
@@ -1589,712 +2356,9 @@ export function CreateProjectWizard({
                 Next
               </Button>
             ) : null}
-          </>
-        }
-        isStepSelectable={(_, index) => index <= currentStepIndex}
-        onStepSelect={handleSelectCompletedStep}
-        progressDescription="Move across completed steps without losing the current project draft."
-        progressEyebrow="Progress"
-        progressSummary={
-          <MetaRow>
-            <MetaItem label="Current">{currentStep.label}</MetaItem>
-            <MetaItem label="Draft">
-              {draft.name.trim() || "Unnamed project"}
-            </MetaItem>
-          </MetaRow>
-        }
-        progressTitle="Wizard Steps"
-        startActions={
-          onRequestClose || showPreviousAction ? (
-            <>
-              {onRequestClose ? (
-                <Button
-                  disabled={isSubmitting}
-                  onClick={onRequestClose}
-                  size="sm"
-                  variant="ghost"
-                >
-                  Cancel
-                </Button>
-              ) : null}
-              {showPreviousAction ? (
-                <Button
-                  disabled={isSubmitting}
-                  onClick={handleRetreatStep}
-                  size="sm"
-                  variant="ghost"
-                >
-                  Previous
-                </Button>
-              ) : null}
-            </>
-          ) : null
-        }
-        supportContent={currentStepSupport}
-        stepSummary={currentStepSummary}
-        steps={WIZARD_STEPS}
-      >
-        {currentStep.key === "identity" ? (
-          <div className="wizard-form-grid">
-            <TextField
-              error={
-                shouldShowFieldError(
-                  attemptedSteps.identity,
-                  touchedFields,
-                  "name",
-                )
-                  ? identityErrors.name
-                  : undefined
-              }
-              label="Project name"
-              onBlur={() => markFieldTouched("name")}
-              onChange={(event) => {
-                const nextValue = event.currentTarget.value;
-                startTransition(() => {
-                  setDraft((current) => ({
-                    ...current,
-                    name: nextValue,
-                  }));
-                });
-                markFieldTouched("name");
-              }}
-              placeholder="Red Horizon"
-              value={draft.name}
-            />
-
-            <SelectField
-              error={
-                shouldShowFieldError(
-                  attemptedSteps.identity,
-                  touchedFields,
-                  "projectKind",
-                )
-                  ? identityErrors.projectKind
-                  : undefined
-              }
-              label="Project kind"
-              onBlur={() => markFieldTouched("projectKind")}
-              onChange={(event) => {
-                const projectKind = event.currentTarget
-                  .value as ProjectDraft["projectKind"];
-                startTransition(() => {
-                  setDraft((current) => ({
-                    ...current,
-                    projectKind,
-                  }));
-                });
-                markFieldTouched("projectKind");
-              }}
-              options={PROJECT_KIND_OPTIONS}
-              value={draft.projectKind}
-            />
-
-            <RepositoryEngineField
-              error={
-                shouldShowFieldError(
-                  attemptedSteps.identity,
-                  touchedFields,
-                  "engineKind",
-                )
-                  ? identityErrors.engineKind
-                  : undefined
-              }
-              onBlur={() => markFieldTouched("engineKind")}
-              onChange={(event) => {
-                const engineKind = event.currentTarget
-                  .value as ProjectDraft["engineKind"];
-                startTransition(() => {
-                  setDraft((current) => ({
-                    ...current,
-                    engineKind,
-                  }));
-                });
-                markFieldTouched("engineKind");
-              }}
-              value={draft.engineKind}
-            />
           </div>
-        ) : null}
-
-        {currentStep.key === "access" ? (
-          <div className="wizard-form-grid">
-            <TextField
-              error={
-                shouldShowFieldError(
-                  attemptedSteps.access,
-                  touchedFields,
-                  "repositoryUrl",
-                )
-                  ? accessErrors.repositoryUrl
-                  : undefined
-              }
-              hint="Use the HTTPS remote that HGP will poll and clone."
-              label="Repository URL"
-              leadingIcon="server"
-              onBlur={() => {
-                markFieldTouched("repositoryUrl");
-                markFieldTouched("repositoryAccess");
-              }}
-              onChange={(event) => {
-                const nextValue = event.currentTarget.value;
-                startTransition(() => {
-                  setDraft((current) => ({
-                    ...current,
-                    repositoryUrl: nextValue,
-                  }));
-                });
-                markFieldTouched("repositoryUrl");
-                markFieldTouched("repositoryAccess");
-              }}
-              placeholder="https://github.com/org/project.git"
-              value={draft.repositoryUrl}
-            />
-            <SelectField
-              hint="Tell HGP whether this remote should be treated as public or private."
-              label="Repository visibility"
-              onBlur={() => markFieldTouched("repositoryAccess")}
-              onChange={(event) => {
-                const nextValue = event.currentTarget
-                  .value as ProjectDraft["repositoryVisibility"];
-                startTransition(() => {
-                  setDraft((current) => ({
-                    ...current,
-                    repositoryVisibility: nextValue,
-                  }));
-                });
-                markFieldTouched("repositoryAccess");
-              }}
-              options={REPOSITORY_VISIBILITY_OPTIONS}
-              value={draft.repositoryVisibility}
-            />
-            <TextField
-              error={
-                shouldShowFieldError(
-                  attemptedSteps.access,
-                  touchedFields,
-                  "defaultBranch",
-                )
-                  ? accessErrors.defaultBranch
-                  : undefined
-              }
-              hint="Optional. HGP uses this when branch-aware operations need a default ref."
-              label="Default branch"
-              onBlur={() => markFieldTouched("defaultBranch")}
-              onChange={(event) => {
-                const nextValue = event.currentTarget.value;
-                startTransition(() => {
-                  setDraft((current) => ({
-                    ...current,
-                    defaultBranch: nextValue,
-                  }));
-                });
-                markFieldTouched("defaultBranch");
-              }}
-              placeholder="main"
-              value={draft.defaultBranch}
-            />
-            <TextField
-              error={
-                shouldShowFieldError(
-                  attemptedSteps.access,
-                  touchedFields,
-                  "pollingIntervalSeconds",
-                )
-                  ? accessErrors.pollingIntervalSeconds
-                  : undefined
-              }
-              hint="Polling stays operator-visible. The runtime requires at least 5 seconds."
-              label="Polling interval (seconds)"
-              min={5}
-              onBlur={() => markFieldTouched("pollingIntervalSeconds")}
-              onChange={(event) => {
-                const nextValue = event.currentTarget.value;
-                startTransition(() => {
-                  setDraft((current) => ({
-                    ...current,
-                    pollingIntervalSeconds: nextValue,
-                  }));
-                });
-                markFieldTouched("pollingIntervalSeconds");
-              }}
-              step={5}
-              type="number"
-              value={draft.pollingIntervalSeconds}
-            />
-          </div>
-        ) : null}
-
-        {currentStep.key === "targets" ? (
-          <div className="wizard-targets-shell">
-            {shouldShowStepError(attemptedSteps.targets) &&
-            targetErrors.root ? (
-              <p className="feed-banner feed-banner--error">
-                {targetErrors.root}
-              </p>
-            ) : null}
-
-            {pendingBuildTargetRemoval ? (
-              <BuildTargetRemovalCallout
-                bindingImpact={pendingBuildTargetBindingImpact}
-                onCancel={() => setPendingBuildTargetRemovalId(null)}
-                onConfirm={handleConfirmBuildTargetRemoval}
-                targetName={pendingBuildTargetRemoval.name}
-              />
-            ) : null}
-
-            {draft.buildTargets.map((target, index) => {
-              const diagnostics = pathDiagnostics[target.id];
-              const fieldErrors = targetErrors.targets[target.id] ?? {};
-
-              return (
-                <VerticalAccordion
-                  bodyClassName="wizard-target-card__body"
-                  bodyInset
-                  className="wizard-target-card"
-                  collapsedToggleLabel={`Expand build target ${index + 1}`}
-                  expandedToggleLabel={`Collapse build target ${index + 1}`}
-                  header={
-                    <div className="wizard-target-card__header">
-                      <div className="wizard-target-card__top-row">
-                        <p className="wizard-target-card__eyebrow">
-                          Build target {index + 1}
-                        </p>
-                        <IconButton
-                          className="wizard-target-card__remove"
-                          disabled={draft.buildTargets.length === 1}
-                          icon="trash"
-                          label={`Remove build target ${index + 1}`}
-                          onClick={() => handleRemoveBuildTarget(target.id)}
-                          size="sm"
-                          variant="ghost"
-                        />
-                      </div>
-
-                      <div className="wizard-target-card__title-block">
-                        <h3 className="wizard-target-card__title">
-                          {target.name.trim() || "Unnamed target"}
-                        </h3>
-                      </div>
-
-                      <div className="wizard-target-card__badges">
-                        {diagnostics ? (
-                          <Badge
-                            tone={
-                              diagnostics.status === "ready"
-                                ? "strong"
-                                : "muted"
-                            }
-                          >
-                            {formatDiagnosticStatus(diagnostics.status)}
-                          </Badge>
-                        ) : null}
-                      </div>
-                    </div>
-                  }
-                  headerSeparated
-                  key={target.id}
-                  onOpenChange={(nextOpen) =>
-                    handleTargetAccordionChange(target.id, nextOpen)
-                  }
-                  open={Boolean(expandedTargetIds[target.id])}
-                  tone="section"
-                  triggerMode="button"
-                >
-                  <div className="wizard-form-grid wizard-form-grid--targets">
-                    <TextField
-                      error={
-                        shouldShowFieldError(
-                          attemptedSteps.targets,
-                          touchedFields,
-                          buildTargetFieldKey(target.id, "name"),
-                        )
-                          ? fieldErrors.name
-                          : undefined
-                      }
-                      hint="Keep the target name stable. It becomes part of the artifact file name."
-                      label="Target name"
-                      onBlur={() =>
-                        markFieldTouched(buildTargetFieldKey(target.id, "name"))
-                      }
-                      onChange={(event) => {
-                        updateBuildTarget(target.id, {
-                          name: event.currentTarget.value,
-                        });
-                        markFieldTouched(
-                          buildTargetFieldKey(target.id, "name"),
-                        );
-                      }}
-                      placeholder="Windows"
-                      value={target.name}
-                    />
-                    <SelectField
-                      error={
-                        shouldShowFieldError(
-                          attemptedSteps.targets,
-                          touchedFields,
-                          buildTargetFieldKey(target.id, "targetPlatform"),
-                        )
-                          ? fieldErrors.targetPlatform
-                          : undefined
-                      }
-                      hint="This writes the Unity targetPlatform contract field directly."
-                      label="Unity target platform"
-                      onBlur={() =>
-                        markFieldTouched(
-                          buildTargetFieldKey(target.id, "targetPlatform"),
-                        )
-                      }
-                      onChange={(event) => {
-                        updateBuildTarget(target.id, {
-                          targetPlatform: normalizeUnityTargetPlatformValue(
-                            event.currentTarget.value,
-                          ),
-                        });
-                        markFieldTouched(
-                          buildTargetFieldKey(target.id, "targetPlatform"),
-                        );
-                      }}
-                      options={PLATFORM_OPTIONS}
-                      value={normalizeUnityTargetPlatformValue(
-                        target.targetPlatform,
-                      )}
-                    />
-                    <TextField
-                      error={
-                        shouldShowFieldError(
-                          attemptedSteps.targets,
-                          touchedFields,
-                          buildTargetFieldKey(target.id, "buildMethod"),
-                        )
-                          ? fieldErrors.buildMethod
-                          : undefined
-                      }
-                      hint="Point this at a real static Unity method, for example Builder.PerformWindows."
-                      label="Unity build method"
-                      onBlur={() =>
-                        markFieldTouched(
-                          buildTargetFieldKey(target.id, "buildMethod"),
-                        )
-                      }
-                      onChange={(event) => {
-                        updateBuildTarget(target.id, {
-                          buildMethod: event.currentTarget.value,
-                        });
-                        markFieldTouched(
-                          buildTargetFieldKey(target.id, "buildMethod"),
-                        );
-                      }}
-                      placeholder="Builder.PerformWindows"
-                      value={target.buildMethod}
-                    />
-                    <PathPickerField
-                      buttonLabel="Choose Unity executable"
-                      disabled={isSubmitting}
-                      dialogTitle="Select Unity Editor executable"
-                      error={
-                        shouldShowFieldError(
-                          attemptedSteps.targets,
-                          touchedFields,
-                          buildTargetFieldKey(target.id, "unityExecutablePath"),
-                        )
-                          ? fieldErrors.unityExecutablePath
-                          : undefined
-                      }
-                      filters={[
-                        {
-                          name: "Unity Editor",
-                          extensions: ["exe", "app"],
-                        },
-                      ]}
-                      hint="Select the host-local Unity Editor executable that should run this target."
-                      label="Unity executable"
-                      onError={handlePathPickerError}
-                      onPathPicked={(selectedPath) =>
-                        handlePickUnityExecutablePath(target.id, selectedPath)
-                      }
-                      pickerKind="file"
-                      placeholder="C:/Program Files/Unity/Hub/Editor/.../Unity.exe"
-                      value={target.unityExecutablePath}
-                    />
-
-                    {diagnostics ? (
-                      <p
-                        className={joinClassNames(
-                          "wizard-target-card__diagnostic",
-                          diagnostics.status !== "ready" &&
-                            "wizard-target-card__diagnostic--error",
-                        )}
-                      >
-                        {diagnostics.message}
-                      </p>
-                    ) : null}
-
-                    {validatingTargets[target.id] ? (
-                      <p className="wizard-target-card__diagnostic">
-                        Validating Unity executable path...
-                      </p>
-                    ) : null}
-                  </div>
-                </VerticalAccordion>
-              );
-            })}
-
-            <div className="wizard-targets-shell__footer">
-              <Button
-                leadingIcon="plus"
-                onClick={handleAddBuildTarget}
-                size="sm"
-                variant="secondary"
-              >
-                Add target
-              </Button>
-            </div>
-          </div>
-        ) : null}
-
-        {currentStep.key === "publish" ? (
-          <PublishDestinationsEditor
-            buildTargets={buildTargetReferences}
-            credentials={publishCredentials}
-            destinations={draft.publishDestinations}
-            disabled={isSubmitting}
-            errors={
-              attemptedSteps.publish ? publishDestinationErrors : undefined
-            }
-            onChange={(nextPublishDestinations) => {
-              startTransition(() => {
-                setDraft((current) => ({
-                  ...current,
-                  publishDestinations: nextPublishDestinations,
-                }));
-              });
-            }}
-            onSaveCredential={handleSavePublishCredential}
-          />
-        ) : null}
-
-        {currentStep.key === "paths" ? (
-          <div className="wizard-form-grid">
-            <PathPickerField
-              buttonLabel="Choose artifacts root"
-              clearable
-              disabled={isSubmitting}
-              dialogTitle="Select artifacts root directory"
-              error={
-                shouldShowFieldError(
-                  attemptedSteps.paths,
-                  touchedFields,
-                  "artifactsRootOverride",
-                )
-                  ? pathErrors.artifactsRootOverride
-                  : undefined
-              }
-              hint="Optional. Override the artifact root for this repository only."
-              label="Artifacts root override"
-              onClear={() => handleProjectPathCleared("artifactsRootOverride")}
-              onError={handlePathPickerError}
-              onPathPicked={(selectedPath) =>
-                handleProjectPathPicked("artifactsRootOverride", selectedPath)
-              }
-              pickerKind="directory"
-              placeholder="C:/builds/red-horizon"
-              value={draft.artifactsRootOverride}
-            />
-
-            <PathPickerField
-              buttonLabel="Choose workspace root"
-              clearable
-              disabled={isSubmitting}
-              dialogTitle="Select managed workspace root directory"
-              error={
-                shouldShowFieldError(
-                  attemptedSteps.paths,
-                  touchedFields,
-                  "workspaceRootOverride",
-                )
-                  ? pathErrors.workspaceRootOverride
-                  : undefined
-              }
-              hint="Optional. Override the managed checkout root for this repository only."
-              label="Workspace root override"
-              onClear={() => handleProjectPathCleared("workspaceRootOverride")}
-              onError={handlePathPickerError}
-              onPathPicked={(selectedPath) =>
-                handleProjectPathPicked("workspaceRootOverride", selectedPath)
-              }
-              pickerKind="directory"
-              placeholder="C:/workspaces/red-horizon"
-              value={draft.workspaceRootOverride}
-            />
-          </div>
-        ) : null}
-
-        {currentStep.key === "review" ? (
-          <div className="wizard-review-shell">
-            <SurfacePanel
-              className="wizard-review-panel"
-              description={
-                draft.repositoryUrl.trim() || "Repository URL not set yet."
-              }
-              eyebrow="Project"
-              headerSeparated
-              summary={
-                <MetaRow>
-                  <MetaItem label="Engine">{draft.engineKind}</MetaItem>
-                  <MetaItem label="Poll">
-                    {`${draft.pollingIntervalSeconds.trim() || "0"}s`}
-                  </MetaItem>
-                  <MetaItem label="Access">{repositoryAccessSummary}</MetaItem>
-                </MetaRow>
-              }
-              title={draft.name.trim() || "Unnamed project"}
-              tone="inset"
-            >
-              <p className="wizard-summary-panel__copy">
-                {formatProjectKindLabel(draft.projectKind)} with
-                {` ${formatWizardTargetCount(draft.buildTargets.length)} configured for registration.`}
-              </p>
-            </SurfacePanel>
-
-            <SurfacePanel
-              className="wizard-review-panel"
-              description="Host-native Unity targets that HGP will execute for this repository."
-              eyebrow="Build Targets"
-              headerSeparated
-              title="Target Review"
-              tone="inset"
-            >
-              <div className="wizard-summary-list">
-                {draft.buildTargets.map((target) => (
-                  <div className="wizard-summary-list__item" key={target.id}>
-                    <div className="wizard-summary-list__title-row">
-                      <strong>{target.name.trim() || "Unnamed target"}</strong>
-                      <Badge tone="neutral">
-                        {target.targetPlatform || "Unity target pending"}
-                      </Badge>
-                    </div>
-                    <p className="wizard-summary-list__copy">
-                      {target.buildMethod.trim() ||
-                        "Unity build method pending"}
-                    </p>
-                    <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
-                      {target.unityExecutablePath.trim() ||
-                        "Unity executable pending"}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </SurfacePanel>
-
-            <SurfacePanel
-              className="wizard-review-panel"
-              description="Destination-specific publish bindings and credential readiness."
-              eyebrow="Publish Destinations"
-              headerSeparated
-              title="Destination Review"
-              tone="inset"
-            >
-              <div className="wizard-summary-list">
-                {publishDestinationReviewSummary.length === 0 ? (
-                  <div className="wizard-summary-list__item">
-                    <div className="wizard-summary-list__title-row">
-                      <strong>No publish destinations configured</strong>
-                      <Badge tone="muted">valid</Badge>
-                    </div>
-                    <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
-                      Every build target will keep its artifact under the
-                      runtime-managed output root.
-                    </p>
-                  </div>
-                ) : (
-                  publishDestinationReviewSummary.map((destination) => (
-                    <div
-                      className="wizard-summary-list__item"
-                      key={destination.id}
-                    >
-                      <div className="wizard-summary-list__title-row">
-                        <strong>{destination.name}</strong>
-                        <Badge tone={destination.enabled ? "strong" : "muted"}>
-                          {destination.kindLabel}
-                        </Badge>
-                      </div>
-                      <p className="wizard-summary-list__copy">
-                        {destination.bindingTargetNames.length > 0
-                          ? destination.bindingTargetNames.join(", ")
-                          : "No build targets bound yet."}
-                      </p>
-                      <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
-                        {destination.missingCredential
-                          ? "Credential still missing."
-                          : destination.usesHostTransportProbe
-                            ? "Uses host butler resolution from PATH."
-                            : "Publish transport and credentials are bound from the draft."}
-                      </p>
-                    </div>
-                  ))
-                )}
-
-                <div className="wizard-summary-list__item">
-                  <div className="wizard-summary-list__title-row">
-                    <strong>Unbound build targets</strong>
-                    <Badge tone="muted">
-                      {unboundPublishTargetNames.length === 0
-                        ? "none"
-                        : "kept local"}
-                    </Badge>
-                  </div>
-                  <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
-                    {unboundPublishTargetNames.length > 0
-                      ? unboundPublishTargetNames.join(", ")
-                      : "Every configured build target is bound to at least one publish destination."}
-                  </p>
-                </div>
-              </div>
-            </SurfacePanel>
-
-            <SurfacePanel
-              className="wizard-review-panel"
-              description="Repository-specific overrides for artifacts and managed workspaces."
-              eyebrow="Paths"
-              headerSeparated
-              title="Path Review"
-              tone="inset"
-            >
-              <div className="wizard-summary-list">
-                <div className="wizard-summary-list__item">
-                  <div className="wizard-summary-list__title-row">
-                    <strong>Artifacts root</strong>
-                    <Badge tone="muted">
-                      {draft.artifactsRootOverride.trim()
-                        ? "override"
-                        : "default"}
-                    </Badge>
-                  </div>
-                  <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
-                    {draft.artifactsRootOverride.trim() ||
-                      "Use the runtime default artifact root."}
-                  </p>
-                </div>
-
-                <div className="wizard-summary-list__item">
-                  <div className="wizard-summary-list__title-row">
-                    <strong>Workspace root</strong>
-                    <Badge tone="muted">
-                      {draft.workspaceRootOverride.trim()
-                        ? "override"
-                        : "default"}
-                    </Badge>
-                  </div>
-                  <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
-                    {draft.workspaceRootOverride.trim() ||
-                      "Use the runtime default managed checkout root."}
-                  </p>
-                </div>
-              </div>
-            </SurfacePanel>
-          </div>
-        ) : null}
-      </StepFlow>
+        </footer>
+      </section>
     </FocusPageFrame>
   );
 }
@@ -2305,12 +2369,145 @@ function formatProjectKindLabel(projectKind: ProjectDraft["projectKind"]) {
     : "Local workspace project";
 }
 
-function formatOverrideState(value: string) {
-  return value.trim() ? "Override" : "Default path";
+function formatRepositoryEngineKindLabel(engineKind: RepositoryEngineKind) {
+  const option = REPOSITORY_ENGINE_OPTIONS.find(
+    (entry) => entry.value === engineKind,
+  );
+
+  if (option) {
+    return option.label;
+  }
+
+  return engineKind
+    .split("-")
+    .map((segment) =>
+      segment.length > 0
+        ? `${segment[0].toUpperCase()}${segment.slice(1)}`
+        : segment,
+    )
+    .join(" ");
 }
 
 function formatWizardTargetCount(targetCount: number) {
   return `${targetCount} target${targetCount === 1 ? "" : "s"}`;
+}
+
+function formatProjectSourceAdapterStatus(adapter: ProjectSourceWizardAdapter) {
+  return adapter.kind === "repository" ? "Available" : "Unavailable";
+}
+
+function resolveProjectSourceWizardAdapter(
+  projectKind: ProjectDraft["projectKind"],
+): ProjectSourceWizardAdapter {
+  if (projectKind === "repository") {
+    return {
+      kind: "repository",
+      stepLabel: "Repository",
+      stepDescription:
+        "Declare where HGP should sync this project, authenticate, and watch for changes.",
+      supportTitle: "Repository source",
+      supportDescription:
+        "Repository-backed projects rely on the source adapter to detect providers, credentials, and polling posture.",
+      supportCopy:
+        "This source adapter lets the runtime poll a remote repository, assess access, and queue automation from new releases.",
+      unsupportedMessage: null,
+    };
+  }
+
+  return {
+    kind: "local-unsupported",
+    stepLabel: "Workspace",
+    stepDescription:
+      "Declare the local workspace source that HGP should manage for this project.",
+    supportTitle: "Local workspace source",
+    supportDescription:
+      "This source selection would need a dedicated local workspace adapter before the wizard can collect the right fields.",
+    supportCopy:
+      "The create-project wizard does not have a local workspace source adapter yet, so repository-specific fields stay hidden for this draft.",
+    unsupportedMessage:
+      "Local workspace setup does not have a create-project source adapter yet.",
+  };
+}
+
+function resolveBuildTargetWizardAdapter(
+  engineKind: RepositoryEngineKind,
+  projectKind: ProjectDraft["projectKind"],
+): BuildTargetWizardAdapter {
+  const engineLabel = formatRepositoryEngineKindLabel(engineKind);
+  const projectLabel = formatProjectKindLabel(projectKind).toLocaleLowerCase();
+
+  if (engineKind === "unity") {
+    return {
+      kind: "unity",
+      stepLabel: "Build Targets",
+      stepDescription: `Configure the ${engineLabel}-specific build targets HGP should execute for this ${projectLabel}.`,
+      supportTitle: "Unity target adapter",
+      supportDescription:
+        "This step is currently being driven by the Unity build target adapter.",
+      supportCopy:
+        "Unity projects define the target platform, build method, and editor executable that HGP should launch for each build target.",
+      reviewDescription:
+        "Engine-specific target configuration that HGP will execute for this project.",
+      unsupportedMessage: null,
+    };
+  }
+
+  return {
+    kind: "engine-unsupported",
+    stepLabel: "Build Targets",
+    stepDescription:
+      "Configure the engine-specific build targets HGP should execute for this project.",
+    supportTitle: `${engineLabel} target adapter`,
+    supportDescription:
+      "This step must switch to the adapter owned by the selected engine.",
+    supportCopy: `${engineLabel} projects need a specialized build target adapter before project creation can collect engine-specific fields.`,
+    reviewDescription: `Engine-specific target configuration for ${engineLabel} is not available in project creation yet.`,
+    unsupportedMessage: `${engineLabel} build target setup does not have a create-project adapter yet.`,
+  };
+}
+
+function buildWizardSteps(
+  sourceAdapter: ProjectSourceWizardAdapter,
+  buildTargetAdapter: BuildTargetWizardAdapter,
+): WizardStepDefinition[] {
+  const definitions: Record<WizardStepKey, WizardStepDefinition> = {
+    identity: {
+      key: "identity",
+      label: "Identity",
+      description:
+        "Name the project and choose the source and engine adapters HGP should use.",
+    },
+    access: {
+      key: "access",
+      label: sourceAdapter.stepLabel,
+      description: sourceAdapter.stepDescription,
+    },
+    targets: {
+      key: "targets",
+      label: buildTargetAdapter.stepLabel,
+      description: buildTargetAdapter.stepDescription,
+    },
+    publish: {
+      key: "publish",
+      label: "Publish Destinations",
+      description:
+        "Bind build outputs to publish destinations and validate destination-specific delivery rules before save.",
+    },
+    paths: {
+      key: "paths",
+      label: "Paths",
+      description:
+        "Choose optional artifact and workspace paths for this project.",
+    },
+    review: {
+      key: "review",
+      label: "Review",
+      description:
+        "Review the project definition produced by the selected source and engine adapters before registration.",
+    },
+  };
+
+  return WIZARD_STEP_ORDER.map((stepKey) => definitions[stepKey]);
 }
 
 function createInitialProjectDraft(): ProjectDraft {
@@ -2320,7 +2517,6 @@ function createInitialProjectDraft(): ProjectDraft {
     name: "",
     repositoryUrl: "",
     repositoryVisibility: "public",
-    defaultBranch: "main",
     pollingIntervalSeconds: "300",
     artifactsRootOverride: "",
     workspaceRootOverride: "",
@@ -2342,7 +2538,6 @@ function createInitialCreateProjectWizardSnapshot(): CreateProjectWizardSnapshot
     pathDiagnostics: {},
     pendingBuildTargetRemovalId: null,
     repositoryCredentialId: null,
-    reviewConfirmed: false,
     touchedFields: {},
   };
 }
@@ -2367,6 +2562,7 @@ function validateIdentityStep(
   if (!normalizedName) {
     errors.name = "Project name is required.";
   } else if (
+    draft.projectKind === "repository" &&
     repositoryInventory.some(
       (repository) =>
         repository.repository_name.trim().toLocaleLowerCase() ===
@@ -2377,13 +2573,11 @@ function validateIdentityStep(
   }
 
   if (draft.projectKind !== "repository") {
-    errors.projectKind =
-      "Only repository projects are available in this release.";
+    errors.projectKind = `${formatProjectKindLabel(draft.projectKind)} does not have a create-project source adapter yet.`;
   }
 
   if (draft.engineKind !== "unity") {
-    errors.engineKind =
-      "Only Unity is currently supported even though future engines are listed.";
+    errors.engineKind = `${formatRepositoryEngineKindLabel(draft.engineKind)} does not have a create-project build target adapter yet.`;
   }
 
   return errors;
@@ -2404,13 +2598,21 @@ function validateAccessStep(
     repositoryCredentialsError: string | null;
     repositoryCredentialCount: number;
   },
+  sourceAdapter: ProjectSourceWizardAdapter,
 ) {
   const errors: {
     repositoryUrl?: string;
-    defaultBranch?: string;
     pollingIntervalSeconds?: string;
     repositoryAccess?: string;
   } = {};
+  if (sourceAdapter.kind !== "repository") {
+    errors.repositoryAccess =
+      sourceAdapter.unsupportedMessage ||
+      "The selected project source does not have a create-project adapter yet.";
+
+    return errors;
+  }
+
   const normalizedUrl = draft.repositoryUrl.trim();
   if (!normalizedUrl) {
     errors.repositoryUrl = "Repository URL is required.";
@@ -2429,11 +2631,6 @@ function validateAccessStep(
     )
   ) {
     errors.repositoryUrl = "This remote is already registered in HGP.";
-  }
-
-  const normalizedBranch = draft.defaultBranch.trim();
-  if (normalizedBranch && /\s/.test(normalizedBranch)) {
-    errors.defaultBranch = "Default branch must not contain whitespace.";
   }
 
   const pollingInterval = Number(draft.pollingIntervalSeconds.trim());
@@ -2522,10 +2719,19 @@ function validateTargetsStep(
   draft: ProjectDraft,
   pathDiagnostics: Record<string, UnityExecutableValidation | null>,
   validatingTargets: Record<string, boolean>,
+  buildTargetAdapter: BuildTargetWizardAdapter,
 ): TargetStepErrors {
   const errors: TargetStepErrors = {
     targets: {},
   };
+  if (buildTargetAdapter.kind !== "unity") {
+    errors.root =
+      buildTargetAdapter.unsupportedMessage ||
+      "The selected engine does not have a create-project build target adapter yet.";
+
+    return errors;
+  }
+
   if (draft.buildTargets.length === 0) {
     errors.root = "At least one build target is required.";
     return errors;
@@ -2606,7 +2812,6 @@ function hasIdentityErrors(errors: ReturnType<typeof validateIdentityStep>) {
 function hasAccessErrors(errors: ReturnType<typeof validateAccessStep>) {
   return Boolean(
     errors.repositoryUrl ||
-    errors.defaultBranch ||
     errors.pollingIntervalSeconds ||
     errors.repositoryAccess,
   );
@@ -2703,22 +2908,12 @@ function buildCreateProjectInput(
     repository_url: draft.repositoryUrl.trim(),
     repository_access_assessment: repositoryAccessAssessment,
     repository_credentials_id: repositoryCredentialId,
-    default_branch: optionalTrimmedString(draft.defaultBranch),
     artifacts_root_override: optionalTrimmedString(draft.artifactsRootOverride),
     workspace_root_override: optionalTrimmedString(draft.workspaceRootOverride),
     polling_interval_seconds: Number(draft.pollingIntervalSeconds.trim()),
-    build_targets: draft.buildTargets.map((target) => ({
-      name: target.name.trim(),
-      contract: {
-        unity: {
-          target_platform: normalizeUnityTargetPlatformValue(
-            target.targetPlatform,
-          ),
-          build_method: target.buildMethod.trim(),
-        },
-      },
-      unity_executable_path: target.unityExecutablePath.trim(),
-    })),
+    build_targets: draft.buildTargets.map((target) =>
+      buildCreateProjectBuildTargetInput(draft.engineKind, target),
+    ),
     publish_targets: buildCreateProjectPublishTargetsInput(
       draft.publishDestinations,
       draft.buildTargets.map((target) => ({
@@ -2727,6 +2922,30 @@ function buildCreateProjectInput(
         name: target.name.trim() || "Unnamed target",
       })),
     ),
+  };
+}
+
+function buildCreateProjectBuildTargetInput(
+  engineKind: RepositoryEngineKind,
+  target: BuildTargetDraft,
+) {
+  if (engineKind !== "unity") {
+    throw new Error(
+      `${formatRepositoryEngineKindLabel(engineKind)} does not have a create-project build target adapter yet.`,
+    );
+  }
+
+  return {
+    name: target.name.trim(),
+    contract: {
+      unity: {
+        target_platform: normalizeUnityTargetPlatformValue(
+          target.targetPlatform,
+        ),
+        build_method: target.buildMethod.trim(),
+      },
+    },
+    unity_executable_path: target.unityExecutablePath.trim(),
   };
 }
 
@@ -2768,6 +2987,90 @@ function normalizeUnityTargetPlatformValue(value: string) {
   }
 }
 
+function listSelectableUnityEditors(
+  unityAdapterSettings: UnityAdapterSettings | null,
+): DiscoveredUnityEditor[] {
+  return (
+    unityAdapterSettings?.capability_profile.discovered_editors.filter(
+      (editor) => editor.executable_exists && editor.executable_is_file,
+    ) ?? []
+  );
+}
+
+function buildDetectedUnityEditorOptions(
+  editors: DiscoveredUnityEditor[],
+  isLoadingUnityAdapterSettings: boolean,
+  unityAdapterSettingsError: string | null,
+): SelectOption[] {
+  if (isLoadingUnityAdapterSettings) {
+    return [
+      {
+        label: "Scanning installed Unity editors...",
+        value: "",
+      },
+    ];
+  }
+
+  if (unityAdapterSettingsError) {
+    return [
+      {
+        label: "Unable to load installed Unity editors",
+        value: "",
+      },
+    ];
+  }
+
+  if (editors.length === 0) {
+    return [
+      {
+        label: "No installed Unity editors detected",
+        value: "",
+      },
+    ];
+  }
+
+  return [
+    {
+      label: "Choose a detected Unity editor",
+      title: "Choose a detected Unity editor",
+      value: "",
+    },
+    ...editors.map((editor) => ({
+      label: editor.version,
+      title: editor.install_root_path,
+      value: editor.executable_path,
+    })),
+  ];
+}
+
+function buildDetectedUnityEditorHint(
+  unityAdapterSettingsError: string | null,
+  editorCount: number,
+) {
+  if (unityAdapterSettingsError) {
+    return `${unityAdapterSettingsError} Use the manual path field below to continue.`;
+  }
+
+  if (editorCount === 0) {
+    return "Choose a detected editor when available, or keep using the manual executable path field below.";
+  }
+
+  return "Select a detected Unity install to fill the executable path below, or keep using the manual picker.";
+}
+
+function resolveDetectedUnityEditorValue(
+  unityExecutablePath: string,
+  editors: DiscoveredUnityEditor[],
+) {
+  const normalizedPath = unityExecutablePath.trim();
+
+  return editors.some(
+    (editor) => editor.executable_path.trim() === normalizedPath,
+  )
+    ? normalizedPath
+    : "";
+}
+
 function cloneProjectDraft(draft: ProjectDraft): ProjectDraft {
   return {
     ...draft,
@@ -2784,7 +3087,7 @@ function cloneProjectDraft(draft: ProjectDraft): ProjectDraft {
 }
 
 function normalizeWizardStepIndex(stepIndex: number) {
-  return Math.min(Math.max(stepIndex, 0), WIZARD_STEPS.length - 1);
+  return Math.min(Math.max(stepIndex, 0), WIZARD_STEP_ORDER.length - 1);
 }
 
 function resolveNextBuildTargetIndex(buildTargets: BuildTargetDraft[]) {
@@ -2816,7 +3119,23 @@ function buildCreateProjectWizardDirtyState(
 }
 
 function indexOfWizardStep(stepKey: WizardStepKey) {
-  return WIZARD_STEPS.findIndex((step) => step.key === stepKey);
+  return WIZARD_STEP_ORDER.findIndex((step) => step === stepKey);
+}
+
+function formatProjectSourceReviewDescription(draft: ProjectDraft) {
+  if (draft.projectKind === "repository") {
+    return draft.repositoryUrl.trim() || "Repository source not set yet.";
+  }
+
+  return "Local workspace source not set yet.";
+}
+
+function renderWizardAdapterUnavailableState(message: string) {
+  return (
+    <div className="wizard-callout wizard-callout--compact">
+      <p className="wizard-callout__copy">{message}</p>
+    </div>
+  );
 }
 
 function optionalTrimmedString(value: string) {
@@ -3320,13 +3639,6 @@ function isRepositoryCredentialSelectable(credential: SecretCredentialSetting) {
       "git-http-bearer",
       "git-http-github-host-login",
     ].includes(credential.kind)
-  );
-}
-
-function isItchCredentialSelectable(credential: SecretCredentialSetting) {
-  return (
-    credential.kind === "itch-api-key" &&
-    credential.config_summary.status === "ready"
   );
 }
 

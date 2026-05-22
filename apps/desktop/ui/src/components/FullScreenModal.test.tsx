@@ -111,4 +111,29 @@ describe("FullScreenModal", () => {
       ).toHaveFocus();
     });
   });
+
+  it("renders footer actions outside the scrollable body", () => {
+    render(
+      <FullScreenModal
+        footer={<button type="button">Pinned action</button>}
+        onResolve={() => undefined}
+        title="Open project"
+      >
+        <div>Scrollable content</div>
+      </FullScreenModal>,
+    );
+
+    const dialog = screen.getByRole("dialog");
+    const body = dialog.querySelector(".full-screen-modal__body");
+    const footer = dialog.querySelector(".full-screen-modal__footer");
+
+    expect(body).not.toBeNull();
+    expect(footer).not.toBeNull();
+    expect(footer).toContainElement(
+      screen.getByRole("button", { name: "Pinned action" }),
+    );
+    expect(body).not.toContainElement(
+      screen.getByRole("button", { name: "Pinned action" }),
+    );
+  });
 });

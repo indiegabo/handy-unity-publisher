@@ -11,7 +11,7 @@ type SurfacePanelProps = Omit<HTMLAttributes<HTMLElement>, "title"> & {
   headerClassName?: string;
   headerSeparated?: boolean;
   summary?: ReactNode;
-  title: string;
+  title?: string;
   tone?: SurfacePanelTone;
 };
 
@@ -21,7 +21,7 @@ type FocusPageFrameProps = Omit<HTMLAttributes<HTMLElement>, "title"> & {
   description?: string;
   eyebrow?: string;
   summary?: ReactNode;
-  title: string;
+  title?: string;
 };
 
 type SummaryStripProps = HTMLAttributes<HTMLDivElement>;
@@ -51,11 +51,16 @@ export function FocusPageFrame({
   ...props
 }: FocusPageFrameProps) {
   return (
-    <section {...props} className={joinClassNames("focus-page-frame", className)}>
+    <section
+      {...props}
+      className={joinClassNames("focus-page-frame", className)}
+    >
       <header className="focus-page-frame__header">
         <div className="focus-page-frame__title-block">
-          {eyebrow ? <p className="focus-page-frame__eyebrow">{eyebrow}</p> : null}
-          <h1 className="focus-page-frame__title">{title}</h1>
+          {eyebrow ? (
+            <p className="focus-page-frame__eyebrow">{eyebrow}</p>
+          ) : null}
+          {title ? <h1 className="focus-page-frame__title">{title}</h1> : null}
           {description ? (
             <p className="focus-page-frame__description">{description}</p>
           ) : null}
@@ -65,7 +70,9 @@ export function FocusPageFrame({
         ) : null}
       </header>
       {summary ? (
-        <SummaryStrip className="focus-page-frame__summary">{summary}</SummaryStrip>
+        <SummaryStrip className="focus-page-frame__summary">
+          {summary}
+        </SummaryStrip>
       ) : null}
       <div className={joinClassNames("focus-page-frame__body", bodyClassName)}>
         {children}
@@ -88,6 +95,9 @@ export function SurfacePanel({
   tone = "section",
   ...props
 }: SurfacePanelProps) {
+  const hasHeader = Boolean(eyebrow || title || description || actions);
+  const hasSummary = summary !== undefined && summary !== null;
+
   return (
     <section
       {...props}
@@ -95,18 +105,25 @@ export function SurfacePanel({
         "ui-panel",
         `ui-panel--${tone}`,
         headerSeparated && "ui-panel--header-separated",
+        !hasHeader && !hasSummary && "ui-panel--body-only",
         className,
       )}
     >
-      <header className={joinClassNames("ui-panel__header", headerClassName)}>
-        <div className="ui-panel__title-block">
-          {eyebrow ? <p className="ui-panel__eyebrow">{eyebrow}</p> : null}
-          <h2 className="ui-panel__title">{title}</h2>
-          {description ? <p className="ui-panel__description">{description}</p> : null}
-        </div>
-        {actions ? <div className="ui-panel__actions">{actions}</div> : null}
-      </header>
-      {summary ? <SummaryStrip className="ui-panel__summary">{summary}</SummaryStrip> : null}
+      {hasHeader ? (
+        <header className={joinClassNames("ui-panel__header", headerClassName)}>
+          <div className="ui-panel__title-block">
+            {eyebrow ? <p className="ui-panel__eyebrow">{eyebrow}</p> : null}
+            {title ? <h2 className="ui-panel__title">{title}</h2> : null}
+            {description ? (
+              <p className="ui-panel__description">{description}</p>
+            ) : null}
+          </div>
+          {actions ? <div className="ui-panel__actions">{actions}</div> : null}
+        </header>
+      ) : null}
+      {hasSummary ? (
+        <SummaryStrip className="ui-panel__summary">{summary}</SummaryStrip>
+      ) : null}
       <div className={joinClassNames("ui-panel__body", bodyClassName)}>
         {children}
       </div>
@@ -150,7 +167,9 @@ export function MetaItem({
 
 export function Badge({ children, className, tone = "neutral" }: BadgeProps) {
   return (
-    <span className={joinClassNames("ui-badge", `ui-badge--${tone}`, className)}>
+    <span
+      className={joinClassNames("ui-badge", `ui-badge--${tone}`, className)}
+    >
       {children}
     </span>
   );

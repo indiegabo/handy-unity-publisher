@@ -10,6 +10,7 @@ import { Icon, type IconName } from "./Icon";
 export type SelectOption = {
   disabled?: boolean;
   label: string;
+  title?: string;
   value: string;
 };
 
@@ -111,6 +112,9 @@ export function SelectField({
   const labelId = `${fieldId}-label`;
   const hintId = hint ? `${fieldId}-hint` : undefined;
   const errorId = error ? `${fieldId}-error` : undefined;
+  const selectedOptionTitle = options.find(
+    (option) => option.value === String(props.value ?? ""),
+  )?.title;
 
   return (
     <label
@@ -141,11 +145,13 @@ export function SelectField({
           aria-labelledby={joinAriaReferences(ariaLabelledBy, labelId)}
           className="ui-field__select"
           id={fieldId}
+          title={props.title ?? selectedOptionTitle}
         >
           {options.map((option) => (
             <option
               disabled={option.disabled}
               key={option.value}
+              title={option.title}
               value={option.value}
             >
               {option.label}

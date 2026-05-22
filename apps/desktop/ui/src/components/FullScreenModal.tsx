@@ -6,6 +6,7 @@ export type FullScreenModalProps = {
   title?: string;
   description?: string;
   children?: React.ReactNode;
+  footer?: React.ReactNode;
   dismissible?: boolean;
   className?: string;
   onResolve?: (value?: any) => void;
@@ -29,6 +30,7 @@ const FullScreenModal = ({
   title,
   description,
   children,
+  footer,
   dismissible = true,
   className,
   onResolve,
@@ -135,6 +137,10 @@ const FullScreenModal = ({
       </header>
 
       <div className="full-screen-modal__body">{children}</div>
+
+      {footer ? (
+        <footer className="full-screen-modal__footer">{footer}</footer>
+      ) : null}
     </div>
   );
 };

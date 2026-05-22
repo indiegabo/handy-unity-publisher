@@ -239,6 +239,7 @@ describe("App shell overlays", () => {
       expect(trigger).toHaveAccessibleDescription(
         "Active workers: Worker Demo (Windows Build)",
       );
+      expect(trigger).toHaveAttribute("title", "Worker Demo");
 
       trigger.focus();
       fireEvent.click(trigger);
@@ -616,7 +617,9 @@ describe("App shell overlays", () => {
       | undefined;
 
     subscribeToRuntimeEventsMock.mockImplementation(async (listener) => {
-      runtimeEventListener = listener as (event: Record<string, unknown>) => void;
+      runtimeEventListener = listener as (
+        event: Record<string, unknown>,
+      ) => void;
       return stopRuntimeEventsMock;
     });
 
@@ -659,7 +662,9 @@ describe("App shell overlays", () => {
       | undefined;
 
     subscribeToRuntimeEventsMock.mockImplementation(async (listener) => {
-      runtimeEventListener = listener as (event: Record<string, unknown>) => void;
+      runtimeEventListener = listener as (
+        event: Record<string, unknown>,
+      ) => void;
       return stopRuntimeEventsMock;
     });
 
@@ -689,69 +694,15 @@ describe("App shell overlays", () => {
     });
   });
 
-  it("shows an in-app toast for automatic build failures and allows dismissal", async () => {
+  it("does not render an in-app notification rail when automatic runtime events arrive", async () => {
     let runtimeEventListener:
       | ((event: Record<string, unknown>) => void)
       | undefined;
 
     subscribeToRuntimeEventsMock.mockImplementation(async (listener) => {
-      runtimeEventListener = listener as (event: Record<string, unknown>) => void;
-      return stopRuntimeEventsMock;
-    });
-
-    render(
-      <OverlayProvider>
-        <App />
-      </OverlayProvider>,
-    );
-
-    await screen.findByRole("button", {
-      name: /Project workers active for 1 active project\./i,
-    });
-
-    await act(async () => {
-      runtimeEventListener?.(
-        buildRuntimeEvent({
-          payload: { status: "failed" },
-          summary: "Worker Demo build failed while the shell was visible.",
-          topic: "build.run_finished",
-        }),
-      );
-    });
-
-    const notificationRail = await screen.findByRole("region", {
-      name: "Runtime notifications",
-    });
-
-    expect(
-      within(notificationRail).getByText("Automatic build failed"),
-    ).toBeInTheDocument();
-    expect(
-      within(notificationRail).getByText(
-        "Worker Demo build failed while the shell was visible.",
-      ),
-    ).toBeInTheDocument();
-
-    fireEvent.click(
-      within(notificationRail).getByRole("button", {
-        name: "Dismiss Automatic build failed",
-      }),
-    );
-
-    await waitFor(() => {
-      expect(
-        screen.queryByRole("region", { name: "Runtime notifications" }),
-      ).not.toBeInTheDocument();
-    });
-  });
-
-  it("shows an automatic release-queued toast without a linked process shortcut before the feed refresh lands", async () => {
-    let runtimeEventListener:
-      | ((event: Record<string, unknown>) => void)
-      | undefined;
-
-    subscribeToRuntimeEventsMock.mockImplementation(async (listener) => {
-      runtimeEventListener = listener as (event: Record<string, unknown>) => void;
+      runtimeEventListener = listener as (
+        event: Record<string, unknown>,
+      ) => void;
       return stopRuntimeEventsMock;
     });
 
@@ -776,99 +727,11 @@ describe("App shell overlays", () => {
       );
     });
 
-    const notificationRail = await screen.findByRole("region", {
-      name: "Runtime notifications",
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("region", { name: "Runtime notifications" }),
+      ).not.toBeInTheDocument();
     });
-
-    expect(
-      within(notificationRail).getByText("Automatic release queued"),
-    ).toBeInTheDocument();
-    expect(
-      within(notificationRail).getByText(
-        "Automatic release queued for Fresh Demo v0.2.0",
-      ),
-    ).toBeInTheDocument();
-    expect(
-      within(notificationRail).queryByRole("button", {
-        name: /Open process detail/i,
-      }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("shows a publish completion toast with a linked process-detail shortcut", async () => {
-    let runtimeEventListener:
-      | ((event: Record<string, unknown>) => void)
-      | undefined;
-
-    subscribeToRuntimeEventsMock.mockImplementation(async (listener) => {
-      runtimeEventListener = listener as (event: Record<string, unknown>) => void;
-      return stopRuntimeEventsMock;
-    });
-
-    invokeMock.mockImplementation(async (command: string) => {
-      switch (command) {
-        case "main_window_pin_state":
-          return false;
-        case "process_feed":
-          return buildProcessFeedPage({
-            items: [COMPLETED_PROCESS],
-            total_items: 1,
-            total_pages: 1,
-          });
-        case "transition_window_focus":
-        case "close_main_window":
-          return undefined;
-        case "set_main_window_pinned":
-          return true;
-        default:
-          throw new Error(`Unexpected invoke command: ${command}`);
-      }
-    });
-
-    render(
-      <OverlayProvider>
-        <App />
-      </OverlayProvider>,
-    );
-
-    expect(
-      await screen.findByRole("button", { name: "Open process detail #77" }),
-    ).toBeInTheDocument();
-
-    await act(async () => {
-      runtimeEventListener?.(
-        buildRuntimeEvent({
-          payload: { status: "succeeded" },
-          publish_run_id: 19,
-          release_run_id: 77,
-          summary: "Automatic publish succeeded for Worker Demo v0.1.0 (Itch stable)",
-          topic: "publish.run_finished",
-        }),
-      );
-    });
-
-    const notificationRail = await screen.findByRole("region", {
-      name: "Runtime notifications",
-    });
-
-    expect(
-      within(notificationRail).getByText("Automatic publish finished"),
-    ).toBeInTheDocument();
-    expect(
-      within(notificationRail).getByRole("button", {
-        name: "Open process detail #77",
-      }),
-    ).toBeInTheDocument();
-
-    fireEvent.click(
-      within(notificationRail).getByRole("button", {
-        name: "Open process detail #77",
-      }),
-    );
-
-    expect(
-      await screen.findByRole("button", { name: "Rerun process" }),
-    ).toBeInTheDocument();
   });
 
   it("returns the process feed to page one when build events arrive on an older page", async () => {
@@ -877,15 +740,14 @@ describe("App shell overlays", () => {
       | undefined;
 
     subscribeToProcessFeedEventsMock.mockImplementation(async (listener) => {
-      processFeedEventListener = listener as (event: Record<string, unknown>) => void;
+      processFeedEventListener = listener as (
+        event: Record<string, unknown>,
+      ) => void;
       return stopRuntimeProcessFeedEventsMock;
     });
 
     invokeMock.mockImplementation(
-      async (
-        command: string,
-        args?: { input?: { page?: number } },
-      ) => {
+      async (command: string, args?: { input?: { page?: number } }) => {
         switch (command) {
           case "main_window_pin_state":
             return false;
