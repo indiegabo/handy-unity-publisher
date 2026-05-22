@@ -63,8 +63,9 @@ Itch destinations require destination-wide metadata and a ready credential.
 - Destination config must include `account_name` and `game_slug`.
 - Each bound build target must declare an Itch `channel`.
 - Channels must not contain `:`.
-- Operators can optionally provide an explicit `butler_path`. When it is
-  empty, HGP resolves `butler` from the host `PATH`.
+- HGP resolves Butler automatically through the desktop shell sidecar flow.
+  Operators do not need to configure a Butler executable path in project
+  settings.
 - Itch credentials use the `itch-api-key` secret kind.
 - The desktop UI allows saving an Itch destination without a selected
   credential, but publish execution remains blocked until a ready credential is

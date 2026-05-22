@@ -157,10 +157,13 @@ npm start
 The root `npm start` command resolves the local Tauri CLI and runs `tauri dev`
 from `apps/desktop`. The Tauri development loop owns the UI development server
 and version synchronization through `beforeDevCommand`, and the desktop shell
-startup path then launches the bundled runtime supervisor. On Windows the
-runner also attempts to enter the Visual Studio developer environment before
-invoking Tauri, but it still requires the native Tauri prerequisites,
-including the Visual Studio C++ workload for the MSVC toolchain.
+startup path then launches the bundled runtime supervisor. Before Tauri starts,
+the root launcher also ensures the Butler sidecar exists under
+`apps/desktop/src-tauri/bin` so Itch destinations can publish without asking
+operators for a local Butler path. On Windows the runner also attempts to enter
+the Visual Studio developer environment before invoking Tauri, but it still
+requires the native Tauri prerequisites, including the Visual Studio C++
+workload for the MSVC toolchain.
 
 The desktop app targets Windows, Linux, and macOS. The current hands-on
 validation loop is still Windows-based, so host-specific behavior should keep

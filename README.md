@@ -194,6 +194,8 @@ repository root.
   published releases and uploads installer artifacts plus checksums.
 - `scripts/prepare-tauri-sidecar.ps1` builds and stages the packaged
   `runtime-bin` sidecar expected by release bundles.
+- `scripts/prepare-butler-sidecar.mjs` downloads and stages the Butler
+  sidecar used by Itch publish flows in development and release bundles.
 
 ## Operator Expectations
 
