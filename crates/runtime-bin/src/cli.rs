@@ -588,7 +588,7 @@ pub(crate) fn registrations_usage() -> &'static str {
 }
 
 pub(crate) fn registrations_checkout_usage() -> &'static str {
-    "HGP runtime registrations checkout\n\nUsage:\n  registrations checkout --repository-id <id> [--ref <git-ref>]\n\nDefaults:\n  --ref defaults to the repository default_branch stored in SQLite\n"
+    "HGP runtime registrations checkout\n\nUsage:\n  registrations checkout --repository-id <id> [--ref <git-ref>]\n\nDefaults:\n  --ref defaults to the repository default_branch stored in SQLite and falls back to the remote HEAD branch when the stored default is missing\n"
 }
 
 pub(crate) fn registrations_import_runtime_db_usage() -> &'static str {

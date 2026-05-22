@@ -711,6 +711,13 @@ pub struct GitTagListRequest {
     pub auth: GitAuthOptions,
 }
 
+/// Defines the repository whose remote HEAD branch must be resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRemoteHeadRefRequest {
+    pub repository_url: String,
+    pub auth: GitAuthOptions,
+}
+
 /// Lists repository tags through the local Git CLI.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GitTagLister;
@@ -738,6 +745,35 @@ impl GitTagLister {
         )?;
 
         parse_git_tags(&output)
+    }
+}
+
+/// Resolves the branch pointed to by a repository remote HEAD reference.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GitRemoteHeadRefResolver;
+
+impl GitRemoteHeadRefResolver {
+    /// Creates the default Git CLI-backed remote HEAD resolver.
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Resolves the branch name targeted by the remote HEAD symbolic ref.
+    pub fn resolve_head_ref(&self, request: &GitRemoteHeadRefRequest) -> io::Result<String> {
+        let repository_url = require_non_empty(&request.repository_url, "repository url")?;
+        let output = run_git_command_with_output(
+            None,
+            request.auth.append_git_args([
+                "ls-remote",
+                "--symref",
+                repository_url.as_str(),
+                "HEAD",
+            ]),
+            request.auth.credential_helper.as_deref(),
+            request.auth.preserve_credential_helper,
+        )?;
+
+        parse_remote_head_ref(&output)
     }
 }
 
@@ -1144,6 +1180,48 @@ fn parse_git_tags(output: &str) -> io::Result<Vec<GitTag>> {
     Ok(tags)
 }
 
+fn parse_remote_head_ref(output: &str) -> io::Result<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let Some(reference_fields) = trimmed.strip_prefix("ref: ") else {
+            continue;
+        };
+        let Some((reference, head_name)) = reference_fields.split_once('\t') else {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!("git ls-remote --symref output is malformed: {trimmed}"),
+            ));
+        };
+        if head_name.trim() != "HEAD" {
+            continue;
+        }
+
+        let normalized = reference
+            .trim()
+            .strip_prefix("refs/heads/")
+            .unwrap_or(reference.trim())
+            .trim()
+            .to_owned();
+        if normalized.is_empty() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "git ls-remote --symref returned an empty remote HEAD ref",
+            ));
+        }
+
+        return Ok(normalized);
+    }
+
+    Err(io::Error::new(
+        ErrorKind::InvalidData,
+        "git ls-remote --symref did not report a remote HEAD branch",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::prepare_github_credential_fill_command;
@@ -1154,10 +1232,10 @@ mod tests {
         git_auth_options_from_credentials_with_github_header_resolver,
         normalize_repository_url, detect_repository_provider,
         parse_git_credential_fill_output, platform_git_command_args,
-        prepare_git_command, GitAuthOptions, GitTagListRequest,
-        GitTagLister, GitWorkspaceSyncRefRequest, GitWorkspaceSyncRequest,
-        GitWorkspaceSyncer, KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER,
-        KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
+        prepare_git_command, GitAuthOptions, GitRemoteHeadRefRequest,
+        GitRemoteHeadRefResolver, GitTagListRequest, GitTagLister,
+        GitWorkspaceSyncRefRequest, GitWorkspaceSyncRequest, GitWorkspaceSyncer,
+        KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER, KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
     };
     use std::ffi::OsStr;
     use std::fs;
@@ -1402,6 +1480,24 @@ mod tests {
         assert_eq!(tags[1].name, "v1.2.0");
         assert_eq!(tags[2].name, "v1.10.0");
         assert!(tags.iter().all(|tag| !tag.commit.trim().is_empty()));
+
+        fs::remove_dir_all(root).expect("temporary git test root should be removable");
+    }
+
+    #[test]
+    fn git_remote_head_ref_resolver_returns_current_branch_name() {
+        let root = test_root("resolve-remote-head");
+        let repository_path = root.join("repo");
+        create_repository_with_tags(&repository_path, "2022.3.20f1", &["v1.0.0"]);
+
+        let branch = GitRemoteHeadRefResolver::new()
+            .resolve_head_ref(&GitRemoteHeadRefRequest {
+                repository_url: repository_path.display().to_string(),
+                auth: GitAuthOptions::default(),
+            })
+            .expect("remote HEAD branch should resolve");
+
+        assert_eq!(branch, current_branch_name(&repository_path));
 
         fs::remove_dir_all(root).expect("temporary git test root should be removable");
     }

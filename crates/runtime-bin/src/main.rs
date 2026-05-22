@@ -26,7 +26,8 @@ use std::time::{Duration, SystemTime};
 
 use runtime_config::{RuntimeConfig, SUPERVISION_ATTEMPT_ENV};
 use runtime_git::{
-    git_auth_options_from_credentials, GitAuthOptions, GitTag, GitTagListRequest, GitTagLister,
+    git_auth_options_from_credentials, GitAuthOptions, GitRemoteHeadRefRequest,
+    GitRemoteHeadRefResolver, GitTag, GitTagListRequest, GitTagLister,
     GitWorkspaceSyncRefRequest, GitWorkspaceSyncer,
 };
 use runtime_manifests::sync_directory as sync_manifest_directory;
@@ -891,11 +892,11 @@ fn run_registration_checkout_command(
             ),
         )) as Box<dyn Error>
     })?;
-    let (git_ref, git_ref_source) =
-        resolve_registration_checkout_ref(&repository, command.git_ref)?;
     let workspace_root_path = resolve_registration_checkout_workspace_root(config, &repository);
     let checkout_path = workspace_root_path.join("checkout");
     let git_auth = resolve_repository_git_auth(&coordinator, repository.credentials_id)?;
+    let (git_ref, git_ref_source) =
+        resolve_registration_checkout_ref(&repository, &repository_url, &git_auth, command.git_ref)?;
 
     GitWorkspaceSyncer::new().sync_ref(&GitWorkspaceSyncRefRequest {
         repository_url,
@@ -1934,6 +1935,71 @@ mod tests {
             .join("ProjectSettings")
             .join("ProjectVersion.txt")
             .is_file());
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn registrations_checkout_command_falls_back_to_remote_head_when_default_branch_is_missing() {
+        let root = test_root("runtime-bin-registrations-checkout-remote-head");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let repository_path = root.join("fixtures").join("revolutions");
+        let repository_url = create_unity_repository_with_tags(
+            &repository_path,
+            "2022.3.20f1",
+            &["v1.0.0"],
+        );
+        let expected_remote_head = current_git_branch_name(&repository_path);
+        let expected_head_commit = current_git_head_commit(&repository_path);
+        let workspace_root_override = root.join("managed-checkouts").join("revolutions");
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let credentials_id = seed_credentials(
+            &connection,
+            "revolutions/origin",
+            "git-http-basic",
+            r#"{"username":"comrade","password":"sickle"}"#,
+        );
+        let repository_id = seed_repository_with_url_and_credentials(
+            &connection,
+            "revolutions",
+            &repository_url,
+            Some(credentials_id),
+        );
+        connection
+            .execute(
+                "
+                UPDATE repositories
+                SET default_branch = NULL,
+                    workspace_root_override = ?
+                WHERE id = ?
+                ",
+                params![workspace_root_override.display().to_string(), repository_id],
+            )
+            .expect("repository checkout metadata should update");
+        drop(connection);
+
+        let output = run_registrations_command(
+            &[
+                String::from("checkout"),
+                String::from("--repository-id"),
+                repository_id.to_string(),
+            ],
+            &config,
+            &storage,
+        )
+        .expect("registrations checkout command should succeed without default_branch");
+        let report: RegistrationCheckoutReport = serde_json::from_str(&output)
+            .expect("registration checkout output should decode");
+
+        assert_eq!(report.repository_id, repository_id);
+        assert_eq!(report.git_ref, expected_remote_head);
+        assert_eq!(report.git_ref_source, "remote_head");
+        assert_eq!(report.head_commit, expected_head_commit);
+        assert!(workspace_root_override.join("checkout").join(".git").is_dir());
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }

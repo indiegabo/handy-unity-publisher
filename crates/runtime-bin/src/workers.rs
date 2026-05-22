@@ -305,6 +305,8 @@ fn run_repository_poll_cycle_with_forced_repositories(
     Ok(AutomationPollReport { repositories: results })
 }
 
+/// Polls one repository by listing remote tags and queuing unseen tags only.
+/// Branch heads are not inspected by the polling loop.
 fn poll_repository(
     coordinator: &LocalCoordinator,
     storage: &StorageLayout,
@@ -629,23 +631,31 @@ fn repository_log_slug(name: &str) -> String {
 
 pub(crate) fn resolve_registration_checkout_ref(
     repository: &RepositoryCheckoutRecord,
+    repository_url: &str,
+    git_auth: &GitAuthOptions,
     explicit_git_ref: Option<String>,
 ) -> io::Result<(String, String)> {
     if let Some(git_ref) = explicit_git_ref {
         return Ok((git_ref, String::from("explicit")));
     }
 
-    let default_branch = repository.default_branch.clone().ok_or_else(|| {
-        io::Error::new(
-            ErrorKind::InvalidData,
-            format!(
-                "repository {} is missing default_branch; pass --ref to registrations checkout",
-                repository.id
-            ),
-        )
-    })?;
+    if let Some(default_branch) = repository.default_branch.clone() {
+        return Ok((default_branch, String::from("default_branch")));
+    }
 
-    Ok((default_branch, String::from("default_branch")))
+    let remote_head = GitRemoteHeadRefResolver::new()
+        .resolve_head_ref(&GitRemoteHeadRefRequest {
+            repository_url: repository_url.to_owned(),
+            auth: git_auth.clone(),
+        })
+        .map_err(|error| {
+            io::Error::other(format!(
+                "repository {} is missing default_branch and remote HEAD could not be resolved: {error}",
+                repository.id
+            ))
+        })?;
+
+    Ok((remote_head, String::from("remote_head")))
 }
 
 pub(crate) fn resolve_registration_checkout_workspace_root(
@@ -721,6 +731,57 @@ pub(crate) fn select_queued_repository_tags(
     }
 
     (vec![tags[tags.len() - 1].clone()], "", true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git_tag(name: &str, commit: &str) -> GitTag {
+        GitTag {
+            name: name.to_owned(),
+            commit: commit.to_owned(),
+        }
+    }
+
+    #[test]
+    fn select_queued_repository_tags_returns_all_tags_when_no_tag_was_seen_yet() {
+        let tags = vec![git_tag("v1.0.0", "a1"), git_tag("v1.1.0", "b2")];
+
+        let (selected, status, ok) = select_queued_repository_tags(&tags, None);
+
+        assert!(ok);
+        assert_eq!(status, "");
+        assert_eq!(selected, tags);
+    }
+
+    #[test]
+    fn select_queued_repository_tags_advances_only_from_last_seen_tag() {
+        let tags = vec![
+            git_tag("v1.0.0", "a1"),
+            git_tag("v1.1.0", "b2"),
+            git_tag("v1.2.0", "c3"),
+        ];
+
+        let (selected, status, ok) =
+            select_queued_repository_tags(&tags, Some("v1.0.0"));
+
+        assert!(ok);
+        assert_eq!(status, "");
+        assert_eq!(selected, vec![git_tag("v1.1.0", "b2"), git_tag("v1.2.0", "c3")]);
+    }
+
+    #[test]
+    fn select_queued_repository_tags_reports_unchanged_when_latest_tag_was_seen() {
+        let tags = vec![git_tag("v1.0.0", "a1"), git_tag("v1.1.0", "b2")];
+
+        let (selected, status, ok) =
+            select_queued_repository_tags(&tags, Some("v1.1.0"));
+
+        assert!(!ok);
+        assert_eq!(status, POLL_STATUS_UNCHANGED);
+        assert!(selected.is_empty());
+    }
 }
 
 fn skipped_poll_result(
