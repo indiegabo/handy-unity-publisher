@@ -2,11 +2,15 @@ import { Button } from "./Button";
 import FullScreenModal from "./FullScreenModal";
 import { MetaItem, MetaRow, SummaryStrip } from "./Surface";
 import type { ProjectWorkerEntry } from "./ProjectWorkersFocusScreen";
-import type { RuntimeHealthStatus } from "../services/runtime";
+import type {
+  RuntimeAutomationMode,
+  RuntimeHealthStatus,
+} from "../services/runtime";
 
 export type WorkerStatusQuickViewResult = "open-project-workers";
 
 type WorkerStatusQuickViewProps = {
+  automationMode: RuntimeAutomationMode | null;
   inspectionAvailable: boolean;
   onResolve?: (value?: WorkerStatusQuickViewResult | null) => void;
   projectWorkers: ProjectWorkerEntry[];
@@ -14,6 +18,7 @@ type WorkerStatusQuickViewProps = {
 };
 
 export function WorkerStatusQuickView({
+  automationMode,
   inspectionAvailable,
   onResolve,
   projectWorkers,
@@ -32,12 +37,22 @@ export function WorkerStatusQuickView({
             <MetaItem label="Runtime">
               {formatRuntimeStatus(runtimeStatus)}
             </MetaItem>
+            <MetaItem label="Automation">
+              {formatAutomationMode(automationMode)}
+            </MetaItem>
             <MetaItem label="Active projects">{projectWorkers.length}</MetaItem>
             <MetaItem label="Enabled targets">
               {countBuildTargets(projectWorkers)}
             </MetaItem>
           </MetaRow>
         </SummaryStrip>
+
+        {automationMode === "idle" ? (
+          <p className="worker-status-quick-view__notice">
+            Automatic polling is paused. Manual instant checks remain available
+            from Project Workers.
+          </p>
+        ) : null}
 
         <div className="worker-status-tooltip__content">
           {!inspectionAvailable ? (
@@ -146,6 +161,14 @@ function formatRuntimeStatus(status: RuntimeHealthStatus | null) {
   }
 
   return status.replace(/_/g, " ");
+}
+
+function formatAutomationMode(mode: RuntimeAutomationMode | null) {
+  if (!mode) {
+    return "unavailable";
+  }
+
+  return mode === "idle" ? "paused" : "active";
 }
 
 function joinClassNames(...tokens: Array<string | false>) {

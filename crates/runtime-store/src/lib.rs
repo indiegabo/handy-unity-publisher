@@ -11495,6 +11495,10 @@ mod tests {
         assert_eq!(layout.database_path, PathBuf::from("/tmp/runtime/state/runtime.db"));
         assert_eq!(layout.health_report_path, PathBuf::from("/tmp/runtime/state/health.json"));
         assert_eq!(
+            layout.automation_state_path,
+            PathBuf::from("/tmp/runtime/state/automation-state.json")
+        );
+        assert_eq!(
             layout.supervision_contract_path,
             PathBuf::from("/tmp/runtime/state/supervision.json")
         );

@@ -9,6 +9,7 @@ use runtime_contracts::{BuildKind, EngineKind};
 pub struct StorageLayout {
     pub database_path: PathBuf,
     pub health_report_path: PathBuf,
+    pub automation_state_path: PathBuf,
     pub supervision_contract_path: PathBuf,
     pub supervisor_state_path: PathBuf,
     pub runtime_events_path: PathBuf,
@@ -23,6 +24,7 @@ impl StorageLayout {
         Self {
             database_path: directories.state_dir.join("runtime.db"),
             health_report_path: directories.state_dir.join("health.json"),
+            automation_state_path: directories.state_dir.join("automation-state.json"),
             supervision_contract_path: directories.state_dir.join("supervision.json"),
             supervisor_state_path: directories.state_dir.join("supervisor-state.json"),
             runtime_events_path: directories.state_dir.join("runtime-events.jsonl"),

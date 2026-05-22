@@ -11,6 +11,7 @@ describe("WorkerStatusQuickView", () => {
   it("focuses the loading copy when inspection is still unavailable", async () => {
     render(
       <WorkerStatusQuickView
+        automationMode="active"
         inspectionAvailable={false}
         onResolve={() => undefined}
         projectWorkers={[]}
@@ -28,6 +29,7 @@ describe("WorkerStatusQuickView", () => {
   it("focuses the empty-state copy when no project workers are configured", async () => {
     render(
       <WorkerStatusQuickView
+        automationMode="active"
         inspectionAvailable
         onResolve={() => undefined}
         projectWorkers={[]}
@@ -47,6 +49,7 @@ describe("WorkerStatusQuickView", () => {
 
     render(
       <WorkerStatusQuickView
+        automationMode="active"
         inspectionAvailable
         onResolve={onResolve}
         projectWorkers={[
@@ -79,6 +82,7 @@ describe("WorkerStatusQuickView", () => {
   it("uses a shared summary strip for runtime and worker totals", () => {
     const { container } = render(
       <WorkerStatusQuickView
+        automationMode="active"
         inspectionAvailable
         onResolve={() => undefined}
         projectWorkers={[
@@ -102,7 +106,9 @@ describe("WorkerStatusQuickView", () => {
     );
 
     expect(
-      container.querySelector(".worker-status-quick-view__summary-strip.ui-summary-strip"),
+      container.querySelector(
+        ".worker-status-quick-view__summary-strip.ui-summary-strip",
+      ),
     ).not.toBeNull();
   });
 });

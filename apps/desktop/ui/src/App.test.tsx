@@ -16,6 +16,7 @@ const {
   invokeMock,
   loadAuthProvidersMock,
   loadRepositoryInspectionMock,
+  loadRuntimeAutomationStatusMock,
   loadSecretSettingsMock,
   loginWithGithubAuthMock,
   loadRuntimeHealthMock,
@@ -24,6 +25,7 @@ const {
   requestRepositoryInstantCheckMock,
   restartRuntimeMock,
   saveSecretCredentialMock,
+  setRuntimeAutomationModeMock,
   startDraggingMock,
   startRuntimeMock,
   stopRuntimeMock,
@@ -39,6 +41,7 @@ const {
   invokeMock: vi.fn(),
   loadAuthProvidersMock: vi.fn(),
   loadRepositoryInspectionMock: vi.fn(),
+  loadRuntimeAutomationStatusMock: vi.fn(),
   loadSecretSettingsMock: vi.fn(),
   loginWithGithubAuthMock: vi.fn(),
   loadRuntimeHealthMock: vi.fn(),
@@ -47,6 +50,7 @@ const {
   requestRepositoryInstantCheckMock: vi.fn(),
   restartRuntimeMock: vi.fn(),
   saveSecretCredentialMock: vi.fn(),
+  setRuntimeAutomationModeMock: vi.fn(),
   startDraggingMock: vi.fn(() => Promise.resolve()),
   startRuntimeMock: vi.fn(),
   stopRuntimeMock: vi.fn(),
@@ -93,9 +97,11 @@ vi.mock("./services/processDetail", () => ({
 }));
 
 vi.mock("./services/runtime", () => ({
+  loadRuntimeAutomationStatus: loadRuntimeAutomationStatusMock,
   loadRuntimeHealth: loadRuntimeHealthMock,
   requestRepositoryInstantCheck: requestRepositoryInstantCheckMock,
   restartRuntime: restartRuntimeMock,
+  setRuntimeAutomationMode: setRuntimeAutomationModeMock,
   startRuntime: startRuntimeMock,
   stopRuntime: stopRuntimeMock,
 }));
@@ -197,12 +203,20 @@ beforeEach(() => {
   loadAuthProvidersMock.mockResolvedValue([buildGithubAuthProvider()]);
   loadSecretSettingsMock.mockResolvedValue(buildSecretSettings());
   loginWithGithubAuthMock.mockResolvedValue(buildGithubAuthProvider());
+  loadRuntimeAutomationStatusMock.mockResolvedValue({
+    mode: "active",
+    updated_at_unix: 1,
+  });
   loadRuntimeHealthMock.mockResolvedValue({ status: "healthy" });
   reconnectRepositoryAuthMock.mockResolvedValue(undefined);
   requestRepositoryInstantCheckMock.mockResolvedValue(undefined);
   restartRuntimeMock.mockResolvedValue(undefined);
   rerunReleaseProcessMock.mockResolvedValue(undefined);
   saveSecretCredentialMock.mockResolvedValue(undefined);
+  setRuntimeAutomationModeMock.mockResolvedValue({
+    mode: "idle",
+    updated_at_unix: 2,
+  });
   startRuntimeMock.mockResolvedValue(undefined);
   stopRuntimeMock.mockResolvedValue(undefined);
   stopRuntimeProcessFeedEventsMock.mockImplementation(() => undefined);
@@ -319,6 +333,35 @@ describe("App shell overlays", () => {
     } finally {
       requestAnimationFrameSpy.mockRestore();
     }
+  });
+
+  it("toggles global polling from the main shell action bar", async () => {
+    render(
+      <OverlayProvider>
+        <App />
+      </OverlayProvider>,
+    );
+
+    const toggle = await screen.findByRole("button", {
+      name: "Pause polling",
+    });
+
+    fireEvent.click(toggle);
+
+    await waitFor(() => {
+      expect(setRuntimeAutomationModeMock).toHaveBeenCalledWith("idle");
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", {
+          name: /Automatic polling paused for 1 active project\./i,
+        }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Resume polling" }),
+      ).toBeInTheDocument();
+    });
   });
 
   it("forces a GitHub browser relogin when a repository enters reauth required", async () => {
@@ -1134,9 +1177,7 @@ describe("App shell overlays", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Next" }));
 
-      expect(
-        await screen.findByRole("heading", { name: "Build Targets" }),
-      ).toBeInTheDocument();
+      expect(await screen.findByText("3. Build Targets")).toBeInTheDocument();
     } finally {
       requestAnimationFrameSpy.mockRestore();
     }

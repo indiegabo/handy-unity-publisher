@@ -100,6 +100,41 @@ impl RuntimeStatus {
     }
 }
 
+/// Describes whether the runtime should intake new automatic polling work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAutomationMode {
+    Active,
+    Idle,
+}
+
+impl RuntimeAutomationMode {
+    /// Returns the stable label used by shell and runtime automation controls.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Idle => "idle",
+        }
+    }
+}
+
+/// Persists the current runtime-wide automation posture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeAutomationSnapshot {
+    pub mode: RuntimeAutomationMode,
+    pub updated_at_unix: u64,
+}
+
+impl RuntimeAutomationSnapshot {
+    /// Builds a persisted automation snapshot for the requested mode.
+    pub fn new(mode: RuntimeAutomationMode) -> io::Result<Self> {
+        Ok(Self {
+            mode,
+            updated_at_unix: unix_timestamp()?,
+        })
+    }
+}
+
 /// Persists the operator-facing health snapshot of the bundled runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeHealthReport {
@@ -484,6 +519,37 @@ pub fn read_supervisor_snapshot(path: &Path) -> io::Result<RuntimeSupervisorSnap
     read_json_file(path)
 }
 
+/// Reads the persisted runtime automation snapshot from disk.
+pub fn read_runtime_automation_snapshot(
+    path: &Path,
+) -> io::Result<RuntimeAutomationSnapshot> {
+    read_json_file(path)
+}
+
+/// Loads the persisted runtime automation snapshot or returns the default
+/// active posture when no persisted state exists yet.
+pub fn load_runtime_automation_snapshot(
+    storage: &StorageLayout,
+) -> io::Result<RuntimeAutomationSnapshot> {
+    match read_runtime_automation_snapshot(&storage.automation_state_path) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            RuntimeAutomationSnapshot::new(RuntimeAutomationMode::Active)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Persists the current runtime-wide automation posture.
+pub fn persist_runtime_automation_mode(
+    storage: &StorageLayout,
+    mode: RuntimeAutomationMode,
+) -> io::Result<RuntimeAutomationSnapshot> {
+    let snapshot = RuntimeAutomationSnapshot::new(mode)?;
+    write_json_file(&storage.automation_state_path, &snapshot)?;
+    Ok(snapshot)
+}
+
 /// Updates the persisted runtime health report and appends a matching log event.
 pub fn update_runtime_health(
     storage: &StorageLayout,
@@ -708,8 +774,11 @@ fn unix_timestamp() -> io::Result<u64> {
 mod tests {
     use super::{
         bootstrap_runtime, read_health_report, read_supervision_contract,
-        read_supervisor_snapshot, recovery_interruption_context, shutdown_runtime,
-        write_supervisor_snapshot, RuntimeRestartPolicy, RuntimeStatus,
+        read_runtime_automation_snapshot, read_supervisor_snapshot,
+        recovery_interruption_context, shutdown_runtime,
+        load_runtime_automation_snapshot, persist_runtime_automation_mode,
+        write_supervisor_snapshot, RuntimeAutomationMode, RuntimeRestartPolicy,
+        RuntimeStatus,
         RuntimeSupervisorSnapshot, RuntimeSupervisorStatus,
         SUPERVISION_PROTOCOL_VERSION,
     };
@@ -850,6 +919,47 @@ mod tests {
         assert!(!policy.should_restart(Some(75), 2));
         assert!(!policy.should_restart(Some(1), 0));
         assert!(!policy.should_restart(None, 0));
+    }
+
+    #[test]
+    fn load_runtime_automation_snapshot_defaults_to_active_when_missing() {
+        let root = test_root("automation-default");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+
+        let snapshot = load_runtime_automation_snapshot(&storage)
+            .expect("automation snapshot should default when missing");
+
+        assert_eq!(snapshot.mode, RuntimeAutomationMode::Active);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn persist_runtime_automation_mode_round_trips_snapshot() {
+        let root = test_root("automation-round-trip");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        config
+            .directories
+            .ensure_exists()
+            .expect("directories should be created");
+
+        let written = persist_runtime_automation_mode(
+            &storage,
+            RuntimeAutomationMode::Idle,
+        )
+        .expect("automation mode should persist");
+
+        assert_eq!(written.mode, RuntimeAutomationMode::Idle);
+        assert_eq!(
+            read_runtime_automation_snapshot(&storage.automation_state_path)
+                .expect("persisted automation snapshot should load")
+                .mode,
+            RuntimeAutomationMode::Idle
+        );
+
+        fs::remove_dir_all(root).expect("temporary runtime directory should be removable");
     }
 
     #[test]

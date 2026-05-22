@@ -2,9 +2,18 @@ import { type ReactNode, useState } from "react";
 
 import { Button } from "./Button";
 import ScreenScaffold from "./ScreenScaffold";
-import { Badge, MetaItem, MetaRow, SummaryStrip, SurfacePanel } from "./Surface";
+import {
+  Badge,
+  MetaItem,
+  MetaRow,
+  SummaryStrip,
+  SurfacePanel,
+} from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
-import type { RuntimeHealthStatus } from "../services/runtime";
+import type {
+  RuntimeAutomationMode,
+  RuntimeHealthStatus,
+} from "../services/runtime";
 
 export type RuntimeControlAction = "start" | "stop" | "restart";
 
@@ -26,6 +35,7 @@ export type ProjectWorkerEntry = {
 type ProjectWorkersFocusScreenProps = {
   actionError: string | null;
   actionMessage: string | null;
+  automationMode: RuntimeAutomationMode | null;
   inspectionAvailable: boolean;
   inspectionError: string | null;
   inspectionStale: boolean;
@@ -45,6 +55,7 @@ type ProjectWorkersFocusScreenProps = {
 export function ProjectWorkersFocusScreen({
   actionError,
   actionMessage,
+  automationMode,
   inspectionAvailable,
   inspectionError,
   inspectionStale,
@@ -92,6 +103,9 @@ export function ProjectWorkersFocusScreen({
             <MetaItem label="Runtime">
               {formatRuntimeStatus(runtimeStatus)}
             </MetaItem>
+            <MetaItem label="Automation">
+              {formatAutomationMode(automationMode)}
+            </MetaItem>
             <MetaItem label="Workers">{projectWorkers.length}</MetaItem>
             <MetaItem label="Targets">{totalBuildTargetCount}</MetaItem>
             <MetaItem label="Attention">
@@ -128,6 +142,9 @@ export function ProjectWorkersFocusScreen({
               <MetaItem label="State">
                 {formatRuntimeStatus(runtimeStatus)}
               </MetaItem>
+              <MetaItem label="Automation">
+                {formatAutomationMode(automationMode)}
+              </MetaItem>
               <MetaItem label="Controls">
                 {runtimeBusy ? "Transition in progress" : "Ready"}
               </MetaItem>
@@ -142,7 +159,7 @@ export function ProjectWorkersFocusScreen({
                 {formatRuntimeStatus(runtimeStatus)}
               </Badge>
               <p className="project-workers-focus-copy">
-                {buildRuntimeCopy(runtimeStatus)}
+                {buildRuntimeCopy(runtimeStatus, automationMode)}
               </p>
             </div>
           </div>
@@ -521,9 +538,24 @@ function formatRuntimeStatus(runtimeStatus: RuntimeHealthStatus | null) {
   return runtimeStatus.replace(/_/g, " ");
 }
 
-function buildRuntimeCopy(runtimeStatus: RuntimeHealthStatus | null) {
+function formatAutomationMode(automationMode: RuntimeAutomationMode | null) {
+  if (!automationMode) {
+    return "status unavailable";
+  }
+
+  return automationMode === "idle" ? "paused" : "active";
+}
+
+function buildRuntimeCopy(
+  runtimeStatus: RuntimeHealthStatus | null,
+  automationMode: RuntimeAutomationMode | null,
+) {
   if (!runtimeStatus) {
     return "The shell is still resolving the latest runtime health snapshot.";
+  }
+
+  if (runtimeStatus === "healthy" && automationMode === "idle") {
+    return "The runtime is online, but automatic polling is paused. Manual instant checks remain available.";
   }
 
   if (runtimeStatus === "healthy") {

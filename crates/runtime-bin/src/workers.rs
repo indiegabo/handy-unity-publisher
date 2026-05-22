@@ -93,11 +93,13 @@ pub(crate) fn run_runtime_worker_iteration(
             HashSet::new()
         }
     };
+    let automation_snapshot = load_runtime_automation_snapshot(storage)?;
     let _ = run_repository_poll_cycle_with_forced_repositories(
         &coordinator,
         storage,
         Some(poll_schedule),
         &forced_repository_ids,
+        automation_snapshot.mode,
     )?;
     // RetryLater planner messages must not monopolize the serve loop, or
     // queued build work for earlier releases never gets a chance to start.
@@ -158,11 +160,14 @@ pub(crate) fn run_repository_poll_cycle(
     storage: &StorageLayout,
     poll_schedule: Option<&mut RepositoryPollSchedule>,
 ) -> io::Result<AutomationPollReport> {
+    let automation_snapshot = load_runtime_automation_snapshot(storage)?;
+
     run_repository_poll_cycle_with_forced_repositories(
         coordinator,
         storage,
         poll_schedule,
         &HashSet::new(),
+        automation_snapshot.mode,
     )
 }
 
@@ -171,6 +176,7 @@ fn run_repository_poll_cycle_with_forced_repositories(
     storage: &StorageLayout,
     mut poll_schedule: Option<&mut RepositoryPollSchedule>,
     forced_repository_ids: &HashSet<i64>,
+    automation_mode: RuntimeAutomationMode,
 ) -> io::Result<AutomationPollReport> {
     let repositories = coordinator.list_polling_repositories()?;
     let tag_lister = GitTagLister::default();
@@ -181,6 +187,17 @@ fn run_repository_poll_cycle_with_forced_repositories(
     for repository in repositories {
         seen_repositories.insert(repository.id);
         let force_poll = forced_repository_ids.contains(&repository.id);
+
+        if automation_mode == RuntimeAutomationMode::Idle && !force_poll {
+            if let Some(schedule) = poll_schedule.as_deref_mut() {
+                schedule.delete_repository(repository.id);
+            }
+            results.push(skipped_poll_result(
+                &repository,
+                POLL_STATUS_SKIPPED_RUNTIME_IDLE,
+            ));
+            continue;
+        }
 
         if repository.auth_binding_status == REPOSITORY_AUTH_BINDING_STATUS_REQUIRED_UNBOUND
             && !force_poll
@@ -781,6 +798,71 @@ mod tests {
         assert!(!ok);
         assert_eq!(status, POLL_STATUS_UNCHANGED);
         assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn repository_poll_cycle_skips_automatic_polling_when_runtime_is_idle() {
+        let root = std::env::temp_dir().join(format!(
+            "handy-games-publisher-runtime-idle-poll-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        ));
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+
+        initialize_database(&storage).expect("database should initialize");
+        runtime_core::persist_runtime_automation_mode(
+            &storage,
+            RuntimeAutomationMode::Idle,
+        )
+            .expect("automation mode should persist as idle");
+
+        let connection = rusqlite::Connection::open(&storage.database_path)
+            .expect("database connection should open");
+        connection
+            .execute(
+                "INSERT INTO repositories (
+                    name,
+                    source_mode,
+                    workspace_strategy,
+                    repo_url,
+                    engine_kind,
+                    polling_interval_seconds,
+                    enabled
+                 ) VALUES (?, 'managed_repository', 'managed_checkout', ?, 'unity', 300, 1)",
+                rusqlite::params![
+                    "Idle Demo",
+                    "https://example.com/idle-demo.git",
+                ],
+            )
+            .expect("repository row should insert");
+        let repository_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO build_targets (repository_id, name, enabled) VALUES (?, ?, 1)",
+                rusqlite::params![repository_id, "Windows Build"],
+            )
+            .expect("build target row should insert");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&storage);
+        let mut poll_schedule = RepositoryPollSchedule::default();
+        let report = run_repository_poll_cycle(
+            &coordinator,
+            &storage,
+            Some(&mut poll_schedule),
+        )
+        .expect("poll cycle should complete while idle");
+
+        assert_eq!(report.repositories.len(), 1);
+        assert_eq!(report.repositories[0].status, POLL_STATUS_SKIPPED_RUNTIME_IDLE);
+        assert!(poll_schedule.next_poll_at_by_repository.is_empty());
+
+        std::fs::remove_dir_all(&root)
+            .expect("temporary runtime root should be removable");
     }
 }
 

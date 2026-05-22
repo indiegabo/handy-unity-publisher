@@ -21,6 +21,7 @@ describe("ProjectWorkersFocusScreen", () => {
       <ProjectWorkersFocusScreen
         actionError={null}
         actionMessage={null}
+        automationMode="active"
         inspectionAvailable={false}
         inspectionError="Inspection offline"
         inspectionStale={false}
@@ -53,6 +54,7 @@ describe("ProjectWorkersFocusScreen", () => {
       <ProjectWorkersFocusScreen
         actionError={null}
         actionMessage={null}
+        automationMode="active"
         inspectionAvailable
         inspectionError={null}
         inspectionStale={false}
@@ -115,6 +117,7 @@ describe("ProjectWorkersFocusScreen", () => {
       <ProjectWorkersFocusScreen
         actionError={null}
         actionMessage={null}
+        automationMode="active"
         inspectionAvailable
         inspectionError={null}
         inspectionStale={false}
@@ -173,6 +176,7 @@ describe("ProjectWorkersFocusScreen", () => {
       <ProjectWorkersFocusScreen
         actionError={null}
         actionMessage={null}
+        automationMode="active"
         inspectionAvailable
         inspectionError={null}
         inspectionStale={false}

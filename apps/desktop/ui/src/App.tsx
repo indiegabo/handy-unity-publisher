@@ -55,11 +55,14 @@ import {
 } from "./services/runtimeEvents";
 import { rerunReleaseProcess } from "./services/processDetail";
 import {
+  loadRuntimeAutomationStatus,
   loadRuntimeHealth,
   requestRepositoryInstantCheck,
   restartRuntime,
+  setRuntimeAutomationMode,
   startRuntime,
   stopRuntime,
+  type RuntimeAutomationMode,
   type RuntimeHealthStatus,
 } from "./services/runtime";
 
@@ -86,6 +89,7 @@ type WorkerStatusSummary = {
 };
 
 type WorkerStatusSnapshot = {
+  automationMode: RuntimeAutomationMode | null;
   repositories: RepositoryInspectionEntry[];
   inspectionAvailable: boolean;
   inspectionError: string | null;
@@ -127,6 +131,7 @@ const EMPTY_PROCESS_FEED_PAGE: ProcessFeedPage = {
   items: [],
 };
 const EMPTY_WORKER_STATUS_SNAPSHOT: WorkerStatusSnapshot = {
+  automationMode: null,
   repositories: [],
   inspectionAvailable: false,
   inspectionError: null,
@@ -190,6 +195,8 @@ function App() {
   const [pendingBulkInstantCheck, setPendingBulkInstantCheck] = useState(false);
   const [pendingRuntimeAction, setPendingRuntimeAction] =
     useState<RuntimeControlAction | null>(null);
+  const [pendingAutomationMode, setPendingAutomationMode] =
+    useState<RuntimeAutomationMode | null>(null);
   const [pendingInstantCheckRepositoryId, setPendingInstantCheckRepositoryId] =
     useState<number | null>(null);
   const latestRequestIdRef = useRef(0);
@@ -203,7 +210,10 @@ function App() {
     workerSnapshot,
     projectWorkers,
   );
-  const workerStatusTooltip = buildWorkerStatusTooltip(projectWorkers);
+  const workerStatusTooltip = buildWorkerStatusTooltip(
+    workerSnapshot.automationMode,
+    projectWorkers,
+  );
   const activeProcessDetail =
     activeScreen.kind === "process-detail"
       ? (processPage.items.find(
@@ -410,13 +420,22 @@ function App() {
   });
 
   const loadRuntimeStatus = useEffectEvent(async () => {
-    const healthResult = await loadRuntimeHealth()
-      .then((value) => ({ status: "fulfilled" as const, value }))
-      .catch((reason) => ({ status: "rejected" as const, reason }));
+    const [healthResult, automationResult] = await Promise.all([
+      loadRuntimeHealth()
+        .then((value) => ({ status: "fulfilled" as const, value }))
+        .catch((reason) => ({ status: "rejected" as const, reason })),
+      loadRuntimeAutomationStatus()
+        .then((value) => ({ status: "fulfilled" as const, value }))
+        .catch((reason) => ({ status: "rejected" as const, reason })),
+    ]);
 
     startTransition(() => {
       setWorkerSnapshot((current) => ({
         ...current,
+        automationMode:
+          automationResult.status === "fulfilled"
+            ? automationResult.value.mode
+            : current.automationMode,
         runtimeStatus:
           healthResult.status === "fulfilled"
             ? healthResult.value.status
@@ -435,6 +454,22 @@ function App() {
 
   const handleRuntimeStatusEvent = useEffectEvent(
     (event: RuntimeEventRecord) => {
+      if (event.topic === "automation.mode_changed") {
+        const mode = event.payload.mode;
+
+        if (mode !== "active" && mode !== "idle") {
+          return;
+        }
+
+        startTransition(() => {
+          setWorkerSnapshot((current) => ({
+            ...current,
+            automationMode: mode,
+          }));
+        });
+        return;
+      }
+
       if (event.topic !== "runtime.status_changed") {
         return;
       }
@@ -717,6 +752,7 @@ function App() {
     const result = await openOverlay<WorkerStatusQuickViewResult>(
       WorkerStatusQuickView,
       {
+        automationMode: workerSnapshot.automationMode,
         inspectionAvailable: workerSnapshot.inspectionAvailable,
         projectWorkers,
         runtimeStatus: workerSnapshot.runtimeStatus,
@@ -799,6 +835,37 @@ function App() {
 
   const handleRestartRuntime = useEffectEvent(() => {
     void confirmRuntimeLifecycleAction("restart");
+  });
+
+  const handleToggleRuntimeAutomationMode = useEffectEvent(async () => {
+    const nextMode =
+      workerSnapshot.automationMode === "idle" ? "active" : "idle";
+
+    setWorkerActionError(null);
+    setWorkerActionMessage(null);
+    setPendingAutomationMode(nextMode);
+
+    try {
+      const snapshot = await setRuntimeAutomationMode(nextMode);
+
+      startTransition(() => {
+        setWorkerSnapshot((current) => ({
+          ...current,
+          automationMode: snapshot.mode,
+        }));
+        setWorkerActionMessage(buildRuntimeAutomationMessage(snapshot.mode));
+      });
+    } catch (error) {
+      startTransition(() => {
+        setWorkerActionError(
+          buildRuntimeAutomationErrorMessage(error, nextMode),
+        );
+      });
+    } finally {
+      startTransition(() => {
+        setPendingAutomationMode(null);
+      });
+    }
   });
 
   const handleBulkRepositoryInstantCheck = useEffectEvent(async () => {
@@ -1111,6 +1178,32 @@ function App() {
                     tone={workerStatus.tone}
                     title={workerStatusTooltip}
                   />
+                  <Button
+                    className="worker-status-shell__automation-toggle"
+                    disabled={
+                      pendingAutomationMode !== null ||
+                      workerSnapshot.automationMode === null
+                    }
+                    leadingIcon={
+                      workerSnapshot.automationMode === "idle"
+                        ? "play"
+                        : undefined
+                    }
+                    onClick={() => {
+                      void handleToggleRuntimeAutomationMode();
+                    }}
+                    size="sm"
+                    variant={
+                      workerSnapshot.automationMode === "idle"
+                        ? "primary"
+                        : "secondary"
+                    }
+                  >
+                    {resolveAutomationToggleLabel(
+                      workerSnapshot.automationMode,
+                      pendingAutomationMode,
+                    )}
+                  </Button>
                 </div>
               </div>
 
@@ -1281,6 +1374,7 @@ function App() {
                 <ProjectWorkersFocusScreen
                   actionError={workerActionError}
                   actionMessage={workerActionMessage}
+                  automationMode={workerSnapshot.automationMode}
                   inspectionAvailable={workerSnapshot.inspectionAvailable}
                   inspectionError={workerSnapshot.inspectionError}
                   inspectionStale={workerSnapshot.inspectionStale}
@@ -1406,6 +1500,12 @@ function buildRuntimeActionMessage(action: RuntimeControlAction): string {
   }
 }
 
+function buildRuntimeAutomationMessage(mode: RuntimeAutomationMode): string {
+  return mode === "idle"
+    ? "Automatic polling paused for the local host."
+    : "Automatic polling resumed for the local host.";
+}
+
 function buildBulkInstantCheckMessage(
   queuedWorkers: ProjectWorkerEntry[],
 ): string {
@@ -1427,6 +1527,21 @@ function buildRuntimeActionErrorMessage(
   }
 
   return `The desktop shell could not ${action} the runtime.`;
+}
+
+function buildRuntimeAutomationErrorMessage(
+  error: unknown,
+  mode: RuntimeAutomationMode,
+): string {
+  const message = readErrorMessage(error);
+
+  if (message) {
+    return message;
+  }
+
+  return mode === "idle"
+    ? "The desktop shell could not pause automatic polling."
+    : "The desktop shell could not resume automatic polling.";
 }
 
 function buildRepositoryInstantCheckErrorMessage(
@@ -1565,6 +1680,14 @@ function resolveWorkerStatusSummary(
     };
   }
 
+  if (snapshot.automationMode === "idle") {
+    return {
+      tone: "idle",
+      label: `Automatic polling paused for ${formatProjectCount(projectWorkers.length)}.`,
+      animated: false,
+    };
+  }
+
   const failingTargets = collectRelevantBuildTargets(projectWorkers).filter(
     (buildTarget) => buildTarget.diagnosticStatus !== "ready",
   );
@@ -1650,6 +1773,10 @@ function buildWorkerStatusDescription(
     return "No active workers configured.";
   }
 
+  if (snapshot.automationMode === "idle") {
+    return `Automatic polling is paused. Manual instant checks remain available. ${buildActiveWorkersDescription(projectWorkers)}`;
+  }
+
   return buildActiveWorkersDescription(projectWorkers);
 }
 
@@ -1665,14 +1792,46 @@ function buildActiveWorkersDescription(projectWorkers: ProjectWorkerEntry[]) {
     .join(" · ")}`;
 }
 
-function buildWorkerStatusTooltip(projectWorkers: ProjectWorkerEntry[]) {
+function buildWorkerStatusTooltip(
+  automationMode: RuntimeAutomationMode | null,
+  projectWorkers: ProjectWorkerEntry[],
+) {
   if (projectWorkers.length === 0) {
-    return undefined;
+    return automationMode === "idle" ? "Automatic polling paused" : undefined;
   }
 
-  return projectWorkers
+  const repositoryNames = projectWorkers
     .map((projectWorker) => projectWorker.repositoryName)
     .join(", ");
+
+  if (automationMode === "idle") {
+    return `Automatic polling paused · ${repositoryNames}`;
+  }
+
+  return repositoryNames;
+}
+
+function resolveAutomationToggleLabel(
+  automationMode: RuntimeAutomationMode | null,
+  pendingAutomationMode: RuntimeAutomationMode | null,
+) {
+  if (pendingAutomationMode === "idle") {
+    return "Pausing...";
+  }
+
+  if (pendingAutomationMode === "active") {
+    return "Resuming...";
+  }
+
+  if (automationMode === "idle") {
+    return "Resume polling";
+  }
+
+  if (automationMode === "active") {
+    return "Pause polling";
+  }
+
+  return "Polling status...";
 }
 
 function formatRuntimeStatus(status: RuntimeHealthStatus) {

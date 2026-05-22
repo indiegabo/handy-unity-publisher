@@ -22,12 +22,23 @@ export type RuntimeHealthReport = {
     log_file_path: string;
 };
 
+export type RuntimeAutomationMode = "active" | "idle";
+
+export type RuntimeAutomationSnapshot = {
+    mode: RuntimeAutomationMode;
+    updated_at_unix: number;
+};
+
 type RepositoryInstantCheckInput = {
     repository_id: number;
 };
 
 export async function loadRuntimeHealth(): Promise<RuntimeHealthReport> {
     return invoke<RuntimeHealthReport>("runtime_health");
+}
+
+export async function loadRuntimeAutomationStatus(): Promise<RuntimeAutomationSnapshot> {
+    return invoke<RuntimeAutomationSnapshot>("runtime_automation_status");
 }
 
 export async function startRuntime(): Promise<void> {
@@ -40,6 +51,14 @@ export async function stopRuntime(): Promise<void> {
 
 export async function restartRuntime(): Promise<void> {
     return invoke<void>("restart_runtime");
+}
+
+export async function setRuntimeAutomationMode(
+    mode: RuntimeAutomationMode,
+): Promise<RuntimeAutomationSnapshot> {
+    return invoke<RuntimeAutomationSnapshot>("set_runtime_automation_mode", {
+        mode,
+    });
 }
 
 export async function requestRepositoryInstantCheck(

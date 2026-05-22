@@ -19,7 +19,11 @@ use runtime_config::{
     HostPlatform, RuntimeConfig, RUNTIME_ROOT_ENV,
 };
 use runtime_core::{
+    emit_runtime_event,
+    load_runtime_automation_snapshot,
+    persist_runtime_automation_mode,
     read_health_report, read_supervision_contract, read_supervisor_snapshot,
+    RuntimeAutomationMode, RuntimeAutomationSnapshot, RuntimeEventInput,
     RuntimeHealthReport, RuntimeRestartPolicy, RuntimeSupervisorSnapshot,
     RuntimeStatus, RuntimeSupervisorStatus,
 };
@@ -118,6 +122,7 @@ const DEFAULT_BUILD_TARGET_TIMEOUT_SECONDS: i64 = 3600;
 const MIN_REPOSITORY_POLL_INTERVAL_SECONDS: i64 = 5;
 const SUPPORTED_REPOSITORY_ENGINE_KIND_UNITY: &str = "unity";
 const GITHUB_AUTH_PROVIDER_ID: &str = "github";
+const EVENT_TOPIC_AUTOMATION_MODE_CHANGED: &str = "automation.mode_changed";
 const GITHUB_AUTH_PROVIDER_LABEL: &str = "GitHub";
 const GITHUB_AUTH_INSTANCE_URL: &str = "https://github.com";
 const GITHUB_AUTH_CREDENTIAL_NAME: &str = "GitHub.com";
@@ -1161,6 +1166,7 @@ pub fn run() {
             update_repository_project,
             remove_repository_project,
             runtime_health,
+            runtime_automation_status,
             runtime_logs,
             runtime_directories,
             runtime_lifecycle_settings,
@@ -1188,6 +1194,7 @@ pub fn run() {
             start_runtime,
             stop_runtime,
             restart_runtime,
+            set_runtime_automation_mode,
             rerun_release_process,
             request_repository_instant_check,
             unity_adapter_settings,
@@ -1378,6 +1385,13 @@ fn remove_repository_project(
 fn runtime_health() -> Result<RuntimeHealthReport, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_runtime_health_report(&config).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn runtime_automation_status() -> Result<RuntimeAutomationSnapshot, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    let storage = StorageLayout::from_directories(&config.directories);
+    load_runtime_automation_snapshot(&storage).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1599,6 +1613,56 @@ fn stop_runtime(app_handle: AppHandle) -> Result<(), String> {
 fn restart_runtime(app_handle: AppHandle) -> Result<(), String> {
     request_runtime_stop(&app_handle).map_err(|error| error.to_string())?;
     launch_runtime_process_handle(&app_handle).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_runtime_automation_mode(
+    mode: String,
+) -> Result<RuntimeAutomationSnapshot, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    let storage = StorageLayout::from_directories(&config.directories);
+    let normalized = mode.trim().to_ascii_lowercase();
+    let parsed_mode = match normalized.as_str() {
+        "active" => RuntimeAutomationMode::Active,
+        "idle" => RuntimeAutomationMode::Idle,
+        _ => {
+            return Err(String::from(
+                "runtime automation mode must be either 'active' or 'idle'",
+            ));
+        }
+    };
+
+    let snapshot = persist_runtime_automation_mode(&storage, parsed_mode)
+        .map_err(|error| error.to_string())?;
+
+    emit_runtime_event(
+        &storage,
+        RuntimeEventInput {
+            topic: String::from(EVENT_TOPIC_AUTOMATION_MODE_CHANGED),
+            severity: String::from("info"),
+            origin: String::from("desktop-shell"),
+            user_requested: true,
+            repository_id: None,
+            release_run_id: None,
+            build_run_id: None,
+            publish_run_id: None,
+            summary: format!(
+                "Automatic polling {} for the local host",
+                if parsed_mode == RuntimeAutomationMode::Idle {
+                    "paused"
+                } else {
+                    "resumed"
+                }
+            ),
+            payload: serde_json::json!({
+                "mode": parsed_mode.as_str(),
+                "status": "updated",
+            }),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(snapshot)
 }
 
 #[tauri::command]

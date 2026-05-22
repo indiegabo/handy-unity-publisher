@@ -40,7 +40,8 @@ use runtime_publish::{
 use runtime_core::{
     bootstrap_runtime, read_health_report, read_supervision_contract, shutdown_runtime,
     update_runtime_health, write_supervisor_snapshot, emit_runtime_event,
-    RuntimeEventInput, RuntimeRestartPolicy,
+    load_runtime_automation_snapshot, RuntimeAutomationMode, RuntimeEventInput,
+    RuntimeRestartPolicy,
     RuntimeSupervisionContract, RuntimeSupervisorSnapshot, RuntimeSupervisorStatus,
     RuntimeStatus, RUNTIME_HEARTBEAT_EVENT,
 };
@@ -92,6 +93,7 @@ const POLL_STATUS_SKIPPED_NO_ENABLED_BUILD_TARGETS: &str = "skipped_no_enabled_b
 const POLL_STATUS_SKIPPED_ACTIVE_RELEASE_BACKLOG: &str = "skipped_active_release_backlog";
 const POLL_STATUS_SKIPPED_REQUIRED_UNBOUND: &str = "skipped_required_unbound";
 const POLL_STATUS_SKIPPED_REAUTH_REQUIRED: &str = "skipped_reauth_required";
+const POLL_STATUS_SKIPPED_RUNTIME_IDLE: &str = "skipped_runtime_idle";
 const POLL_STATUS_NO_TAGS: &str = "no_tags";
 const POLL_STATUS_UNCHANGED: &str = "unchanged";
 const POLL_STATUS_QUEUED: &str = "queued";
