@@ -12,7 +12,7 @@ use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use runtime_core::{read_runtime_event_batch, RuntimeEventRecord};
 use runtime_store::StorageLayout;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 
 use crate::MAIN_WINDOW_LABEL;
@@ -23,7 +23,6 @@ const RECENT_EVENT_ID_LIMIT: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeNotificationPolicy {
     Always,
-    WhenWindowHidden,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -201,8 +200,7 @@ fn maybe_notify_native_runtime_event<R: Runtime>(
         return Ok(());
     };
 
-    let main_window_visible = is_main_window_visible(app_handle);
-    if !should_show_native_notification(policy, main_window_visible) {
+    if !should_show_native_notification(policy) {
         return Ok(());
     }
 
@@ -227,30 +225,38 @@ fn native_notification_policy(event: &RuntimeEventRecord) -> Option<NativeNotifi
 
     match event.topic.as_str() {
         "automation.poll_auth_failed" => Some(NativeNotificationPolicy::Always),
+        "automation.release_queued" => Some(NativeNotificationPolicy::Always),
         "build.run_started" => Some(NativeNotificationPolicy::Always),
-        "build.run_finished" => Some(NativeNotificationPolicy::WhenWindowHidden),
+        "build.run_finished" => Some(NativeNotificationPolicy::Always),
+        "publish.run_started" => Some(NativeNotificationPolicy::Always),
+        "publish.run_finished" => Some(NativeNotificationPolicy::Always),
         _ => None,
     }
 }
 
-fn should_show_native_notification(
-    policy: NativeNotificationPolicy,
-    main_window_visible: bool,
-) -> bool {
+fn should_show_native_notification(policy: NativeNotificationPolicy) -> bool {
     match policy {
         NativeNotificationPolicy::Always => true,
-        NativeNotificationPolicy::WhenWindowHidden => !main_window_visible,
     }
 }
 
 fn native_notification_content(event: &RuntimeEventRecord) -> (String, String) {
     let title = match event.topic.as_str() {
         "automation.poll_auth_failed" => String::from("Repository polling stopped"),
+        "automation.release_queued" => String::from("Automatic release queued"),
         "build.run_started" => String::from("Automatic build started"),
         "build.run_finished" => match build_status_from_event(event) {
             Some("failed") => String::from("Automatic build failed"),
             Some("canceled") | Some("cancelled") => String::from("Automatic build canceled"),
             _ => String::from("Automatic build finished"),
+        },
+        "publish.run_started" => String::from("Automatic publish started"),
+        "publish.run_finished" => match build_status_from_event(event) {
+            Some("failed") => String::from("Automatic publish failed"),
+            Some("canceled") | Some("cancelled") => {
+                String::from("Automatic publish canceled")
+            }
+            _ => String::from("Automatic publish finished"),
         },
         _ => String::from("HGP build update"),
     };
@@ -260,13 +266,6 @@ fn native_notification_content(event: &RuntimeEventRecord) -> (String, String) {
 
 fn build_status_from_event(event: &RuntimeEventRecord) -> Option<&str> {
     event.payload.get("status").and_then(serde_json::Value::as_str)
-}
-
-fn is_main_window_visible<R: Runtime>(app_handle: &AppHandle<R>) -> bool {
-    app_handle
-        .get_webview_window(MAIN_WINDOW_LABEL)
-        .and_then(|window| window.is_visible().ok())
-        .unwrap_or(false)
 }
 
 fn ensure_notification_permission<R: Runtime>(app_handle: &AppHandle<R>) -> io::Result<bool> {
@@ -466,9 +465,13 @@ mod tests {
     }
 
     #[test]
-    fn native_notification_policy_targets_automatic_builds_and_poll_auth_failures() {
+    fn native_notification_policy_targets_automatic_runtime_events() {
         assert_eq!(
             native_notification_policy(&test_event("automation.poll_auth_failed", false, None)),
+            Some(NativeNotificationPolicy::Always)
+        );
+        assert_eq!(
+            native_notification_policy(&test_event("automation.release_queued", false, None)),
             Some(NativeNotificationPolicy::Always)
         );
         assert_eq!(
@@ -477,43 +480,36 @@ mod tests {
         );
         assert_eq!(
             native_notification_policy(&test_event("build.run_finished", false, Some("failed"))),
-            Some(NativeNotificationPolicy::WhenWindowHidden)
+            Some(NativeNotificationPolicy::Always)
+        );
+        assert_eq!(
+            native_notification_policy(&test_event("publish.run_started", false, None)),
+            Some(NativeNotificationPolicy::Always)
+        );
+        assert_eq!(
+            native_notification_policy(&test_event("publish.run_finished", false, None)),
+            Some(NativeNotificationPolicy::Always)
         );
         assert_eq!(
             native_notification_policy(&test_event("build.run_started", true, None)),
             None
         );
-        assert_eq!(
-            native_notification_policy(&test_event("publish.run_finished", false, None)),
-            None
-        );
     }
 
     #[test]
-    fn notification_visibility_policy_matches_build_event_rules() {
-        assert!(should_show_native_notification(
-            NativeNotificationPolicy::Always,
-            true,
-        ));
-        assert!(should_show_native_notification(
-            NativeNotificationPolicy::Always,
-            false,
-        ));
-        assert!(!should_show_native_notification(
-            NativeNotificationPolicy::WhenWindowHidden,
-            true,
-        ));
-        assert!(should_show_native_notification(
-            NativeNotificationPolicy::WhenWindowHidden,
-            false,
-        ));
+    fn notification_visibility_policy_always_shows_native_runtime_events() {
+        assert!(should_show_native_notification(NativeNotificationPolicy::Always));
     }
 
     #[test]
-    fn native_notification_content_uses_build_status_for_finished_events() {
+    fn native_notification_content_uses_runtime_event_titles() {
         assert_eq!(
             native_notification_content(&test_event("automation.poll_auth_failed", false, None)).0,
             "Repository polling stopped"
+        );
+        assert_eq!(
+            native_notification_content(&test_event("automation.release_queued", false, None)).0,
+            "Automatic release queued"
         );
         assert_eq!(
             native_notification_content(&test_event("build.run_started", false, None)).0,
@@ -530,6 +526,22 @@ mod tests {
         assert_eq!(
             native_notification_content(&test_event("build.run_finished", false, Some("succeeded"))).0,
             "Automatic build finished"
+        );
+        assert_eq!(
+            native_notification_content(&test_event("publish.run_started", false, None)).0,
+            "Automatic publish started"
+        );
+        assert_eq!(
+            native_notification_content(&test_event("publish.run_finished", false, Some("failed"))).0,
+            "Automatic publish failed"
+        );
+        assert_eq!(
+            native_notification_content(&test_event("publish.run_finished", false, Some("cancelled"))).0,
+            "Automatic publish canceled"
+        );
+        assert_eq!(
+            native_notification_content(&test_event("publish.run_finished", false, Some("succeeded"))).0,
+            "Automatic publish finished"
         );
     }
 

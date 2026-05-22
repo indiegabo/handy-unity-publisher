@@ -6,7 +6,8 @@
             "nsis"
         ],
         "externalBin": [
-            "bin/hgp-runtime"
+            "bin/hgp-runtime",
+            "bin/hgp-butler"
         ]
     }
 }

@@ -82,6 +82,8 @@ use zip::ZipArchive;
 
 const RUNTIME_PACKAGE_NAME: &str = "runtime-bin";
 const RUNTIME_BINARY_NAME: &str = "hgp-runtime";
+const BUTLER_BINARY_NAME: &str = "hgp-butler";
+const HGP_BUTLER_PATH_ENV: &str = "HGP_BUTLER_PATH";
 const DEFAULT_RUNTIME_LOG_LINE_LIMIT: usize = 100;
 const MAX_RUNTIME_LOG_LINE_LIMIT: usize = 500;
 const DEFAULT_TEXT_FILE_PREVIEW_MAX_BYTES: usize = 128 * 1024;
@@ -107,6 +109,7 @@ const POPUP_WINDOW_MIN_HEIGHT: u32 = 420;
 const POPUP_WINDOW_EDGE_MARGIN: i32 = 16;
 const WINDOW_FOCUS_TRANSITION_MILLIS: u64 = 150;
 const WINDOW_FOCUS_TRANSITION_STEP_MILLIS: u64 = 15;
+const SYSTEM_DIALOG_FOCUS_LOSS_GRACE: Duration = Duration::from_millis(250);
 const DEFAULT_PROCESS_FEED_PAGE_SIZE: u32 = 6;
 const MAX_PROCESS_FEED_PAGE_SIZE: u32 = 50;
 const HOST_CAPABILITY_PROFILE_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -240,6 +243,7 @@ struct ShellLifecycleState {
     is_quitting: Mutex<bool>,
     is_main_window_pinned: Mutex<bool>,
     active_system_dialogs: Mutex<u32>,
+    suppress_main_window_focus_loss_until: Mutex<Option<Instant>>,
 }
 
 #[derive(Debug, Clone)]
@@ -279,6 +283,13 @@ impl Drop for ActiveSystemDialogGuard<'_> {
     fn drop(&mut self) {
         if let Ok(mut active_system_dialogs) = self.lifecycle.active_system_dialogs.lock() {
             *active_system_dialogs = active_system_dialogs.saturating_sub(1);
+
+            if *active_system_dialogs == 0 {
+                suppress_main_window_focus_loss(
+                    self.lifecycle,
+                    SYSTEM_DIALOG_FOCUS_LOSS_GRACE,
+                );
+            }
         }
     }
 }
@@ -883,6 +894,52 @@ fn set_main_window_pinned_state(app_handle: &AppHandle, pinned: bool) -> Result<
     Ok(*is_pinned)
 }
 
+fn has_active_system_dialogs(lifecycle: &ShellLifecycleState) -> bool {
+    lifecycle
+        .active_system_dialogs
+        .lock()
+        .map(|active_system_dialogs| *active_system_dialogs > 0)
+        .unwrap_or(true)
+}
+
+fn suppress_main_window_focus_loss(
+    lifecycle: &ShellLifecycleState,
+    duration: Duration,
+) {
+    if let Ok(mut suppressed_until) = lifecycle.suppress_main_window_focus_loss_until.lock() {
+        *suppressed_until = Some(Instant::now() + duration);
+    }
+}
+
+fn is_main_window_focus_loss_suppressed(lifecycle: &ShellLifecycleState) -> bool {
+    let now = Instant::now();
+
+    lifecycle
+        .suppress_main_window_focus_loss_until
+        .lock()
+        .map(|mut suppressed_until| match *suppressed_until {
+            Some(until) if until > now => true,
+            Some(_) => {
+                *suppressed_until = None;
+                false
+            }
+            None => false,
+        })
+        .unwrap_or(true)
+}
+
+fn should_hide_main_window_on_focus_loss_state(
+    should_keep_running: bool,
+    is_pinned: bool,
+    has_active_system_dialogs: bool,
+    is_focus_loss_suppressed: bool,
+) -> bool {
+    should_keep_running
+        && !is_pinned
+        && !has_active_system_dialogs
+        && !is_focus_loss_suppressed
+}
+
 fn should_hide_main_window_on_focus_loss(app_handle: &AppHandle) -> bool {
     if !should_keep_running(app_handle) {
         return false;
@@ -894,13 +951,15 @@ fn should_hide_main_window_on_focus_loss(app_handle: &AppHandle) -> bool {
         .lock()
         .map(|is_pinned| *is_pinned)
         .unwrap_or(true);
-    let has_active_system_dialogs = lifecycle
-        .active_system_dialogs
-        .lock()
-        .map(|active_system_dialogs| *active_system_dialogs > 0)
-        .unwrap_or(true);
+    let has_active_system_dialogs = has_active_system_dialogs(&lifecycle);
+    let is_focus_loss_suppressed = is_main_window_focus_loss_suppressed(&lifecycle);
 
-    !is_pinned && !has_active_system_dialogs
+    should_hide_main_window_on_focus_loss_state(
+        true,
+        is_pinned,
+        has_active_system_dialogs,
+        is_focus_loss_suppressed,
+    )
 }
 
 fn initialize_tray(app: &tauri::App) -> Result<(), String> {
@@ -1039,6 +1098,23 @@ fn show_main_window(app_handle: &AppHandle) {
             let _ = window.set_focus();
         }
         Err(error) => eprintln!("failed to show main window: {error}"),
+    }
+}
+
+fn restore_main_window_focus_after_system_dialog(app_handle: &AppHandle) {
+    if !should_keep_running(app_handle) {
+        return;
+    }
+
+    match main_window(app_handle) {
+        Ok(window) => {
+            if window.is_visible().ok().unwrap_or(true) {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }
+        Err(error) => eprintln!("failed to restore main window focus: {error}"),
     }
 }
 
@@ -1227,7 +1303,7 @@ fn close_main_window(app_handle: AppHandle) -> Result<(), String> {
 fn pick_host_path(app_handle: AppHandle, input: PickHostPathInput) -> Result<Option<String>, String> {
     let mut dialog = FileDialog::new();
     let lifecycle = app_handle.state::<ShellLifecycleState>();
-    let _dialog_guard = ActiveSystemDialogGuard::acquire(&lifecycle)?;
+    let dialog_guard = ActiveSystemDialogGuard::acquire(&lifecycle)?;
 
     if let Some(title) = normalize_optional_shell_string(input.title) {
         dialog = dialog.set_title(&title);
@@ -1250,6 +1326,9 @@ fn pick_host_path(app_handle: AppHandle, input: PickHostPathInput) -> Result<Opt
         HostPathSelectionKind::File => dialog.pick_file(),
         HostPathSelectionKind::Directory => dialog.pick_folder(),
     };
+
+    restore_main_window_focus_after_system_dialog(&app_handle);
+    drop(dialog_guard);
 
     Ok(selected_path.map(|path| path.display().to_string()))
 }
@@ -1461,7 +1540,7 @@ fn secret_settings() -> Result<SecretSettings, String> {
 }
 
 #[tauri::command]
-fn save_secret_credential(input: SaveSecretCredentialInput) -> Result<(), String> {
+fn save_secret_credential(input: SaveSecretCredentialInput) -> Result<i64, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     persist_secret_credential(&config, input).map_err(|error| error.to_string())
 }
@@ -1564,7 +1643,11 @@ fn launch_runtime_process_handle<R: tauri::Runtime>(
 
     let plan = current_runtime_command_plan(RuntimeLaunchAction::Supervise)?;
     let mut command = plan.into_command();
-    command.env(RUNTIME_ROOT_ENV, &config.directories.data_dir);
+    apply_runtime_command_environment(
+        &mut command,
+        &config.directories.data_dir,
+        current_butler_sidecar_path().as_deref(),
+    );
     let mut child = command.spawn()?;
 
     thread::sleep(Duration::from_millis(RUNTIME_STARTUP_PROBE_MILLIS));
@@ -1641,7 +1724,11 @@ fn request_runtime_shutdown() -> io::Result<()> {
     let config = load_shell_runtime_config()?;
     let plan = current_runtime_command_plan(RuntimeLaunchAction::Shutdown)?;
     let mut command = plan.into_command();
-    command.env(RUNTIME_ROOT_ENV, &config.directories.data_dir);
+    apply_runtime_command_environment(
+        &mut command,
+        &config.directories.data_dir,
+        current_butler_sidecar_path().as_deref(),
+    );
     let status = command.status()?;
     if status.success() {
         Ok(())
@@ -2962,7 +3049,7 @@ fn load_secret_settings(config: &RuntimeConfig) -> io::Result<SecretSettings> {
 fn persist_secret_credential(
     config: &RuntimeConfig,
     input: SaveSecretCredentialInput,
-) -> io::Result<()> {
+) -> io::Result<i64> {
     if !credential_kind_supported(&input.kind) {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -2974,7 +3061,7 @@ fn persist_secret_credential(
     }
 
     let storage = writable_secret_storage(config)?;
-    LocalCoordinator::new(&storage).upsert_credential_record(
+    let credential = LocalCoordinator::new(&storage).upsert_credential_record(
         UpsertCredentialRecordInput {
             credential_id: input.credential_id,
             name: input.name,
@@ -2983,7 +3070,7 @@ fn persist_secret_credential(
         },
     )?;
 
-    Ok(())
+    Ok(credential.id)
 }
 
 fn persist_repository_auth_binding(
@@ -4104,7 +4191,7 @@ fn load_runtime_restart_policy(
 ) -> io::Result<RuntimeRestartPolicy> {
     match read_supervision_contract(&storage.supervision_contract_path) {
         Ok(contract) => Ok(contract.restart_policy),
-        Err(error) if error.kind() == ErrorKind::NotFound => {
+        Err(error) if is_ignorable_runtime_state_error(&error) => {
             Ok(RuntimeRestartPolicy::from_settings(&config.supervision))
         }
         Err(error) => Err(error),
@@ -4169,7 +4256,7 @@ fn runtime_process_ids(storage: &StorageLayout) -> io::Result<Vec<u32>> {
                 }
             }
         Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) if is_ignorable_runtime_state_error(&error) => {}
         Err(error) => return Err(error),
     }
 
@@ -4184,13 +4271,17 @@ fn runtime_process_ids(storage: &StorageLayout) -> io::Result<Vec<u32>> {
                 pids.push(report.process_id);
             }
         Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) if is_ignorable_runtime_state_error(&error) => {}
         Err(error) => return Err(error),
     }
 
     pids.sort_unstable();
     pids.dedup();
     Ok(pids)
+}
+
+fn is_ignorable_runtime_state_error(error: &io::Error) -> bool {
+    matches!(error.kind(), ErrorKind::NotFound | ErrorKind::InvalidData)
 }
 
 fn runtime_shutdown_grace_period_millis() -> u64 {
@@ -4359,10 +4450,89 @@ fn runtime_binary_file_name() -> String {
     format!("{RUNTIME_BINARY_NAME}{}", std::env::consts::EXE_SUFFIX)
 }
 
+fn butler_binary_file_name() -> String {
+    format!("{BUTLER_BINARY_NAME}{}", std::env::consts::EXE_SUFFIX)
+}
+
+fn apply_runtime_command_environment(
+    command: &mut Command,
+    runtime_root: &Path,
+    butler_sidecar_path: Option<&Path>,
+) {
+    command.env(RUNTIME_ROOT_ENV, runtime_root);
+    if let Some(butler_sidecar_path) = butler_sidecar_path {
+        command.env(HGP_BUTLER_PATH_ENV, butler_sidecar_path);
+    }
+}
+
+fn current_butler_sidecar_path() -> Option<PathBuf> {
+    if cfg!(debug_assertions) {
+        return development_butler_sidecar_path(&workspace_root());
+    }
+
+    packaged_butler_sidecar_path(&std::env::current_exe().ok()?)
+}
+
+fn development_butler_sidecar_path(workspace_root: &Path) -> Option<PathBuf> {
+    let target_triple = current_desktop_target_triple()?;
+    let sidecar_path = workspace_root
+        .join("apps")
+        .join("desktop")
+        .join("src-tauri")
+        .join("bin")
+        .join(format!(
+            "{BUTLER_BINARY_NAME}-{target_triple}{}",
+            std::env::consts::EXE_SUFFIX,
+        ));
+
+    sidecar_path.is_file().then_some(sidecar_path)
+}
+
+fn packaged_butler_sidecar_path(current_executable: &Path) -> Option<PathBuf> {
+    let sidecar_path = current_executable.parent()?.join(butler_binary_file_name());
+    sidecar_path.is_file().then_some(sidecar_path)
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const CURRENT_DESKTOP_TARGET_TRIPLE: Option<&str> = Some("x86_64-pc-windows-msvc");
+
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+const CURRENT_DESKTOP_TARGET_TRIPLE: Option<&str> = Some("aarch64-pc-windows-msvc");
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const CURRENT_DESKTOP_TARGET_TRIPLE: Option<&str> = Some("x86_64-unknown-linux-gnu");
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const CURRENT_DESKTOP_TARGET_TRIPLE: Option<&str> = Some("aarch64-unknown-linux-gnu");
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const CURRENT_DESKTOP_TARGET_TRIPLE: Option<&str> = Some("x86_64-apple-darwin");
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const CURRENT_DESKTOP_TARGET_TRIPLE: Option<&str> = Some("aarch64-apple-darwin");
+
+#[cfg(not(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64"),
+    all(target_os = "macos", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64"),
+)))]
+const CURRENT_DESKTOP_TARGET_TRIPLE: Option<&str> = None;
+
+fn current_desktop_target_triple() -> Option<&'static str> {
+    CURRENT_DESKTOP_TARGET_TRIPLE
+}
+
 #[cfg(test)]
 mod tests {
     use crate::load_retained_log_archive_entry;
     use super::{
+        ActiveSystemDialogGuard,
+        apply_runtime_command_environment,
+        butler_binary_file_name,
+        development_butler_sidecar_path,
         finalize_github_auth_login_with_known_accounts,
         github_browser_login_command_args,
         github_auth_credential_config_json,
@@ -4379,6 +4549,9 @@ mod tests {
         load_runtime_health_report, load_runtime_lifecycle_settings,
         load_runtime_log_lines,
         detect_repository_provider,
+        has_active_system_dialogs,
+        is_main_window_focus_loss_suppressed,
+        runtime_process_ids,
         persist_repository_auth_assessment,
         persist_repository_auth_connect,
         persist_repository_auth_disconnect,
@@ -4390,11 +4563,15 @@ mod tests {
         persist_secret_credential,
         process_identity_matches_runtime,
         purge_build_execution_retention_files,
+        packaged_butler_sidecar_path,
         load_secret_settings,
         resolve_github_auth_credential,
+        ShellLifecycleState,
+        should_hide_main_window_on_focus_loss_state,
         load_unity_adapter_settings,
         normalize_runtime_log_line_limit, packaged_runtime_command_plan,
-        runtime_binary_file_name, RuntimeLaunchAction, RUNTIME_BINARY_NAME,
+        runtime_binary_file_name, RuntimeLaunchAction, BUTLER_BINARY_NAME,
+        HGP_BUTLER_PATH_ENV, RUNTIME_BINARY_NAME,
         BuildContractCommandInput,
         CreateRepositoryProjectBuildTargetCommandInput,
         CreateRepositoryProjectCommandInput,
@@ -4412,7 +4589,7 @@ mod tests {
         UpdatePublishTargetSecretBindingInput, UnityBuildContractCommandInput,
         window_transition_settings,
     };
-    use runtime_config::RuntimeConfig;
+    use runtime_config::{RuntimeConfig, RUNTIME_ROOT_ENV};
     use runtime_core::{
         bootstrap_runtime, write_supervisor_snapshot, RuntimeRestartPolicy,
         RuntimeStatus, RuntimeSupervisorSnapshot, RuntimeSupervisorStatus,
@@ -4424,6 +4601,7 @@ mod tests {
     };
     use rusqlite::params;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     #[test]
     fn process_identity_matches_runtime_accepts_runtime_binary_name() {
@@ -4500,6 +4678,91 @@ mod tests {
     }
 
     #[test]
+    fn development_butler_sidecar_path_uses_workspace_bin_layout() {
+        let root = std::env::temp_dir().join("desktop-shell-butler-sidecar-dev-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let target_triple = super::current_desktop_target_triple()
+            .expect("test host should map to a supported target triple");
+        let sidecar_path = root
+            .join("apps")
+            .join("desktop")
+            .join("src-tauri")
+            .join("bin")
+            .join(format!(
+                "{BUTLER_BINARY_NAME}-{target_triple}{}",
+                std::env::consts::EXE_SUFFIX,
+            ));
+
+        std::fs::create_dir_all(sidecar_path.parent().expect("sidecar path should have parent"))
+            .expect("sidecar directory should create");
+        std::fs::write(&sidecar_path, b"butler").expect("sidecar placeholder should write");
+
+        assert_eq!(development_butler_sidecar_path(&root), Some(sidecar_path.clone()));
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn packaged_butler_sidecar_path_uses_sibling_binary() {
+        let root = std::env::temp_dir().join("desktop-shell-butler-sidecar-package-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+        std::fs::create_dir_all(&root).expect("temp directory should create");
+
+        let desktop_path = root.join(format!("HGP{}", std::env::consts::EXE_SUFFIX));
+        let sidecar_path = root.join(butler_binary_file_name());
+        std::fs::write(&desktop_path, b"desktop").expect("desktop binary placeholder should write");
+        std::fs::write(&sidecar_path, b"butler").expect("butler sidecar placeholder should write");
+
+        assert_eq!(packaged_butler_sidecar_path(&desktop_path), Some(sidecar_path.clone()));
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn apply_runtime_command_environment_sets_runtime_root_and_butler_sidecar() {
+        let runtime_root = if cfg!(windows) {
+            PathBuf::from("C:/repo/runtime")
+        } else {
+            PathBuf::from("/repo/runtime")
+        };
+        let butler_sidecar_path = if cfg!(windows) {
+            PathBuf::from("C:/repo/apps/desktop/src-tauri/bin/hgp-butler.exe")
+        } else {
+            PathBuf::from("/repo/apps/desktop/src-tauri/bin/hgp-butler")
+        };
+        let mut command = Command::new("cargo");
+
+        apply_runtime_command_environment(
+            &mut command,
+            &runtime_root,
+            Some(&butler_sidecar_path),
+        );
+
+        let runtime_root_env = command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new(RUNTIME_ROOT_ENV))
+            .and_then(|(_, value)| value.map(|entry| entry.to_os_string()));
+        let butler_sidecar_env = command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new(HGP_BUTLER_PATH_ENV))
+            .and_then(|(_, value)| value.map(|entry| entry.to_os_string()));
+
+        assert_eq!(
+            runtime_root_env,
+            Some(runtime_root.as_os_str().to_os_string()),
+        );
+        assert_eq!(
+            butler_sidecar_env,
+            Some(butler_sidecar_path.as_os_str().to_os_string()),
+        );
+    }
+
+    #[test]
     fn load_runtime_health_report_reads_persisted_runtime_snapshot() {
         let root = std::env::temp_dir().join("desktop-shell-runtime-health-test");
         if root.exists() {
@@ -4525,6 +4788,32 @@ mod tests {
         if root.exists() {
             std::fs::remove_dir_all(root).expect("temp directory should be removable");
         }
+    }
+
+    #[test]
+    fn runtime_process_ids_ignores_empty_persisted_snapshot_files() {
+        let root = std::env::temp_dir().join("desktop-shell-runtime-empty-state-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        config
+            .directories
+            .ensure_exists()
+            .expect("directories should be created");
+        std::fs::write(&storage.supervisor_state_path, b"")
+            .expect("empty supervisor snapshot placeholder should write");
+        std::fs::write(&storage.health_report_path, b"")
+            .expect("empty health report placeholder should write");
+
+        assert_eq!(
+            runtime_process_ids(&storage).expect("empty state files should be ignored"),
+            Vec::<u32>::new(),
+        );
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }
 
     #[test]
@@ -4570,6 +4859,56 @@ mod tests {
         assert_eq!(settings.focus.width, 540);
         assert_eq!(settings.focus.height, 840);
         assert_eq!(settings.duration_millis, 150);
+    }
+
+    #[test]
+    fn focus_loss_policy_hides_only_when_window_is_unpinned_and_idle() {
+        assert!(should_hide_main_window_on_focus_loss_state(
+            true,
+            false,
+            false,
+            false,
+        ));
+        assert!(!should_hide_main_window_on_focus_loss_state(
+            false,
+            false,
+            false,
+            false,
+        ));
+        assert!(!should_hide_main_window_on_focus_loss_state(
+            true,
+            true,
+            false,
+            false,
+        ));
+        assert!(!should_hide_main_window_on_focus_loss_state(
+            true,
+            false,
+            true,
+            false,
+        ));
+        assert!(!should_hide_main_window_on_focus_loss_state(
+            true,
+            false,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn system_dialog_guard_keeps_focus_loss_suppressed_after_last_dialog_closes() {
+        let lifecycle = ShellLifecycleState::default();
+
+        {
+            let _dialog_guard = ActiveSystemDialogGuard::acquire(&lifecycle)
+                .expect("system dialog guard should acquire");
+
+            assert!(has_active_system_dialogs(&lifecycle));
+            assert!(!is_main_window_focus_loss_suppressed(&lifecycle));
+        }
+
+        assert!(!has_active_system_dialogs(&lifecycle));
+        assert!(is_main_window_focus_loss_suppressed(&lifecycle));
     }
 
     #[test]

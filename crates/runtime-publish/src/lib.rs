@@ -12,6 +12,7 @@ use std::process::Command;
 
 const KIND_ITCH_API_KEY: &str = "itch-api-key";
 const BUTLER_API_KEY_ENV: &str = "BUTLER_API_KEY";
+const HGP_BUTLER_PATH_ENV: &str = "HGP_BUTLER_PATH";
 
 /// Lists the publish backends enabled by the local runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,8 +363,24 @@ fn parse_itch_credential_config(
 }
 
 fn resolve_itch_butler_executable(configured_path: &str) -> String {
+    resolve_itch_butler_executable_with_sidecar(
+        configured_path,
+        std::env::var_os(HGP_BUTLER_PATH_ENV).as_deref(),
+    )
+}
+
+fn resolve_itch_butler_executable_with_sidecar(
+    configured_path: &str,
+    shell_sidecar_path: Option<&std::ffi::OsStr>,
+) -> String {
     let trimmed = configured_path.trim();
     if trimmed.is_empty() {
+        if let Some(sidecar_path) =
+            shell_sidecar_path.filter(|value| !value.is_empty())
+        {
+            return PathBuf::from(sidecar_path).display().to_string();
+        }
+
         return String::from("butler");
     }
 
@@ -501,7 +518,10 @@ fn move_regular_file(source_path: &Path, destination_path: &Path) -> io::Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_destination_path, ExecutionPlan, ExecutionProcessor, Processor};
+    use super::{
+        resolve_destination_path, resolve_itch_butler_executable_with_sidecar,
+        ExecutionPlan, ExecutionProcessor, HGP_BUTLER_PATH_ENV, Processor,
+    };
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -686,6 +706,61 @@ mod tests {
         assert!(error.to_string().contains("require a bound credential"));
     }
 
+    #[test]
+    fn resolve_itch_butler_executable_prefers_configured_override() {
+        assert_eq!(
+            resolve_itch_butler_executable_with_sidecar(
+                "./custom-butler",
+                Some(std::ffi::OsStr::new("ignored-sidecar")),
+            ),
+            String::from("./custom-butler")
+        );
+    }
+
+    #[test]
+    fn resolve_itch_butler_executable_uses_shell_sidecar_when_config_is_empty() {
+        let butler_path = if cfg!(windows) {
+            String::from("C:/repo/apps/desktop/src-tauri/bin/hgp-butler-x86_64-pc-windows-msvc.exe")
+        } else {
+            String::from("/repo/apps/desktop/src-tauri/bin/hgp-butler-x86_64-unknown-linux-gnu")
+        };
+
+        assert_eq!(
+            resolve_itch_butler_executable_with_sidecar(
+                "",
+                Some(std::ffi::OsStr::new(butler_path.as_str())),
+            ),
+            butler_path,
+        );
+    }
+
+    #[test]
+    fn resolve_itch_butler_executable_falls_back_to_path_when_no_override_exists() {
+        assert_eq!(
+            resolve_itch_butler_executable_with_sidecar("", None),
+            String::from("butler")
+        );
+    }
+
+    #[test]
+    fn resolve_itch_butler_executable_reads_shell_environment_variable() {
+        let sidecar = if cfg!(windows) {
+            std::ffi::OsString::from(
+                "C:/repo/apps/desktop/src-tauri/bin/hgp-butler-x86_64-pc-windows-msvc.exe",
+            )
+        } else {
+            std::ffi::OsString::from(
+                "/repo/apps/desktop/src-tauri/bin/hgp-butler-x86_64-unknown-linux-gnu",
+            )
+        };
+
+        assert_eq!(HGP_BUTLER_PATH_ENV, "HGP_BUTLER_PATH");
+        assert_eq!(
+            resolve_itch_butler_executable_with_sidecar("", Some(sidecar.as_os_str())),
+            PathBuf::from(sidecar).display().to_string(),
+        );
+    }
+
     fn base_execution_plan(kind: &str, git_tag: &str, artifact_path: &str) -> ExecutionPlan {
         ExecutionPlan {
             publish_run_id: 1,
@@ -764,4 +839,5 @@ mod tests {
             std::process::id()
         ))
     }
+
 }

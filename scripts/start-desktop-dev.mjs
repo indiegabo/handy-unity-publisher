@@ -32,7 +32,14 @@ const tauriCommand = resolve(
     ".bin",
     process.platform === "win32" ? "tauri.cmd" : "tauri",
 );
+const prepareButlerSidecarScript = resolve(
+    repositoryRoot,
+    "scripts",
+    "prepare-butler-sidecar.mjs",
+);
 const forwardedArguments = process.argv.slice(2);
+
+ensureButlerSidecarPrepared();
 
 const childProcess =
     process.platform === "win32"
@@ -117,6 +124,14 @@ function resolveVsDevCommand() {
     ].filter(Boolean);
 
     return candidatePaths.find((candidatePath) => existsSync(candidatePath));
+}
+
+function ensureButlerSidecarPrepared() {
+    execFileSync(process.execPath, [prepareButlerSidecarScript], {
+        cwd: repositoryRoot,
+        env: process.env,
+        stdio: "inherit",
+    });
 }
 
 function quoteForWindowsCmd(argument) {

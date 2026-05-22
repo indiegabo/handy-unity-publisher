@@ -42,6 +42,10 @@ jobs:
         shell: pwsh
         run: ./scripts/prepare-tauri-sidecar.ps1 -TargetTriple $env:TARGET_TRIPLE -Profile release
 
+      - name: Prepare packaged Butler sidecar
+        shell: bash
+        run: node ./scripts/prepare-butler-sidecar.mjs --target "$TARGET_TRIPLE"
+
       - name: Install Tauri CLI
         shell: bash
         run: cargo install tauri-cli --version '^2' --locked

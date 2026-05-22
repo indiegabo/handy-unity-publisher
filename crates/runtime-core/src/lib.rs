@@ -471,20 +471,17 @@ pub fn shutdown_runtime(
 
 /// Reads the last persisted runtime health report from disk.
 pub fn read_health_report(path: &Path) -> io::Result<RuntimeHealthReport> {
-    let content = fs::read_to_string(path)?;
-    serde_json::from_str(&content).map_err(json_error)
+    read_json_file(path)
 }
 
 /// Reads the persisted supervision contract from disk.
 pub fn read_supervision_contract(path: &Path) -> io::Result<RuntimeSupervisionContract> {
-    let content = fs::read_to_string(path)?;
-    serde_json::from_str(&content).map_err(json_error)
+    read_json_file(path)
 }
 
 /// Reads the persisted supervisor snapshot from disk.
 pub fn read_supervisor_snapshot(path: &Path) -> io::Result<RuntimeSupervisorSnapshot> {
-    let content = fs::read_to_string(path)?;
-    serde_json::from_str(&content).map_err(json_error)
+    read_json_file(path)
 }
 
 /// Updates the persisted runtime health report and appends a matching log event.
@@ -554,7 +551,58 @@ fn write_json_file<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     }
 
     let content = serde_json::to_vec_pretty(value).map_err(json_error)?;
-    fs::write(path, content)
+    write_file_atomically(path, &content)
+}
+
+fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<T> {
+    let content = fs::read_to_string(path)?;
+    if content.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("persisted JSON file {} is empty", path.display()),
+        ));
+    }
+
+    serde_json::from_str(&content).map_err(json_error)
+}
+
+fn write_file_atomically(path: &Path, content: &[u8]) -> io::Result<()> {
+    let temporary_path = atomic_write_temporary_path(path);
+
+    fs::write(&temporary_path, content)?;
+
+    match fs::rename(&temporary_path, path) {
+        Ok(()) => Ok(()),
+        Err(rename_error) if path.exists() => {
+            fs::remove_file(path)?;
+            fs::rename(&temporary_path, path).map_err(|replacement_error| {
+                let _ = fs::remove_file(&temporary_path);
+                io::Error::new(
+                    replacement_error.kind(),
+                    format!(
+                        "failed to replace {} after rename error {rename_error}: {replacement_error}",
+                        path.display()
+                    ),
+                )
+            })
+        }
+        Err(rename_error) => {
+            let _ = fs::remove_file(&temporary_path);
+            Err(rename_error)
+        }
+    }
+}
+
+fn atomic_write_temporary_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("runtime-state");
+
+    path.with_file_name(format!(
+        ".{file_name}.tmp-{}",
+        process::id()
+    ))
 }
 
 fn emit_log(path: &Path, event: StructuredLogEvent) -> io::Result<()> {
@@ -834,6 +882,26 @@ mod tests {
                 .status,
             RuntimeSupervisorStatus::Restarting
         );
+
+        fs::remove_dir_all(root).expect("temporary runtime directory should be removable");
+    }
+
+    #[test]
+    fn read_supervisor_snapshot_treats_empty_file_as_missing() {
+        let root = test_root("supervisor-empty");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        config
+            .directories
+            .ensure_exists()
+            .expect("directories should be created");
+        fs::write(&storage.supervisor_state_path, b"")
+            .expect("empty snapshot placeholder should write");
+
+        let error = read_supervisor_snapshot(&storage.supervisor_state_path)
+            .expect_err("empty snapshot file should be treated as missing state");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 
         fs::remove_dir_all(root).expect("temporary runtime directory should be removable");
     }
