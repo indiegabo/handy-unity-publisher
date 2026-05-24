@@ -13,6 +13,9 @@ pub const RUNTIME_NAME: &str = "handy-games-publisher-runtime";
 /// Names the persistent application directory used under host-specific roots.
 pub const PRODUCT_DIRECTORY_NAME: &str = "HandyGamesPublisher";
 
+/// Names the persistent application directory used by development builds.
+pub const DEVELOPMENT_PRODUCT_DIRECTORY_NAME: &str = "HandyGamesPublisher_DEV";
+
 /// Overrides the default runtime root directory when set.
 pub const RUNTIME_ROOT_ENV: &str = "HANDY_GAMES_PUBLISHER_RUNTIME_ROOT";
 
@@ -89,6 +92,31 @@ impl HostPlatform {
             Self::Windows => "windows",
             Self::MacOS => "macos",
             Self::Linux => "linux",
+        }
+    }
+}
+
+/// Describes whether runtime storage should use production or development roots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeEnvironment {
+    Development,
+    Production,
+}
+
+impl RuntimeEnvironment {
+    /// Returns the runtime environment inferred from the current build profile.
+    pub fn current() -> Self {
+        if cfg!(debug_assertions) {
+            Self::Development
+        } else {
+            Self::Production
+        }
+    }
+
+    const fn product_directory_name(self) -> &'static str {
+        match self {
+            Self::Development => DEVELOPMENT_PRODUCT_DIRECTORY_NAME,
+            Self::Production => PRODUCT_DIRECTORY_NAME,
         }
     }
 }
@@ -262,10 +290,11 @@ impl RuntimeConfig {
     /// Loads configuration from the current host environment.
     pub fn load() -> io::Result<Self> {
         let platform = HostPlatform::current();
+        let runtime_environment = RuntimeEnvironment::current();
         let environment = HostEnvironment::current();
         let root = match env::var_os(RUNTIME_ROOT_ENV) {
             Some(path) => PathBuf::from(path),
-            None => resolve_default_root(platform, &environment)?,
+            None => resolve_default_root(platform, &environment, runtime_environment)?,
         };
 
         Ok(Self::from_parts(
@@ -361,6 +390,7 @@ fn parse_optional_env_u32(variable_name: &str) -> io::Result<Option<u32>> {
 fn resolve_default_root(
     platform: HostPlatform,
     environment: &HostEnvironment,
+    runtime_environment: RuntimeEnvironment,
 ) -> io::Result<PathBuf> {
     let base_dir = match platform {
         HostPlatform::Windows => environment
@@ -387,7 +417,11 @@ fn resolve_default_root(
             .ok_or_else(|| missing_variable_error("XDG_DATA_HOME or HOME"))?,
     };
 
-    Ok(base_dir.join(PRODUCT_DIRECTORY_NAME).join("runtime"))
+    Ok(
+        base_dir
+            .join(runtime_environment.product_directory_name())
+            .join("runtime"),
+    )
 }
 
 fn missing_variable_error(variable_name: &str) -> io::Error {
@@ -408,6 +442,7 @@ fn invalid_env_error(variable_name: &str, value: &str) -> io::Error {
 mod tests {
     use super::{
         resolve_default_root, HostEnvironment, HostPlatform, RuntimeConfig,
+        RuntimeEnvironment,
         RuntimeDirectories,
     };
     use std::path::PathBuf;
@@ -437,12 +472,38 @@ mod tests {
             home_dir: Some(PathBuf::from("C:/Users/test")),
         };
 
-        let root = resolve_default_root(HostPlatform::Windows, &environment)
+        let root = resolve_default_root(
+            HostPlatform::Windows,
+            &environment,
+            RuntimeEnvironment::Production,
+        )
             .expect("windows root should resolve");
 
         assert_eq!(
             root,
             PathBuf::from("C:/Users/test/AppData/Local/HandyGamesPublisher/runtime")
+        );
+    }
+
+    #[test]
+    fn windows_development_root_uses_dev_app_data_directory() {
+        let environment = HostEnvironment {
+            local_app_data: Some(PathBuf::from("C:/Users/test/AppData/Local")),
+            app_data: Some(PathBuf::from("C:/Users/test/AppData/Roaming")),
+            xdg_data_home: None,
+            home_dir: Some(PathBuf::from("C:/Users/test")),
+        };
+
+        let root = resolve_default_root(
+            HostPlatform::Windows,
+            &environment,
+            RuntimeEnvironment::Development,
+        )
+        .expect("windows development root should resolve");
+
+        assert_eq!(
+            root,
+            PathBuf::from("C:/Users/test/AppData/Local/HandyGamesPublisher_DEV/runtime")
         );
     }
 
@@ -455,8 +516,12 @@ mod tests {
             home_dir: Some(PathBuf::from("/Users/test")),
         };
 
-        let root =
-            resolve_default_root(HostPlatform::MacOS, &environment).expect("macOS root");
+        let root = resolve_default_root(
+            HostPlatform::MacOS,
+            &environment,
+            RuntimeEnvironment::Production,
+        )
+        .expect("macOS root");
 
         assert_eq!(
             root,
@@ -473,7 +538,11 @@ mod tests {
             home_dir: Some(PathBuf::from("/home/test")),
         };
 
-        let root = resolve_default_root(HostPlatform::Linux, &environment)
+        let root = resolve_default_root(
+            HostPlatform::Linux,
+            &environment,
+            RuntimeEnvironment::Production,
+        )
             .expect("linux root should resolve");
 
         assert_eq!(
