@@ -11,7 +11,7 @@ pub use engine::{BuildExecutionAdapter, EngineAdapterRegistry};
 
 use runtime_config::RuntimeDirectories;
 use runtime_git::{
-    GitAuthOptions, GitProgressReporter, GitWorkspaceSyncRequest,
+    GitAuthOptions, GitProgressReporter, GitWorkspaceSyncRefRequest,
     GitWorkspaceSyncer,
 };
 use std::fs;
@@ -40,12 +40,26 @@ pub struct PreparedWorkspace {
     pub root_path: PathBuf,
     pub build_root_path: PathBuf,
     pub source_path: PathBuf,
+    pub source_is_local_workspace: bool,
     pub host_root_path: PathBuf,
     pub host_build_root_path: PathBuf,
     pub host_source_path: PathBuf,
     pub log_path: PathBuf,
     pub artifact_root_path: PathBuf,
     pub host_artifact_root_path: PathBuf,
+}
+
+/// Defines the source that must back one prepared process workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspacePreparationSource {
+    GitRef {
+        repository_url: String,
+        git_auth: GitAuthOptions,
+        git_ref: String,
+    },
+    LocalWorkspace {
+        local_path: PathBuf,
+    },
 }
 
 /// Defines the repository snapshot that must be materialized for one build run.
@@ -55,9 +69,7 @@ pub struct WorkspacePreparationInput {
     pub build_run_id: i64,
     pub attempt_token: String,
     pub repository_name: String,
-    pub repository_url: String,
-    pub git_auth: GitAuthOptions,
-    pub git_tag: String,
+    pub source: WorkspacePreparationSource,
     pub workspace_root_override: Option<String>,
     pub artifacts_root_override: Option<String>,
 }
@@ -162,7 +174,11 @@ fn process_checkout_git_dir_path(source_path: &Path) -> PathBuf {
 
 fn process_checkout_is_ready(planned: &PreparedWorkspace) -> bool {
     process_checkout_marker_path(&planned.root_path).is_file()
-        || process_checkout_git_dir_path(&planned.source_path).is_dir()
+        || if planned.source_is_local_workspace {
+            planned.source_path.is_dir()
+        } else {
+            process_checkout_git_dir_path(&planned.source_path).is_dir()
+        }
 }
 
 fn write_process_checkout_marker(planned: &PreparedWorkspace) -> io::Result<()> {
@@ -202,8 +218,6 @@ impl WorkspacePreparer {
         if input.release_run_id <= 0 {
             return Err(io::Error::new(ErrorKind::InvalidInput, "release run id must be greater than zero"));
         }
-        require_non_empty(&input.repository_url, "repository url")?;
-        require_non_empty(&input.git_tag, "git tag")?;
         let process_name = format!("release-run-{}", input.release_run_id);
         let build_workspace_name = build_workspace_name(input.build_run_id, &input.attempt_token);
         let runs_root_path = self.resolve_runs_root(input)?;
@@ -212,8 +226,28 @@ impl WorkspacePreparer {
         let build_root_path = root_path.join("builds").join(&build_workspace_name);
         let host_root_path = root_path.clone();
         let host_build_root_path = host_root_path.join("builds").join(&build_workspace_name);
-        let source_path = root_path.join("source");
-        let host_source_path = host_root_path.join("source");
+        let (source_path, host_source_path, source_is_local_workspace) = match &input.source {
+            WorkspacePreparationSource::GitRef {
+                repository_url,
+                git_ref,
+                ..
+            } => {
+                require_non_empty(repository_url, "repository url")?;
+                require_non_empty(git_ref, "git ref")?;
+                let source_path = root_path.join("source");
+                let host_source_path = host_root_path.join("source");
+                (source_path, host_source_path, false)
+            }
+            WorkspacePreparationSource::LocalWorkspace { local_path } => {
+                if local_path.as_os_str().is_empty() || !local_path.is_absolute() {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidInput,
+                        "local workspace path must be absolute",
+                    ));
+                }
+                (local_path.clone(), local_path.clone(), true)
+            }
+        };
         let log_path = build_root_path.join("logs").join("unity-build.log");
         let artifact_root_path = build_root_path.join("outputs");
         let host_artifact_root_path = artifact_root_path.clone();
@@ -222,6 +256,7 @@ impl WorkspacePreparer {
             root_path,
             build_root_path,
             source_path,
+            source_is_local_workspace,
             host_root_path,
             host_build_root_path,
             host_source_path,
@@ -259,23 +294,39 @@ impl WorkspacePreparer {
             ),
         });
 
-        for directory in [
-            planned.root_path.as_path(),
-            planned.artifact_root_path.as_path(),
-            planned.source_path.parent().unwrap_or(planned.root_path.as_path()),
-            planned.root_path.join("logs").as_path(),
-        ] {
-            fs::create_dir_all(directory)?;
+        let logs_root_path = planned.root_path.join("logs");
+        let mut directories = vec![
+            planned.root_path.clone(),
+            planned.artifact_root_path.clone(),
+            logs_root_path,
+        ];
+        if !planned.source_is_local_workspace {
+            directories.push(
+                planned
+                    .source_path
+                    .parent()
+                    .unwrap_or(planned.root_path.as_path())
+                    .to_path_buf(),
+            );
+        }
+
+        for directory in directories {
+            fs::create_dir_all(&directory)?;
         }
 
         if process_checkout_marker_path(&planned.root_path).is_file() {
-            if !process_checkout_git_dir_path(&planned.source_path).is_dir() {
+            let source_ready = if planned.source_is_local_workspace {
+                planned.source_path.is_dir()
+            } else {
+                process_checkout_git_dir_path(&planned.source_path).is_dir()
+            };
+            if !source_ready {
                 return Err(io::Error::new(
                     ErrorKind::NotFound,
                     format!(
-                        "release process workspace '{}' is marked as checked out but source is missing .git metadata at '{}'",
+                        "release process workspace '{}' is marked as checked out but source is missing at '{}'",
                         planned.root_path.display(),
-                        process_checkout_git_dir_path(&planned.source_path).display(),
+                        planned.source_path.display(),
                     ),
                 ));
             }
@@ -286,6 +337,27 @@ impl WorkspacePreparer {
                     planned.source_path.display(),
                 ),
             });
+            return Ok(planned);
+        }
+
+        if planned.source_is_local_workspace {
+            if !planned.source_path.is_dir() {
+                return Err(io::Error::new(
+                    ErrorKind::NotFound,
+                    format!(
+                        "local workspace source '{}' does not exist",
+                        planned.source_path.display(),
+                    ),
+                ));
+            }
+
+            reporter.heartbeat(ExecutionProgress {
+                message: format!(
+                    "Using local workspace source at '{}'.",
+                    planned.source_path.display(),
+                ),
+            });
+            write_process_checkout_marker(&planned)?;
             return Ok(planned);
         }
 
@@ -300,13 +372,23 @@ impl WorkspacePreparer {
             return Ok(planned);
         }
 
+        let WorkspacePreparationSource::GitRef {
+            repository_url,
+            git_auth,
+            git_ref,
+        } = &input.source
+        else {
+            return Err(io::Error::other(
+                "git-backed workspace preparation expected a Git source",
+            ));
+        };
         let mut sync_reporter = WorkspacePreparationProgressReporter { reporter };
-        self.syncer.sync_tag_with_progress(
-            &GitWorkspaceSyncRequest {
-                repository_url: input.repository_url.clone(),
+        self.syncer.sync_ref_with_progress(
+            &GitWorkspaceSyncRefRequest {
+                repository_url: repository_url.clone(),
                 workspace_path: planned.source_path.clone(),
-                git_tag: input.git_tag.clone(),
-                auth: input.git_auth.clone(),
+                git_ref: git_ref.clone(),
+                auth: git_auth.clone(),
             },
             &mut sync_reporter,
         )?;
@@ -703,7 +785,8 @@ mod tests {
         discover_artifacts,
         process_checkout_marker_path,
         ExecutionPlan, ExecutionProgress, ExecutionProgressReporter,
-        WorkspacePreparationInput, WorkspacePreparer,
+        WorkspacePreparationInput, WorkspacePreparationSource,
+        WorkspacePreparer,
     };
     use super::unity::{
         classify_execution_error, diagnose_host_native_runner_config,
@@ -738,6 +821,22 @@ mod tests {
         }
     }
 
+    fn git_source(repository_path: &Path, git_ref: &str) -> WorkspacePreparationSource {
+        WorkspacePreparationSource::GitRef {
+            repository_url: repository_path.display().to_string(),
+            git_auth: GitAuthOptions::default(),
+            git_ref: String::from(git_ref),
+        }
+    }
+
+    fn git_source_from_plan(plan: &ExecutionPlan) -> WorkspacePreparationSource {
+        WorkspacePreparationSource::GitRef {
+            repository_url: plan.repository_url.clone(),
+            git_auth: GitAuthOptions::default(),
+            git_ref: plan.git_tag.clone(),
+        }
+    }
+
     #[test]
     fn workspace_preparer_creates_isolated_run_directories() {
         let root = test_root("prepare-workspace");
@@ -756,9 +855,7 @@ mod tests {
                 build_run_id: 42,
                 attempt_token: String::from("attempt-42"),
                 repository_name: String::from("revolutions"),
-                repository_url: repository_path.display().to_string(),
-                git_auth: GitAuthOptions::default(),
-                git_tag: String::from("v5.0.0"),
+                source: git_source(&repository_path, "v5.0.0"),
                 workspace_root_override: None,
                 artifacts_root_override: None,
             })
@@ -819,9 +916,7 @@ mod tests {
             build_run_id: 52,
             attempt_token: String::from("attempt-52"),
             repository_name: String::from("revolutions"),
-            repository_url: repository_path.display().to_string(),
-            git_auth: GitAuthOptions::default(),
-            git_tag: String::from("v5.1.0"),
+            source: git_source(&repository_path, "v5.1.0"),
             workspace_root_override: None,
             artifacts_root_override: None,
         };
@@ -850,9 +945,7 @@ mod tests {
             build_run_id: 43,
             attempt_token: String::from("attempt-43"),
             repository_name: String::from("revolutions"),
-            repository_url: repository_path.display().to_string(),
-            git_auth: GitAuthOptions::default(),
-            git_tag: String::from("v5.1.1"),
+            source: git_source(&repository_path, "v5.1.1"),
             workspace_root_override: None,
             artifacts_root_override: None,
         };
@@ -905,9 +998,7 @@ mod tests {
                 build_run_id: 44,
                 attempt_token: String::from("attempt-44"),
                 repository_name: String::from("revolutions"),
-                repository_url: repository_path.display().to_string(),
-                git_auth: GitAuthOptions::default(),
-                git_tag: String::from("v5.1.2"),
+                source: git_source(&repository_path, "v5.1.2"),
                 workspace_root_override: None,
                 artifacts_root_override: None,
             })
@@ -940,9 +1031,7 @@ mod tests {
                 build_run_id: 53,
                 attempt_token: String::from("attempt-53"),
                 repository_name: String::from("revolutions"),
-                repository_url: repository_path.display().to_string(),
-                git_auth: GitAuthOptions::default(),
-                git_tag: String::from("v5.2.0"),
+                source: git_source(&repository_path, "v5.2.0"),
                 workspace_root_override: Some(
                     workspace_root_override.display().to_string(),
                 ),
@@ -992,9 +1081,7 @@ mod tests {
             build_run_id: 54,
             attempt_token: String::from("attempt-54"),
             repository_name: String::from("revolutions"),
-            repository_url: repository_path.display().to_string(),
-            git_auth: GitAuthOptions::default(),
-            git_tag: String::from("v5.3.0"),
+            source: git_source(&repository_path, "v5.3.0"),
             workspace_root_override: None,
             artifacts_root_override: None,
         };
@@ -1321,9 +1408,7 @@ mod tests {
                 build_run_id: 7,
                 attempt_token: String::from("attempt-a"),
                 repository_name: String::from("revolutions"),
-                repository_url: repository_path.display().to_string(),
-                git_auth: GitAuthOptions::default(),
-                git_tag: String::from("v6.0.0"),
+                source: git_source(&repository_path, "v6.0.0"),
                 workspace_root_override: None,
                 artifacts_root_override: None,
             })
@@ -1337,9 +1422,7 @@ mod tests {
                 build_run_id: 7,
                 attempt_token: String::from("attempt-b"),
                 repository_name: String::from("revolutions"),
-                repository_url: repository_path.display().to_string(),
-                git_auth: GitAuthOptions::default(),
-                git_tag: String::from("v6.0.0"),
+                source: git_source(&repository_path, "v6.0.0"),
                 workspace_root_override: None,
                 artifacts_root_override: None,
             })
@@ -1432,9 +1515,7 @@ mod tests {
             build_run_id: plan.build_run_id,
             attempt_token: String::from("attempt-61"),
             repository_name: plan.repository_name.clone(),
-            repository_url: plan.repository_url.clone(),
-            git_auth: GitAuthOptions::default(),
-            git_tag: plan.git_tag.clone(),
+            source: git_source_from_plan(&plan),
             workspace_root_override: None,
             artifacts_root_override: None,
         };
@@ -1447,7 +1528,7 @@ mod tests {
         let contents = fs::read_to_string(&outcome.result.log_path)
             .expect("execution log should exist");
         assert!(contents.contains("-batchmode"));
-        assert!(contents.contains("-buildTarget WebGL"));
+        assert!(contents.contains("-buildTarget webgl"));
         assert!(contents.contains("-executeMethod Builder.PerformWebGL"));
         assert!(contents.contains("--custom-flag"));
         assert!(contents.contains("custom:workers"));
@@ -1507,9 +1588,7 @@ mod tests {
             build_run_id: plan.build_run_id,
             attempt_token: String::from("attempt-64"),
             repository_name: plan.repository_name.clone(),
-            repository_url: plan.repository_url.clone(),
-            git_auth: GitAuthOptions::default(),
-            git_tag: plan.git_tag.clone(),
+            source: git_source_from_plan(&plan),
             workspace_root_override: None,
             artifacts_root_override: None,
         };
@@ -1586,9 +1665,7 @@ mod tests {
             build_run_id: plan.build_run_id,
             attempt_token: String::from("attempt-62"),
             repository_name: plan.repository_name.clone(),
-            repository_url: plan.repository_url.clone(),
-            git_auth: GitAuthOptions::default(),
-            git_tag: plan.git_tag.clone(),
+            source: git_source_from_plan(&plan),
             workspace_root_override: None,
             artifacts_root_override: None,
         };
@@ -1651,9 +1728,7 @@ mod tests {
             build_run_id: plan.build_run_id,
             attempt_token: String::from("attempt-63"),
             repository_name: plan.repository_name.clone(),
-            repository_url: plan.repository_url.clone(),
-            git_auth: GitAuthOptions::default(),
-            git_tag: plan.git_tag.clone(),
+            source: git_source_from_plan(&plan),
             workspace_root_override: None,
             artifacts_root_override: None,
         };

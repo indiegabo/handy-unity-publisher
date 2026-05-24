@@ -5,14 +5,18 @@ use super::*;
 use runtime_contracts::BuildKind;
 use runtime_runner::{
     BuildExecutionAdapter, DiscoveredArtifact, EngineAdapterRegistry,
+    WorkspacePreparationInput, WorkspacePreparationSource,
     unity::{
         package_unity_build_output, resolve_final_unity_artifact_output_path,
         resolve_unity_build_stage_identity, UnityBuildStageIdentity,
     },
 };
-use runtime_store::{CreateArtifactRecordInput, LocalCoordinator};
+use runtime_store::{
+    CreateArtifactRecordInput, LocalCoordinator, ReleaseSourceMetadata,
+};
 use runtime_store::lifecycle::ReleaseStatus;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[cfg(test)]
 use runtime_config::RuntimeDirectories;
@@ -40,6 +44,10 @@ const PROCESS_CHECKOUT_LOG_FILE_NAME: &str = "01-checkout-repository.log";
 const PROCESS_VALIDATION_LOG_FILE_NAME: &str = "02-validate-build-context.log";
 const QUEUE_LEASE_RENEWER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MIN_QUEUE_LEASE_RENEW_INTERVAL: Duration = Duration::from_millis(20);
+const RELEASE_SOURCE_KIND_MANAGED_TAG: &str = "managed_tag";
+const RELEASE_SOURCE_KIND_MANAGED_REF: &str = "managed_ref";
+const RELEASE_SOURCE_KIND_LOCAL_WORKSPACE: &str = "local_workspace";
+const REPOSITORY_SOURCE_MODE_LOCAL_WORKSPACE: &str = "local_workspace";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +71,14 @@ struct StoredUnityBuildTargetContract {
 struct ResolvedUnityBuildTargetContract {
     target_platform: String,
     build_method: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedBuildSourceMetadata {
+    source_kind: String,
+    source_ref: Option<String>,
+    local_path: Option<String>,
+    unity_executable_path_override: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -796,7 +812,19 @@ pub(crate) fn run_build_run_next_command(
         let event_context = build_run_event_context(&coordinator, &plan);
         build_event_context = Some(event_context.clone());
 
-        let planned_preparation = build_workspace_preparation(&plan, GitAuthOptions::default());
+        let planned_preparation =
+            match build_workspace_preparation(&plan, GitAuthOptions::default()) {
+                Ok(preparation) => preparation,
+                Err(error) => {
+                    release_claimed_build_message(
+                        &coordinator,
+                        message.id,
+                        &message.lease_token,
+                        &error,
+                    )?;
+                    return Err(Box::new(error));
+                }
+            };
         let planned = match WorkspacePreparer::new(&config.directories).plan(&planned_preparation)
         {
             Ok(planned) => planned,
@@ -995,8 +1023,9 @@ fn stage_claimed_build_job(
     payload: &[u8],
 ) -> io::Result<BuildRunRecord> {
     let plan = load_claimed_build_plan(coordinator, payload)?;
+    let planned_preparation = build_workspace_preparation(&plan, GitAuthOptions::default())?;
     let planned = WorkspacePreparer::new(&config.directories)
-        .plan(&build_workspace_preparation(&plan, GitAuthOptions::default()))?;
+        .plan(&planned_preparation)?;
     let event_context = build_run_event_context(coordinator, &plan);
     let started = coordinator.start_build_run(
         plan.build_run_id,
@@ -2064,24 +2093,74 @@ fn resolve_build_workspace_preparation(
         None => GitAuthOptions::default(),
     };
 
-    Ok(build_workspace_preparation(plan, git_auth))
+    build_workspace_preparation(plan, git_auth)
 }
 
 fn build_workspace_preparation(
     plan: &StoredBuildExecutionPlan,
     git_auth: GitAuthOptions,
-) -> WorkspacePreparationInput {
-    WorkspacePreparationInput {
+) -> io::Result<WorkspacePreparationInput> {
+    let source_metadata = resolve_build_source_metadata(plan)?;
+    let source = match source_metadata.source_kind.as_str() {
+        RELEASE_SOURCE_KIND_LOCAL_WORKSPACE => WorkspacePreparationSource::LocalWorkspace {
+            local_path: PathBuf::from(
+                source_metadata.local_path.ok_or_else(|| {
+                    io::Error::new(
+                        ErrorKind::InvalidInput,
+                        format!(
+                            "build run {} is missing a local workspace path",
+                            plan.build_run_id
+                        ),
+                    )
+                })?,
+            ),
+        },
+        RELEASE_SOURCE_KIND_MANAGED_TAG | RELEASE_SOURCE_KIND_MANAGED_REF => {
+            let git_ref = source_metadata.source_ref.ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "build run {} is missing a source ref",
+                        plan.build_run_id
+                    ),
+                )
+            })?;
+            if plan.repository_url.trim().is_empty() {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "build run {} is missing a managed repository URL",
+                        plan.build_run_id
+                    ),
+                ));
+            }
+
+            WorkspacePreparationSource::GitRef {
+                repository_url: plan.repository_url.clone(),
+                git_auth,
+                git_ref,
+            }
+        }
+        other => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "build run {} uses unsupported source_kind {:?}",
+                    plan.build_run_id, other
+                ),
+            ));
+        }
+    };
+
+    Ok(WorkspacePreparationInput {
         build_run_id: plan.build_run_id,
         release_run_id: plan.release_run_id,
         attempt_token: String::new(),
         repository_name: plan.repository_name.clone(),
-        repository_url: plan.repository_url.clone(),
-        git_auth,
-        git_tag: plan.git_tag.clone(),
+        source,
         workspace_root_override: plan.workspace_root_override.clone(),
         artifacts_root_override: plan.artifacts_root_override.clone(),
-    }
+    })
 }
 
 fn unity_runner_execution_plan(
@@ -2112,9 +2191,110 @@ fn unity_runner_execution_plan(
         output_kind: plan.output_kind.clone(),
         output_path_template: plan.output_path_template.clone(),
         engine_version: plan.engine_version.clone(),
-        config_json: plan.config_json.clone(),
+        config_json: resolve_unity_runner_config_json(plan)?,
         timeout_seconds: plan.timeout_seconds,
     })
+}
+
+fn resolve_build_source_metadata(
+    plan: &StoredBuildExecutionPlan,
+) -> io::Result<ResolvedBuildSourceMetadata> {
+    let metadata = if plan.source_metadata_json.trim().is_empty() {
+        ReleaseSourceMetadata::default()
+    } else {
+        serde_json::from_str::<ReleaseSourceMetadata>(&plan.source_metadata_json).map_err(
+            |error| {
+                io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "decode build source metadata for build run {}: {error}",
+                        plan.build_run_id
+                    ),
+                )
+            },
+        )?
+    };
+    let default_source_kind = if plan.repository_source_mode == REPOSITORY_SOURCE_MODE_LOCAL_WORKSPACE
+    {
+        RELEASE_SOURCE_KIND_LOCAL_WORKSPACE
+    } else {
+        RELEASE_SOURCE_KIND_MANAGED_TAG
+    };
+    let source_kind = metadata
+        .source_kind
+        .as_deref()
+        .unwrap_or(default_source_kind)
+        .trim()
+        .to_owned();
+    let source_ref = metadata
+        .source_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            if source_kind == RELEASE_SOURCE_KIND_MANAGED_TAG {
+                Some(plan.git_tag.clone())
+            } else {
+                None
+            }
+        });
+    let local_path = metadata
+        .local_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| plan.repository_local_path.clone());
+    let unity_executable_path_override = metadata
+        .unity_executable_path_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    Ok(ResolvedBuildSourceMetadata {
+        source_kind,
+        source_ref,
+        local_path,
+        unity_executable_path_override,
+    })
+}
+
+fn resolve_unity_runner_config_json(
+    plan: &StoredBuildExecutionPlan,
+) -> io::Result<String> {
+    let source_metadata = resolve_build_source_metadata(plan)?;
+    let Some(unity_executable_path_override) = source_metadata.unity_executable_path_override else {
+        return Ok(plan.config_json.clone());
+    };
+
+    let mut config = serde_json::from_str::<serde_json::Value>(&plan.config_json).map_err(
+        |error| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "build run {} has invalid runner config_json: {error}",
+                    plan.build_run_id
+                ),
+            )
+        },
+    )?;
+    let object = config.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "build run {} runner config_json must be a JSON object",
+                plan.build_run_id
+            ),
+        )
+    })?;
+    object.insert(
+        String::from("unity_executable_path"),
+        serde_json::Value::String(unity_executable_path_override),
+    );
+
+    serde_json::to_string(&config).map_err(io::Error::other)
 }
 
 fn resolve_unity_build_target_contract(
@@ -2425,7 +2605,9 @@ mod tests {
             .create_repository_project(CreateRepositoryProjectInput {
                 name: String::from("Revolutions"),
                 engine_kind: String::from("unity"),
-                repo_url: String::from("https://example.com/revolutions.git"),
+                source_mode: String::from("managed_repository"),
+                repo_url: Some(String::from("https://example.com/revolutions.git")),
+                local_path: None,
                 credentials: None,
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: None,
@@ -2528,9 +2710,12 @@ mod tests {
             workspace_root_override: None,
             artifacts_root_override: None,
             build_target_id: 23,
+            repository_source_mode: String::from("managed_repository"),
             repository_url: String::from("https://example.com/revolutions.git"),
+            repository_local_path: None,
             git_tag: String::from("v1.2.3"),
             git_commit: Some(String::from("deadbeef")),
+            source_metadata_json: String::from("{}"),
             target_name: String::from("Windows"),
             build_kind: BuildKind::Player,
             contract_json: String::from(

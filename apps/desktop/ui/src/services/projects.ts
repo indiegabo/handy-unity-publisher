@@ -113,7 +113,10 @@ export type BuildContractInput = {
 export type RepositoryInspectionEntry = {
     repository_id: number;
     repository_name: string;
+    source_mode?: string | null;
+    workspace_strategy?: string | null;
     repo_url: string;
+    local_path?: string | null;
     engine_kind: string;
     enabled: boolean;
     polling_interval_seconds: number;
@@ -239,7 +242,9 @@ export type CreateRepositoryProjectPublishTargetInput = {
 export type CreateRepositoryProjectInput = {
     name: string;
     engine_kind: RepositoryEngineKind;
-    repository_url: string;
+    source_mode: "managed_repository" | "local_workspace";
+    repository_url?: string | null;
+    local_path?: string | null;
     repository_access_assessment?: RepositoryAccessAssessment | null;
     repository_credentials_id?: number | null;
     default_branch?: string | null;
@@ -285,7 +290,9 @@ export type UpdateRepositoryProjectInput = {
     repository_id: number;
     name: string;
     engine_kind: RepositoryEngineKind;
-    repository_url: string;
+    source_mode: "managed_repository" | "local_workspace";
+    repository_url?: string | null;
+    local_path?: string | null;
     repository_access_assessment?: RepositoryAccessAssessment | null;
     default_branch?: string | null;
     artifacts_root_override?: string | null;
@@ -316,6 +323,30 @@ export type RemoveRepositoryProjectReport = {
     removed_paths: string[];
     missing_paths: string[];
     skipped_paths: string[];
+};
+
+export type OnDemandReleaseVersionSource = "manual" | "project_settings";
+
+export type OnDemandReleaseSourceKind =
+    | "managed_tag"
+    | "managed_ref"
+    | "local_workspace";
+
+export type OnDemandReleaseProcessInput = {
+    repository_id: number;
+    release_version?: string | null;
+    version_source: OnDemandReleaseVersionSource;
+    source_kind: OnDemandReleaseSourceKind;
+    source_ref?: string | null;
+    local_path?: string | null;
+    unity_executable_path_override?: string | null;
+};
+
+export type QueuedReleaseRunRecord = {
+    id: number;
+    repository_id: number;
+    git_tag: string;
+    status: string;
 };
 
 export async function loadRepositoryInspection(): Promise<RepositoryInspectionSettings> {
@@ -406,6 +437,14 @@ export async function removeRepositoryProject(
     input: RemoveRepositoryProjectInput,
 ): Promise<RemoveRepositoryProjectReport> {
     return invoke<RemoveRepositoryProjectReport>("remove_repository_project", {
+        input,
+    });
+}
+
+export async function dispatchOnDemandReleaseProcess(
+    input: OnDemandReleaseProcessInput,
+): Promise<QueuedReleaseRunRecord> {
+    return invoke<QueuedReleaseRunRecord>("dispatch_on_demand_release_process", {
         input,
     });
 }

@@ -394,7 +394,12 @@ fn create_repository_project(
         .create_repository_project(CreateRepositoryProjectInput {
             name: String::from(name),
             engine_kind: String::from("unity"),
-            repo_url: format!("https://example.com/{}.git", name.replace(' ', "-").to_ascii_lowercase()),
+            source_mode: String::from("managed_repository"),
+            repo_url: Some(format!(
+                "https://example.com/{}.git",
+                name.replace(' ', "-").to_ascii_lowercase()
+            )),
+            local_path: None,
             credentials: None,
             default_branch: Some(String::from("main")),
             artifacts_root_override: None,

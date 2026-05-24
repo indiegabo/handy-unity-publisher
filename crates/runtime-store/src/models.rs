@@ -290,6 +290,7 @@ pub struct ReleaseRunRecord {
     pub trigger_source: String,
     pub trigger_rule_id: Option<i64>,
     pub source_metadata_json: String,
+    pub source_identity: String,
     pub engine_version: Option<String>,
     pub status: String,
     pub started_at: Option<String>,
@@ -324,6 +325,35 @@ pub struct PollingRepositoryRecord {
     pub has_release_history: bool,
 }
 
+/// Stores one repository or local-workspace project row exposed to shell
+/// inspection and project navigation surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryProjectRecord {
+    pub id: i64,
+    pub name: String,
+    pub source_mode: String,
+    pub workspace_strategy: String,
+    pub repo_url: Option<String>,
+    pub local_path: Option<String>,
+    pub engine_kind: String,
+    pub credentials_id: Option<i64>,
+    pub source_provider_id: Option<String>,
+    pub source_instance_url: Option<String>,
+    pub visibility_status: String,
+    pub auth_requirement_status: String,
+    pub auth_binding_status: String,
+    pub auth_status_message: String,
+    pub auth_last_verified_at: Option<String>,
+    pub enabled: bool,
+    pub polling_interval_seconds: i64,
+    pub last_seen_tag: Option<String>,
+    pub default_branch: Option<String>,
+    pub artifacts_root_override: Option<String>,
+    pub workspace_root_override: Option<String>,
+    pub enabled_build_target_count: i64,
+    pub has_release_history: bool,
+}
+
 /// Stores one repository registration row needed to materialize a managed checkout.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryCheckoutRecord {
@@ -332,6 +362,7 @@ pub struct RepositoryCheckoutRecord {
     pub source_mode: String,
     pub workspace_strategy: String,
     pub repo_url: Option<String>,
+    pub local_path: Option<String>,
     pub credentials_id: Option<i64>,
     pub default_branch: Option<String>,
     pub workspace_root_override: Option<String>,
@@ -418,9 +449,12 @@ pub struct BuildExecutionPlan {
     pub workspace_root_override: Option<String>,
     pub artifacts_root_override: Option<String>,
     pub build_target_id: i64,
+    pub repository_source_mode: String,
     pub repository_url: String,
+    pub repository_local_path: Option<String>,
     pub git_tag: String,
     pub git_commit: Option<String>,
+    pub source_metadata_json: String,
     pub target_name: String,
     pub build_kind: BuildKind,
     pub contract_json: String,
@@ -749,7 +783,9 @@ pub struct CreateRepositoryProjectPublishTargetInput {
 pub struct CreateRepositoryProjectInput {
     pub name: String,
     pub engine_kind: String,
-    pub repo_url: String,
+    pub source_mode: String,
+    pub repo_url: Option<String>,
+    pub local_path: Option<String>,
     pub credentials: Option<CreateRepositoryProjectCredentialInput>,
     pub default_branch: Option<String>,
     pub artifacts_root_override: Option<String>,
@@ -800,14 +836,16 @@ pub struct UpdateRepositoryProjectPublishTargetInput {
     pub bindings: Vec<UpdateRepositoryProjectPublishBindingInput>,
 }
 
-/// Defines the durable payload required to update one managed repository
-/// project together with its active build target configuration.
+/// Defines the durable payload required to update one repository or local
+/// workspace project together with its active build target configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateRepositoryProjectInput {
     pub repository_id: i64,
     pub name: String,
     pub engine_kind: String,
-    pub repo_url: String,
+    pub source_mode: String,
+    pub repo_url: Option<String>,
+    pub local_path: Option<String>,
     pub default_branch: Option<String>,
     pub artifacts_root_override: Option<String>,
     pub workspace_root_override: Option<String>,
@@ -922,4 +960,29 @@ pub struct RepositoryPollDispatchInput {
     pub git_tag: String,
     pub git_commit: String,
     pub observed_via: String,
+}
+
+/// Defines the operator-provided fields for one on-demand release dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnDemandReleaseDispatchInput {
+    pub repository_id: i64,
+    pub release_version: Option<String>,
+    pub version_source: String,
+    pub source_kind: String,
+    pub source_ref: Option<String>,
+    pub local_path: Option<String>,
+    pub requested_via: String,
+    pub unity_executable_path_override: Option<String>,
+}
+
+/// Defines the structured source metadata persisted for one release run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ReleaseSourceMetadata {
+    pub requested_via: Option<String>,
+    pub observed_via: Option<String>,
+    pub source_kind: Option<String>,
+    pub source_ref: Option<String>,
+    pub local_path: Option<String>,
+    pub version_source: Option<String>,
+    pub unity_executable_path_override: Option<String>,
 }

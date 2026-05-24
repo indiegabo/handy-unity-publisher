@@ -48,7 +48,7 @@ use runtime_core::{
 use runtime_runner::{
     discover_artifacts, ExecutionProgress, ExecutionProgressReporter,
     PreparedWorkspace, RunnerFamily,
-    WorkspacePreparationInput, WorkspacePreparer,
+    WorkspacePreparer,
     unity::{
         inspect_host_capability_profile,
         resolve_host_native_unity_execution_plan, HostCapabilityProfile,
@@ -66,6 +66,7 @@ use runtime_store::{
     InterruptedBuildRecoveryRecord,
     ManualReleaseDispatchInput, PollingRepositoryRecord, PublishDispatchJob,
     PublishExecutionPlan as StoredPublishExecutionPlan, PublishRunRecord,
+    ReleaseRunRecord, ReleaseSourceMetadata,
     RepositoryCheckoutRecord,
     resolve_credential_secret_config_json,
     RepositoryPollDispatchInput, StartBuildRunInput,
@@ -130,7 +131,7 @@ struct ReleaseEventContext {
     repository_name: String,
     git_tag: String,
     git_commit: Option<String>,
-    user_requested: bool,
+    origin: ReleaseEventOriginContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,7 +143,7 @@ struct BuildRunEventContext {
     git_tag: String,
     target_name: String,
     unity_target_platform: String,
-    user_requested: bool,
+    origin: ReleaseEventOriginContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,7 +157,17 @@ struct PublishRunEventContext {
     publish_target_id: i64,
     publish_target_name: String,
     artifact_name: String,
+    origin: ReleaseEventOriginContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ReleaseEventOriginContext {
     user_requested: bool,
+    trigger_source: String,
+    source_kind: Option<String>,
+    source_ref: Option<String>,
+    local_path: Option<String>,
+    requested_via: Option<String>,
 }
 
 pub(crate) fn error_indicates_authentication_failure(error: &impl Display) -> bool {
@@ -194,6 +205,72 @@ fn user_requested_from_trigger_source(trigger_source: &str) -> bool {
     trigger_source.eq_ignore_ascii_case("manual")
 }
 
+fn decode_release_event_source_metadata(
+    source_metadata_json: &str,
+) -> ReleaseSourceMetadata {
+    if source_metadata_json.trim().is_empty() {
+        return ReleaseSourceMetadata::default();
+    }
+
+    serde_json::from_str::<ReleaseSourceMetadata>(source_metadata_json)
+        .unwrap_or_default()
+}
+
+fn normalize_release_event_optional_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn release_event_origin_context(record: &ReleaseRunRecord) -> ReleaseEventOriginContext {
+    let metadata = decode_release_event_source_metadata(&record.source_metadata_json);
+
+    ReleaseEventOriginContext {
+        user_requested: user_requested_from_trigger_source(&record.trigger_source),
+        trigger_source: record.trigger_source.trim().to_owned(),
+        source_kind: normalize_release_event_optional_string(
+            metadata.source_kind.as_deref(),
+        ),
+        source_ref: normalize_release_event_optional_string(
+            metadata.source_ref.as_deref(),
+        ),
+        local_path: normalize_release_event_optional_string(
+            metadata.local_path.as_deref(),
+        ),
+        requested_via: normalize_release_event_optional_string(
+            metadata.requested_via.as_deref(),
+        ),
+    }
+}
+
+fn release_event_mode_label(origin: &ReleaseEventOriginContext) -> &'static str {
+    if origin.trigger_source.eq_ignore_ascii_case("poll") {
+        return "Automatic";
+    }
+
+    match origin.source_kind.as_deref() {
+        Some("local_workspace") => "On-demand local",
+        Some("managed_ref") => "On-demand ref",
+        Some("managed_tag") => "On-demand tag",
+        _ => "Manual",
+    }
+}
+
+fn release_event_context(
+    repository_name: &str,
+    record: &ReleaseRunRecord,
+) -> ReleaseEventContext {
+    ReleaseEventContext {
+        release_run_id: record.id,
+        repository_id: record.repository_id,
+        repository_name: repository_name.to_owned(),
+        git_tag: record.git_tag.clone(),
+        git_commit: record.git_commit.clone(),
+        origin: release_event_origin_context(record),
+    }
+}
+
 fn resolve_build_event_platform(plan: &StoredBuildExecutionPlan) -> String {
     serde_json::from_str::<serde_json::Value>(plan.contract_json.trim())
         .ok()
@@ -213,10 +290,10 @@ fn build_run_event_context(
     coordinator: &LocalCoordinator,
     plan: &StoredBuildExecutionPlan,
 ) -> BuildRunEventContext {
-    let user_requested = coordinator
+    let origin = coordinator
         .get_release_run_record(plan.release_run_id)
-        .map(|release| user_requested_from_trigger_source(&release.trigger_source))
-        .unwrap_or(false);
+        .map(|release| release_event_origin_context(&release))
+        .unwrap_or_default();
 
     BuildRunEventContext {
         release_run_id: plan.release_run_id,
@@ -226,7 +303,7 @@ fn build_run_event_context(
         git_tag: plan.git_tag.clone(),
         target_name: plan.target_name.clone(),
         unity_target_platform: resolve_build_event_platform(plan),
-        user_requested,
+        origin,
     }
 }
 
@@ -234,10 +311,10 @@ fn publish_run_event_context(
     coordinator: &LocalCoordinator,
     plan: &PublishExecutionPlan,
 ) -> PublishRunEventContext {
-    let user_requested = coordinator
+    let origin = coordinator
         .get_release_run_record(plan.release_run_id)
-        .map(|release| user_requested_from_trigger_source(&release.trigger_source))
-        .unwrap_or(false);
+        .map(|release| release_event_origin_context(&release))
+        .unwrap_or_default();
 
     PublishRunEventContext {
         release_run_id: plan.release_run_id,
@@ -249,7 +326,7 @@ fn publish_run_event_context(
         publish_target_id: plan.publish_target_id,
         publish_target_name: plan.publish_target_name.clone(),
         artifact_name: plan.artifact_name.clone(),
-        user_requested,
+        origin,
     }
 }
 
@@ -269,18 +346,14 @@ fn emit_release_queued_event(
     storage: &StorageLayout,
     context: &ReleaseEventContext,
 ) -> io::Result<()> {
-    let mode = if context.user_requested {
-        "Manual"
-    } else {
-        "Automatic"
-    };
+    let mode = release_event_mode_label(&context.origin);
     emit_runtime_event(
         storage,
         RuntimeEventInput {
             topic: String::from(EVENT_TOPIC_RELEASE_QUEUED),
             severity: String::from("info"),
             origin: String::from("runtime-bin"),
-            user_requested: context.user_requested,
+            user_requested: context.origin.user_requested,
             repository_id: Some(context.repository_id),
             release_run_id: Some(context.release_run_id),
             build_run_id: None,
@@ -293,6 +366,11 @@ fn emit_release_queued_event(
                 "repository_name": &context.repository_name,
                 "git_tag": &context.git_tag,
                 "git_commit": &context.git_commit,
+                "trigger_source": &context.origin.trigger_source,
+                "source_kind": &context.origin.source_kind,
+                "source_ref": &context.origin.source_ref,
+                "local_path": &context.origin.local_path,
+                "requested_via": &context.origin.requested_via,
                 "status": "queued",
             }),
         },
@@ -304,18 +382,14 @@ fn emit_tag_detected_event(
     storage: &StorageLayout,
     context: &ReleaseEventContext,
 ) -> io::Result<()> {
-    let mode = if context.user_requested {
-        "Manual"
-    } else {
-        "Automatic"
-    };
+    let mode = release_event_mode_label(&context.origin);
     emit_runtime_event(
         storage,
         RuntimeEventInput {
             topic: String::from(EVENT_TOPIC_TAG_DETECTED),
             severity: String::from("info"),
             origin: String::from("runtime-bin"),
-            user_requested: context.user_requested,
+            user_requested: context.origin.user_requested,
             repository_id: Some(context.repository_id),
             release_run_id: Some(context.release_run_id),
             build_run_id: None,
@@ -339,18 +413,14 @@ fn emit_build_run_started_event(
     storage: &StorageLayout,
     context: &BuildRunEventContext,
 ) -> io::Result<()> {
-    let mode = if context.user_requested {
-        "Manual"
-    } else {
-        "Automatic"
-    };
+    let mode = release_event_mode_label(&context.origin);
     emit_runtime_event(
         storage,
         RuntimeEventInput {
             topic: String::from(EVENT_TOPIC_BUILD_RUN_STARTED),
             severity: String::from("info"),
             origin: String::from("runtime-bin"),
-            user_requested: context.user_requested,
+            user_requested: context.origin.user_requested,
             repository_id: Some(context.repository_id),
             release_run_id: Some(context.release_run_id),
             build_run_id: Some(context.build_run_id),
@@ -364,6 +434,11 @@ fn emit_build_run_started_event(
                 "git_tag": &context.git_tag,
                 "target_name": &context.target_name,
                 "unity_target_platform": &context.unity_target_platform,
+                "trigger_source": &context.origin.trigger_source,
+                "source_kind": &context.origin.source_kind,
+                "source_ref": &context.origin.source_ref,
+                "local_path": &context.origin.local_path,
+                "requested_via": &context.origin.requested_via,
                 "status": "running",
             }),
         },
@@ -376,18 +451,14 @@ fn emit_build_run_finished_event(
     context: &BuildRunEventContext,
     record: &BuildRunRecord,
 ) -> io::Result<()> {
-    let mode = if context.user_requested {
-        "Manual"
-    } else {
-        "Automatic"
-    };
+    let mode = release_event_mode_label(&context.origin);
     emit_runtime_event(
         storage,
         RuntimeEventInput {
             topic: String::from(EVENT_TOPIC_BUILD_RUN_FINISHED),
             severity: String::from(terminal_event_severity(&record.status)),
             origin: String::from("runtime-bin"),
-            user_requested: context.user_requested,
+            user_requested: context.origin.user_requested,
             repository_id: Some(context.repository_id),
             release_run_id: Some(context.release_run_id),
             build_run_id: Some(context.build_run_id),
@@ -401,6 +472,11 @@ fn emit_build_run_finished_event(
                 "git_tag": &context.git_tag,
                 "target_name": &context.target_name,
                 "unity_target_platform": &context.unity_target_platform,
+                "trigger_source": &context.origin.trigger_source,
+                "source_kind": &context.origin.source_kind,
+                "source_ref": &context.origin.source_ref,
+                "local_path": &context.origin.local_path,
+                "requested_via": &context.origin.requested_via,
                 "status": &record.status,
                 "error_message": &record.error_message,
             }),
@@ -416,18 +492,14 @@ fn emit_build_run_stage_updated_event(
     stage_label: &str,
     message: &str,
 ) -> io::Result<()> {
-    let mode = if context.user_requested {
-        "Manual"
-    } else {
-        "Automatic"
-    };
+    let mode = release_event_mode_label(&context.origin);
     emit_runtime_event(
         storage,
         RuntimeEventInput {
             topic: String::from(EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED),
             severity: String::from("info"),
             origin: String::from("runtime-bin"),
-            user_requested: context.user_requested,
+            user_requested: context.origin.user_requested,
             repository_id: Some(context.repository_id),
             release_run_id: Some(context.release_run_id),
             build_run_id: Some(context.build_run_id),
@@ -441,6 +513,11 @@ fn emit_build_run_stage_updated_event(
                 "git_tag": &context.git_tag,
                 "target_name": &context.target_name,
                 "unity_target_platform": &context.unity_target_platform,
+                "trigger_source": &context.origin.trigger_source,
+                "source_kind": &context.origin.source_kind,
+                "source_ref": &context.origin.source_ref,
+                "local_path": &context.origin.local_path,
+                "requested_via": &context.origin.requested_via,
                 "stage_key": stage_key,
                 "stage_label": stage_label,
                 "status": "running",
@@ -455,18 +532,14 @@ fn emit_publish_run_started_event(
     storage: &StorageLayout,
     context: &PublishRunEventContext,
 ) -> io::Result<()> {
-    let mode = if context.user_requested {
-        "Manual"
-    } else {
-        "Automatic"
-    };
+    let mode = release_event_mode_label(&context.origin);
     emit_runtime_event(
         storage,
         RuntimeEventInput {
             topic: String::from(EVENT_TOPIC_PUBLISH_RUN_STARTED),
             severity: String::from("info"),
             origin: String::from("runtime-bin"),
-            user_requested: context.user_requested,
+            user_requested: context.origin.user_requested,
             repository_id: Some(context.repository_id),
             release_run_id: Some(context.release_run_id),
             build_run_id: Some(context.build_run_id),
@@ -481,6 +554,11 @@ fn emit_publish_run_started_event(
                 "publish_target_id": context.publish_target_id,
                 "publish_target_name": &context.publish_target_name,
                 "artifact_name": &context.artifact_name,
+                "trigger_source": &context.origin.trigger_source,
+                "source_kind": &context.origin.source_kind,
+                "source_ref": &context.origin.source_ref,
+                "local_path": &context.origin.local_path,
+                "requested_via": &context.origin.requested_via,
                 "status": "running",
             }),
         },
@@ -493,18 +571,14 @@ fn emit_publish_run_finished_event(
     context: &PublishRunEventContext,
     record: &PublishRunRecord,
 ) -> io::Result<()> {
-    let mode = if context.user_requested {
-        "Manual"
-    } else {
-        "Automatic"
-    };
+    let mode = release_event_mode_label(&context.origin);
     emit_runtime_event(
         storage,
         RuntimeEventInput {
             topic: String::from(EVENT_TOPIC_PUBLISH_RUN_FINISHED),
             severity: String::from(terminal_event_severity(&record.status)),
             origin: String::from("runtime-bin"),
-            user_requested: context.user_requested,
+            user_requested: context.origin.user_requested,
             repository_id: Some(context.repository_id),
             release_run_id: Some(context.release_run_id),
             build_run_id: Some(context.build_run_id),
@@ -522,6 +596,11 @@ fn emit_publish_run_finished_event(
                 "publish_target_id": context.publish_target_id,
                 "publish_target_name": &context.publish_target_name,
                 "artifact_name": &context.artifact_name,
+                "trigger_source": &context.origin.trigger_source,
+                "source_kind": &context.origin.source_kind,
+                "source_ref": &context.origin.source_ref,
+                "local_path": &context.origin.local_path,
+                "requested_via": &context.origin.requested_via,
                 "status": &record.status,
                 "destination_ref": &record.destination_ref,
                 "error_message": &record.error_message,
@@ -806,14 +885,7 @@ fn run_manual_release_dispatch_command(
         coordinator.dispatch_manual_release(input)?
     };
     let repository = coordinator.get_repository_checkout_record(command.repository_id)?;
-    let context = ReleaseEventContext {
-        release_run_id: record.id,
-        repository_id: record.repository_id,
-        repository_name: repository.name,
-        git_tag: record.git_tag.clone(),
-        git_commit: record.git_commit.clone(),
-        user_requested: user_requested_from_trigger_source(&record.trigger_source),
-    };
+    let context = release_event_context(&repository.name, &record);
     if let Err(error) = emit_release_queued_event(storage, &context) {
         log_runtime_event_failure(EVENT_TOPIC_RELEASE_QUEUED, &error);
     }
@@ -2423,7 +2495,7 @@ mod tests {
         assert_eq!(record.id, release_run_id);
         assert_eq!(record.git_commit.as_deref(), Some("feedface"));
         assert_eq!(record.status, "queued");
-        assert!(record.engine_version.is_none());
+        assert_eq!(record.engine_version.as_deref(), Some("2022.3.20f1"));
 
         let metadata: serde_json::Value = serde_json::from_str(&record.source_metadata_json)
             .expect("rebuild metadata should decode");
@@ -3822,7 +3894,7 @@ mod tests {
         assert!(!archived_logs_path.exists());
         let log_contents = fs::read_to_string(&log_path).expect("unity log should exist");
         assert!(log_contents.contains("build_method: Builder.PerformWebGL"));
-        assert!(log_contents.contains("build_target: WebGL"));
+        assert!(log_contents.contains("build_target: webgl"));
         assert!(workspace_path.join("source").exists());
         assert!(workspace_path.join("logs").exists());
         assert!(workspace_output_path.is_dir());
@@ -3833,6 +3905,8 @@ mod tests {
         assert_eq!(report.publish_runs.len(), 1);
 
         let artifact_path = workspace_path
+            .join("builds")
+            .join(format!("build-run-{}", record.id))
             .join("outputs")
             .join("runtime-bin-build-run-next-success.v13.0.0.webgl-player.zip");
         assert!(artifact_path.is_file());
@@ -3887,7 +3961,9 @@ mod tests {
             .create_repository_project(CreateRepositoryProjectInput {
                 name: String::from("runtime-bin-project-creation-smoke"),
                 engine_kind: String::from("unity"),
-                repo_url: repository_url,
+                source_mode: String::from("managed_repository"),
+                repo_url: Some(repository_url),
+                local_path: None,
                 credentials: None,
                 default_branch: Some(default_branch),
                 artifacts_root_override: None,
@@ -3977,7 +4053,11 @@ mod tests {
             .any(|attempt| attempt.workspace_path == workspace_path.display().to_string()
                 && attempt.is_final_workspace));
         assert!(report.build_plan.contract_json.contains("Builder.PerformWebGL"));
-        assert!(report.build_plan.contract_json.contains("webgl"));
+        assert!(report
+            .build_plan
+            .contract_json
+            .to_ascii_lowercase()
+            .contains("webgl"));
         assert_eq!(report.artifacts.len(), 1);
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
@@ -4062,9 +4142,7 @@ mod tests {
         let expected_build_root = expected_workspace_root
             .join("builds")
             .join(format!("build-run-{}", record.id));
-        let expected_artifact_root = expected_workspace_root.join("outputs");
-        let expected_artifact_path = expected_artifact_root
-            .join("runtime-bin-build-run-next-overrides.v13.1.0.webgl-player.zip");
+        let expected_artifact_root = expected_build_root.join("outputs");
         let expected_workspace_output_path = expected_build_root
             .join("outputs")
             .join("runtime-bin-build-run-next-overrides.v13.1.0.webgl-player");
@@ -4097,7 +4175,10 @@ mod tests {
         assert!(!expected_log_path.exists());
         assert!(build_execution_logs_archive_path(&expected_workspace_root).is_file());
         assert!(build_execution_report_path(&expected_workspace_root).is_file());
-        assert!(expected_artifact_path.is_file());
+        let report = load_build_execution_report(&expected_workspace_root);
+        assert_eq!(report.cleanup.status, "completed");
+        assert_eq!(report.artifacts.len(), 1);
+        assert_eq!(report.artifacts[0].path, "runtime-bin-build-run-next-overrides.v13.1.0.webgl-player.zip");
         assert!(!config
             .directories
             .artifacts_dir
@@ -4369,9 +4450,12 @@ mod tests {
             workspace_root_override: None,
             artifacts_root_override: None,
             build_target_id: 4,
+            repository_source_mode: String::from("managed_repository"),
             repository_url: String::from("https://example.com/revolutions.git"),
+            repository_local_path: None,
             git_tag: String::from("v1.0.0"),
             git_commit: Some(String::from("deadbeef")),
+            source_metadata_json: String::from("{}"),
             target_name: String::from("windows-player"),
             build_kind: BuildKind::Player,
             contract_json: json!({
@@ -4441,9 +4525,12 @@ mod tests {
             workspace_root_override: None,
             artifacts_root_override: None,
             build_target_id: 4,
+            repository_source_mode: String::from("managed_repository"),
             repository_url: String::from("https://example.com/revolutions.git"),
+            repository_local_path: None,
             git_tag: String::from("v1.0.0"),
             git_commit: Some(String::from("deadbeef")),
+            source_metadata_json: String::from("{}"),
             target_name: String::from("windows-player"),
             build_kind: BuildKind::Player,
             contract_json: json!({
@@ -4768,15 +4855,16 @@ mod tests {
             .iter()
             .any(|attempt| !attempt.is_final_workspace && attempt.removed_after_cleanup));
         assert!(build_execution_logs_archive_path(&workspace_path).is_file());
+        assert_eq!(report.cleanup.status, "completed");
+        assert_eq!(report.artifacts.len(), 1);
+        assert_eq!(
+            report.artifacts[0].path,
+            "runtime-bin-build-run-next-retry-package-cache.v13.2.0.windows-player.zip"
+        );
 
         let state_path = root.join("run-next-retry-package-cache.state");
         let attempts = fs::read_to_string(&state_path).expect("retry state file should exist");
         assert_eq!(attempts.trim(), "2");
-
-        let artifact_path = workspace_path
-            .join("outputs")
-            .join("runtime-bin-build-run-next-retry-package-cache.v13.2.0.windows-player.zip");
-        assert!(artifact_path.is_file());
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }

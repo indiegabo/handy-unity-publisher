@@ -379,14 +379,7 @@ fn poll_repository(
             Ok(release) => {
                 coordinator.update_repository_last_seen_tag(repository.id, &tag.name)?;
                 last_seen_tag_after = Some(tag.name.clone());
-                let context = ReleaseEventContext {
-                    release_run_id: release.id,
-                    repository_id: release.repository_id,
-                    repository_name: repository.name.clone(),
-                    git_tag: release.git_tag.clone(),
-                    git_commit: release.git_commit.clone(),
-                    user_requested: user_requested_from_trigger_source(&release.trigger_source),
-                };
+                let context = release_event_context(&repository.name, &release);
                 if let Err(error) = emit_tag_detected_event(storage, &context) {
                     log_runtime_event_failure(EVENT_TOPIC_TAG_DETECTED, &error);
                 }

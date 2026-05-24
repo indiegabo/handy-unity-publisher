@@ -49,10 +49,20 @@ pub const KIND_ITCH_API_KEY: &str = "itch-api-key";
 const REPOSITORY_AUTH_BINDING_STATUS_REAUTH_REQUIRED: &str = "reauth_required";
 const SUPPORTED_REPOSITORY_ENGINE_UNITY: &str = "unity";
 const SUPPORTED_REPOSITORY_BUILD_KIND_PLAYER: &str = "player";
+const SOURCE_MODE_MANAGED_REPOSITORY: &str = "managed_repository";
+const SOURCE_MODE_LOCAL_WORKSPACE: &str = "local_workspace";
+const WORKSPACE_STRATEGY_DIRECT: &str = "direct";
+const WORKSPACE_STRATEGY_MANAGED_CHECKOUT: &str = "managed_checkout";
 const TRIGGER_SOURCE_MANUAL: &str = "manual";
 const TRIGGER_SOURCE_POLL: &str = "poll";
 const TRIGGER_SOURCE_REPOSITORY_POLL: &str = "repository-poll";
+const RELEASE_SOURCE_KIND_MANAGED_TAG: &str = "managed_tag";
+const RELEASE_SOURCE_KIND_MANAGED_REF: &str = "managed_ref";
+const RELEASE_SOURCE_KIND_LOCAL_WORKSPACE: &str = "local_workspace";
+const RELEASE_VERSION_SOURCE_MANUAL: &str = "manual";
+const RELEASE_VERSION_SOURCE_PROJECT_SETTINGS: &str = "project_settings";
 const PROJECT_VERSION_FILE_PATH: &str = "ProjectSettings/ProjectVersion.txt";
+const PROJECT_SETTINGS_ASSET_PATH: &str = "ProjectSettings/ProjectSettings.asset";
 
 pub const RECOVERY_INTERRUPTION_KIND_REQUESTED: &str = "requested_shutdown";
 pub const RECOVERY_INTERRUPTION_KIND_SYSTEM: &str = "system_interruption";
@@ -161,6 +171,11 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0013_publish_destination_execution_contract.sql"),
         transactional: true,
     },
+    Migration {
+        name: "0014_release_source_identity.sql",
+        sql: include_str!("../migrations/0014_release_source_identity.sql"),
+        transactional: true,
+    },
 ];
 
 const MIGRATION_NO_OP_SQL: &str = "SELECT 1;\n";
@@ -231,12 +246,37 @@ struct PublishRunDispatchState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReleaseBuildPlanningState {
     repository_id: i64,
+    repository_source_mode: String,
     repository_url: String,
+    repository_local_path: Option<String>,
     engine_kind: EngineKind,
     credentials_id: Option<i64>,
     git_tag: String,
+    source_metadata_json: String,
     engine_version: Option<String>,
     status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OnDemandRepositoryState {
+    repository_id: i64,
+    source_mode: String,
+    repo_url: Option<String>,
+    local_path: Option<String>,
+    credentials_id: Option<i64>,
+    default_branch: Option<String>,
+    engine_kind: EngineKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedReleaseSourceMetadata {
+    requested_via: Option<String>,
+    observed_via: Option<String>,
+    source_kind: String,
+    source_ref: Option<String>,
+    local_path: Option<String>,
+    version_source: Option<String>,
+    unity_executable_path_override: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +332,7 @@ struct NormalizedManualReleaseDispatchInput {
     git_tag: String,
     git_commit: String,
     requested_via: String,
+    source_identity: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,6 +341,21 @@ struct NormalizedRepositoryPollDispatchInput {
     git_tag: String,
     git_commit: String,
     observed_via: String,
+    source_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedOnDemandReleaseDispatchInput {
+    repository_id: i64,
+    git_tag: String,
+    git_commit: String,
+    requested_via: String,
+    source_kind: String,
+    source_ref: Option<String>,
+    local_path: Option<String>,
+    version_source: String,
+    unity_executable_path_override: Option<String>,
+    source_identity: String,
 }
 
 /// Owns the local queue, lease, and idempotency primitives backed by SQLite.
@@ -686,6 +742,31 @@ impl LocalCoordinator {
         self.queue_release_run(record.id)
     }
 
+    /// Persists one on-demand release run and queues it for downstream planning.
+    pub fn dispatch_on_demand_release(
+        &self,
+        input: OnDemandReleaseDispatchInput,
+    ) -> io::Result<ReleaseRunRecord> {
+        let input = self.normalize_on_demand_release_dispatch_input(input)?;
+        let record = self.create_on_demand_release_dispatch(&input)?;
+
+        self.queue_release_run(record.id)
+    }
+
+    /// Requeues one stored release run while preserving its original source metadata.
+    pub fn dispatch_release_rebuild_by_id(
+        &self,
+        release_run_id: i64,
+        requested_via: &str,
+    ) -> io::Result<ReleaseRunRecord> {
+        require_positive_identifier(release_run_id, "release run id")?;
+
+        let record = self.rebuild_release_dispatch_by_id(release_run_id, requested_via)?;
+        self.forget_idempotency(&release_dispatch_idempotency_key(record.id))?;
+
+        self.queue_release_run(record.id)
+    }
+
     /// Persists one repository-poll release run and queues it for downstream planning.
     pub fn dispatch_repository_poll_release(
         &self,
@@ -842,9 +923,12 @@ impl LocalCoordinator {
                       r.workspace_root_override,
                       r.artifacts_root_override,
                        br.build_target_id,
+                      r.source_mode,
                        r.repo_url,
+                      r.local_path,
                        rr.git_tag,
                        rr.git_commit,
+                      rr.source_metadata_json,
                        bt.name,
                       COALESCE(bt.build_kind, ''),
                       COALESCE(bt.contract_json, ''),
@@ -970,7 +1054,26 @@ impl LocalCoordinator {
             .map_err(sqlite_error)?;
 
         reject_duplicate_repository_project_name(&transaction, &normalized.name)?;
-        reject_duplicate_repository_project_url(&transaction, &normalized.repo_url)?;
+        match normalized.source_mode.as_str() {
+            SOURCE_MODE_MANAGED_REPOSITORY => reject_duplicate_repository_project_url(
+                &transaction,
+                normalized.repo_url.as_deref().ok_or_else(|| {
+                    invalid_input_error("repository project repo_url must not be empty")
+                })?,
+            )?,
+            SOURCE_MODE_LOCAL_WORKSPACE => reject_duplicate_repository_project_local_path(
+                &transaction,
+                normalized.local_path.as_deref().ok_or_else(|| {
+                    invalid_input_error("repository project local_path must not be empty")
+                })?,
+            )?,
+            _ => {
+                return Err(invalid_input_error(format!(
+                    "repository project source_mode {:?} is not supported",
+                    normalized.source_mode
+                )));
+            }
+        }
 
         let credentials_id = if let Some(credentials) = normalized.credentials {
             transaction
@@ -1009,11 +1112,18 @@ impl LocalCoordinator {
                     engine_kind,
                     enabled
                 )
-                VALUES (?, 'managed_repository', 'managed_checkout', ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                 ",
                 params![
                     normalized.name,
+                    normalized.source_mode,
+                    if normalized.source_mode == SOURCE_MODE_LOCAL_WORKSPACE {
+                        WORKSPACE_STRATEGY_DIRECT
+                    } else {
+                        WORKSPACE_STRATEGY_MANAGED_CHECKOUT
+                    },
                     normalized.repo_url,
+                    normalized.local_path,
                     credentials_id,
                     normalized.default_branch,
                     normalized.artifacts_root_override,
@@ -1026,25 +1136,27 @@ impl LocalCoordinator {
             .map_err(sqlite_error)?;
         let repository_id = transaction.last_insert_rowid();
 
-        transaction
-            .execute(
-                "
-                INSERT INTO trigger_rules (
-                    repository_id,
-                    name,
-                    source,
-                    enabled,
-                    config_json
+        if normalized.source_mode == SOURCE_MODE_MANAGED_REPOSITORY {
+            transaction
+                .execute(
+                    "
+                    INSERT INTO trigger_rules (
+                        repository_id,
+                        name,
+                        source,
+                        enabled,
+                        config_json
+                    )
+                    VALUES (?, ?, ?, 1, '{}')
+                    ",
+                    params![
+                        repository_id,
+                        DEFAULT_REPOSITORY_POLL_TRIGGER_RULE_NAME,
+                        TRIGGER_SOURCE_POLL,
+                    ],
                 )
-                VALUES (?, ?, ?, 1, '{}')
-                ",
-                params![
-                    repository_id,
-                    DEFAULT_REPOSITORY_POLL_TRIGGER_RULE_NAME,
-                    TRIGGER_SOURCE_POLL,
-                ],
-            )
-            .map_err(sqlite_error)?;
+                .map_err(sqlite_error)?;
+        }
 
         let mut build_target_ids = Vec::with_capacity(normalized.build_targets.len());
         for target in normalized.build_targets {
@@ -1296,10 +1408,10 @@ impl LocalCoordinator {
             )));
         };
 
-        if source_mode != "managed_repository" {
+        if source_mode != normalized.source_mode {
             return Err(invalid_input_error(format!(
-                "repository {} is not a managed repository project",
-                normalized.repository_id
+                "repository {} source_mode cannot change from {:?} to {:?}",
+                normalized.repository_id, source_mode, normalized.source_mode
             )));
         }
 
@@ -1308,11 +1420,36 @@ impl LocalCoordinator {
             normalized.repository_id,
             &normalized.name,
         )?;
-        reject_duplicate_repository_project_url_for_update(
-            &transaction,
-            normalized.repository_id,
-            &normalized.repo_url,
-        )?;
+        let workspace_strategy = match normalized.source_mode.as_str() {
+            SOURCE_MODE_MANAGED_REPOSITORY => {
+                let repo_url = normalized.repo_url.as_deref().ok_or_else(|| {
+                    invalid_input_error("repository project repo_url must not be empty")
+                })?;
+                reject_duplicate_repository_project_url_for_update(
+                    &transaction,
+                    normalized.repository_id,
+                    repo_url,
+                )?;
+                WORKSPACE_STRATEGY_MANAGED_CHECKOUT
+            }
+            SOURCE_MODE_LOCAL_WORKSPACE => {
+                let local_path = normalized.local_path.as_deref().ok_or_else(|| {
+                    invalid_input_error("repository project local_path must not be empty")
+                })?;
+                reject_duplicate_repository_project_local_path_for_update(
+                    &transaction,
+                    normalized.repository_id,
+                    local_path,
+                )?;
+                WORKSPACE_STRATEGY_DIRECT
+            }
+            _ => {
+                return Err(invalid_input_error(format!(
+                    "repository project source_mode {:?} is not supported",
+                    normalized.source_mode
+                )));
+            }
+        };
 
         transaction
             .execute(
@@ -1320,7 +1457,10 @@ impl LocalCoordinator {
                 UPDATE repositories
                 SET name = ?,
                     engine_kind = ?,
+                    source_mode = ?,
+                    workspace_strategy = ?,
                     repo_url = ?,
+                    local_path = ?,
                     default_branch = ?,
                     artifacts_root_override = ?,
                     workspace_root_override = ?,
@@ -1332,7 +1472,10 @@ impl LocalCoordinator {
                 params![
                     normalized.name,
                     normalized.engine_kind,
+                    normalized.source_mode,
+                    workspace_strategy,
                     normalized.repo_url,
+                    normalized.local_path,
                     normalized.default_branch,
                     normalized.artifacts_root_override,
                     normalized.workspace_root_override,
@@ -1546,6 +1689,95 @@ impl LocalCoordinator {
         Ok(repositories)
     }
 
+    /// Lists repository and local-workspace project rows needed by shell
+    /// inspection and project navigation.
+    pub fn list_repository_projects(&self) -> io::Result<Vec<RepositoryProjectRecord>> {
+        let connection = open_connection(&self.database_path)?;
+        let mut statement = connection
+            .prepare(
+                "
+                SELECT r.id,
+                       r.name,
+                       r.source_mode,
+                       r.workspace_strategy,
+                       r.repo_url,
+                       r.local_path,
+                       r.engine_kind,
+                       r.credentials_id,
+                       r.source_provider_id,
+                       r.source_instance_url,
+                       r.visibility_status,
+                       r.auth_requirement_status,
+                       r.auth_binding_status,
+                       r.auth_status_message,
+                       r.auth_last_verified_at,
+                       r.enabled,
+                       r.polling_interval_seconds,
+                       r.last_seen_tag,
+                       r.default_branch,
+                       r.artifacts_root_override,
+                       r.workspace_root_override,
+                       COUNT(bt.id) AS enabled_build_target_count,
+                       EXISTS(
+                          SELECT 1
+                          FROM release_runs rr
+                          WHERE rr.repository_id = r.id
+                      ) AS has_release_history
+                FROM repositories r
+                LEFT JOIN build_targets bt
+                  ON bt.repository_id = r.id
+                 AND bt.enabled = 1
+                GROUP BY r.id, r.name, r.source_mode, r.workspace_strategy,
+                         r.repo_url, r.local_path, r.engine_kind,
+                         r.credentials_id, r.source_provider_id,
+                         r.source_instance_url, r.visibility_status,
+                         r.auth_requirement_status, r.auth_binding_status,
+                         r.auth_status_message, r.auth_last_verified_at,
+                         r.enabled, r.polling_interval_seconds,
+                         r.last_seen_tag, r.default_branch,
+                         r.artifacts_root_override, r.workspace_root_override
+                ORDER BY r.id ASC
+                ",
+            )
+            .map_err(sqlite_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(RepositoryProjectRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    source_mode: row.get(2)?,
+                    workspace_strategy: row.get(3)?,
+                    repo_url: normalize_optional_string(row.get(4)?),
+                    local_path: normalize_optional_string(row.get(5)?),
+                    engine_kind: row.get(6)?,
+                    credentials_id: row.get(7)?,
+                    source_provider_id: normalize_optional_string(row.get(8)?),
+                    source_instance_url: normalize_optional_string(row.get(9)?),
+                    visibility_status: row.get(10)?,
+                    auth_requirement_status: row.get(11)?,
+                    auth_binding_status: row.get(12)?,
+                    auth_status_message: row.get(13)?,
+                    auth_last_verified_at: normalize_optional_string(row.get(14)?),
+                    enabled: row.get::<_, i64>(15)? != 0,
+                    polling_interval_seconds: row.get(16)?,
+                    last_seen_tag: normalize_optional_string(row.get(17)?),
+                    default_branch: normalize_optional_string(row.get(18)?),
+                    artifacts_root_override: normalize_optional_string(row.get(19)?),
+                    workspace_root_override: normalize_optional_string(row.get(20)?),
+                    enabled_build_target_count: row.get(21)?,
+                    has_release_history: row.get::<_, i64>(22)? != 0,
+                })
+            })
+            .map_err(sqlite_error)?;
+
+        let mut repositories = Vec::new();
+        for row in rows {
+            repositories.push(row.map_err(sqlite_error)?);
+        }
+
+        Ok(repositories)
+    }
+
     /// Loads one repository registration row by identifier for direct checkout operations.
     pub fn get_repository_checkout_record(
         &self,
@@ -1562,6 +1794,7 @@ impl LocalCoordinator {
                        source_mode,
                        workspace_strategy,
                        repo_url,
+                      local_path,
                        credentials_id,
                        default_branch,
                        workspace_root_override,
@@ -1577,10 +1810,11 @@ impl LocalCoordinator {
                         source_mode: row.get(2)?,
                         workspace_strategy: row.get(3)?,
                         repo_url: normalize_optional_string(row.get(4)?),
-                        credentials_id: row.get(5)?,
-                        default_branch: normalize_optional_string(row.get(6)?),
-                        workspace_root_override: normalize_optional_string(row.get(7)?),
-                        enabled: row.get::<_, i64>(8)? != 0,
+                        local_path: normalize_optional_string(row.get(5)?),
+                        credentials_id: row.get(6)?,
+                        default_branch: normalize_optional_string(row.get(7)?),
+                        workspace_root_override: normalize_optional_string(row.get(8)?),
+                        enabled: row.get::<_, i64>(9)? != 0,
                     })
                 },
             )
@@ -1590,6 +1824,193 @@ impl LocalCoordinator {
                 }
                 other => sqlite_error(other),
             })
+    }
+
+    fn load_on_demand_repository_state(
+        &self,
+        repository_id: i64,
+    ) -> io::Result<OnDemandRepositoryState> {
+        require_positive_identifier(repository_id, "repository id")?;
+
+        let connection = open_connection(&self.database_path)?;
+        connection
+            .query_row(
+                "
+                SELECT id,
+                       source_mode,
+                       repo_url,
+                       local_path,
+                       credentials_id,
+                       default_branch,
+                       engine_kind
+                FROM repositories
+                WHERE id = ?
+                ",
+                [repository_id],
+                |row| {
+                    Ok(OnDemandRepositoryState {
+                        repository_id: row.get(0)?,
+                        source_mode: row.get::<_, String>(1)?.trim().to_owned(),
+                        repo_url: normalize_optional_string(row.get(2)?),
+                        local_path: normalize_optional_string(row.get(3)?),
+                        credentials_id: row.get(4)?,
+                        default_branch: normalize_optional_string(row.get(5)?),
+                        engine_kind: parse_engine_kind_sql(6, row.get::<_, String>(6)?)?,
+                    })
+                },
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    not_found_error(format!("repository {repository_id} was not found"))
+                }
+                other => sqlite_error(other),
+            })
+    }
+
+    fn normalize_on_demand_release_dispatch_input(
+        &self,
+        input: OnDemandReleaseDispatchInput,
+    ) -> io::Result<NormalizedOnDemandReleaseDispatchInput> {
+        if input.repository_id <= 0 {
+            return Err(invalid_input_error(
+                "repository id must be greater than zero",
+            ));
+        }
+
+        let repository = self.load_on_demand_repository_state(input.repository_id)?;
+        let requested_via = input.requested_via.trim().to_owned();
+        let source_kind = if input.source_kind.trim().is_empty() {
+            match repository.source_mode.as_str() {
+                SOURCE_MODE_LOCAL_WORKSPACE => String::from(RELEASE_SOURCE_KIND_LOCAL_WORKSPACE),
+                _ => {
+                    return Err(invalid_input_error(
+                        "on-demand release source_kind must not be empty",
+                    ));
+                }
+            }
+        } else {
+            normalize_release_source_kind(&input.source_kind)?
+        };
+        let version_source = normalize_release_version_source(&input.version_source)?;
+        let mut source_ref = normalize_optional_string(input.source_ref);
+        let mut local_path = normalize_absolute_path_string(
+            input.local_path,
+            "on-demand release local_path",
+        )?;
+
+        match source_kind.as_str() {
+            RELEASE_SOURCE_KIND_MANAGED_TAG | RELEASE_SOURCE_KIND_MANAGED_REF => {
+                if repository.repo_url.is_none() {
+                    return Err(invalid_input_error(format!(
+                        "repository {} does not define a managed repo_url for source_kind {:?}",
+                        repository.repository_id, source_kind
+                    )));
+                }
+
+                if source_ref.is_none() {
+                    source_ref = repository.default_branch.clone();
+                }
+                source_ref = Some(require_non_empty(
+                    source_ref.as_deref().unwrap_or_default(),
+                    "on-demand release source_ref",
+                )?);
+            }
+            RELEASE_SOURCE_KIND_LOCAL_WORKSPACE => {
+                if local_path.is_none() {
+                    local_path = repository.local_path.clone();
+                }
+                if local_path.is_none() {
+                    return Err(invalid_input_error(format!(
+                        "repository {} does not define a local workspace path for on-demand execution",
+                        repository.repository_id
+                    )));
+                }
+            }
+            _ => {
+                return Err(invalid_input_error(format!(
+                    "unsupported on-demand release source_kind {:?}",
+                    source_kind
+                )));
+            }
+        }
+
+        let git_tag = match version_source.as_str() {
+            RELEASE_VERSION_SOURCE_MANUAL => require_non_empty(
+                input.release_version.as_deref().unwrap_or_default(),
+                "on-demand release version",
+            )?,
+            RELEASE_VERSION_SOURCE_PROJECT_SETTINGS => self.resolve_on_demand_release_version(
+                &repository,
+                &source_kind,
+                source_ref.as_deref(),
+                local_path.as_deref(),
+            )?,
+            other => {
+                return Err(invalid_input_error(format!(
+                    "unsupported on-demand release version_source {:?}",
+                    other
+                )));
+            }
+        };
+        let unity_executable_path_override = normalize_absolute_path_string(
+            input.unity_executable_path_override,
+            "unity executable path override",
+        )?;
+        let source_identity = build_release_source_identity(
+            &source_kind,
+            source_ref.as_deref(),
+            local_path.as_deref(),
+        )?;
+
+        Ok(NormalizedOnDemandReleaseDispatchInput {
+            repository_id: input.repository_id,
+            git_tag,
+            git_commit: String::new(),
+            requested_via,
+            source_kind,
+            source_ref,
+            local_path,
+            version_source,
+            unity_executable_path_override,
+            source_identity,
+        })
+    }
+
+    fn resolve_on_demand_release_version(
+        &self,
+        repository: &OnDemandRepositoryState,
+        source_kind: &str,
+        source_ref: Option<&str>,
+        local_path: Option<&str>,
+    ) -> io::Result<String> {
+        match source_kind {
+            RELEASE_SOURCE_KIND_LOCAL_WORKSPACE => detect_release_version_from_local_workspace(
+                repository.engine_kind,
+                local_path.ok_or_else(|| {
+                    invalid_input_error("on-demand local workspace path must not be empty")
+                })?,
+            ),
+            RELEASE_SOURCE_KIND_MANAGED_TAG | RELEASE_SOURCE_KIND_MANAGED_REF => {
+                let repository_url = repository.repo_url.as_deref().ok_or_else(|| {
+                    invalid_input_error("managed repository URL must not be empty")
+                })?;
+                let git_ref = source_ref.ok_or_else(|| {
+                    invalid_input_error("on-demand source_ref must not be empty")
+                })?;
+                let git_auth = self.resolve_release_git_auth(repository.credentials_id)?;
+
+                detect_release_version_from_git_ref(
+                    repository.engine_kind,
+                    repository_url,
+                    git_ref,
+                    &git_auth,
+                )
+            }
+            other => Err(invalid_input_error(format!(
+                "unsupported on-demand release source_kind {:?}",
+                other
+            ))),
+        }
     }
 
     /// Imports one repository registration and its configuration from another runtime database.
@@ -3158,11 +3579,21 @@ impl LocalCoordinator {
             return Ok(engine_version.to_owned());
         }
 
+        let default_source_kind = match release.repository_source_mode.as_str() {
+            SOURCE_MODE_LOCAL_WORKSPACE => RELEASE_SOURCE_KIND_LOCAL_WORKSPACE,
+            _ => RELEASE_SOURCE_KIND_MANAGED_TAG,
+        };
+        let source = decode_release_source_metadata(
+            &release.source_metadata_json,
+            default_source_kind,
+            Some(&release.git_tag),
+            release.repository_local_path.as_deref(),
+        )?;
         let git_auth = self.resolve_release_git_auth(release.credentials_id)?;
-        let detected_engine_version = detect_release_engine_version(
+        let detected_engine_version = detect_release_engine_version_from_source(
             release.engine_kind,
             &release.repository_url,
-            &release.git_tag,
+            &source,
             &git_auth,
         )?;
         let connection = open_connection(&self.database_path)?;
@@ -3213,7 +3644,7 @@ impl LocalCoordinator {
         }
         self.reject_if_repository_build_work_active(input.repository_id)?;
 
-        let metadata_json = manual_dispatch_metadata_json(&input.requested_via)?;
+        let metadata_json = manual_dispatch_metadata_json(&input.requested_via, &input.git_tag)?;
         let connection = open_connection(&self.database_path)?;
         let inserted = connection.execute(
             "
@@ -3223,8 +3654,9 @@ impl LocalCoordinator {
                 git_commit,
                 trigger_source,
                 source_metadata_json,
+                source_identity,
                 status
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ",
             params![
                 input.repository_id,
@@ -3232,6 +3664,7 @@ impl LocalCoordinator {
                 nullable_string(&input.git_commit),
                 TRIGGER_SOURCE_MANUAL,
                 metadata_json,
+                input.source_identity,
                 ReleaseStatus::Detected.as_str(),
             ],
         );
@@ -3256,7 +3689,8 @@ impl LocalCoordinator {
         }
         self.reject_if_repository_build_work_active(input.repository_id)?;
 
-        let metadata_json = repository_poll_metadata_json(&input.observed_via)?;
+        let metadata_json =
+            repository_poll_metadata_json(&input.observed_via, &input.git_tag)?;
         let connection = open_connection(&self.database_path)?;
         let inserted = connection.execute(
             "
@@ -3266,8 +3700,9 @@ impl LocalCoordinator {
                 git_commit,
                 trigger_source,
                 source_metadata_json,
+                source_identity,
                 status
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ",
             params![
                 input.repository_id,
@@ -3275,6 +3710,7 @@ impl LocalCoordinator {
                 nullable_string(&input.git_commit),
                 TRIGGER_SOURCE_REPOSITORY_POLL,
                 metadata_json,
+                input.source_identity,
                 ReleaseStatus::Detected.as_str(),
             ],
         );
@@ -3299,14 +3735,15 @@ impl LocalCoordinator {
         }
         self.reject_if_repository_build_work_active(input.repository_id)?;
 
-        let Some(existing_release_run_id) = self.release_run_id_by_repository_and_tag(
+        let Some(existing_release_run_id) = self.release_run_id_by_repository_tag_and_source_identity(
             input.repository_id,
             &input.git_tag,
+            &input.source_identity,
         )? else {
             return self.create_manual_release_dispatch(input);
         };
 
-        let metadata_json = manual_dispatch_metadata_json(&input.requested_via)?;
+        let metadata_json = manual_dispatch_metadata_json(&input.requested_via, &input.git_tag)?;
         let mut connection = open_connection(&self.database_path)?;
         let cleanup_paths = Self::collect_release_run_rebuild_cleanup_paths(
             &connection,
@@ -3334,6 +3771,7 @@ impl LocalCoordinator {
                     trigger_source = ?,
                     trigger_rule_id = NULL,
                     source_metadata_json = ?,
+                    source_identity = ?,
                     status = ?,
                     started_at = NULL,
                     finished_at = NULL,
@@ -3345,6 +3783,7 @@ impl LocalCoordinator {
                     nullable_string(&input.git_commit),
                     TRIGGER_SOURCE_MANUAL,
                     metadata_json,
+                    input.source_identity,
                     ReleaseStatus::Detected.as_str(),
                     existing_release_run_id,
                 ],
@@ -3355,6 +3794,107 @@ impl LocalCoordinator {
         self.load_release_run_record(existing_release_run_id)?.ok_or_else(|| {
             not_found_error(format!(
                 "rebuilt release run {existing_release_run_id} could not be reloaded"
+            ))
+        })
+    }
+
+    fn create_on_demand_release_dispatch(
+        &self,
+        input: &NormalizedOnDemandReleaseDispatchInput,
+    ) -> io::Result<ReleaseRunRecord> {
+        if !self.repository_exists(input.repository_id)? {
+            return Err(not_found_error(format!(
+                "release repository {} was not found",
+                input.repository_id
+            )));
+        }
+        self.reject_if_repository_build_work_active(input.repository_id)?;
+
+        let metadata_json = on_demand_dispatch_metadata_json(input)?;
+        let connection = open_connection(&self.database_path)?;
+        let inserted = connection.execute(
+            "
+            INSERT INTO release_runs (
+                repository_id,
+                git_tag,
+                git_commit,
+                trigger_source,
+                source_metadata_json,
+                source_identity,
+                status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ",
+            params![
+                input.repository_id,
+                input.git_tag,
+                nullable_string(&input.git_commit),
+                TRIGGER_SOURCE_MANUAL,
+                metadata_json,
+                input.source_identity,
+                ReleaseStatus::Detected.as_str(),
+            ],
+        );
+        if let Err(error) = inserted {
+            return Err(map_release_store_sqlite_error(error));
+        }
+
+        self.load_release_run_record(connection.last_insert_rowid())?.ok_or_else(|| {
+            not_found_error("inserted on-demand release could not be reloaded")
+        })
+    }
+
+    fn rebuild_release_dispatch_by_id(
+        &self,
+        release_run_id: i64,
+        requested_via: &str,
+    ) -> io::Result<ReleaseRunRecord> {
+        let existing = self
+            .load_release_run_record(release_run_id)?
+            .ok_or_else(|| not_found_error(format!("release run {release_run_id} was not found")))?;
+        self.reject_if_repository_build_work_active(existing.repository_id)?;
+
+        let metadata_json = rebuild_release_metadata_json(&existing, requested_via)?;
+        let mut connection = open_connection(&self.database_path)?;
+        let cleanup_paths =
+            Self::collect_release_run_rebuild_cleanup_paths(&connection, release_run_id)?;
+        Self::remove_release_run_rebuild_cleanup_paths(&cleanup_paths, release_run_id)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+
+        transaction
+            .execute(
+                "DELETE FROM build_runs WHERE release_run_id = ?",
+                [release_run_id],
+            )
+            .map_err(sqlite_error)?;
+        transaction
+            .execute(
+                "
+                UPDATE release_runs
+                SET trigger_source = ?,
+                    trigger_rule_id = NULL,
+                    source_metadata_json = ?,
+                    status = ?,
+                    started_at = NULL,
+                    finished_at = NULL,
+                    error_message = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                ",
+                params![
+                    TRIGGER_SOURCE_MANUAL,
+                    metadata_json,
+                    ReleaseStatus::Detected.as_str(),
+                    release_run_id,
+                ],
+            )
+            .map_err(sqlite_error)?;
+        transaction.commit().map_err(sqlite_error)?;
+
+        self.load_release_run_record(release_run_id)?.ok_or_else(|| {
+            not_found_error(format!(
+                "rebuilt release run {release_run_id} could not be reloaded"
             ))
         })
     }
@@ -4029,10 +4569,13 @@ fn remove_release_run_rebuild_cleanup_paths(
             .query_row(
                 "
                 SELECT rr.repository_id,
+                      r.source_mode,
                        r.repo_url,
-                      r.engine_kind,
+                      r.local_path,
+                     r.engine_kind,
                        r.credentials_id,
                        rr.git_tag,
+                      rr.source_metadata_json,
                       rr.engine_version,
                        rr.status
                 FROM release_runs rr
@@ -4055,10 +4598,13 @@ fn remove_release_run_rebuild_cleanup_paths(
             .query_row(
                 "
                 SELECT rr.repository_id,
+                      r.source_mode,
                        r.repo_url,
-                      r.engine_kind,
+                      r.local_path,
+                     r.engine_kind,
                        r.credentials_id,
                        rr.git_tag,
+                      rr.source_metadata_json,
                       rr.engine_version,
                        rr.status
                 FROM release_runs rr
@@ -4084,6 +4630,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                        trigger_source,
                        trigger_rule_id,
                        source_metadata_json,
+                      source_identity,
                       engine_version,
                        status,
                        started_at,
@@ -4116,6 +4663,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                        trigger_source,
                        trigger_rule_id,
                        source_metadata_json,
+                      source_identity,
                       engine_version,
                        status,
                        started_at,
@@ -4829,7 +5377,6 @@ fn remove_release_run_rebuild_cleanup_paths(
             repository_id,
             &mut file_paths,
         )?;
-
         let mut directory_paths = directory_paths.into_iter().collect::<Vec<_>>();
         directory_paths.sort();
         let mut file_paths = file_paths.into_iter().collect::<Vec<_>>();
@@ -4987,25 +5534,51 @@ fn remove_release_run_rebuild_cleanup_paths(
             .map_err(sqlite_error)
     }
 
-    fn release_run_id_by_repository_and_tag(
+    fn release_run_id_by_repository_tag_and_source_identity(
         &self,
         repository_id: i64,
         git_tag: &str,
+        source_identity: &str,
     ) -> io::Result<Option<i64>> {
         let git_tag = require_non_empty(git_tag, "git tag")?;
+        let source_identity = require_non_empty(source_identity, "release source identity")?;
         let connection = open_connection(&self.database_path)?;
-        connection
+        let existing = connection
             .query_row(
                 "
                 SELECT id
                 FROM release_runs
-                WHERE repository_id = ? AND git_tag = ?
+                WHERE repository_id = ?
+                  AND git_tag = ?
+                  AND source_identity = ?
                 ",
-                params![repository_id, git_tag],
+                params![repository_id, git_tag, source_identity],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(sqlite_error)
+            .map_err(sqlite_error)?;
+        if existing.is_some() {
+            return Ok(existing);
+        }
+
+        if source_identity.starts_with(&format!("{RELEASE_SOURCE_KIND_MANAGED_TAG}:")) {
+            return connection
+                .query_row(
+                    "
+                    SELECT id
+                    FROM release_runs
+                    WHERE repository_id = ?
+                      AND git_tag = ?
+                      AND source_identity = ?
+                    ",
+                    params![repository_id, git_tag, RELEASE_SOURCE_KIND_MANAGED_TAG],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(sqlite_error);
+        }
+
+        Ok(None)
     }
 
     fn repository_has_active_build_work(&self, repository_id: i64) -> io::Result<bool> {
@@ -5293,6 +5866,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                        trigger_source,
                        trigger_rule_id,
                        source_metadata_json,
+                      source_identity,
                       engine_version,
                        status,
                        started_at,
@@ -8193,16 +8767,18 @@ fn is_release_planning_noop_error(error: &io::Error) -> bool {
         || message.contains("has no enabled build targets")
 }
 
-fn detect_release_engine_version(
+fn detect_release_engine_version_from_source(
     repository_engine_kind: EngineKind,
     repository_url: &str,
-    git_tag: &str,
+    source: &ResolvedReleaseSourceMetadata,
     git_auth: &GitAuthOptions,
 ) -> io::Result<String> {
     match repository_engine_kind {
-        EngineKind::Unity => {
-            detect_release_unity_engine_version(repository_url, git_tag, git_auth)
-        }
+        EngineKind::Unity => detect_release_unity_engine_version_from_source(
+            repository_url,
+            source,
+            git_auth,
+        ),
         other => Err(invalid_input_error(format!(
             "repository engine_kind {:?} is not supported for release planning",
             other.as_str()
@@ -8210,32 +8786,146 @@ fn detect_release_engine_version(
     }
 }
 
-fn detect_release_unity_engine_version(
+fn detect_release_unity_engine_version_from_source(
     repository_url: &str,
-    git_tag: &str,
+    source: &ResolvedReleaseSourceMetadata,
     git_auth: &GitAuthOptions,
 ) -> io::Result<String> {
-    let repository_url = require_non_empty(repository_url, "repository url")?;
-    let git_tag = require_non_empty(git_tag, "git tag")?;
-    let workspace_path = std::env::temp_dir().join(next_token("unity-version-workspace")?);
+    match source.source_kind.as_str() {
+        RELEASE_SOURCE_KIND_LOCAL_WORKSPACE => {
+            detect_release_unity_engine_version_from_local_workspace(
+                source.local_path.as_deref().ok_or_else(|| {
+                    invalid_input_error("release local workspace path must not be empty")
+                })?,
+            )
+        }
+        RELEASE_SOURCE_KIND_MANAGED_TAG | RELEASE_SOURCE_KIND_MANAGED_REF => {
+            let git_ref = source.source_ref.as_deref().ok_or_else(|| {
+                invalid_input_error("release source_ref must not be empty")
+            })?;
+            detect_release_unity_engine_version_from_git_ref(
+                repository_url,
+                git_ref,
+                git_auth,
+            )
+        }
+        other => Err(invalid_input_error(format!(
+            "unsupported release source_kind {:?}",
+            other
+        ))),
+    }
+}
 
-    let outcome = (|| {
-        prepare_unity_version_workspace(
-            &repository_url,
-            &workspace_path,
-            &git_tag,
-            git_auth,
-        )?;
-        let contents = fs::read(workspace_path.join(PROJECT_VERSION_FILE_PATH)).map_err(|error| {
+fn detect_release_unity_engine_version_from_local_workspace(
+    local_path: &str,
+) -> io::Result<String> {
+    let local_path = require_non_empty(local_path, "local workspace path")?;
+    let contents = fs::read(Path::new(&local_path).join(PROJECT_VERSION_FILE_PATH)).map_err(
+        |error| {
             io::Error::new(
                 ErrorKind::InvalidData,
                 format!(
-                    "read {PROJECT_VERSION_FILE_PATH} from repository tag {git_tag:?}: {error}"
+                    "read {PROJECT_VERSION_FILE_PATH} from local workspace {local_path:?}: {error}"
                 ),
             )
-        })?;
+        },
+    )?;
 
-        parse_project_version_unity_version(&contents)
+    parse_project_version_unity_version(&contents)
+}
+
+fn detect_release_unity_engine_version_from_git_ref(
+    repository_url: &str,
+    git_ref: &str,
+    git_auth: &GitAuthOptions,
+) -> io::Result<String> {
+    let contents = read_repository_file_from_git_ref(
+        repository_url,
+        git_ref,
+        PROJECT_VERSION_FILE_PATH,
+        git_auth,
+    )?;
+    parse_project_version_unity_version(&contents)
+}
+
+fn detect_release_version_from_local_workspace(
+    repository_engine_kind: EngineKind,
+    local_path: &str,
+) -> io::Result<String> {
+    match repository_engine_kind {
+        EngineKind::Unity => {
+            let local_path = require_non_empty(local_path, "local workspace path")?;
+            let contents = fs::read(Path::new(&local_path).join(PROJECT_SETTINGS_ASSET_PATH))
+                .map_err(|error| {
+                    io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "read {PROJECT_SETTINGS_ASSET_PATH} from local workspace {local_path:?}: {error}"
+                        ),
+                    )
+                })?;
+            parse_project_settings_bundle_version(&contents)
+        }
+        other => Err(invalid_input_error(format!(
+            "repository engine_kind {:?} is not supported for on-demand version detection",
+            other.as_str()
+        ))),
+    }
+}
+
+fn detect_release_version_from_git_ref(
+    repository_engine_kind: EngineKind,
+    repository_url: &str,
+    git_ref: &str,
+    git_auth: &GitAuthOptions,
+) -> io::Result<String> {
+    match repository_engine_kind {
+        EngineKind::Unity => {
+            let contents = read_repository_file_from_git_ref(
+                repository_url,
+                git_ref,
+                PROJECT_SETTINGS_ASSET_PATH,
+                git_auth,
+            )?;
+            parse_project_settings_bundle_version(&contents)
+        }
+        other => Err(invalid_input_error(format!(
+            "repository engine_kind {:?} is not supported for on-demand version detection",
+            other.as_str()
+        ))),
+    }
+}
+
+fn read_repository_file_from_git_ref(
+    repository_url: &str,
+    git_ref: &str,
+    file_path: &str,
+    git_auth: &GitAuthOptions,
+) -> io::Result<Vec<u8>> {
+    let repository_url = require_non_empty(repository_url, "repository url")?;
+    let git_ref = require_non_empty(git_ref, "git ref")?;
+    let file_path = require_non_empty(file_path, "repository file path")?;
+    let workspace_path = std::env::temp_dir().join(next_token("release-source-workspace")?);
+    let file_path_for_read = file_path.clone();
+
+    let outcome = (|| {
+        prepare_sparse_repository_file_workspace(
+            &repository_url,
+            &workspace_path,
+            &git_ref,
+            &file_path,
+            git_auth,
+        )?;
+        fs::read(workspace_path.join(file_path_for_read.as_str())).map_err(|error| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "read {} from repository ref {:?}: {error}",
+                    file_path,
+                    git_ref,
+                ),
+            )
+        })
     })();
 
     if workspace_path.exists() {
@@ -8245,10 +8935,11 @@ fn detect_release_unity_engine_version(
     outcome
 }
 
-fn prepare_unity_version_workspace(
+fn prepare_sparse_repository_file_workspace(
     repository_url: &str,
     workspace_path: &Path,
-    git_tag: &str,
+    git_ref: &str,
+    file_path: &str,
     git_auth: &GitAuthOptions,
 ) -> io::Result<()> {
     let clone_destination = workspace_path.display().to_string();
@@ -8261,7 +8952,7 @@ fn prepare_unity_version_workspace(
             "--depth=1",
             "--single-branch",
             "--branch",
-            git_tag,
+            git_ref,
             "--no-checkout",
             repository_url,
             clone_destination.as_str(),
@@ -8270,23 +8961,18 @@ fn prepare_unity_version_workspace(
     .map_err(|error| {
         io::Error::new(
             ErrorKind::Other,
-            format!("materialize repository tag {git_tag:?}: {error}"),
+            format!("materialize repository ref {git_ref:?}: {error}"),
         )
     })?;
 
     run_git_command(
         Some(workspace_path),
-        git_auth.append_git_args([
-            "sparse-checkout",
-            "set",
-            "--no-cone",
-            PROJECT_VERSION_FILE_PATH,
-        ]),
+        git_auth.append_git_args(["sparse-checkout", "set", "--no-cone", file_path]),
     )
     .map_err(|error| {
         io::Error::new(
             ErrorKind::Other,
-            format!("configure sparse checkout for {PROJECT_VERSION_FILE_PATH}: {error}"),
+            format!("configure sparse checkout for {file_path}: {error}"),
         )
     })?;
 
@@ -8297,7 +8983,7 @@ fn prepare_unity_version_workspace(
     .map_err(|error| {
         io::Error::new(
             ErrorKind::Other,
-            format!("checkout repository tag {git_tag:?}: {error}"),
+            format!("checkout repository ref {git_ref:?}: {error}"),
         )
     })
 }
@@ -8363,6 +9049,29 @@ fn parse_project_version_unity_version(contents: &[u8]) -> io::Result<String> {
         ErrorKind::InvalidData,
         format!(
             "{PROJECT_VERSION_FILE_PATH} does not define m_EditorVersion"
+        ),
+    ))
+}
+
+fn parse_project_settings_bundle_version(contents: &[u8]) -> io::Result<String> {
+    for line in String::from_utf8_lossy(contents).lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("bundleVersion:") {
+            continue;
+        }
+
+        let bundle_version = trimmed.trim_start_matches("bundleVersion:").trim();
+        if bundle_version.is_empty() {
+            break;
+        }
+
+        return Ok(bundle_version.to_owned());
+    }
+
+    Err(io::Error::new(
+        ErrorKind::InvalidData,
+        format!(
+            "{PROJECT_SETTINGS_ASSET_PATH} does not define bundleVersion"
         ),
     ))
 }
@@ -8464,11 +9173,19 @@ fn normalize_manual_release_dispatch_input(
         ));
     }
 
+    let git_tag = require_non_empty(&input.git_tag, "git tag")?;
+    let source_identity = build_release_source_identity(
+        RELEASE_SOURCE_KIND_MANAGED_TAG,
+        Some(&git_tag),
+        None,
+    )?;
+
     Ok(NormalizedManualReleaseDispatchInput {
         repository_id: input.repository_id,
-        git_tag: require_non_empty(&input.git_tag, "git tag")?,
+        git_tag,
         git_commit: input.git_commit.trim().to_owned(),
         requested_via: input.requested_via.trim().to_owned(),
+        source_identity,
     })
 }
 
@@ -8481,38 +9198,231 @@ fn normalize_repository_poll_dispatch_input(
         ));
     }
 
+    let git_tag = require_non_empty(&input.git_tag, "git tag")?;
+    let source_identity = build_release_source_identity(
+        RELEASE_SOURCE_KIND_MANAGED_TAG,
+        Some(&git_tag),
+        None,
+    )?;
+
     Ok(NormalizedRepositoryPollDispatchInput {
         repository_id: input.repository_id,
-        git_tag: require_non_empty(&input.git_tag, "git tag")?,
+        git_tag,
         git_commit: input.git_commit.trim().to_owned(),
         observed_via: input.observed_via.trim().to_owned(),
+        source_identity,
     })
 }
 
-fn manual_dispatch_metadata_json(requested_via: &str) -> io::Result<String> {
-    let requested_via = requested_via.trim();
-    let metadata = if requested_via.is_empty() {
-        serde_json::json!({})
-    } else {
-        serde_json::json!({
-            "requested_via": requested_via,
-        })
-    };
-
-    serde_json::to_string(&metadata).map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
+fn manual_dispatch_metadata_json(requested_via: &str, git_tag: &str) -> io::Result<String> {
+    release_source_metadata_json(&ReleaseSourceMetadata {
+        requested_via: normalize_optional_string(Some(requested_via.to_owned())),
+        observed_via: None,
+        source_kind: Some(String::from(RELEASE_SOURCE_KIND_MANAGED_TAG)),
+        source_ref: Some(require_non_empty(git_tag, "git tag")?),
+        local_path: None,
+        version_source: Some(String::from(RELEASE_VERSION_SOURCE_MANUAL)),
+        unity_executable_path_override: None,
+    })
 }
 
-fn repository_poll_metadata_json(observed_via: &str) -> io::Result<String> {
-    let observed_via = observed_via.trim();
-    let metadata = if observed_via.is_empty() {
-        serde_json::json!({})
+fn repository_poll_metadata_json(observed_via: &str, git_tag: &str) -> io::Result<String> {
+    release_source_metadata_json(&ReleaseSourceMetadata {
+        requested_via: None,
+        observed_via: normalize_optional_string(Some(observed_via.to_owned())),
+        source_kind: Some(String::from(RELEASE_SOURCE_KIND_MANAGED_TAG)),
+        source_ref: Some(require_non_empty(git_tag, "git tag")?),
+        local_path: None,
+        version_source: None,
+        unity_executable_path_override: None,
+    })
+}
+
+fn on_demand_dispatch_metadata_json(
+    input: &NormalizedOnDemandReleaseDispatchInput,
+) -> io::Result<String> {
+    release_source_metadata_json(&ReleaseSourceMetadata {
+        requested_via: normalize_optional_string(Some(input.requested_via.clone())),
+        observed_via: None,
+        source_kind: Some(input.source_kind.clone()),
+        source_ref: input.source_ref.clone(),
+        local_path: input.local_path.clone(),
+        version_source: Some(input.version_source.clone()),
+        unity_executable_path_override: input.unity_executable_path_override.clone(),
+    })
+}
+
+fn rebuild_release_metadata_json(
+    release: &ReleaseRunRecord,
+    requested_via: &str,
+) -> io::Result<String> {
+    let mut metadata = decode_release_source_metadata(
+        &release.source_metadata_json,
+        RELEASE_SOURCE_KIND_MANAGED_TAG,
+        Some(&release.git_tag),
+        None,
+    )?;
+    metadata.requested_via = normalize_optional_string(Some(requested_via.to_owned()));
+    metadata.observed_via = None;
+    release_source_metadata_json(&ReleaseSourceMetadata {
+        requested_via: metadata.requested_via,
+        observed_via: metadata.observed_via,
+        source_kind: Some(metadata.source_kind),
+        source_ref: metadata.source_ref,
+        local_path: metadata.local_path,
+        version_source: metadata.version_source,
+        unity_executable_path_override: metadata.unity_executable_path_override,
+    })
+}
+
+fn release_source_metadata_json(metadata: &ReleaseSourceMetadata) -> io::Result<String> {
+    let mut object = serde_json::Map::new();
+
+    if let Some(value) = metadata.requested_via.as_deref() {
+        object.insert(String::from("requested_via"), serde_json::json!(value));
+    }
+    if let Some(value) = metadata.observed_via.as_deref() {
+        object.insert(String::from("observed_via"), serde_json::json!(value));
+    }
+    if let Some(value) = metadata.source_kind.as_deref() {
+        object.insert(String::from("source_kind"), serde_json::json!(value));
+    }
+    if let Some(value) = metadata.source_ref.as_deref() {
+        object.insert(String::from("source_ref"), serde_json::json!(value));
+    }
+    if let Some(value) = metadata.local_path.as_deref() {
+        object.insert(String::from("local_path"), serde_json::json!(value));
+    }
+    if let Some(value) = metadata.version_source.as_deref() {
+        object.insert(String::from("version_source"), serde_json::json!(value));
+    }
+    if let Some(value) = metadata.unity_executable_path_override.as_deref() {
+        object.insert(
+            String::from("unity_executable_path_override"),
+            serde_json::json!(value),
+        );
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(object))
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
+}
+
+fn decode_release_source_metadata(
+    source_metadata_json: &str,
+    default_source_kind: &str,
+    default_source_ref: Option<&str>,
+    default_local_path: Option<&str>,
+) -> io::Result<ResolvedReleaseSourceMetadata> {
+    let metadata = if source_metadata_json.trim().is_empty() {
+        ReleaseSourceMetadata::default()
     } else {
-        serde_json::json!({
-            "observed_via": observed_via,
-        })
+        serde_json::from_str::<ReleaseSourceMetadata>(source_metadata_json).map_err(|error| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                format!("decode release source metadata: {error}"),
+            )
+        })?
+    };
+    let source_kind = metadata
+        .source_kind
+        .as_deref()
+        .map(normalize_release_source_kind)
+        .transpose()?
+        .unwrap_or_else(|| default_source_kind.to_owned());
+
+    Ok(ResolvedReleaseSourceMetadata {
+        requested_via: normalize_optional_string(metadata.requested_via),
+        observed_via: normalize_optional_string(metadata.observed_via),
+        source_kind,
+        source_ref: normalize_optional_string(metadata.source_ref)
+            .or_else(|| normalize_optional_string(default_source_ref.map(str::to_owned))),
+        local_path: normalize_absolute_path_string(
+            metadata.local_path.or_else(|| default_local_path.map(str::to_owned)),
+            "release source metadata local_path",
+        )?,
+        version_source: metadata
+            .version_source
+            .as_deref()
+            .map(normalize_release_version_source)
+            .transpose()?,
+        unity_executable_path_override: normalize_absolute_path_string(
+            metadata.unity_executable_path_override,
+            "release source metadata unity_executable_path_override",
+        )?,
+    })
+}
+
+fn normalize_release_source_kind(value: &str) -> io::Result<String> {
+    match value.trim() {
+        RELEASE_SOURCE_KIND_MANAGED_TAG => Ok(String::from(RELEASE_SOURCE_KIND_MANAGED_TAG)),
+        RELEASE_SOURCE_KIND_MANAGED_REF => Ok(String::from(RELEASE_SOURCE_KIND_MANAGED_REF)),
+        RELEASE_SOURCE_KIND_LOCAL_WORKSPACE => {
+            Ok(String::from(RELEASE_SOURCE_KIND_LOCAL_WORKSPACE))
+        }
+        other => Err(invalid_input_error(format!(
+            "unsupported release source_kind {:?}",
+            other
+        ))),
+    }
+}
+
+fn normalize_release_version_source(value: &str) -> io::Result<String> {
+    match value.trim() {
+        RELEASE_VERSION_SOURCE_MANUAL => Ok(String::from(RELEASE_VERSION_SOURCE_MANUAL)),
+        RELEASE_VERSION_SOURCE_PROJECT_SETTINGS => {
+            Ok(String::from(RELEASE_VERSION_SOURCE_PROJECT_SETTINGS))
+        }
+        other => Err(invalid_input_error(format!(
+            "unsupported release version_source {:?}",
+            other
+        ))),
+    }
+}
+
+fn normalize_absolute_path_string(
+    value: Option<String>,
+    label: &str,
+) -> io::Result<Option<String>> {
+    let Some(value) = normalize_optional_string(value) else {
+        return Ok(None);
     };
 
-    serde_json::to_string(&metadata).map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
+    let normalized = PathBuf::from(&value).components().collect::<PathBuf>();
+    if normalized.as_os_str().is_empty() || !normalized.is_absolute() {
+        return Err(invalid_input_error(format!(
+            "{label} must be an absolute path"
+        )));
+    }
+
+    Ok(Some(normalized.to_string_lossy().replace('\\', "/")))
+}
+
+fn build_release_source_identity(
+    source_kind: &str,
+    source_ref: Option<&str>,
+    local_path: Option<&str>,
+) -> io::Result<String> {
+    match source_kind {
+        RELEASE_SOURCE_KIND_MANAGED_TAG | RELEASE_SOURCE_KIND_MANAGED_REF => Ok(format!(
+            "{}:{}",
+            source_kind,
+            require_non_empty(source_ref.unwrap_or_default(), "release source ref")?
+        )),
+        RELEASE_SOURCE_KIND_LOCAL_WORKSPACE => {
+            let mut normalized = require_non_empty(
+                local_path.unwrap_or_default(),
+                "release local workspace path",
+            )?;
+            if cfg!(windows) {
+                normalized.make_ascii_lowercase();
+            }
+            Ok(format!("{}:{}", source_kind, normalized))
+        }
+        other => Err(invalid_input_error(format!(
+            "unsupported release source_kind {:?}",
+            other
+        ))),
+    }
 }
 
 fn release_dispatch_lock_key(release_run_id: i64) -> String {
@@ -8550,6 +9460,7 @@ fn list_process_feed_release_rows(
                    rr.trigger_source,
                    rr.trigger_rule_id,
                    rr.source_metadata_json,
+                                     rr.source_identity,
                      rr.engine_version,
                    rr.status,
                    rr.started_at,
@@ -9420,13 +10331,14 @@ fn scan_release_run_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReleaseR
         trigger_source: row.get::<_, String>(4)?.trim().to_owned(),
         trigger_rule_id: row.get(5)?,
         source_metadata_json: row.get(6)?,
-        engine_version: normalize_optional_string(row.get(7)?),
-        status: row.get(8)?,
-        started_at: normalize_optional_string(row.get(9)?),
-        finished_at: normalize_optional_string(row.get(10)?),
-        error_message: normalize_optional_string(row.get(11)?),
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
+        source_identity: row.get::<_, String>(7)?.trim().to_owned(),
+        engine_version: normalize_optional_string(row.get(8)?),
+        status: row.get(9)?,
+        started_at: normalize_optional_string(row.get(10)?),
+        finished_at: normalize_optional_string(row.get(11)?),
+        error_message: normalize_optional_string(row.get(12)?),
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
@@ -9442,13 +10354,14 @@ fn scan_process_feed_release_row(
             trigger_source: row.get::<_, String>(7)?.trim().to_owned(),
             trigger_rule_id: row.get(8)?,
             source_metadata_json: row.get(9)?,
-            engine_version: normalize_optional_string(row.get(10)?),
-            status: row.get(11)?,
-            started_at: normalize_optional_string(row.get(12)?),
-            finished_at: normalize_optional_string(row.get(13)?),
-            error_message: normalize_optional_string(row.get(14)?),
-            created_at: row.get(15)?,
-            updated_at: row.get(16)?,
+            source_identity: row.get::<_, String>(10)?.trim().to_owned(),
+            engine_version: normalize_optional_string(row.get(11)?),
+            status: row.get(12)?,
+            started_at: normalize_optional_string(row.get(13)?),
+            finished_at: normalize_optional_string(row.get(14)?),
+            error_message: normalize_optional_string(row.get(15)?),
+            created_at: row.get(16)?,
+            updated_at: row.get(17)?,
         },
         repository_name: row.get(2)?,
         repository_url: row.get::<_, String>(3)?.trim().to_owned(),
@@ -10253,12 +11166,12 @@ fn normalize_relative_store_artifact_path(path: &str) -> io::Result<String> {
 
 fn scan_build_execution_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<BuildExecutionPlan> {
     let engine_version = row
-        .get::<_, Option<String>>(19)?
+        .get::<_, Option<String>>(22)?
         .unwrap_or_default()
         .trim()
         .to_owned();
     let image_ref = row
-        .get::<_, Option<String>>(20)?
+        .get::<_, Option<String>>(23)?
         .unwrap_or_default()
         .trim()
         .to_owned();
@@ -10286,20 +11199,27 @@ fn scan_build_execution_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<BuildE
         workspace_root_override: normalize_optional_string(row.get(6)?),
         artifacts_root_override: normalize_optional_string(row.get(7)?),
         build_target_id: row.get(8)?,
-        repository_url: row.get::<_, String>(9)?.trim().to_owned(),
-        git_tag: row.get::<_, String>(10)?.trim().to_owned(),
-        git_commit: normalize_optional_string(row.get(11)?),
-        target_name: row.get::<_, String>(12)?.trim().to_owned(),
-        build_kind: parse_build_kind_sql(13, row.get::<_, String>(13)?)?,
-        contract_json: row.get(14)?,
-        runner_type: row.get::<_, String>(15)?.trim().to_owned(),
-        output_kind: normalize_optional_string(row.get(16)?),
-        output_path_template: normalize_optional_string(row.get(17)?),
-        config_json: row.get(18)?,
+        repository_source_mode: row.get::<_, String>(9)?.trim().to_owned(),
+        repository_url: row
+            .get::<_, Option<String>>(10)?
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+        repository_local_path: normalize_optional_string(row.get(11)?),
+        git_tag: row.get::<_, String>(12)?.trim().to_owned(),
+        git_commit: normalize_optional_string(row.get(13)?),
+        source_metadata_json: row.get(14)?,
+        target_name: row.get::<_, String>(15)?.trim().to_owned(),
+        build_kind: parse_build_kind_sql(16, row.get::<_, String>(16)?)?,
+        contract_json: row.get(17)?,
+        runner_type: row.get::<_, String>(18)?.trim().to_owned(),
+        output_kind: normalize_optional_string(row.get(19)?),
+        output_path_template: normalize_optional_string(row.get(20)?),
+        config_json: row.get(21)?,
         engine_version,
         image_ref,
-        timeout_seconds: row.get(21)?,
-        status: row.get(22)?,
+        timeout_seconds: row.get(24)?,
+        status: row.get(25)?,
     })
 }
 
@@ -10340,12 +11260,19 @@ fn scan_release_build_planning_state(
 ) -> rusqlite::Result<ReleaseBuildPlanningState> {
     Ok(ReleaseBuildPlanningState {
         repository_id: row.get(0)?,
-        repository_url: row.get::<_, String>(1)?.trim().to_owned(),
-        engine_kind: parse_engine_kind_sql(2, row.get::<_, String>(2)?)?,
-        credentials_id: row.get(3)?,
-        git_tag: row.get::<_, String>(4)?.trim().to_owned(),
-        engine_version: normalize_optional_string(row.get(5)?),
-        status: row.get(6)?,
+        repository_source_mode: row.get::<_, String>(1)?.trim().to_owned(),
+        repository_url: row
+            .get::<_, Option<String>>(2)?
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+        repository_local_path: normalize_optional_string(row.get(3)?),
+        engine_kind: parse_engine_kind_sql(4, row.get::<_, String>(4)?)?,
+        credentials_id: row.get(5)?,
+        git_tag: row.get::<_, String>(6)?.trim().to_owned(),
+        source_metadata_json: row.get(7)?,
+        engine_version: normalize_optional_string(row.get(8)?),
+        status: row.get(9)?,
     })
 }
 
@@ -10395,7 +11322,34 @@ fn normalize_create_repository_project_input(
 ) -> io::Result<CreateRepositoryProjectInput> {
     let name = require_non_empty(&input.name, "repository project name")?;
     let engine_kind = normalize_repository_project_engine_kind(&input.engine_kind)?;
-    let repo_url = require_non_empty(&input.repo_url, "repository project repo_url")?;
+    let source_mode = require_non_empty(&input.source_mode, "repository project source_mode")?
+        .to_ascii_lowercase();
+    let repo_url = normalize_optional_string(input.repo_url);
+    let local_path = normalize_absolute_path_string(
+        input.local_path,
+        "repository project local_path",
+    )?;
+
+    match source_mode.as_str() {
+        SOURCE_MODE_MANAGED_REPOSITORY => {
+            let repo_url = repo_url.as_deref().ok_or_else(|| {
+                invalid_input_error("repository project repo_url must not be empty")
+            })?;
+            require_non_empty(repo_url, "repository project repo_url")?;
+        }
+        SOURCE_MODE_LOCAL_WORKSPACE => {
+            let local_path = local_path.as_deref().ok_or_else(|| {
+                invalid_input_error("repository project local_path must not be empty")
+            })?;
+            require_non_empty(local_path, "repository project local_path")?;
+        }
+        _ => {
+            return Err(invalid_input_error(format!(
+                "repository project source_mode {:?} is not supported",
+                source_mode
+            )));
+        }
+    }
     let default_branch = normalize_optional_input_string(input.default_branch);
     let artifacts_root_override = normalize_optional_input_string(input.artifacts_root_override);
     let workspace_root_override = normalize_optional_input_string(input.workspace_root_override);
@@ -10447,7 +11401,9 @@ fn normalize_create_repository_project_input(
     Ok(CreateRepositoryProjectInput {
         name,
         engine_kind,
+        source_mode,
         repo_url,
+        local_path,
         credentials,
         default_branch,
         artifacts_root_override,
@@ -10466,7 +11422,35 @@ fn normalize_update_repository_project_input(
 
     let name = require_non_empty(&input.name, "repository project name")?;
     let engine_kind = normalize_repository_project_engine_kind(&input.engine_kind)?;
-    let repo_url = require_non_empty(&input.repo_url, "repository project repo_url")?;
+    let source_mode = require_non_empty(&input.source_mode, "repository project source_mode")?
+        .to_ascii_lowercase();
+    let repo_url = normalize_optional_string(input.repo_url);
+    let local_path = normalize_absolute_path_string(
+        input.local_path,
+        "repository project local_path",
+    )?;
+
+    match source_mode.as_str() {
+        SOURCE_MODE_MANAGED_REPOSITORY => {
+            let repo_url = repo_url.as_deref().ok_or_else(|| {
+                invalid_input_error("repository project repo_url must not be empty")
+            })?;
+            require_non_empty(repo_url, "repository project repo_url")?;
+        }
+        SOURCE_MODE_LOCAL_WORKSPACE => {
+            let local_path = local_path.as_deref().ok_or_else(|| {
+                invalid_input_error("repository project local_path must not be empty")
+            })?;
+            require_non_empty(local_path, "repository project local_path")?;
+        }
+        _ => {
+            return Err(invalid_input_error(format!(
+                "repository project source_mode {:?} is not supported",
+                source_mode
+            )));
+        }
+    }
+
     let default_branch = normalize_optional_input_string(input.default_branch);
     let artifacts_root_override = normalize_optional_input_string(input.artifacts_root_override);
     let workspace_root_override = normalize_optional_input_string(input.workspace_root_override);
@@ -10537,7 +11521,9 @@ fn normalize_update_repository_project_input(
         repository_id: input.repository_id,
         name,
         engine_kind,
+        source_mode,
         repo_url,
+        local_path,
         default_branch,
         artifacts_root_override,
         workspace_root_override,
@@ -11190,6 +12176,30 @@ fn reject_duplicate_repository_project_url(
     Ok(())
 }
 
+fn reject_duplicate_repository_project_local_path(
+    transaction: &Transaction<'_>,
+    local_path: &str,
+) -> io::Result<()> {
+    let exists: i64 = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM repositories WHERE local_path = ?)",
+            [local_path],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    if exists != 0 {
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!(
+                "repository project local_path {:?} is already registered",
+                local_path
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
 fn reject_duplicate_repository_project_url_for_update(
     transaction: &Transaction<'_>,
     repository_id: i64,
@@ -11206,6 +12216,31 @@ fn reject_duplicate_repository_project_url_for_update(
         return Err(io::Error::new(
             ErrorKind::AlreadyExists,
             format!("repository project URL {:?} is already registered", repo_url),
+        ));
+    }
+
+    Ok(())
+}
+
+fn reject_duplicate_repository_project_local_path_for_update(
+    transaction: &Transaction<'_>,
+    repository_id: i64,
+    local_path: &str,
+) -> io::Result<()> {
+    let exists: i64 = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM repositories WHERE local_path = ? AND id <> ?)",
+            params![local_path, repository_id],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error)?;
+    if exists != 0 {
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!(
+                "repository project local_path {:?} is already registered",
+                local_path
+            ),
         ));
     }
 
@@ -11591,10 +12626,12 @@ mod tests {
                 "0007_repository_path_model_cleanup.sql",
                 "0008_build_run_stage_tracking.sql",
                 "0009_build_target_runner_model_cleanup.sql",
+                "0009_execution_retention.sql",
                 "0010_engine_contract_model.sql",
                 "0011_runtime_engine_version.sql",
                 "0012_repository_auth_state.sql",
                 "0013_publish_destination_execution_contract.sql",
+                "0014_release_source_identity.sql",
             ]
         );
 
@@ -11736,7 +12773,9 @@ mod tests {
             .create_repository_project(CreateRepositoryProjectInput {
                 name: String::from("Red Horizon"),
                 engine_kind: String::from("unity"),
-                repo_url: String::from("https://example.com/red-horizon.git"),
+                source_mode: String::from("managed_repository"),
+                repo_url: Some(String::from("https://example.com/red-horizon.git")),
+                local_path: None,
                 credentials: Some(CreateRepositoryProjectCredentialInput {
                     name: String::from("Red Horizon/origin"),
                     kind: String::from(KIND_GIT_HTTP_BASIC),
@@ -11945,7 +12984,9 @@ mod tests {
             .create_repository_project(CreateRepositoryProjectInput {
                 name: String::from("Old Banner"),
                 engine_kind: String::from("unity"),
-                repo_url: String::from("https://example.com/old-banner.git"),
+                source_mode: String::from("managed_repository"),
+                repo_url: Some(String::from("https://example.com/old-banner.git")),
+                local_path: None,
                 credentials: None,
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: Some(String::from("C:/artifacts/old-banner")),
@@ -11980,7 +13021,9 @@ mod tests {
                 repository_id: created.repository_id,
                 name: String::from("New Banner"),
                 engine_kind: String::from("unity"),
-                repo_url: String::from("https://example.com/new-banner.git"),
+                source_mode: String::from("managed_repository"),
+                repo_url: Some(String::from("https://example.com/new-banner.git")),
+                local_path: None,
                 default_branch: Some(String::from("release")),
                 artifacts_root_override: None,
                 workspace_root_override: Some(String::from("D:/workspaces/new-banner")),
@@ -12118,7 +13161,9 @@ mod tests {
             .create_repository_project(CreateRepositoryProjectInput {
                 name: String::from("Night Shift"),
                 engine_kind: String::from("unity"),
-                repo_url: String::from("https://github.com/indiegabo/night-shift.git"),
+                source_mode: String::from("managed_repository"),
+                repo_url: Some(String::from("https://github.com/indiegabo/night-shift.git")),
+                local_path: None,
                 credentials: None,
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: None,
@@ -12266,7 +13311,9 @@ mod tests {
             .create_repository_project(CreateRepositoryProjectInput {
                 name: String::from("Night Shift"),
                 engine_kind: String::from("unity"),
-                repo_url: String::from("https://github.com/indiegabo/night-shift.git"),
+                source_mode: String::from("managed_repository"),
+                repo_url: Some(String::from("https://github.com/indiegabo/night-shift.git")),
+                local_path: None,
                 credentials: None,
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: None,
@@ -12364,7 +13411,9 @@ mod tests {
             .create_repository_project(CreateRepositoryProjectInput {
                 name: String::from("Target Sync"),
                 engine_kind: String::from("unity"),
-                repo_url: String::from("https://example.com/target-sync.git"),
+                source_mode: String::from("managed_repository"),
+                repo_url: Some(String::from("https://example.com/target-sync.git")),
+                local_path: None,
                 credentials: None,
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: None,
@@ -12438,7 +13487,9 @@ mod tests {
                 repository_id: created.repository_id,
                 name: String::from("Target Sync"),
                 engine_kind: String::from("unity"),
-                repo_url: String::from("https://example.com/target-sync.git"),
+                source_mode: String::from("managed_repository"),
+                repo_url: Some(String::from("https://example.com/target-sync.git")),
+                local_path: None,
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: None,
                 workspace_root_override: None,
@@ -12803,7 +13854,7 @@ mod tests {
         assert_eq!(record.git_commit.as_deref(), Some("cafebabe"));
         assert_eq!(record.build_target_id, fixture.primary_build_target_id);
         assert_eq!(record.build_target_name, "build-history-windows");
-        assert_eq!(record.unity_target_platform, "windows");
+        assert_eq!(record.unity_target_platform, "StandaloneWindows64");
         assert_eq!(record.runner_type, DEFAULT_HOST_NATIVE_RUNNER_TYPE);
         assert_eq!(
             record.unity_build_method.as_deref(),
@@ -13570,10 +14621,12 @@ mod tests {
                 "0007_repository_path_model_cleanup.sql",
                 "0008_build_run_stage_tracking.sql",
                 "0009_build_target_runner_model_cleanup.sql",
+                "0009_execution_retention.sql",
                 "0010_engine_contract_model.sql",
                 "0011_runtime_engine_version.sql",
                 "0012_repository_auth_state.sql",
-                "0013_publish_destination_execution_contract.sql"
+                "0013_publish_destination_execution_contract.sql",
+                "0014_release_source_identity.sql"
             ]
         );
 
@@ -14744,9 +15797,12 @@ mod tests {
                 workspace_root_override: None,
                 artifacts_root_override: None,
                 build_target_id: fixture.build_target_id,
+                repository_source_mode: String::from("managed_repository"),
                 repository_url: String::from("https://example.com/build-execution-plan.git"),
+                repository_local_path: None,
                 git_tag: String::from("v10.0.0"),
                 git_commit: Some(String::from("deadbeef")),
+                source_metadata_json: String::from("{}"),
                 target_name: String::from("build-execution-plan-windows"),
                 build_kind: BuildKind::Player,
                 contract_json: serde_json::json!({
@@ -15108,6 +16164,78 @@ mod tests {
         assert_eq!(repositories[0].name, "managed-poll");
         assert_eq!(repositories[0].repo_url, "https://example.com/managed-poll.git");
         assert!(!repositories[0].has_release_history);
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn list_repository_projects_includes_local_workspaces() {
+        let root = test_root("repository-projects-include-local-workspaces");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let managed = seed_repository_fixture(&connection, "managed-project");
+        connection
+            .execute(
+                "
+                INSERT INTO repositories (
+                    name,
+                    source_mode,
+                    workspace_strategy,
+                    repo_url,
+                    local_path,
+                    polling_interval_seconds,
+                    enabled,
+                    engine_kind
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ",
+                params![
+                    "local-project",
+                    "local_workspace",
+                    "direct",
+                    Option::<String>::None,
+                    String::from("C:/Users/gabao/projects/Games/revolutions"),
+                    300,
+                    1,
+                    "unity",
+                ],
+            )
+            .expect("local workspace repository should insert");
+        let local_repository_id = connection.last_insert_rowid();
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let repositories = coordinator
+            .list_repository_projects()
+            .expect("repository projects should load");
+
+        assert_eq!(repositories.len(), 2);
+
+        let managed_record = repositories
+            .iter()
+            .find(|repository| repository.id == managed.repository_id)
+            .expect("managed repository should be listed");
+        assert_eq!(managed_record.source_mode, "managed_repository");
+        assert_eq!(
+            managed_record.repo_url.as_deref(),
+            Some("https://example.com/managed-project.git")
+        );
+        assert_eq!(managed_record.local_path, None);
+
+        let local_record = repositories
+            .iter()
+            .find(|repository| repository.id == local_repository_id)
+            .expect("local workspace repository should be listed");
+        assert_eq!(local_record.name, "local-project");
+        assert_eq!(local_record.source_mode, "local_workspace");
+        assert_eq!(local_record.workspace_strategy, "direct");
+        assert_eq!(local_record.repo_url, None);
+        assert_eq!(
+            local_record.local_path.as_deref(),
+            Some("C:/Users/gabao/projects/Games/revolutions")
+        );
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -16954,6 +18082,7 @@ mod tests {
                        trigger_source,
                        trigger_rule_id,
                        source_metadata_json,
+                       source_identity,
                        engine_version,
                        status,
                        started_at,

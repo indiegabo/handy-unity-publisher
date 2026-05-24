@@ -134,10 +134,7 @@ where
         workspace: PreparedWorkspace,
         reporter: &mut dyn ExecutionProgressReporter,
     ) -> io::Result<UnityBuildExecutionProcessOutcome> {
-        let mut canonical_plan = plan.clone();
-        canonical_plan.output_path_template =
-            Some(artifact_output_relative_path(&canonical_plan));
-
+        let canonical_plan = plan.clone();
         let output_path = resolve_runtime_output_path(&workspace, &canonical_plan)?;
         cleanup_previous_artifact_output(&output_path)?;
 
