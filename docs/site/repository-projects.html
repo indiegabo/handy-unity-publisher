@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Repository Projects | HGP Operator Docs</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="site-shell">
+      <header class="site-header">
+        <a class="site-brand" href="index.html">
+          <span class="site-brand__mark">H</span>
+          HGP Beta Docs
+        </a>
+        <nav class="site-nav">
+          <a href="index.html">Overview</a>
+          <a href="getting-started.html">Getting Started</a>
+          <a href="local-workspaces.html">Local Workspaces</a>
+          <a href="publish-destinations.html">Publishing</a>
+          <a href="troubleshooting.html">Troubleshooting</a>
+        </nav>
+      </header>
+
+      <section class="page-intro">
+        <span class="eyebrow">Git-backed Unity Projects</span>
+        <h1>
+          Connect repository projects without turning them into second-class
+          flows.
+        </h1>
+        <p>
+          Repository-backed projects remain the canonical automation surface for
+          HGP. The beta supports repository source settings, explicit access
+          binding, build targets, publish destinations, and manual release
+          execution from the desktop shell.
+        </p>
+      </section>
+
+      <section class="page-section">
+        <h2>Before you create the project</h2>
+        <div class="panel">
+          <ul class="checklist">
+            <li>
+              Confirm the repository URL is stable and reachable from the host.
+            </li>
+            <li>
+              Connect a reusable repository credential or GitHub login if the
+              repository is private.
+            </li>
+            <li>
+              Know which Unity version the repository expects before defining
+              build targets.
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="page-section">
+        <h2>Repository onboarding flow</h2>
+        <div class="panel">
+          <ol class="step-list">
+            <li>Open Projects and create a new project.</li>
+            <li>Choose the repository-backed source mode.</li>
+            <li>Paste the repository URL and let HGP detect the provider.</li>
+            <li>Bind the project to the correct repository access method.</li>
+            <li>
+              Define build targets and any publish destinations the beta should
+              run.
+            </li>
+            <li>
+              Save the project and inspect the project detail surface before
+              queuing work.
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="page-section">
+        <h2>Manual checks and release dispatch</h2>
+        <div class="panel-grid">
+          <article class="callout">
+            <strong>Instant checks</strong>
+            <p>
+              Use project-level inspection when you want to verify access and
+              refresh remote information without waiting for scheduled polling.
+            </p>
+          </article>
+          <article class="callout">
+            <strong>Manual releases</strong>
+            <p>
+              Manual execution is the safest way to confirm a new repository
+              project before you leave automation fully active.
+            </p>
+          </article>
+          <article class="callout">
+            <strong>Idle-safe operations</strong>
+            <p>
+              Idle posture blocks automatic polling intake, not the entire
+              shell. Operator-driven inspection and release work remain
+              available.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="page-section">
+        <h2>What to inspect after the first successful run</h2>
+        <div class="panel">
+          <ul class="checklist">
+            <li>
+              Build history shows the expected repository commit and target
+              results.
+            </li>
+            <li>
+              Artifact inspection resolves the output files you actually need.
+            </li>
+            <li>
+              Runtime logs do not show repeated authentication or Unity
+              resolution errors.
+            </li>
+            <li>
+              Publish destinations only bind to reusable credentials that are
+              already healthy.
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span
+          >Need a source tree that is not in Git? Use the local workspace flow
+          instead.</span
+        >
+        <a href="local-workspaces.html">Local workspace guide</a>
+      </footer>
+    </div>
+  </body>
+</html>

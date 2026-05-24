@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Publishing | HGP Operator Docs</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="site-shell">
+      <header class="site-header">
+        <a class="site-brand" href="index.html">
+          <span class="site-brand__mark">H</span>
+          HGP Beta Docs
+        </a>
+        <nav class="site-nav">
+          <a href="index.html">Overview</a>
+          <a href="getting-started.html">Getting Started</a>
+          <a href="repository-projects.html">Repository Projects</a>
+          <a href="local-workspaces.html">Local Workspaces</a>
+          <a href="troubleshooting.html">Troubleshooting</a>
+        </nav>
+      </header>
+
+      <section class="page-intro">
+        <span class="eyebrow">Reusable Credentials</span>
+        <h1>
+          Configure publish destinations once, then reuse them deliberately.
+        </h1>
+        <p>
+          The beta already supports Itch credential authoring inside the app.
+          Settings acts as the shared inventory so destination-level publish
+          flows can bind to reusable credentials rather than duplicating secrets
+          across every project.
+        </p>
+      </section>
+
+      <section class="page-section">
+        <h2>Prepare credentials in Settings first</h2>
+        <div class="panel">
+          <ol class="step-list">
+            <li>Open Settings.</li>
+            <li>
+              Create a reusable Itch credential or repository credential from
+              the credential inventory panel.
+            </li>
+            <li>
+              Confirm the credential summary reports a healthy or ready state.
+            </li>
+            <li>
+              Return to the project detail surface and bind the credential where
+              needed.
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="page-section">
+        <h2>Itch publish destination flow</h2>
+        <div class="panel-grid">
+          <article class="callout">
+            <strong>Runtime prerequisite</strong>
+            <p>
+              Butler sidecars must be present in the packaged shell. Release
+              bundles stage the expected binary alongside the runtime sidecar.
+            </p>
+          </article>
+          <article class="callout">
+            <strong>Credential binding</strong>
+            <p>
+              Bind the reusable Itch credential from settings instead of
+              rewriting the API key for every destination.
+            </p>
+          </article>
+          <article class="callout">
+            <strong>Output checks</strong>
+            <p>
+              Verify the build output exists before you expect the publish run
+              to succeed. Publish destinations do not replace build validation.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="page-section">
+        <h2>Healthy publish setup checklist</h2>
+        <div class="panel">
+          <ul class="checklist">
+            <li>
+              The project has at least one successful build target configured.
+            </li>
+            <li>
+              The destination points to the correct Itch channel or remote
+              endpoint.
+            </li>
+            <li>
+              The reusable credential is ready and bound to the destination.
+            </li>
+            <li>
+              The operator can inspect logs and retained outputs if the publish
+              step fails.
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="page-section">
+        <h2>When publication fails</h2>
+        <div class="panel">
+          <p>
+            Open the execution report, build logs, and runtime logs before
+            changing multiple variables at once. Most publication failures come
+            from missing artifacts, stale credentials, or destination metadata
+            that no longer matches the upstream service.
+          </p>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span>Runtime or host issue instead of a destination issue?</span>
+        <a href="troubleshooting.html">Troubleshooting guide</a>
+      </footer>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HGP Operator Docs</title>
+    <meta
+      name="description"
+      content="Operator documentation for the HGP beta desktop build."
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="site-shell">
+      <header class="site-header">
+        <a class="site-brand" href="index.html">
+          <span class="site-brand__mark">H</span>
+          HGP Beta Docs
+        </a>
+        <nav class="site-nav">
+          <a href="getting-started.html">Getting Started</a>
+          <a href="repository-projects.html">Repository Projects</a>
+          <a href="local-workspaces.html">Local Workspaces</a>
+          <a href="publish-destinations.html">Publishing</a>
+          <a href="troubleshooting.html">Troubleshooting</a>
+        </nav>
+      </header>
+
+      <section class="hero">
+        <article class="hero-card">
+          <span class="eyebrow">Shipped Beta Only</span>
+          <h1>Operate Unity releases without leaving your workstation.</h1>
+          <p>
+            HGP is a local-first desktop shell for Unity build and publish
+            pipelines. These guides cover the workflows that ship in the beta:
+            Windows installation, repository-backed projects, local workspaces,
+            reusable credentials, publish destinations, and recovery paths.
+          </p>
+          <div class="hero-actions">
+            <a
+              class="button-link button-link--primary"
+              href="getting-started.html"
+            >
+              Start with installation
+            </a>
+            <a class="button-link" href="publish-destinations.html">
+              Configure publishing
+            </a>
+          </div>
+        </article>
+
+        <div class="stack">
+          <article class="metric-card">
+            <strong>Two project modes</strong>
+            <p>
+              Connect a remote repository or register a local Unity workspace.
+              Both feed the same inspection, build-target, and publish surfaces.
+            </p>
+          </article>
+          <article class="metric-card">
+            <strong>Operator-owned automation</strong>
+            <p>
+              Keep the runtime healthy while switching release intake between
+              active automation and deliberate idle posture from the shell.
+            </p>
+          </article>
+          <article class="metric-card">
+            <strong>Reusable credentials</strong>
+            <p>
+              Store one reusable Itch or repository credential in settings and
+              bind it to project flows as needed.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section-heading">
+        <div>
+          <span class="eyebrow">Guide Map</span>
+          <h2>Pick the workflow you need.</h2>
+        </div>
+        <p>
+          Each page stays aligned with the current beta surface, not future
+          plans.
+        </p>
+      </section>
+
+      <section class="guide-grid">
+        <article>
+          <h3>Install and launch</h3>
+          <p>
+            Use the Windows installer, confirm the bundled runtime is healthy,
+            and understand the tray-resident shell before onboarding projects.
+          </p>
+          <div class="button-row">
+            <a class="button-link" href="getting-started.html">Open guide</a>
+          </div>
+        </article>
+        <article>
+          <h3>Repository projects</h3>
+          <p>
+            Connect Git-backed Unity repositories, authorize repository access,
+            and run manual release checks without losing automation posture.
+          </p>
+          <div class="button-row">
+            <a class="button-link" href="repository-projects.html"
+              >Open guide</a
+            >
+          </div>
+        </article>
+        <article>
+          <h3>Local workspace projects</h3>
+          <p>
+            Register a local Unity folder, dispatch manual releases, and inspect
+            outputs using the same shell surfaces as repository projects.
+          </p>
+          <div class="button-row">
+            <a class="button-link" href="local-workspaces.html">Open guide</a>
+          </div>
+        </article>
+        <article>
+          <h3>Publishing and credentials</h3>
+          <p>
+            Create reusable credentials in settings, connect Itch publish
+            destinations, and verify the runtime can see the staged sidecars.
+          </p>
+          <div class="button-row">
+            <a class="button-link" href="publish-destinations.html"
+              >Open guide</a
+            >
+          </div>
+        </article>
+      </section>
+
+      <section class="page-section">
+        <div class="panel-grid">
+          <article class="panel">
+            <h3>Runtime health cues</h3>
+            <p>
+              The Settings screen is the control room for shell version, runtime
+              version, runtime directories, localization preferences, and
+              reusable credentials.
+            </p>
+          </article>
+          <article class="panel">
+            <h3>Automation semantics</h3>
+            <p>
+              Active means polling intake continues. Idle keeps the runtime and
+              workers healthy while blocking automatic intake until you switch
+              back.
+            </p>
+          </article>
+          <article class="panel">
+            <h3>Documentation access</h3>
+            <p>
+              The packaged shell links back to this site from Settings so the
+              operator does not need repository archaeology just to perform a
+              release or recover a workstation.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="callout">
+        <strong>Need a fast recovery path?</strong>
+        <p>
+          Start with the
+          <a href="troubleshooting.html">troubleshooting guide</a>
+          if Unity is not detected, repository access fails, the runtime looks
+          unhealthy, or Itch publication prerequisites are missing.
+        </p>
+      </section>
+
+      <footer class="footer">
+        <span>HGP operator docs for the shipped beta surface.</span>
+        <a href="https://github.com/indiegabo/handy-games-publisher">
+          View repository
+        </a>
+      </footer>
+    </div>
+  </body>
+</html>

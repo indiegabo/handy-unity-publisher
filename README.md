@@ -12,6 +12,7 @@ assets, and host-native Unity execution.
 
 Repository and development surfaces use `handy-games-publisher`.
 Canonical Git remote: `git@github.com:indiegabo/handy-games-publisher.git`.
+Public beta docs: <https://indiegabo.github.io/handy-games-publisher/>.
 
 ## Product Model
 

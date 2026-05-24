@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Troubleshooting | HGP Operator Docs</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="site-shell">
+      <header class="site-header">
+        <a class="site-brand" href="index.html">
+          <span class="site-brand__mark">H</span>
+          HGP Beta Docs
+        </a>
+        <nav class="site-nav">
+          <a href="index.html">Overview</a>
+          <a href="getting-started.html">Getting Started</a>
+          <a href="repository-projects.html">Repository Projects</a>
+          <a href="local-workspaces.html">Local Workspaces</a>
+          <a href="publish-destinations.html">Publishing</a>
+        </nav>
+      </header>
+
+      <section class="page-intro">
+        <span class="eyebrow">Recovery Paths</span>
+        <h1>Diagnose the host before you widen the blast radius.</h1>
+        <p>
+          HGP is local-first, so most failures come from host capabilities,
+          credentials, or project configuration rather than remote shell state.
+          Use Settings as the first inspection surface and change one variable
+          at a time.
+        </p>
+      </section>
+
+      <section class="page-section">
+        <h2>Unity detection</h2>
+        <div class="panel">
+          <ul class="checklist">
+            <li>
+              Confirm the required Unity editor is installed on the same host
+              where HGP runs.
+            </li>
+            <li>
+              Reopen the project detail surface and validate the Unity
+              executable or detected version.
+            </li>
+            <li>
+              If the wrong editor is discovered, correct the project-level build
+              target configuration before retrying.
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="page-section">
+        <h2>Repository authentication</h2>
+        <div class="panel">
+          <ul class="checklist">
+            <li>
+              Use Settings to inspect the connected GitHub login or reusable
+              repository credential state.
+            </li>
+            <li>
+              Refresh the credential if status reports missing keys or stale
+              metadata.
+            </li>
+            <li>
+              Run a manual repository inspection before assuming polling or
+              release automation is broken.
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="page-section">
+        <h2>Runtime health and directories</h2>
+        <div class="panel-grid">
+          <article class="callout">
+            <strong>Logs</strong>
+            <p>
+              Open the runtime log path from Settings when the shell reports an
+              unhealthy or stopped runtime state.
+            </p>
+          </article>
+          <article class="callout">
+            <strong>Artifacts and runs</strong>
+            <p>
+              Use the runtime directories panel to inspect artifacts, retained
+              logs, and run outputs before re-queuing work blindly.
+            </p>
+          </article>
+          <article class="callout">
+            <strong>Localization root</strong>
+            <p>
+              Additional locale files belong in the localization root next to
+              the packaged shell resources. Invalid JSON packs are ignored and
+              surfaced as warnings.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="page-section">
+        <h2>Itch publication prerequisites</h2>
+        <div class="panel">
+          <ul class="checklist">
+            <li>The reusable Itch credential is ready in Settings.</li>
+            <li>
+              The packaged shell includes the Butler sidecar expected by the
+              publish flow.
+            </li>
+            <li>
+              The target destination metadata still matches the upstream Itch
+              project and channel.
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span
+          >Still blocked? Recheck the shipped workflow guidance from the
+          start.</span
+        >
+        <a href="getting-started.html">Back to first-run guide</a>
+      </footer>
+    </div>
+  </body>
+</html>
