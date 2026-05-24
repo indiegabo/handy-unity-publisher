@@ -9,6 +9,7 @@ import type {
 } from "../services/projects";
 
 type RepositoryCredentialComposerProps = {
+  initialCredential?: RepositoryCredentialInitialValue | null;
   isSaving: boolean;
   onCancel: () => void;
   onSave: (input: SaveSecretCredentialInput) => Promise<void> | void;
@@ -23,7 +24,14 @@ type RepositoryCredentialDraftKind = Exclude<
   "git-http-github-host-login"
 >;
 
+export type RepositoryCredentialInitialValue = {
+  credentialId: number | null;
+  kind: RepositoryCredentialDraftKind;
+  name: string;
+};
+
 type RepositoryCredentialDraft = {
+  credentialId: number | null;
   kind: RepositoryCredentialDraftKind;
   apiKey: string;
   name: string;
@@ -50,6 +58,7 @@ const PUBLISH_CREDENTIAL_KIND_OPTIONS = [
 ] as const;
 
 export function RepositoryCredentialComposer({
+  initialCredential = null,
   isSaving,
   onCancel,
   onSave,
@@ -58,14 +67,18 @@ export function RepositoryCredentialComposer({
   saveError,
   scope = "repository",
 }: RepositoryCredentialComposerProps) {
-  const [draft, setDraft] = useState<RepositoryCredentialDraft>({
-    kind: scope === "publish" ? "itch-api-key" : "git-http-basic",
+  const isEditing = initialCredential?.credentialId != null;
+  const [draft, setDraft] = useState<RepositoryCredentialDraft>(() => ({
+    credentialId: initialCredential?.credentialId ?? null,
+    kind:
+      initialCredential?.kind ??
+      (scope === "publish" ? "itch-api-key" : "git-http-basic"),
     apiKey: "",
-    name: "",
+    name: initialCredential?.name ?? "",
     password: "",
     token: "",
     username: "",
-  });
+  }));
   const [errors, setErrors] = useState<RepositoryCredentialDraftErrors>({});
   const credentialKindOptions =
     scope === "publish"
@@ -73,12 +86,20 @@ export function RepositoryCredentialComposer({
       : REPOSITORY_CREDENTIAL_KIND_OPTIONS;
   const panelTitle =
     scope === "publish"
-      ? "New publish credential"
-      : "New repository credential";
+      ? isEditing
+        ? "Edit publish credential"
+        : "New publish credential"
+      : isEditing
+        ? "Edit repository credential"
+        : "New repository credential";
   const panelDescription =
     scope === "publish"
-      ? `Create one reusable ${providerLabel} credential and bind it to this publish destination.`
-      : `Create one reusable ${providerLabel} credential and connect it to this project.`;
+      ? isEditing
+        ? `Update one reusable ${providerLabel} credential and replace the stored secret used by publish destinations.`
+        : `Create one reusable ${providerLabel} credential and bind it to this publish destination.`
+      : isEditing
+        ? `Update one reusable ${providerLabel} credential and replace the stored secret used by repository flows.`
+        : `Create one reusable ${providerLabel} credential and connect it to this project.`;
   const credentialNamePlaceholder =
     scope === "publish"
       ? `${providerLabel} publish credential`
@@ -110,6 +131,12 @@ export function RepositoryCredentialComposer({
         options={credentialKindOptions}
         value={draft.kind}
       />
+
+      {isEditing ? (
+        <p className="wizard-callout__copy">
+          Re-enter the secret material to replace the stored credential value.
+        </p>
+      ) : null}
 
       {draft.kind === "git-http-basic" ? (
         <>
@@ -171,7 +198,13 @@ export function RepositoryCredentialComposer({
           size="sm"
           variant="primary"
         >
-          {isSaving ? "Saving credential..." : "Save credential"}
+          {isSaving
+            ? isEditing
+              ? "Saving changes..."
+              : "Saving credential..."
+            : isEditing
+              ? "Save changes"
+              : "Save credential"}
         </Button>
         <Button
           disabled={isSaving}
@@ -264,7 +297,7 @@ function buildSaveSecretCredentialInput(
   draft: RepositoryCredentialDraft,
 ): SaveSecretCredentialInput {
   return {
-    credential_id: null,
+    credential_id: draft.credentialId,
     config_json:
       draft.kind === "git-http-basic"
         ? JSON.stringify({

@@ -73,6 +73,7 @@ export type ProjectDraft = {
   engineKind: RepositoryEngineKind;
   name: string;
   repositoryUrl: string;
+  localPath: string;
   repositoryVisibility: "public" | "private";
   pollingIntervalSeconds: string;
   artifactsRootOverride: string;
@@ -117,7 +118,10 @@ export type CreateProjectWizardSnapshot = {
   touchedFields: Record<string, boolean>;
 };
 
-type ProjectPathFieldName = "artifactsRootOverride" | "workspaceRootOverride";
+type ProjectPathFieldName =
+  | "localPath"
+  | "artifactsRootOverride"
+  | "workspaceRootOverride";
 
 type CreateProjectWizardProps = {
   authProviderResult?: AuthProviderConnectionResult | null;
@@ -138,7 +142,7 @@ type WizardStepDefinition = {
 };
 
 type ProjectSourceWizardAdapter = {
-  kind: "repository" | "local-unsupported";
+  kind: "repository" | "local";
   stepLabel: string;
   stepDescription: string;
   supportTitle: string;
@@ -169,11 +173,7 @@ const WIZARD_STEP_ORDER: readonly WizardStepKey[] = [
 
 const PROJECT_KIND_OPTIONS = [
   { label: "Repository project", value: "repository" },
-  {
-    label: "Local workspace project",
-    value: "local",
-    disabled: true,
-  },
+  { label: "Local workspace project", value: "local" },
 ] as const;
 
 const REPOSITORY_VISIBILITY_OPTIONS = [
@@ -727,6 +727,24 @@ export function CreateProjectWizard({
   ]);
 
   useEffect(() => {
+    if (draft.projectKind !== "repository") {
+      accessAssessmentTokenRef.current += 1;
+
+      if (accessAssessmentTimerRef.current !== undefined) {
+        window.clearTimeout(accessAssessmentTimerRef.current);
+        accessAssessmentTimerRef.current = undefined;
+      }
+
+      startTransition(() => {
+        setRepositoryAccessAssessment(null);
+        setRepositoryAccessError(null);
+        setIsAssessingRepositoryAccess(false);
+        setRepositoryAccessActionMessage(null);
+        setRepositoryCredentialId(null);
+      });
+      return;
+    }
+
     const normalizedUrl = draft.repositoryUrl.trim();
     const repositoryVisibility = draft.repositoryVisibility;
     accessAssessmentTokenRef.current += 1;
@@ -773,7 +791,7 @@ export function CreateProjectWizard({
         accessAssessmentTimerRef.current = undefined;
       }
     };
-  }, [draft.repositoryUrl, draft.repositoryVisibility]);
+  }, [draft.projectKind, draft.repositoryUrl, draft.repositoryVisibility]);
 
   useEffect(() => {
     if (
@@ -835,6 +853,10 @@ export function CreateProjectWizard({
   });
 
   const handleRetryRepositoryAccessCheck = useEffectEvent(() => {
+    if (draft.projectKind !== "repository") {
+      return;
+    }
+
     const normalizedUrl = draft.repositoryUrl.trim();
 
     if (
@@ -1692,17 +1714,31 @@ export function CreateProjectWizard({
                   </div>
                 ) : (
                   <div className="wizard-form-grid">
-                    {shouldShowStepError(attemptedSteps.access) &&
-                    accessErrors.repositoryAccess ? (
-                      <p className="feed-banner feed-banner--error">
-                        {accessErrors.repositoryAccess}
-                      </p>
-                    ) : null}
-
-                    {renderWizardAdapterUnavailableState(
-                      projectSourceStepAdapter.unsupportedMessage ??
-                        projectSourceStepAdapter.supportCopy,
-                    )}
+                    <PathPickerField
+                      buttonLabel="Choose workspace"
+                      clearable
+                      disabled={isSubmitting}
+                      dialogTitle="Select local workspace directory"
+                      error={
+                        shouldShowFieldError(
+                          attemptedSteps.access,
+                          touchedFields,
+                          "localPath",
+                        )
+                          ? accessErrors.localPath
+                          : undefined
+                      }
+                      hint="Choose the host-local Unity workspace that HGP should build directly."
+                      label="Local workspace path"
+                      onClear={() => handleProjectPathCleared("localPath")}
+                      onError={handlePathPickerError}
+                      onPathPicked={(selectedPath) =>
+                        handleProjectPathPicked("localPath", selectedPath)
+                      }
+                      pickerKind="directory"
+                      placeholder="C:/projects/red-horizon"
+                      value={draft.localPath}
+                    />
                   </div>
                 )
               ) : null}
@@ -2393,7 +2429,9 @@ function formatWizardTargetCount(targetCount: number) {
 }
 
 function formatProjectSourceAdapterStatus(adapter: ProjectSourceWizardAdapter) {
-  return adapter.kind === "repository" ? "Available" : "Unavailable";
+  return adapter.kind === "repository" || adapter.kind === "local"
+    ? "Available"
+    : "Unavailable";
 }
 
 function resolveProjectSourceWizardAdapter(
@@ -2415,17 +2453,16 @@ function resolveProjectSourceWizardAdapter(
   }
 
   return {
-    kind: "local-unsupported",
+    kind: "local",
     stepLabel: "Workspace",
     stepDescription:
       "Declare the local workspace source that HGP should manage for this project.",
     supportTitle: "Local workspace source",
     supportDescription:
-      "This source selection would need a dedicated local workspace adapter before the wizard can collect the right fields.",
+      "Local workspace projects point HGP at one host path that should be released without a managed repository checkout.",
     supportCopy:
-      "The create-project wizard does not have a local workspace source adapter yet, so repository-specific fields stay hidden for this draft.",
-    unsupportedMessage:
-      "Local workspace setup does not have a create-project source adapter yet.",
+      "Choose the Unity workspace path that HGP should inspect for versioning and build from this host directly.",
+    unsupportedMessage: null,
   };
 }
 
@@ -2516,6 +2553,7 @@ function createInitialProjectDraft(): ProjectDraft {
     engineKind: "unity",
     name: "",
     repositoryUrl: "",
+    localPath: "",
     repositoryVisibility: "public",
     pollingIntervalSeconds: "300",
     artifactsRootOverride: "",
@@ -2572,10 +2610,6 @@ function validateIdentityStep(
     errors.name = "Another repository project already uses this name.";
   }
 
-  if (draft.projectKind !== "repository") {
-    errors.projectKind = `${formatProjectKindLabel(draft.projectKind)} does not have a create-project source adapter yet.`;
-  }
-
   if (draft.engineKind !== "unity") {
     errors.engineKind = `${formatRepositoryEngineKindLabel(draft.engineKind)} does not have a create-project build target adapter yet.`;
   }
@@ -2602,13 +2636,27 @@ function validateAccessStep(
 ) {
   const errors: {
     repositoryUrl?: string;
+    localPath?: string;
     pollingIntervalSeconds?: string;
     repositoryAccess?: string;
   } = {};
-  if (sourceAdapter.kind !== "repository") {
-    errors.repositoryAccess =
-      sourceAdapter.unsupportedMessage ||
-      "The selected project source does not have a create-project adapter yet.";
+
+  if (sourceAdapter.kind === "local") {
+    const normalizedLocalPath = draft.localPath.trim();
+
+    if (!normalizedLocalPath) {
+      errors.localPath = "Local workspace path is required.";
+    } else if (!looksLikeAbsolutePath(normalizedLocalPath)) {
+      errors.localPath = "Local workspace path must be an absolute path.";
+    } else if (
+      repositoryInventory.some(
+        (repository) =>
+          normalizePathForComparison(repository.local_path ?? "") ===
+          normalizePathForComparison(normalizedLocalPath),
+      )
+    ) {
+      errors.localPath = "This local workspace is already registered in HGP.";
+    }
 
     return errors;
   }
@@ -2812,6 +2860,7 @@ function hasIdentityErrors(errors: ReturnType<typeof validateIdentityStep>) {
 function hasAccessErrors(errors: ReturnType<typeof validateAccessStep>) {
   return Boolean(
     errors.repositoryUrl ||
+    errors.localPath ||
     errors.pollingIntervalSeconds ||
     errors.repositoryAccess,
   );
@@ -2902,12 +2951,20 @@ function buildCreateProjectInput(
   repositoryAccessAssessment: RepositoryAccessAssessment | null,
   repositoryCredentialId: number | null,
 ): CreateRepositoryProjectInput {
+  const isRepositoryProject = draft.projectKind === "repository";
+
   return {
     name: draft.name.trim(),
     engine_kind: draft.engineKind,
-    repository_url: draft.repositoryUrl.trim(),
-    repository_access_assessment: repositoryAccessAssessment,
-    repository_credentials_id: repositoryCredentialId,
+    source_mode: isRepositoryProject ? "managed_repository" : "local_workspace",
+    repository_url: isRepositoryProject ? draft.repositoryUrl.trim() : null,
+    local_path: isRepositoryProject ? null : draft.localPath.trim(),
+    repository_access_assessment: isRepositoryProject
+      ? repositoryAccessAssessment
+      : null,
+    repository_credentials_id: isRepositoryProject
+      ? repositoryCredentialId
+      : null,
     artifacts_root_override: optionalTrimmedString(draft.artifactsRootOverride),
     workspace_root_override: optionalTrimmedString(draft.workspaceRootOverride),
     polling_interval_seconds: Number(draft.pollingIntervalSeconds.trim()),
@@ -3127,7 +3184,7 @@ function formatProjectSourceReviewDescription(draft: ProjectDraft) {
     return draft.repositoryUrl.trim() || "Repository source not set yet.";
   }
 
-  return "Local workspace source not set yet.";
+  return draft.localPath.trim() || "Local workspace source not set yet.";
 }
 
 function renderWizardAdapterUnavailableState(message: string) {
@@ -3149,6 +3206,16 @@ function looksLikeAbsolutePath(value: string) {
     value.startsWith("/") ||
     value.startsWith("\\\\")
   );
+}
+
+function normalizePathForComparison(value: string) {
+  const normalized = value.trim().replace(/\\/g, "/");
+
+  if (normalized === "/" || /^[a-zA-Z]:\/$/.test(normalized)) {
+    return normalized.toLocaleLowerCase();
+  }
+
+  return normalized.replace(/\/+$/, "").toLocaleLowerCase();
 }
 
 function formatDiagnosticStatus(status: string) {

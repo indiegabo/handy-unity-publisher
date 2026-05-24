@@ -2923,11 +2923,28 @@ button {
   padding-right: 2px;
 }
 
+.settings-focus-shell {
+  height: 100%;
+  min-height: 0;
+  gap: 10px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
 .project-workers-focus-shell::-webkit-scrollbar {
   width: 6px;
 }
 
+.settings-focus-shell::-webkit-scrollbar {
+  width: 6px;
+}
+
 .project-workers-focus-shell::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.settings-focus-shell::-webkit-scrollbar-thumb {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.1);
 }
@@ -2953,6 +2970,93 @@ button {
 .project-detail-form-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.settings-focus-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settings-focus-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-focus-panel-stack,
+.settings-focus-warning-list,
+.settings-focus-entry-list,
+.settings-focus-path-list {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-focus-entry-list,
+.settings-focus-path-list {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.settings-focus-status-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.settings-focus-entry,
+.settings-focus-path-item {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-inset);
+}
+
+.settings-focus-entry__header,
+.settings-focus-path-item__header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.settings-focus-entry__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.settings-focus-entry__title,
+.settings-focus-path-item__title {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 0.76rem;
+}
+
+.settings-focus-copy,
+.settings-focus-entry__copy,
+.settings-focus-entry__meta,
+.settings-focus-path-item__copy,
+.settings-focus-path-item__path {
+  margin: 0;
+  font-size: 0.69rem;
+  line-height: 1.45;
+}
+
+.settings-focus-copy,
+.settings-focus-entry__copy,
+.settings-focus-path-item__copy {
+  color: var(--text-muted);
+}
+
+.settings-focus-entry__meta,
+.settings-focus-path-item__path {
+  color: var(--text-soft);
+  word-break: break-word;
 }
 
 .project-detail-form-grid__span-full {
@@ -3138,6 +3242,12 @@ button {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .settings-focus-status-row,
+  .settings-focus-entry__header,
+  .settings-focus-path-item__header {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .project-detail-tablist {
     grid-auto-flow: column;
     grid-auto-columns: 1fr;
@@ -3150,6 +3260,10 @@ button {
   }
 
   .project-detail-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-focus-form-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 

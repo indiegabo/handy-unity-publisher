@@ -3,6 +3,7 @@ import { useState, type ReactElement } from "react";
 import { Button, IconButton } from "./Button";
 import { SelectField, TextField, type SelectOption } from "./Field";
 import FullScreenModal from "./FullScreenModal";
+import { type Translate, useLocalization } from "../LocalizationProvider";
 import { useOverlay } from "./OverlayManager";
 import { PathPickerField } from "./PathPickerField";
 import { RepositoryCredentialComposer } from "./RepositoryCredentialComposer";
@@ -123,6 +124,7 @@ export function PublishDestinationsEditor({
   onChange,
   onSaveCredential,
 }: PublishDestinationsEditorProps) {
+  const { t } = useLocalization();
   const { openOverlay } = useOverlay();
   const [showDestinationMenu, setShowDestinationMenu] = useState(false);
   const [pendingDestinationRemovalId, setPendingDestinationRemovalId] =
@@ -376,11 +378,17 @@ export function PublishDestinationsEditor({
               size="sm"
               variant="secondary"
             >
-              Add destination
+              {t(
+                "publish_destinations.editor.actions.add_destination",
+                "Add destination",
+              )}
             </Button>
             {showDestinationMenu ? (
               <div
-                aria-label="Destination list"
+                aria-label={t(
+                  "publish_destinations.editor.menu.label",
+                  "Destination list",
+                )}
                 className="publish-destination-menu__popover"
                 role="menu"
               >
@@ -399,7 +407,7 @@ export function PublishDestinationsEditor({
                       }}
                       type="button"
                     >
-                      {formatPublishDestinationKindLabel(kind)}
+                      {formatPublishDestinationKindLabel(t, kind)}
                     </button>
                   );
                 })}
@@ -415,11 +423,17 @@ export function PublishDestinationsEditor({
               size="sm"
               variant="secondary"
             >
-              Add destination
+              {t(
+                "publish_destinations.editor.actions.add_destination",
+                "Add destination",
+              )}
             </Button>
             {showDestinationMenu ? (
               <div
-                aria-label="Destination list"
+                aria-label={t(
+                  "publish_destinations.editor.menu.label",
+                  "Destination list",
+                )}
                 className="publish-destination-menu__popover"
                 role="menu"
               >
@@ -436,7 +450,7 @@ export function PublishDestinationsEditor({
                       onClick={() => handleAddDestination(kind)}
                       type="button"
                     >
-                      {formatPublishDestinationKindLabel(kind)}
+                      {formatPublishDestinationKindLabel(t, kind)}
                     </button>
                   );
                 })}
@@ -455,13 +469,28 @@ export function PublishDestinationsEditor({
           <div className="wizard-callout__header">
             <div>
               <p className="wizard-callout__title">
-                Confirm destination removal
+                {t(
+                  "publish_destinations.editor.confirm_remove.title",
+                  "Confirm destination removal",
+                )}
               </p>
               <p className="wizard-callout__copy">
-                Removing{" "}
-                {formatPublishDestinationTitle(pendingDestinationRemoval)} also
-                removes persisted bindings for{" "}
-                {pendingRemovalTargets.join(", ") || "its bound build targets"}.
+                {t(
+                  "publish_destinations.editor.confirm_remove.copy",
+                  "Removing {{destinationTitle}} also removes persisted bindings for {{bindingTargets}}.",
+                  {
+                    bindingTargets:
+                      pendingRemovalTargets.join(", ") ||
+                      t(
+                        "publish_destinations.editor.confirm_remove.binding_fallback",
+                        "its bound build targets",
+                      ),
+                    destinationTitle: formatPublishDestinationTitle(
+                      t,
+                      pendingDestinationRemoval,
+                    ),
+                  },
+                )}
               </p>
             </div>
           </div>
@@ -474,7 +503,10 @@ export function PublishDestinationsEditor({
               size="sm"
               variant="primary"
             >
-              Remove destination
+              {t(
+                "publish_destinations.editor.confirm_remove.confirm",
+                "Remove destination",
+              )}
             </Button>
             <Button
               disabled={disabled}
@@ -482,7 +514,7 @@ export function PublishDestinationsEditor({
               size="sm"
               variant="ghost"
             >
-              Cancel
+              {t("publish_destinations.editor.confirm_remove.cancel", "Cancel")}
             </Button>
           </div>
         </div>
@@ -491,7 +523,10 @@ export function PublishDestinationsEditor({
       {destinations.length === 0 ? (
         <div className="feed-state">
           <p className="feed-state__title">
-            No publish destinations configured.
+            {t(
+              "publish_destinations.editor.empty_state",
+              "No publish destinations configured.",
+            )}
           </p>
         </div>
       ) : null}
@@ -528,7 +563,7 @@ export function PublishDestinationsEditor({
                     size="sm"
                     variant="ghost"
                   >
-                    Edit
+                    {t("publish_destinations.editor.actions.edit", "Edit")}
                   </Button>
                   <Button
                     disabled={disabled}
@@ -539,7 +574,7 @@ export function PublishDestinationsEditor({
                     size="sm"
                     variant="ghost"
                   >
-                    Remove
+                    {t("publish_destinations.editor.actions.remove", "Remove")}
                   </Button>
                 </div>
               }
@@ -547,25 +582,56 @@ export function PublishDestinationsEditor({
               key={destination.id}
               summary={
                 <MetaRow className="wizard-target-card__summary">
-                  <MetaItem label="Status">
-                    {destination.enabled ? "Enabled" : "Disabled"}
+                  <MetaItem
+                    label={t(
+                      "publish_destinations.editor.meta.status",
+                      "Status",
+                    )}
+                  >
+                    {destination.enabled
+                      ? t("publish_destinations.editor.meta.enabled", "Enabled")
+                      : t(
+                          "publish_destinations.editor.meta.disabled",
+                          "Disabled",
+                        )}
                   </MetaItem>
-                  <MetaItem label="Bindings">
+                  <MetaItem
+                    label={t(
+                      "publish_destinations.editor.meta.bindings",
+                      "Bindings",
+                    )}
+                  >
                     {formatPublishDestinationBindingCount(
+                      t,
                       bindingTargetNames.length,
                     )}
                   </MetaItem>
-                  <MetaItem label="Targets">
-                    {formatPublishDestinationBindingPreview(bindingTargetNames)}
+                  <MetaItem
+                    label={t(
+                      "publish_destinations.editor.meta.targets",
+                      "Targets",
+                    )}
+                  >
+                    {formatPublishDestinationBindingPreview(
+                      t,
+                      bindingTargetNames,
+                    )}
                   </MetaItem>
                   <MetaItem
-                    label={destination.kind === "itch" ? "Credential" : "Mode"}
+                    label={
+                      destination.kind === "itch"
+                        ? t(
+                            "publish_destinations.editor.meta.credential",
+                            "Credential",
+                          )
+                        : t("publish_destinations.editor.meta.mode", "Mode")
+                    }
                   >
-                    {formatPublishDestinationOperationalSummary(destination)}
+                    {formatPublishDestinationOperationalSummary(t, destination)}
                   </MetaItem>
                 </MetaRow>
               }
-              title={formatPublishDestinationTitle(destination)}
+              title={formatPublishDestinationTitle(t, destination)}
               tone="inset"
             >
               {destinationErrorPreview ? (
@@ -573,6 +639,7 @@ export function PublishDestinationsEditor({
               ) : (
                 <p className="project-detail-target-card__copy project-detail-target-card__copy--muted">
                   {buildPublishDestinationQuickViewCopy(
+                    t,
                     destination,
                     bindingTargetNames,
                   )}
@@ -595,7 +662,11 @@ export function PublishDestinationsEditor({
                     className="wizard-target-card__remove"
                     disabled={disabled}
                     icon="trash"
-                    label={`Remove ${adapter.label} destination`}
+                    label={t(
+                      "publish_destinations.editor.actions.remove_destination_with_kind",
+                      "Remove {{kind}} destination",
+                      { kind: adapter.label },
+                    )}
                     onClick={() =>
                       handleDestinationRemovalRequest(destination.id)
                     }
@@ -610,28 +681,56 @@ export function PublishDestinationsEditor({
 
                 <div className="wizard-target-card__badges">
                   <Badge tone={destination.enabled ? "strong" : "muted"}>
-                    {destination.enabled ? "enabled" : "disabled"}
+                    {destination.enabled
+                      ? t(
+                          "publish_destinations.editor.meta.enabled_lower",
+                          "enabled",
+                        )
+                      : t(
+                          "publish_destinations.editor.meta.disabled_lower",
+                          "disabled",
+                        )}
                   </Badge>
                 </div>
 
                 <SummaryStrip className="publish-destination-card__summary-strip">
                   <MetaRow className="wizard-target-card__summary">
-                    <MetaItem label="Bindings">
+                    <MetaItem
+                      label={t(
+                        "publish_destinations.editor.meta.bindings",
+                        "Bindings",
+                      )}
+                    >
                       {formatPublishDestinationBindingCount(
+                        t,
                         bindingTargetNames.length,
                       )}
                     </MetaItem>
-                    <MetaItem label="Targets">
+                    <MetaItem
+                      label={t(
+                        "publish_destinations.editor.meta.targets",
+                        "Targets",
+                      )}
+                    >
                       {formatPublishDestinationBindingPreview(
+                        t,
                         bindingTargetNames,
                       )}
                     </MetaItem>
                     <MetaItem
                       label={
-                        destination.kind === "itch" ? "Credential" : "Mode"
+                        destination.kind === "itch"
+                          ? t(
+                              "publish_destinations.editor.meta.credential",
+                              "Credential",
+                            )
+                          : t("publish_destinations.editor.meta.mode", "Mode")
                       }
                     >
-                      {formatPublishDestinationOperationalSummary(destination)}
+                      {formatPublishDestinationOperationalSummary(
+                        t,
+                        destination,
+                      )}
                     </MetaItem>
                   </MetaRow>
                 </SummaryStrip>
@@ -701,6 +800,7 @@ function PublishDestinationEditorOverlay({
   onResolve,
   onSaveCredential,
 }: PublishDestinationEditorOverlayProps) {
+  const { t } = useLocalization();
   const { openOverlay } = useOverlay();
   const [draft, setDraft] = useState(() =>
     clonePublishDestinationDraft(initialDestination),
@@ -826,12 +926,15 @@ function PublishDestinationEditorOverlay({
       description={
         isCreateMode
           ? undefined
-          : "Update the selected publish destination and return to the wizard when its delivery rules are ready."
+          : t(
+              "publish_destinations.editor.modal.edit_description",
+              "Update the selected publish destination and return to the wizard when its delivery rules are ready.",
+            )
       }
       footer={
         <div className="publish-destination-editor-modal__footer">
           <Button onClick={() => onResolve?.(null)} size="sm" variant="ghost">
-            Cancel
+            {t("publish_destinations.editor.actions.cancel", "Cancel")}
           </Button>
           <Button
             leadingIcon="plus"
@@ -839,15 +942,31 @@ function PublishDestinationEditorOverlay({
             size="sm"
             variant="primary"
           >
-            {isCreateMode ? "Add destination" : "Save destination"}
+            {isCreateMode
+              ? t(
+                  "publish_destinations.editor.actions.add_destination",
+                  "Add destination",
+                )
+              : t(
+                  "publish_destinations.editor.actions.save_destination",
+                  "Save destination",
+                )}
           </Button>
         </div>
       }
       onResolve={onResolve}
       title={
         isCreateMode
-          ? `Add ${formatPublishDestinationKindLabel(draft.kind)} destination`
-          : `Edit ${formatPublishDestinationKindLabel(draft.kind)} destination`
+          ? t(
+              "publish_destinations.editor.modal.add_title",
+              "Add {{kind}} destination",
+              { kind: formatPublishDestinationKindLabel(t, draft.kind) },
+            )
+          : t(
+              "publish_destinations.editor.modal.edit_title",
+              "Edit {{kind}} destination",
+              { kind: formatPublishDestinationKindLabel(t, draft.kind) },
+            )
       }
     >
       {attemptedSave && validationErrors.root ? (
@@ -893,6 +1012,7 @@ function PublishCredentialComposerOverlay({
   onResolve,
   onSubmit,
 }: PublishCredentialComposerOverlayProps) {
+  const { t } = useLocalization();
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -914,16 +1034,25 @@ function PublishCredentialComposerOverlay({
 
   return (
     <FullScreenModal
-      description="Create one reusable Itch.io credential and bind it to the selected publish destination."
+      description={t(
+        "publish_destinations.editor.credentials.composer.description",
+        "Create one reusable Itch.io credential and bind it to the selected publish destination.",
+      )}
       dismissible={!isSaving}
       onResolve={onResolve}
-      title="New publish credential"
+      title={t(
+        "publish_destinations.editor.credentials.composer.title",
+        "New publish credential",
+      )}
     >
       <RepositoryCredentialComposer
         isSaving={isSaving}
         onCancel={() => onResolve?.(null)}
         onSave={handleSave}
-        providerLabel="Itch.io"
+        providerLabel={t(
+          "publish_destinations.editor.credentials.provider",
+          "Itch.io",
+        )}
         renderSurface={false}
         saveError={saveError}
         scope="publish"
@@ -999,20 +1128,27 @@ function FilesystemPublishDestinationAdapter({
   pendingBindingTargetId,
   showDestinationStatus,
 }: PublishDestinationAdapterComponentProps) {
+  const { t } = useLocalization();
   return (
     <>
       {showDestinationStatus ? (
         <SurfacePanel
           bodyClassName="wizard-form-grid"
           className="project-detail-form-grid__span-full"
-          description="Configure the lifecycle state for this filesystem publish destination. Bound target paths stay with each individual binding."
+          description={t(
+            "publish_destinations.editor.filesystem.identity.description",
+            "Configure the lifecycle state for this filesystem publish destination. Bound target paths stay with each individual binding.",
+          )}
           headerSeparated
-          title="Destination identity"
+          title={t(
+            "publish_destinations.editor.filesystem.identity.title",
+            "Destination identity",
+          )}
           tone="inset"
         >
           <SelectField
             data-overlay-autofocus
-            label="Status"
+            label={t("publish_destinations.editor.meta.status", "Status")}
             onChange={(event) =>
               onDestinationChange({
                 enabled: event.currentTarget.value === "enabled",
@@ -1042,19 +1178,34 @@ function FilesystemPublishDestinationAdapter({
           onBindingChange: handleBindingFieldChange,
         }) => (
           <PathPickerField
-            buttonLabel="Pick folder"
-            dialogTitle="Select publish destination folder"
+            buttonLabel={t(
+              "publish_destinations.editor.filesystem.pick_folder",
+              "Pick folder",
+            )}
+            dialogTitle={t(
+              "publish_destinations.editor.filesystem.dialog_title",
+              "Select publish destination folder",
+            )}
             disabled={bindingDisabled}
             error={bindingErrors.filesystemDirectoryPath}
-            hint="The artifact will move into this absolute directory when the binding succeeds."
-            label="Destination directory"
+            hint={t(
+              "publish_destinations.editor.filesystem.directory_hint",
+              "The artifact will move into this absolute directory when the binding succeeds.",
+            )}
+            label={t(
+              "publish_destinations.editor.filesystem.directory_label",
+              "Destination directory",
+            )}
             onPathPicked={(path) =>
               handleBindingFieldChange({
                 filesystemDirectoryPath: path,
               })
             }
             pickerKind="directory"
-            placeholder="D:/Published/Windows"
+            placeholder={t(
+              "publish_destinations.editor.filesystem.directory_placeholder",
+              "D:/Published/Windows",
+            )}
             value={binding.filesystemDirectoryPath}
           />
         )}
@@ -1079,6 +1230,7 @@ function ItchPublishDestinationAdapter({
   pendingBindingTargetId,
   showDestinationStatus,
 }: PublishDestinationAdapterComponentProps) {
+  const { t } = useLocalization();
   const publishCredentialOptions = buildPublishCredentialOptions(
     credentials,
     destination.credentialsId,
@@ -1092,17 +1244,27 @@ function ItchPublishDestinationAdapter({
         className="project-detail-form-grid__span-full"
         description={
           showExpandedCopy
-            ? "Define the operator-facing identity and upload settings for this Itch publish destination."
+            ? t(
+                "publish_destinations.editor.itch.identity.description",
+                "Define the operator-facing identity and upload settings for this Itch publish destination.",
+              )
             : undefined
         }
         headerSeparated
-        title={showExpandedCopy ? "Destination identity" : "Destination"}
+        title={
+          showExpandedCopy
+            ? t(
+                "publish_destinations.editor.itch.identity.title",
+                "Destination identity",
+              )
+            : t("publish_destinations.editor.itch.title", "Destination")
+        }
         tone="inset"
       >
         {showDestinationStatus ? (
           <SelectField
             data-overlay-autofocus
-            label="Status"
+            label={t("publish_destinations.editor.meta.status", "Status")}
             onChange={(event) =>
               onDestinationChange({
                 enabled: event.currentTarget.value === "enabled",
@@ -1116,7 +1278,10 @@ function ItchPublishDestinationAdapter({
         <TextField
           data-overlay-autofocus={!showDestinationStatus}
           error={destinationErrors.itchAccountName}
-          label="Itch account name"
+          label={t(
+            "publish_destinations.editor.itch.account_name",
+            "Itch account name",
+          )}
           onChange={(event) =>
             onDestinationChange({
               itchAccountName: event.currentTarget.value,
@@ -1128,7 +1293,10 @@ function ItchPublishDestinationAdapter({
 
         <TextField
           error={destinationErrors.itchGameSlug}
-          label="Itch game slug"
+          label={t(
+            "publish_destinations.editor.itch.game_slug",
+            "Itch game slug",
+          )}
           onChange={(event) =>
             onDestinationChange({
               itchGameSlug: event.currentTarget.value,
@@ -1149,23 +1317,36 @@ function ItchPublishDestinationAdapter({
               size="sm"
               variant="ghost"
             >
-              New credential
+              {t(
+                "publish_destinations.editor.credentials.new",
+                "New credential",
+              )}
             </Button>
           ) : null
         }
         className="project-detail-form-grid__span-full"
         description={
           showExpandedCopy
-            ? "Choose the stored publish credential that should back Butler uploads for this destination."
+            ? t(
+                "publish_destinations.editor.credentials.description",
+                "Choose the stored publish credential that should back Butler uploads for this destination.",
+              )
             : undefined
         }
         headerSeparated
-        title={showExpandedCopy ? "Credential state" : "Access"}
+        title={
+          showExpandedCopy
+            ? t(
+                "publish_destinations.editor.credentials.title",
+                "Credential state",
+              )
+            : t("publish_destinations.editor.credentials.access", "Access")
+        }
         tone="inset"
       >
         <SelectField
           error={destinationErrors.credentialsId}
-          label="Credential"
+          label={t("publish_destinations.editor.meta.credential", "Credential")}
           onChange={(event) =>
             onDestinationChange({
               credentialsId: event.currentTarget.value
@@ -1182,7 +1363,10 @@ function ItchPublishDestinationAdapter({
         buildTargets={buildTargets}
         description={
           showExpandedCopy
-            ? "Bind build targets to this destination and configure the per-target delivery fields each binding requires."
+            ? t(
+                "publish_destinations.editor.bindings.description",
+                "Bind build targets to this destination and configure the per-target delivery fields each binding requires.",
+              )
             : undefined
         }
         destination={destination}
@@ -1203,10 +1387,16 @@ function ItchPublishDestinationAdapter({
               error={bindingErrors.itchChannel}
               hint={
                 showExpandedCopy
-                  ? "Use the Itch channel that should receive this build target artifact."
+                  ? t(
+                      "publish_destinations.editor.itch.channel_hint",
+                      "Use the Itch channel that should receive this build target artifact.",
+                    )
                   : undefined
               }
-              label="Itch channel"
+              label={t(
+                "publish_destinations.editor.itch.channel",
+                "Itch channel",
+              )}
               onChange={(event) =>
                 handleBindingFieldChange({
                   itchChannel: event.currentTarget.value,
@@ -1218,10 +1408,16 @@ function ItchPublishDestinationAdapter({
             <TextField
               hint={
                 showExpandedCopy
-                  ? "Optional template. Leave empty to use the git tag as the userversion."
+                  ? t(
+                      "publish_destinations.editor.itch.userversion_hint",
+                      "Optional template. Leave empty to use the git tag as the userversion.",
+                    )
                   : undefined
               }
-              label="Itch userversion template"
+              label={t(
+                "publish_destinations.editor.itch.userversion_template",
+                "Itch userversion template",
+              )}
               onChange={(event) =>
                 handleBindingFieldChange({
                   itchUserversionTemplate: event.currentTarget.value,
@@ -1254,6 +1450,7 @@ function PublishDestinationBindingsSection({
   showBindingStatus = true,
   title = "Target bindings",
 }: PublishDestinationBindingsSectionProps) {
+  const { t } = useLocalization();
   const { openOverlay } = useOverlay();
   const availableBindingTargets = buildTargets.filter(
     (target) =>
@@ -1274,13 +1471,23 @@ function PublishDestinationBindingsSection({
     }
 
     const selectedTargetId = await openOverlay<string>(SelectListFullScreen, {
-      description:
+      description: t(
+        "publish_destinations.editor.bindings.selector.description",
         "Search the unbound build targets and select one result to bind to this publish destination.",
-      emptyStateCopy:
+      ),
+      emptyStateCopy: t(
+        "publish_destinations.editor.bindings.selector.empty_copy",
         "Every currently available build target is already bound to this destination.",
-      emptyStateTitle: "No unbound build targets are available.",
-      items: buildBindingTargetItems(availableBindingTargets),
-      title: "Select build target",
+      ),
+      emptyStateTitle: t(
+        "publish_destinations.editor.bindings.selector.empty_title",
+        "No unbound build targets are available.",
+      ),
+      items: buildBindingTargetItems(t, availableBindingTargets),
+      title: t(
+        "publish_destinations.editor.bindings.selector.title",
+        "Select build target",
+      ),
     });
 
     if (selectedTargetId) {
@@ -1306,9 +1513,14 @@ function PublishDestinationBindingsSection({
                 className="publish-destination-bindings-toolbar__empty-state"
                 role="status"
               >
-                <span className="ui-field__label">Target</span>
+                <span className="ui-field__label">
+                  {t("publish_destinations.editor.meta.target", "Target")}
+                </span>
                 <div className="publish-destination-bindings-toolbar__empty-value">
-                  No unbound build targets available.
+                  {t(
+                    "publish_destinations.editor.bindings.none_available",
+                    "No unbound build targets available.",
+                  )}
                 </div>
               </div>
             ) : shouldUseBindingSelectorOverlay ? (
@@ -1324,15 +1536,22 @@ function PublishDestinationBindingsSection({
                 variant="ghost"
               >
                 {pendingBindingTarget
-                  ? `Target: ${pendingBindingTarget.name}`
-                  : "Select target"}
+                  ? t(
+                      "publish_destinations.editor.bindings.selector.pending_target",
+                      "Target: {{name}}",
+                      { name: pendingBindingTarget.name },
+                    )
+                  : t(
+                      "publish_destinations.editor.bindings.selector.select",
+                      "Select target",
+                    )}
               </Button>
             ) : (
               <SelectField
                 className="publish-destination-bindings-toolbar__selector"
                 data-overlay-autofocus={autoFocusTargetSelector}
                 disabled={disabled}
-                label="Target"
+                label={t("publish_destinations.editor.meta.target", "Target")}
                 onChange={(event) =>
                   onPendingBindingTargetChange(event.currentTarget.value)
                 }
@@ -1349,7 +1568,10 @@ function PublishDestinationBindingsSection({
                 size="sm"
                 variant="secondary"
               >
-                Add target
+                {t(
+                  "publish_destinations.editor.bindings.add_target",
+                  "Add target",
+                )}
               </Button>
             ) : null}
           </div>
@@ -1363,7 +1585,12 @@ function PublishDestinationBindingsSection({
       <div className="project-detail-form-grid__span-full">
         {destination.bindings.length === 0 ? (
           <div className="feed-state">
-            <p className="feed-state__title">No bound build targets.</p>
+            <p className="feed-state__title">
+              {t(
+                "publish_destinations.editor.bindings.none_bound",
+                "No bound build targets.",
+              )}
+            </p>
           </div>
         ) : (
           <div className="project-detail-status-grid">
@@ -1388,9 +1615,11 @@ function PublishDestinationBindingsSection({
                       className="publish-destination-binding-card__remove"
                       disabled={disabled}
                       icon="trash"
-                      label={`Remove binding for ${
-                        buildTarget?.name || binding.buildTargetName
-                      }`}
+                      label={t(
+                        "publish_destinations.editor.bindings.remove_binding",
+                        "Remove binding for {{name}}",
+                        { name: buildTarget?.name || binding.buildTargetName },
+                      )}
                       onClick={() => onRemoveBinding(binding.id)}
                       size="sm"
                       variant="ghost"
@@ -1400,7 +1629,10 @@ function PublishDestinationBindingsSection({
                   <div className="wizard-form-grid">
                     {showBindingStatus ? (
                       <SelectField
-                        label="Status"
+                        label={t(
+                          "publish_destinations.editor.meta.status",
+                          "Status",
+                        )}
                         onChange={(event) =>
                           onBindingChange(binding.id, {
                             enabled: event.currentTarget.value === "enabled",
@@ -1782,15 +2014,27 @@ function resolvePendingBindingTargetId(
 }
 
 function buildBindingTargetOptions(
-  buildTargets: ProjectBuildTargetReference[],
+  tOrBuildTargets: Translate | ProjectBuildTargetReference[],
+  maybeBuildTargets?: ProjectBuildTargetReference[],
 ): SelectOption[] {
+  const buildTargets = Array.isArray(tOrBuildTargets)
+    ? tOrBuildTargets
+    : (maybeBuildTargets ?? []);
+  const translate = Array.isArray(tOrBuildTargets) ? null : tOrBuildTargets;
+
   return [
     {
       disabled: buildTargets.length === 0,
       label:
         buildTargets.length === 0
-          ? "No unbound build targets available"
-          : "Select a build target",
+          ? (translate?.(
+              "publish_destinations.editor.bindings.selector.none_available",
+              "No unbound build targets available",
+            ) ?? "No unbound build targets available")
+          : (translate?.(
+              "publish_destinations.editor.bindings.selector.select_build_target",
+              "Select a build target",
+            ) ?? "Select a build target"),
       value: "",
     },
     ...buildTargets.map((target) => ({
@@ -1801,28 +2045,57 @@ function buildBindingTargetOptions(
 }
 
 function buildBindingTargetItems(
-  buildTargets: ProjectBuildTargetReference[],
+  tOrBuildTargets: Translate | ProjectBuildTargetReference[],
+  maybeBuildTargets?: ProjectBuildTargetReference[],
 ): SelectListItem[] {
+  const buildTargets = Array.isArray(tOrBuildTargets)
+    ? tOrBuildTargets
+    : (maybeBuildTargets ?? []);
+  const translate = Array.isArray(tOrBuildTargets) ? null : tOrBuildTargets;
+
   return buildTargets.map((target) => ({
     id: target.id,
     label: target.name,
     subtitle: target.buildTargetId
-      ? `Build target id ${target.buildTargetId}`
-      : "Draft-only build target",
+      ? (translate?.(
+          "publish_destinations.editor.bindings.target_id",
+          "Build target id {{id}}",
+          { id: target.buildTargetId },
+        ) ?? `Build target id ${target.buildTargetId}`)
+      : (translate?.(
+          "publish_destinations.editor.bindings.draft_only",
+          "Draft-only build target",
+        ) ?? "Draft-only build target"),
   }));
 }
 
 function buildPublishCredentialOptions(
-  credentials: SecretCredentialSetting[],
-  selectedCredentialId: number | null,
+  tOrCredentials: Translate | SecretCredentialSetting[],
+  maybeCredentialsOrSelected: SecretCredentialSetting[] | number | null,
+  maybeSelectedCredentialId?: number | null,
 ): SelectOption[] {
+  const credentials = Array.isArray(tOrCredentials)
+    ? tOrCredentials
+    : ((maybeCredentialsOrSelected as SecretCredentialSetting[] | undefined) ??
+      []);
+  const selectedCredentialId = Array.isArray(tOrCredentials)
+    ? (maybeCredentialsOrSelected as number | null)
+    : (maybeSelectedCredentialId ?? null);
+  const translate = Array.isArray(tOrCredentials) ? null : tOrCredentials;
+
   const selectableCredentials = credentials.filter(isItchCredentialSelectable);
   const options: SelectOption[] = [
     {
       label:
         selectableCredentials.length === 0
-          ? "No stored Itch credentials available"
-          : "No Itch credential selected",
+          ? (translate?.(
+              "publish_destinations.editor.credentials.none_available",
+              "No stored Itch credentials available",
+            ) ?? "No stored Itch credentials available")
+          : (translate?.(
+              "publish_destinations.editor.credentials.none_selected",
+              "No Itch credential selected",
+            ) ?? "No Itch credential selected"),
       value: "",
     },
     ...selectableCredentials.map((credential) => ({
@@ -1844,6 +2117,11 @@ function buildPublishCredentialOptions(
     options.push({
       label:
         selectedCredential?.name ||
+        translate?.(
+          "publish_destinations.editor.credentials.current",
+          "Current credential #{{id}}",
+          { id: selectedCredentialId },
+        ) ||
         `Current credential #${selectedCredentialId}`,
       value: selectedCredentialId.toString(),
     });
@@ -1925,53 +2203,160 @@ function createDraftId(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function formatPublishDestinationKindLabel(kind: PublishDestinationKind) {
-  return kind === "filesystem" ? "Folder" : "Itch";
+function formatPublishDestinationKindLabel(
+  tOrKind: Translate | PublishDestinationKind,
+  maybeKind?: PublishDestinationKind,
+) {
+  const kind =
+    typeof tOrKind === "string" ? tOrKind : (maybeKind ?? "filesystem");
+  const translate = typeof tOrKind === "string" ? null : tOrKind;
+
+  return kind === "filesystem"
+    ? (translate?.("publish_destinations.editor.kind.folder", "Folder") ??
+        "Folder")
+    : (translate?.("publish_destinations.editor.kind.itch", "Itch") ?? "Itch");
 }
 
-function formatPublishDestinationTitle(destination: PublishDestinationDraft) {
+function formatPublishDestinationTitle(
+  tOrDestination: Translate | PublishDestinationDraft,
+  maybeDestination?: PublishDestinationDraft,
+) {
+  const destination =
+    typeof tOrDestination === "object" ? tOrDestination : maybeDestination;
+
+  if (!destination) {
+    return "";
+  }
+
   return derivePublishDestinationName(destination.kind);
 }
 
-function formatPublishDestinationBindingCount(count: number) {
-  return count === 1 ? "1 target" : `${count} targets`;
+function formatPublishDestinationBindingCount(
+  tOrCount: Translate | number,
+  maybeCount?: number,
+) {
+  const count = typeof tOrCount === "number" ? tOrCount : (maybeCount ?? 0);
+  const translate = typeof tOrCount === "number" ? null : tOrCount;
+
+  return count === 1
+    ? (translate?.(
+        "publish_destinations.editor.bindings.one_target",
+        "1 target",
+      ) ?? "1 target")
+    : (translate?.(
+        "publish_destinations.editor.bindings.many_targets",
+        "{{count}} targets",
+        { count },
+      ) ?? `${count} targets`);
 }
 
-function formatPublishDestinationBindingPreview(bindingTargetNames: string[]) {
+function formatPublishDestinationBindingPreview(
+  tOrNames: Translate | string[],
+  maybeBindingTargetNames?: string[],
+) {
+  const bindingTargetNames = Array.isArray(tOrNames)
+    ? tOrNames
+    : (maybeBindingTargetNames ?? []);
+  const translate = Array.isArray(tOrNames) ? null : tOrNames;
+
   if (bindingTargetNames.length === 0) {
-    return "No bound targets";
+    return (
+      translate?.(
+        "publish_destinations.editor.bindings.none_bound",
+        "No bound targets",
+      ) ?? "No bound targets"
+    );
   }
 
   if (bindingTargetNames.length <= 2) {
     return bindingTargetNames.join(", ");
   }
 
-  return `${bindingTargetNames.slice(0, 2).join(", ")} +${bindingTargetNames.length - 2} more`;
+  return (
+    translate?.(
+      "publish_destinations.editor.bindings.more_targets",
+      "{{preview}} +{{count}} more",
+      {
+        count: bindingTargetNames.length - 2,
+        preview: bindingTargetNames.slice(0, 2).join(", "),
+      },
+    ) ??
+    `${bindingTargetNames.slice(0, 2).join(", ")} +${bindingTargetNames.length - 2} more`
+  );
 }
 
 function formatPublishDestinationOperationalSummary(
-  destination: PublishDestinationDraft,
+  tOrDestination: Translate | PublishDestinationDraft,
+  maybeDestination?: PublishDestinationDraft,
 ) {
-  if (destination.kind === "filesystem") {
-    return "Move artifacts";
+  const destination =
+    typeof tOrDestination === "object" ? tOrDestination : maybeDestination;
+  const translate = typeof tOrDestination === "object" ? null : tOrDestination;
+
+  if (!destination) {
+    return "";
   }
 
-  return destination.credentialsId === null ? "Missing" : "Configured";
-}
-
-function buildPublishDestinationQuickViewCopy(
-  destination: PublishDestinationDraft,
-  bindingTargetNames: string[],
-) {
   if (destination.kind === "filesystem") {
-    return bindingTargetNames.length === 0
-      ? "No build targets are currently bound to this folder destination."
-      : "Artifacts will move into the configured folder for each bound build target.";
+    return (
+      translate?.(
+        "publish_destinations.editor.summary.move_artifacts",
+        "Move artifacts",
+      ) ?? "Move artifacts"
+    );
   }
 
   return destination.credentialsId === null
-    ? "Select a publish credential before this Itch destination can upload bound targets."
-    : "Bound targets will upload to Itch with the selected credential and per-target channels.";
+    ? (translate?.("publish_destinations.editor.summary.missing", "Missing") ??
+        "Missing")
+    : (translate?.(
+        "publish_destinations.editor.summary.configured",
+        "Configured",
+      ) ?? "Configured");
+}
+
+function buildPublishDestinationQuickViewCopy(
+  tOrDestination: Translate | PublishDestinationDraft,
+  maybeDestinationOrBindingTargets: PublishDestinationDraft | string[],
+  maybeBindingTargetNames?: string[],
+) {
+  const destination =
+    typeof tOrDestination === "object"
+      ? tOrDestination
+      : (maybeDestinationOrBindingTargets as PublishDestinationDraft);
+  const bindingTargetNames = Array.isArray(maybeDestinationOrBindingTargets)
+    ? maybeDestinationOrBindingTargets
+    : (maybeBindingTargetNames ?? []);
+  const translate = typeof tOrDestination === "object" ? null : tOrDestination;
+
+  if (!destination) {
+    return "";
+  }
+
+  if (destination.kind === "filesystem") {
+    return bindingTargetNames.length === 0
+      ? (translate?.(
+          "publish_destinations.editor.quick_view.filesystem.empty",
+          "No build targets are currently bound to this folder destination.",
+        ) ?? "No build targets are currently bound to this folder destination.")
+      : (translate?.(
+          "publish_destinations.editor.quick_view.filesystem.bound",
+          "Artifacts will move into the configured folder for each bound build target.",
+        ) ??
+          "Artifacts will move into the configured folder for each bound build target.");
+  }
+
+  return destination.credentialsId === null
+    ? (translate?.(
+        "publish_destinations.editor.quick_view.itch.missing",
+        "Select a publish credential before this Itch destination can upload bound targets.",
+      ) ??
+        "Select a publish credential before this Itch destination can upload bound targets.")
+    : (translate?.(
+        "publish_destinations.editor.quick_view.itch.configured",
+        "Bound targets will upload to Itch with the selected credential and per-target channels.",
+      ) ??
+        "Bound targets will upload to Itch with the selected credential and per-target channels.");
 }
 
 function formatPublishDestinationErrorPreview(

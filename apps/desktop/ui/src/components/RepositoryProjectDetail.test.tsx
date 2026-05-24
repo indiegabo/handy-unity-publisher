@@ -12,12 +12,14 @@ import { RepositoryProjectDetail } from "./RepositoryProjectDetail";
 
 const {
   connectRepositoryAuthMock,
+  dispatchOnDemandReleaseProcessMock,
   detectRepositoryProviderMock,
   disconnectRepositoryAuthMock,
   loadAuthProvidersMock,
   loadRepositoryProjectDetailMock,
   loadSecretSettingsMock,
   loginWithGithubAuthMock,
+  pickHostPathMock,
   removeRepositoryProjectMock,
   reconnectRepositoryAuthMock,
   saveSecretCredentialMock,
@@ -25,12 +27,14 @@ const {
   validateUnityExecutablePathMock,
 } = vi.hoisted(() => ({
   connectRepositoryAuthMock: vi.fn(),
+  dispatchOnDemandReleaseProcessMock: vi.fn(),
   detectRepositoryProviderMock: vi.fn(),
   disconnectRepositoryAuthMock: vi.fn(),
   loadAuthProvidersMock: vi.fn(),
   loadRepositoryProjectDetailMock: vi.fn(),
   loadSecretSettingsMock: vi.fn(),
   loginWithGithubAuthMock: vi.fn(),
+  pickHostPathMock: vi.fn(),
   removeRepositoryProjectMock: vi.fn(),
   reconnectRepositoryAuthMock: vi.fn(),
   saveSecretCredentialMock: vi.fn(),
@@ -40,10 +44,12 @@ const {
 
 vi.mock("../services/projects", () => ({
   connectRepositoryAuth: connectRepositoryAuthMock,
+  dispatchOnDemandReleaseProcess: dispatchOnDemandReleaseProcessMock,
   detectRepositoryProvider: detectRepositoryProviderMock,
   disconnectRepositoryAuth: disconnectRepositoryAuthMock,
   loadRepositoryProjectDetail: loadRepositoryProjectDetailMock,
   loadSecretSettings: loadSecretSettingsMock,
+  pickHostPath: pickHostPathMock,
   removeRepositoryProject: removeRepositoryProjectMock,
   reconnectRepositoryAuth: reconnectRepositoryAuthMock,
   saveSecretCredential: saveSecretCredentialMock,
@@ -63,12 +69,19 @@ afterEach(() => {
 
 beforeEach(() => {
   connectRepositoryAuthMock.mockResolvedValue(undefined);
+  dispatchOnDemandReleaseProcessMock.mockResolvedValue({
+    git_tag: "v1.2.3",
+    id: 77,
+    repository_id: 1,
+    status: "queued",
+  });
   detectRepositoryProviderMock.mockResolvedValue(buildRepositoryProvider());
   disconnectRepositoryAuthMock.mockResolvedValue(undefined);
   loadAuthProvidersMock.mockResolvedValue([buildGithubAuthProvider()]);
   loadRepositoryProjectDetailMock.mockResolvedValue(buildRepositoryDetail());
   loadSecretSettingsMock.mockResolvedValue(buildSecretSettings());
   loginWithGithubAuthMock.mockResolvedValue(buildGithubAuthProvider());
+  pickHostPathMock.mockResolvedValue(null);
   removeRepositoryProjectMock.mockResolvedValue(buildProjectRemovalReport());
   reconnectRepositoryAuthMock.mockResolvedValue(undefined);
   saveSecretCredentialMock.mockResolvedValue(303);
@@ -222,6 +235,119 @@ describe("RepositoryProjectDetail", () => {
     expect(screen.getByText("Default branch")).toBeInTheDocument();
     expect(screen.getByText("Polling interval")).toBeInTheDocument();
     expect(screen.getByText("Repository access")).toBeInTheDocument();
+  });
+
+  it("shows local workspace configuration in the source tab", async () => {
+    loadRepositoryProjectDetailMock.mockResolvedValue(
+      buildRepositoryDetail({
+        auth_binding_status: "not_required",
+        auth_requirement_status: "not_required",
+        auth_status_message: "Local workspace projects do not need auth.",
+        local_path: "C:/projects/revolutions-local",
+        repo_url: "C:/projects/revolutions-local",
+        source_mode: "local_workspace",
+      }),
+    );
+
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Source" }));
+
+    const sourcePanel = await screen.findByRole("tabpanel", {
+      name: "Source",
+    });
+
+    expect(
+      within(sourcePanel).getAllByText("Local workspace path"),
+    ).toHaveLength(2);
+    expect(
+      within(sourcePanel).getByDisplayValue("C:/projects/revolutions-local"),
+    ).toBeInTheDocument();
+    expect(
+      within(sourcePanel).queryByLabelText("Repository URL"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(sourcePanel).queryByText("Repository access"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(sourcePanel).getByText("Source Behavior"),
+    ).toBeInTheDocument();
+  });
+
+  it("queues a local workspace release from runtime status", async () => {
+    loadRepositoryProjectDetailMock.mockReset();
+    loadRepositoryProjectDetailMock
+      .mockResolvedValueOnce(
+        buildRepositoryDetail({
+          auth_binding_status: "not_required",
+          auth_requirement_status: "not_required",
+          auth_status_message: "Local workspace projects do not need auth.",
+          local_path: "C:/projects/revolutions-local",
+          pending_release_count: 0,
+          release_queue: [],
+          repo_url: "C:/projects/revolutions-local",
+          source_mode: "local_workspace",
+        }),
+      )
+      .mockResolvedValueOnce(
+        buildRepositoryDetail({
+          auth_binding_status: "not_required",
+          auth_requirement_status: "not_required",
+          auth_status_message: "Local workspace projects do not need auth.",
+          local_path: "C:/projects/revolutions-local",
+          pending_release_count: 1,
+          repo_url: "C:/projects/revolutions-local",
+          source_mode: "local_workspace",
+        }),
+      );
+
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Runtime Status" }));
+
+    const runtimePanel = await screen.findByRole("tabpanel", {
+      name: "Runtime Status",
+    });
+
+    fireEvent.change(within(runtimePanel).getByLabelText("Release version"), {
+      target: { value: "v1.2.3" },
+    });
+
+    fireEvent.click(
+      within(runtimePanel).getByRole("button", {
+        name: "Queue Local Release",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(dispatchOnDemandReleaseProcessMock).toHaveBeenCalledWith({
+        local_path: "C:/projects/revolutions-local",
+        release_version: "v1.2.3",
+        repository_id: 1,
+        source_kind: "local_workspace",
+        source_ref: null,
+        unity_executable_path_override: null,
+        version_source: "manual",
+      });
+    });
+
+    await waitFor(() => {
+      expect(loadRepositoryProjectDetailMock).toHaveBeenCalledTimes(2);
+    });
+
+    expect(
+      await within(runtimePanel).findByText("Queued local release v1.2.3."),
+    ).toBeInTheDocument();
   });
 
   it("shows repository path overrides in their own tab", async () => {
@@ -659,6 +785,7 @@ describe("RepositoryProjectDetail", () => {
       expect(updateRepositoryProjectMock).toHaveBeenCalledWith(
         expect.objectContaining({
           repository_id: 1,
+          source_mode: "managed_repository",
           publish_targets: [
             expect.objectContaining({
               bindings: [
@@ -871,6 +998,7 @@ describe("RepositoryProjectDetail", () => {
         expect.objectContaining({
           repository_id: 1,
           name: "Revolutions Redux",
+          source_mode: "managed_repository",
         }),
       );
     });
@@ -928,6 +1056,82 @@ describe("RepositoryProjectDetail", () => {
 
     expect(screen.getByText("Saved")).toBeInTheDocument();
     expect(updateRepositoryProjectMock).not.toHaveBeenCalled();
+  });
+
+  it("saves local workspace path changes without repository auth mutations", async () => {
+    loadRepositoryProjectDetailMock.mockReset();
+    loadRepositoryProjectDetailMock
+      .mockResolvedValueOnce(
+        buildRepositoryDetail({
+          auth_binding_status: "not_required",
+          auth_requirement_status: "not_required",
+          auth_status_message: "Local workspace projects do not need auth.",
+          local_path: "C:/projects/revolutions-local",
+          repo_url: "C:/projects/revolutions-local",
+          source_mode: "local_workspace",
+        }),
+      )
+      .mockResolvedValueOnce(
+        buildRepositoryDetail({
+          auth_binding_status: "not_required",
+          auth_requirement_status: "not_required",
+          auth_status_message: "Local workspace projects do not need auth.",
+          local_path: "D:/workspaces/revolutions-redux",
+          repo_url: "D:/workspaces/revolutions-redux",
+          source_mode: "local_workspace",
+        }),
+      );
+
+    render(
+      <RepositoryProjectDetail
+        onProjectNameResolved={vi.fn()}
+        repositoryId={1}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Source" }));
+
+    const sourcePanel = await screen.findByRole("tabpanel", {
+      name: "Source",
+    });
+
+    pickHostPathMock.mockResolvedValueOnce("D:/workspaces/revolutions-redux");
+
+    fireEvent.click(
+      within(sourcePanel).getByRole("button", { name: "Choose workspace" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        within(sourcePanel).getByDisplayValue(
+          "D:/workspaces/revolutions-redux",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Save Changes" }),
+      ).toBeEnabled();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() => {
+      expect(updateRepositoryProjectMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          local_path: "D:/workspaces/revolutions-redux",
+          repository_access_assessment: null,
+          repository_id: 1,
+          repository_url: null,
+          source_mode: "local_workspace",
+        }),
+      );
+    });
+
+    expect(connectRepositoryAuthMock).not.toHaveBeenCalled();
+    expect(disconnectRepositoryAuthMock).not.toHaveBeenCalled();
+    expect(reconnectRepositoryAuthMock).not.toHaveBeenCalled();
   });
 
   it("removes the project from the app only and notifies the caller", async () => {
@@ -1113,11 +1317,13 @@ function buildRepositoryDetail(
         total_publish_runs: 0,
       },
     ],
+    local_path: null,
     repo_url: "https://github.com/indiegabo/revolutions.git",
     repository_id: 1,
     repository_name: "Revolutions",
     running_build_runs: 0,
     running_publish_runs: 0,
+    source_mode: "managed_repository",
     source_instance_url: "https://github.com",
     source_provider_id: "github",
     visibility_status: "private",

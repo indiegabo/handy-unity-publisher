@@ -1,4 +1,5 @@
 import { Button } from "./Button";
+import { useLocalization } from "../LocalizationProvider";
 import { Badge, MetaItem, MetaRow, SurfacePanel } from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
 
@@ -41,19 +42,34 @@ export function RetainedLogsPanel({
   pendingLogPreviewEntryPath,
   pendingOpenPath,
 }: RetainedLogsPanelProps) {
+  const { t } = useLocalization();
+
   return (
     <SurfacePanel
       bodyClassName="process-detail-panel__body"
-      description="Archived execution log entries stored under retained/execution-logs.zip for this completed process."
+      description={t(
+        "process_detail.retained_logs.description",
+        "Archived execution log entries stored under retained/execution-logs.zip for this completed process.",
+      )}
       summary={
         <MetaRow className="process-detail-panel__meta-row">
-          <MetaItem label="Archive path">
-            {logsArchivePath || "not recorded"}
+          <MetaItem
+            label={t(
+              "process_detail.retained_logs.summary.archive_path",
+              "Archive path",
+            )}
+          >
+            {logsArchivePath ||
+              t("process_detail.meta.not_recorded", "not recorded")}
           </MetaItem>
-          <MetaItem label="Entries">{String(entries.length)}</MetaItem>
+          <MetaItem
+            label={t("process_detail.retained_logs.summary.entries", "Entries")}
+          >
+            {String(entries.length)}
+          </MetaItem>
         </MetaRow>
       }
-      title="Retained Logs"
+      title={t("process_detail.retained_logs.title", "Retained Logs")}
       actions={
         logsArchivePath ? (
           <Button
@@ -63,24 +79,34 @@ export function RetainedLogsPanel({
             size="sm"
             variant="ghost"
           >
-            Open log archive
+            {t(
+              "process_detail.retained_logs.actions.open_archive",
+              "Open log archive",
+            )}
           </Button>
         ) : null
       }
     >
       {deletedRetention ? (
         <p className="process-detail-report__copy">
-          The retained log archive for this completed process has been removed
-          from disk.
+          {t(
+            "process_detail.retained_logs.deleted_copy",
+            "The retained log archive for this completed process has been removed from disk.",
+          )}
         </p>
       ) : !logsArchiveExists ? (
         <p className="process-detail-report__copy">
-          No retained log archive was found for this completed process.
+          {t(
+            "process_detail.retained_logs.empty_missing",
+            "No retained log archive was found for this completed process.",
+          )}
         </p>
       ) : entries.length === 0 ? (
         <p className="process-detail-report__copy">
-          The retained log archive exists, but it does not contain any readable
-          log entries.
+          {t(
+            "process_detail.retained_logs.empty_no_entries",
+            "The retained log archive exists, but it does not contain any readable log entries.",
+          )}
         </p>
       ) : (
         <div className="process-detail-log-list">
@@ -91,8 +117,16 @@ export function RetainedLogsPanel({
               <VerticalAccordion
                 bodyInset
                 className="process-detail-log-card"
-                collapsedToggleLabel={`Expand retained log ${entry.entry_name}`}
-                expandedToggleLabel={`Collapse retained log ${entry.entry_name}`}
+                collapsedToggleLabel={t(
+                  "process_detail.retained_logs.accordion.expand",
+                  "Expand retained log {{entryName}}",
+                  { entryName: entry.entry_name },
+                )}
+                expandedToggleLabel={t(
+                  "process_detail.retained_logs.accordion.collapse",
+                  "Collapse retained log {{entryName}}",
+                  { entryName: entry.entry_name },
+                )}
                 header={
                   <div className="process-detail-log-card__header">
                     <div className="process-detail-log-card__title-block">
@@ -109,7 +143,13 @@ export function RetainedLogsPanel({
                         {formatByteSize(entry.size_bytes)}
                       </Badge>
                       <Badge tone="muted">
-                        {formatByteSize(entry.compressed_size_bytes)} zipped
+                        {t(
+                          "process_detail.retained_logs.zipped",
+                          "{{size}} zipped",
+                          {
+                            size: formatByteSize(entry.compressed_size_bytes),
+                          },
+                        )}
                       </Badge>
                     </div>
                   </div>
@@ -121,7 +161,11 @@ export function RetainedLogsPanel({
                 <div className="process-detail-log-card__body">
                   <div className="process-detail-toolbar">
                     <Button
-                      aria-label={`Open retained log viewer for ${entry.entry_name}`}
+                      aria-label={t(
+                        "process_detail.retained_logs.actions.open_viewer_named",
+                        "Open retained log viewer for {{entryName}}",
+                        { entryName: entry.entry_name },
+                      )}
                       disabled={
                         deletedRetention ||
                         pendingLogPreviewEntryPath === entry.entry_path
@@ -131,23 +175,49 @@ export function RetainedLogsPanel({
                         onOpenViewer(entry.entry_path, entry.entry_name)
                       }
                       size="sm"
-                      title={`Open retained log viewer for ${entry.entry_name}`}
+                      title={t(
+                        "process_detail.retained_logs.actions.open_viewer_named",
+                        "Open retained log viewer for {{entryName}}",
+                        { entryName: entry.entry_name },
+                      )}
                       variant="ghost"
                     >
                       {pendingLogPreviewEntryPath === entry.entry_path
-                        ? "Loading viewer..."
-                        : "Open viewer"}
+                        ? t(
+                            "process_detail.retained_logs.actions.loading_viewer",
+                            "Loading viewer...",
+                          )
+                        : t(
+                            "process_detail.retained_logs.actions.open_viewer",
+                            "Open viewer",
+                          )}
                     </Button>
                   </div>
 
                   <MetaRow className="process-detail-panel__meta-row">
-                    <MetaItem label="Archive path">
-                      {logsArchivePath || "not recorded"}
+                    <MetaItem
+                      label={t(
+                        "process_detail.retained_logs.summary.archive_path",
+                        "Archive path",
+                      )}
+                    >
+                      {logsArchivePath ||
+                        t("process_detail.meta.not_recorded", "not recorded")}
                     </MetaItem>
-                    <MetaItem label="Expanded size">
+                    <MetaItem
+                      label={t(
+                        "process_detail.retained_logs.labels.expanded_size",
+                        "Expanded size",
+                      )}
+                    >
                       {formatByteSize(entry.size_bytes)}
                     </MetaItem>
-                    <MetaItem label="Compressed size">
+                    <MetaItem
+                      label={t(
+                        "process_detail.retained_logs.labels.compressed_size",
+                        "Compressed size",
+                      )}
+                    >
                       {formatByteSize(entry.compressed_size_bytes)}
                     </MetaItem>
                   </MetaRow>
@@ -159,8 +229,10 @@ export function RetainedLogsPanel({
                   ) : null}
 
                   <p className="process-detail-report__copy">
-                    Open the retained log viewer to inspect this entry without
-                    expanding the full log body inline.
+                    {t(
+                      "process_detail.retained_logs.viewer_copy",
+                      "Open the retained log viewer to inspect this entry without expanding the full log body inline.",
+                    )}
                   </p>
                 </div>
               </VerticalAccordion>

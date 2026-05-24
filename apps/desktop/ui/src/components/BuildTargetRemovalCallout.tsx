@@ -1,4 +1,5 @@
 import { Button } from "./Button";
+import { useLocalization } from "../LocalizationProvider";
 
 type BuildTargetRemovalCalloutProps = {
   bindingImpact: string[];
@@ -17,13 +18,20 @@ export function BuildTargetRemovalCallout({
   onConfirm,
   targetName,
 }: BuildTargetRemovalCalloutProps) {
+  const { t } = useLocalization();
+
   return (
     <div className="wizard-callout wizard-callout--compact wizard-callout--auth">
       <div className="wizard-callout__header">
         <div>
-          <p className="wizard-callout__title">Confirm build target removal</p>
+          <p className="wizard-callout__title">
+            {t(
+              "project_shared.build_target_removal.title",
+              "Confirm build target removal",
+            )}
+          </p>
           <p className="wizard-callout__copy">
-            {buildRemovalImpactCopy(targetName, bindingImpact)}
+            {buildRemovalImpactCopy(t, targetName, bindingImpact)}
           </p>
         </div>
       </div>
@@ -36,7 +44,10 @@ export function BuildTargetRemovalCallout({
           size="sm"
           variant="primary"
         >
-          Remove build target and bindings
+          {t(
+            "project_shared.build_target_removal.actions.confirm",
+            "Remove build target and bindings",
+          )}
         </Button>
         <Button
           disabled={cancelDisabled}
@@ -44,19 +55,39 @@ export function BuildTargetRemovalCallout({
           size="sm"
           variant="ghost"
         >
-          Cancel
+          {t("project_shared.build_target_removal.actions.cancel", "Cancel")}
         </Button>
       </div>
     </div>
   );
 }
 
-function buildRemovalImpactCopy(targetName: string, bindingImpact: string[]) {
-  const resolvedTargetName = targetName.trim() || "this build target";
+function buildRemovalImpactCopy(
+  t: ReturnType<typeof useLocalization>["t"],
+  targetName: string,
+  bindingImpact: string[],
+) {
+  const resolvedTargetName =
+    targetName.trim() ||
+    t(
+      "project_shared.build_target_removal.target_fallback",
+      "this build target",
+    );
 
   if (bindingImpact.length === 0) {
-    return `Removing ${resolvedTargetName} also removes its publish bindings.`;
+    return t(
+      "project_shared.build_target_removal.copy.no_bindings",
+      "Removing {{targetName}} also removes its publish bindings.",
+      { targetName: resolvedTargetName },
+    );
   }
 
-  return `Removing ${resolvedTargetName} also removes publish bindings from ${bindingImpact.join(", ")}.`;
+  return t(
+    "project_shared.build_target_removal.copy.with_bindings",
+    "Removing {{targetName}} also removes publish bindings from {{bindingImpact}}.",
+    {
+      bindingImpact: bindingImpact.join(", "),
+      targetName: resolvedTargetName,
+    },
+  );
 }

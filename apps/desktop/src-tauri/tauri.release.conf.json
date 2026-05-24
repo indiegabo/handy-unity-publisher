@@ -8,6 +8,9 @@
         "externalBin": [
             "bin/hgp-runtime",
             "bin/hgp-butler"
+        ],
+        "resources": [
+            "localizations/"
         ]
     }
 }

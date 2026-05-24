@@ -40,6 +40,7 @@ import {
 } from "./Surface";
 import {
   connectRepositoryAuth,
+  dispatchOnDemandReleaseProcess,
   detectRepositoryProvider,
   disconnectRepositoryAuth,
   loadSecretSettings,
@@ -58,6 +59,7 @@ import {
   type RemoveRepositoryProjectStrategy,
   type SaveSecretCredentialInput,
   type SecretCredentialSetting,
+  type OnDemandReleaseVersionSource,
   type UnityExecutableValidation,
   type UpdateRepositoryProjectInput,
 } from "../services/projects";
@@ -66,6 +68,16 @@ import {
   loginWithGithubAuth,
   type AuthProviderStatus,
 } from "../services/auth";
+import {
+  buildProjectSourceDisplay,
+  isLocalWorkspaceSource,
+  isManagedRepositorySource,
+  resolveProjectSourceFieldLabel,
+  resolveProjectSourceLabel,
+  resolveProjectSourceModeSummary,
+  resolveProjectSourceValue,
+  type ProjectSourceMode,
+} from "../projectSourcePresentation";
 
 type RepositoryProjectDetailProps = {
   onProjectNameResolved?: (repositoryName: string) => void;
@@ -83,9 +95,11 @@ type RepositoryProjectBuildTargetDraft = {
 };
 
 type RepositoryProjectDraft = {
+  sourceMode: ProjectSourceMode;
   engineKind: RepositoryEngineKind;
   name: string;
   repositoryUrl: string;
+  localPath: string;
   repositoryVisibility: "public" | "private";
   defaultBranch: string;
   artifactsRootOverride: string;
@@ -107,11 +121,27 @@ type RepositoryProjectValidationErrors = {
   engineKind?: string;
   name?: string;
   repositoryUrl?: string;
+  localPath?: string;
   pollingIntervalSeconds?: string;
   repositoryAccess?: string;
   buildTargetsRoot?: string;
   buildTargets: Record<string, RepositoryProjectBuildTargetValidationErrors>;
   publishDestinations: PublishDestinationValidationErrors;
+};
+
+type LocalReleaseDispatchDraft = {
+  releaseVersion: string;
+  versionSource: OnDemandReleaseVersionSource;
+};
+
+type LocalReleaseDispatchValidationErrors = {
+  releaseVersion?: string;
+};
+
+type ProjectDetailSectionTab = {
+  key: ProjectDetailSectionKey;
+  icon: IconName;
+  label: string;
 };
 
 type RepositoryProjectFieldName = Exclude<
@@ -154,11 +184,17 @@ const PLATFORM_OPTIONS = [
   { label: "Android", value: "Android" },
 ] as const;
 const DEFAULT_PROJECT_DETAIL_SECTION: ProjectDetailSectionKey = "project";
-const PROJECT_DETAIL_SECTION_TABS: Array<{
-  key: ProjectDetailSectionKey;
-  icon: IconName;
-  label: string;
-}> = [
+const LOCAL_RELEASE_VERSION_SOURCE_OPTIONS: SelectOption[] = [
+  {
+    label: "Manual version label",
+    value: "manual",
+  },
+  {
+    label: "Detect from project settings",
+    value: "project_settings",
+  },
+];
+const PROJECT_DETAIL_SECTION_TABS: ProjectDetailSectionTab[] = [
   {
     key: "project",
     icon: "settings",
@@ -256,6 +292,17 @@ export function RepositoryProjectDetail({
   const [projectRemovalError, setProjectRemovalError] = useState<string | null>(
     null,
   );
+  const [localReleaseDraft, setLocalReleaseDraft] =
+    useState<LocalReleaseDispatchDraft>(createLocalReleaseDispatchDraft);
+  const [localReleaseValidationErrors, setLocalReleaseValidationErrors] =
+    useState<LocalReleaseDispatchValidationErrors>({});
+  const [localReleaseDispatchError, setLocalReleaseDispatchError] = useState<
+    string | null
+  >(null);
+  const [localReleaseDispatchMessage, setLocalReleaseDispatchMessage] =
+    useState<string | null>(null);
+  const [isDispatchingLocalRelease, setIsDispatchingLocalRelease] =
+    useState(false);
   const [hasLoadedAuthProviders, setHasLoadedAuthProviders] = useState(false);
   const [hasLoadedCredentials, setHasLoadedCredentials] = useState(false);
   const nextBuildTargetIdRef = useRef(1);
@@ -305,6 +352,11 @@ export function RepositoryProjectDetail({
           matchingRepository?.credentials?.credential_id ?? null,
         );
         setRepositoryAccessActionMessage(null);
+        setLocalReleaseDraft(createLocalReleaseDispatchDraft());
+        setLocalReleaseValidationErrors({});
+        setLocalReleaseDispatchError(null);
+        setLocalReleaseDispatchMessage(null);
+        setIsDispatchingLocalRelease(false);
         setError(null);
         setIsLoading(false);
         if (showLoading) {
@@ -333,6 +385,11 @@ export function RepositoryProjectDetail({
       setProjectRemovalError(null);
       setHasLoadedAuthProviders(false);
       setHasLoadedCredentials(false);
+      setLocalReleaseDraft(createLocalReleaseDispatchDraft());
+      setLocalReleaseValidationErrors({});
+      setLocalReleaseDispatchError(null);
+      setLocalReleaseDispatchMessage(null);
+      setIsDispatchingLocalRelease(false);
       setGithubAuthProvider(null);
       setAuthProviderError(null);
       setIsLoadingAuthProviders(false);
@@ -414,7 +471,12 @@ export function RepositoryProjectDetail({
   });
 
   useEffect(() => {
-    if (!sectionOpenState.repository || hasLoadedAuthProviders) {
+    if (
+      !sectionOpenState.repository ||
+      !repository ||
+      hasLoadedAuthProviders ||
+      isLocalWorkspaceSource(repository)
+    ) {
       return;
     }
 
@@ -423,13 +485,19 @@ export function RepositoryProjectDetail({
   }, [
     hasLoadedAuthProviders,
     loadAuthProvidersEffect,
+    repository,
     sectionOpenState.repository,
   ]);
 
   useEffect(() => {
+    const shouldLoadRepositoryCredentials =
+      sectionOpenState.repository &&
+      repository !== null &&
+      isManagedRepositorySource(repository);
+
     if (
       hasLoadedCredentials ||
-      (!sectionOpenState.repository && !sectionOpenState.destinations)
+      (!shouldLoadRepositoryCredentials && !sectionOpenState.destinations)
     ) {
       return;
     }
@@ -480,9 +548,12 @@ export function RepositoryProjectDetail({
       }
     },
   );
-
   useEffect(() => {
-    if (!sectionOpenState.repository) {
+    if (
+      !sectionOpenState.repository ||
+      !draft ||
+      !isManagedRepositorySource(draft)
+    ) {
       if (accessAssessmentTimerRef.current !== undefined) {
         window.clearTimeout(accessAssessmentTimerRef.current);
         accessAssessmentTimerRef.current = undefined;
@@ -987,10 +1058,12 @@ export function RepositoryProjectDetail({
       return;
     }
 
-    const repositoryCredentialIdForSave = resolveRepositoryCredentialIdForSave(
-      repositoryAccessAssessment,
-      repositoryCredentialId,
-    );
+    const repositoryCredentialIdForSave = isManagedRepositorySource(draft)
+      ? resolveRepositoryCredentialIdForSave(
+          repositoryAccessAssessment,
+          repositoryCredentialId,
+        )
+      : null;
 
     const nextValidationErrors = validateRepositoryProjectDraft(
       draft,
@@ -1044,24 +1117,26 @@ export function RepositoryProjectDetail({
         buildRepositoryProjectUpdateInput(
           repository.repository_id,
           draft,
-          repositoryAccessAssessment,
+          isManagedRepositorySource(draft) ? repositoryAccessAssessment : null,
         ),
       );
 
-      const persistedRepositoryCredentialId =
-        repository.credentials?.credential_id ?? null;
-      if (repositoryCredentialIdForSave === null) {
-        await disconnectRepositoryAuth(repository.repository_id);
-      } else if (persistedRepositoryCredentialId === null) {
-        await connectRepositoryAuth(
-          repository.repository_id,
-          repositoryCredentialIdForSave,
-        );
-      } else {
-        await reconnectRepositoryAuth(
-          repository.repository_id,
-          repositoryCredentialIdForSave,
-        );
+      if (isManagedRepositorySource(draft)) {
+        const persistedRepositoryCredentialId =
+          repository.credentials?.credential_id ?? null;
+        if (repositoryCredentialIdForSave === null) {
+          await disconnectRepositoryAuth(repository.repository_id);
+        } else if (persistedRepositoryCredentialId === null) {
+          await connectRepositoryAuth(
+            repository.repository_id,
+            repositoryCredentialIdForSave,
+          );
+        } else {
+          await reconnectRepositoryAuth(
+            repository.repository_id,
+            repositoryCredentialIdForSave,
+          );
+        }
       }
 
       const refreshedRepository = await resolveRepositoryDetail();
@@ -1098,6 +1173,89 @@ export function RepositoryProjectDetail({
     } finally {
       startTransition(() => {
         setIsSaving(false);
+      });
+    }
+  });
+
+  const handleLocalReleaseDraftFieldChange = useEffectEvent(
+    <FieldName extends keyof LocalReleaseDispatchDraft>(
+      fieldName: FieldName,
+      value: LocalReleaseDispatchDraft[FieldName],
+    ) => {
+      startTransition(() => {
+        setLocalReleaseDraft((currentDraft) => ({
+          ...currentDraft,
+          [fieldName]: value,
+        }));
+        setLocalReleaseValidationErrors((currentErrors) => ({
+          ...currentErrors,
+          [fieldName]: undefined,
+        }));
+        setLocalReleaseDispatchError(null);
+        setLocalReleaseDispatchMessage(null);
+      });
+    },
+  );
+
+  const handleDispatchLocalRelease = useEffectEvent(async () => {
+    if (
+      !repository ||
+      !draft ||
+      !isLocalWorkspaceSource(draft) ||
+      isDispatchingLocalRelease ||
+      hasPendingChanges ||
+      isSaving ||
+      isRemovingProject ||
+      isEditingLocked
+    ) {
+      return;
+    }
+
+    const nextValidationErrors =
+      validateLocalReleaseDispatchDraft(localReleaseDraft);
+    if (nextValidationErrors.releaseVersion) {
+      startTransition(() => {
+        setLocalReleaseValidationErrors(nextValidationErrors);
+      });
+      return;
+    }
+
+    setIsDispatchingLocalRelease(true);
+    setLocalReleaseDispatchError(null);
+    setLocalReleaseDispatchMessage(null);
+
+    try {
+      const release = await dispatchOnDemandReleaseProcess({
+        repository_id: repository.repository_id,
+        release_version:
+          localReleaseDraft.versionSource === "manual"
+            ? localReleaseDraft.releaseVersion.trim()
+            : null,
+        version_source: localReleaseDraft.versionSource,
+        source_kind: "local_workspace",
+        source_ref: null,
+        local_path: draft.localPath.trim() || null,
+        unity_executable_path_override: null,
+      });
+
+      await loadRepositoryDetail(false);
+
+      startTransition(() => {
+        setLocalReleaseDraft(createLocalReleaseDispatchDraft());
+        setLocalReleaseValidationErrors({});
+        setLocalReleaseDispatchMessage(
+          `Queued local release ${release.git_tag}.`,
+        );
+      });
+    } catch (dispatchError) {
+      startTransition(() => {
+        setLocalReleaseDispatchError(
+          buildProjectSaveErrorMessage(dispatchError),
+        );
+      });
+    } finally {
+      startTransition(() => {
+        setIsDispatchingLocalRelease(false);
       });
     }
   });
@@ -1232,8 +1390,8 @@ export function RepositoryProjectDetail({
     return (
       <div className="project-detail-shell">
         <FocusPageFrame
-          description="Inspect and edit repository identity, build targets, and runtime-managed paths."
-          eyebrow="Repository Project"
+          description="Inspect and edit project source, build targets, and runtime-managed paths."
+          eyebrow="Project"
           title="Project Detail"
         >
           <div className="feed-state">
@@ -1252,9 +1410,15 @@ export function RepositoryProjectDetail({
     repository && draft
       ? isRepositoryProjectDraftChanged(repository, draft)
       : false;
+  const isManagedSource = isManagedRepositorySource(draft);
+  const projectSourceLabel = resolveProjectSourceLabel(draft);
+  const projectSourceFieldLabel = resolveProjectSourceFieldLabel(draft);
+  const projectSourceValue = resolveProjectSourceValue(draft);
+  const projectSourceDisplay = buildProjectSourceDisplay(draft);
+  const sectionTabs = resolveProjectDetailSectionTabs(draft.sourceMode);
   const desiredRepositoryCredentialId = resolveRepositoryCredentialIdForSave(
-    repositoryAccessAssessment,
-    repositoryCredentialId,
+    isManagedSource ? repositoryAccessAssessment : null,
+    isManagedSource ? repositoryCredentialId : null,
   );
   const repositoryCredentialOptions = buildRepositoryCredentialOptions(
     repositoryCredentials,
@@ -1262,8 +1426,9 @@ export function RepositoryProjectDetail({
     isLoadingRepositoryCredentials,
   );
   const hasRepositoryCredentialChanges = repository
-    ? (repository.credentials?.credential_id ?? null) !==
-      desiredRepositoryCredentialId
+    ? isManagedSource &&
+      (repository.credentials?.credential_id ?? null) !==
+        desiredRepositoryCredentialId
     : false;
   const hasPendingChanges = hasUnsavedChanges || hasRepositoryCredentialChanges;
   const activeTargetCount = draft?.buildTargets.length ?? 0;
@@ -1324,7 +1489,8 @@ export function RepositoryProjectDetail({
   const runningWorkCount =
     repository.running_build_runs + repository.running_publish_runs;
   const isEditingLocked = hasActiveRepositoryProcesses(repository);
-  const isProjectMutationPending = isSaving || isRemovingProject;
+  const isProjectMutationPending =
+    isSaving || isRemovingProject || isDispatchingLocalRelease;
 
   return (
     <div className="project-detail-shell">
@@ -1364,31 +1530,44 @@ export function RepositoryProjectDetail({
             </Button>
           </div>
         }
-        description={repository.repo_url}
-        eyebrow="Repository Project"
+        description={projectSourceDisplay}
+        eyebrow={
+          isManagedSource ? "Repository Project" : "Local Workspace Project"
+        }
         summary={
           <MetaRow>
             <MetaItem label="Draft">
               {hasPendingChanges ? "Unsaved changes" : "Saved"}
             </MetaItem>
             <MetaItem label="Status">{draft?.enabled ?? "enabled"}</MetaItem>
-            <MetaItem label="Cadence">{`${pollingIntervalLabel}s`}</MetaItem>
+            <MetaItem label="Mode">
+              {resolveProjectSourceModeSummary(draft)}
+            </MetaItem>
             <MetaItem label="Targets">
               {formatTargetCount(activeTargetCount)}
             </MetaItem>
-            <MetaItem label="Access">
-              {formatRepositoryAccessSummary(
-                repositoryAccessAssessment,
-                isAssessingRepositoryAccess,
-                repositoryAccessError,
-              )}
-            </MetaItem>
-            <MetaItem label="Connection">
-              {formatRepositoryBindingSummary(
-                repository,
-                desiredRepositoryCredentialId,
-              )}
-            </MetaItem>
+            {isManagedSource ? (
+              <MetaItem label="Cadence">{`${pollingIntervalLabel}s`}</MetaItem>
+            ) : (
+              <MetaItem label="Source">{projectSourceLabel}</MetaItem>
+            )}
+            {isManagedSource ? (
+              <MetaItem label="Access">
+                {formatRepositoryAccessSummary(
+                  repositoryAccessAssessment,
+                  isAssessingRepositoryAccess,
+                  repositoryAccessError,
+                )}
+              </MetaItem>
+            ) : null}
+            {isManagedSource ? (
+              <MetaItem label="Connection">
+                {formatRepositoryBindingSummary(
+                  repository,
+                  desiredRepositoryCredentialId,
+                )}
+              </MetaItem>
+            ) : null}
           </MetaRow>
         }
         title={draft?.name.trim() || repository.repository_name}
@@ -1409,6 +1588,7 @@ export function RepositoryProjectDetail({
             activeSection={activeSection}
             disabled={isEditingLocked}
             onChange={handleSectionTabChange}
+            tabs={sectionTabs}
           />
 
           <fieldset
@@ -1479,240 +1659,311 @@ export function RepositoryProjectDetail({
               </ProjectDetailSectionPanel>
 
               <ProjectDetailSectionPanel
-                description="Configure the remote, branch, polling cadence, visibility, and repository authentication."
-                eyebrow="Repository"
+                description={
+                  isManagedSource
+                    ? "Configure the remote, branch, polling cadence, visibility, and repository authentication."
+                    : "Configure the host-local workspace path that HGP should build directly without a managed checkout."
+                }
+                eyebrow={isManagedSource ? "Repository" : "Source"}
                 open={sectionOpenState.repository}
                 sectionKey="repository"
                 summary={
-                  <MetaRow>
-                    <MetaItem label="Branch">
-                      {formatOptionalBranchLabel(draft?.defaultBranch ?? "")}
-                    </MetaItem>
-                    <MetaItem label="Visibility">
-                      {draft?.repositoryVisibility ?? "public"}
-                    </MetaItem>
-                    <MetaItem label="Access">
-                      {formatRepositoryAccessSummary(
-                        repositoryAccessAssessment,
-                        isAssessingRepositoryAccess,
-                        repositoryAccessError,
-                      )}
-                    </MetaItem>
-                  </MetaRow>
+                  isManagedSource ? (
+                    <MetaRow>
+                      <MetaItem label="Branch">
+                        {formatOptionalBranchLabel(draft?.defaultBranch ?? "")}
+                      </MetaItem>
+                      <MetaItem label="Visibility">
+                        {draft?.repositoryVisibility ?? "public"}
+                      </MetaItem>
+                      <MetaItem label="Access">
+                        {formatRepositoryAccessSummary(
+                          repositoryAccessAssessment,
+                          isAssessingRepositoryAccess,
+                          repositoryAccessError,
+                        )}
+                      </MetaItem>
+                    </MetaRow>
+                  ) : (
+                    <MetaRow>
+                      <MetaItem label="Source">{projectSourceLabel}</MetaItem>
+                      <MetaItem label="Mode">
+                        {resolveProjectSourceModeSummary(draft)}
+                      </MetaItem>
+                      <MetaItem label="Path">
+                        {projectSourceValue ? "Configured" : "Missing"}
+                      </MetaItem>
+                    </MetaRow>
+                  )
                 }
-                title="Repository"
+                title={isManagedSource ? "Repository" : "Local Workspace"}
               >
                 {draft ? (
                   <div className="project-detail-form">
                     <div className="project-detail-form-grid">
-                      <TextField
-                        error={validationErrors.repositoryUrl}
-                        label="Repository URL"
-                        onChange={(event) =>
-                          handleDraftFieldChange(
-                            "repositoryUrl",
-                            event.target.value,
-                          )
-                        }
-                        placeholder="https://example.com/repository.git"
-                        value={draft.repositoryUrl}
-                      />
+                      {isManagedSource ? (
+                        <>
+                          <TextField
+                            error={validationErrors.repositoryUrl}
+                            label="Repository URL"
+                            onChange={(event) =>
+                              handleDraftFieldChange(
+                                "repositoryUrl",
+                                event.target.value,
+                              )
+                            }
+                            placeholder="https://example.com/repository.git"
+                            value={draft.repositoryUrl}
+                          />
 
-                      <TextField
-                        hint="Optional"
-                        label="Default branch"
-                        onChange={(event) =>
-                          handleDraftFieldChange(
-                            "defaultBranch",
-                            event.target.value,
-                          )
-                        }
-                        placeholder="main"
-                        value={draft.defaultBranch}
-                      />
+                          <TextField
+                            hint="Optional"
+                            label="Default branch"
+                            onChange={(event) =>
+                              handleDraftFieldChange(
+                                "defaultBranch",
+                                event.target.value,
+                              )
+                            }
+                            placeholder="main"
+                            value={draft.defaultBranch}
+                          />
 
-                      <TextField
-                        error={validationErrors.pollingIntervalSeconds}
-                        hint="Minimum 5s"
-                        inputMode="numeric"
-                        label="Polling interval"
-                        min={MIN_PROJECT_POLL_INTERVAL_SECONDS}
-                        onChange={(event) =>
-                          handleDraftFieldChange(
-                            "pollingIntervalSeconds",
-                            event.target.value,
-                          )
-                        }
-                        placeholder="300"
-                        type="number"
-                        value={draft.pollingIntervalSeconds}
-                      />
+                          <TextField
+                            error={validationErrors.pollingIntervalSeconds}
+                            hint="Minimum 5s"
+                            inputMode="numeric"
+                            label="Polling interval"
+                            min={MIN_PROJECT_POLL_INTERVAL_SECONDS}
+                            onChange={(event) =>
+                              handleDraftFieldChange(
+                                "pollingIntervalSeconds",
+                                event.target.value,
+                              )
+                            }
+                            placeholder="300"
+                            type="number"
+                            value={draft.pollingIntervalSeconds}
+                          />
 
-                      <SelectField
-                        hint="Tell HGP whether this remote should be treated as public or private."
-                        label="Repository visibility"
-                        onChange={(event) =>
-                          handleDraftFieldChange(
-                            "repositoryVisibility",
-                            event.target.value,
-                          )
-                        }
-                        options={REPOSITORY_VISIBILITY_OPTIONS}
-                        value={draft.repositoryVisibility}
-                      />
+                          <SelectField
+                            hint="Tell HGP whether this remote should be treated as public or private."
+                            label="Repository visibility"
+                            onChange={(event) =>
+                              handleDraftFieldChange(
+                                "repositoryVisibility",
+                                event.target.value,
+                              )
+                            }
+                            options={REPOSITORY_VISIBILITY_OPTIONS}
+                            value={draft.repositoryVisibility}
+                          />
 
-                      <div className="project-detail-form-grid__span-full">
-                        <div className="wizard-callout wizard-callout--compact wizard-callout--auth wizard-callout--support">
-                          <div className="wizard-callout__header">
-                            <div>
-                              <p className="wizard-callout__title">
-                                Repository access
-                              </p>
-                              <p className="wizard-callout__copy">
-                                {resolveRepositoryAccessCopy(
-                                  draft.repositoryUrl,
-                                  repositoryAccessAssessment,
-                                  isAssessingRepositoryAccess,
-                                  repositoryAccessError,
-                                )}
-                              </p>
-                            </div>
+                          <div className="project-detail-form-grid__span-full">
+                            <div className="wizard-callout wizard-callout--compact wizard-callout--auth wizard-callout--support">
+                              <div className="wizard-callout__header">
+                                <div>
+                                  <p className="wizard-callout__title">
+                                    Repository access
+                                  </p>
+                                  <p className="wizard-callout__copy">
+                                    {resolveRepositoryAccessCopy(
+                                      draft.repositoryUrl,
+                                      repositoryAccessAssessment,
+                                      isAssessingRepositoryAccess,
+                                      repositoryAccessError,
+                                    )}
+                                  </p>
+                                </div>
 
-                            <div className="wizard-callout__badges">
-                              <Badge
-                                tone={resolveRepositoryAccessBadgeTone(
-                                  repositoryAccessAssessment,
-                                  isAssessingRepositoryAccess,
-                                  repositoryAccessError,
-                                )}
-                              >
-                                {formatRepositoryAccessStatus(
-                                  draft.repositoryUrl,
-                                  repositoryAccessAssessment,
-                                  isAssessingRepositoryAccess,
-                                  repositoryAccessError,
-                                )}
-                              </Badge>
+                                <div className="wizard-callout__badges">
+                                  <Badge
+                                    tone={resolveRepositoryAccessBadgeTone(
+                                      repositoryAccessAssessment,
+                                      isAssessingRepositoryAccess,
+                                      repositoryAccessError,
+                                    )}
+                                  >
+                                    {formatRepositoryAccessStatus(
+                                      draft.repositoryUrl,
+                                      repositoryAccessAssessment,
+                                      isAssessingRepositoryAccess,
+                                      repositoryAccessError,
+                                    )}
+                                  </Badge>
+                                </div>
+                              </div>
+
+                              {draft.repositoryUrl.trim() ||
+                              isAssessingRepositoryAccess ||
+                              repositoryAccessAssessment ||
+                              repositoryAccessError ? (
+                                <SummaryStrip className="wizard-callout__summary-strip">
+                                  <MetaRow className="wizard-callout__meta">
+                                    <MetaItem label="Provider">
+                                      {formatRepositoryAccessProviderLabel(
+                                        repositoryAccessAssessment,
+                                        isAssessingRepositoryAccess,
+                                        repositoryAccessError,
+                                      )}
+                                    </MetaItem>
+                                    <MetaItem label="Visibility">
+                                      {formatRepositoryVisibilityLabel(
+                                        repositoryAccessAssessment,
+                                        isAssessingRepositoryAccess,
+                                        repositoryAccessError,
+                                      )}
+                                    </MetaItem>
+                                    <MetaItem label="Login">
+                                      {formatRepositoryLoginStatus(
+                                        repositoryAccessAssessment,
+                                        githubAuthProvider,
+                                        isLoadingAuthProviders,
+                                      )}
+                                    </MetaItem>
+                                    <MetaItem label="Connection">
+                                      {formatRepositoryBindingStatus(
+                                        repositoryAccessAssessment,
+                                        desiredRepositoryCredentialId,
+                                        pendingRepositoryAccessAction,
+                                      )}
+                                    </MetaItem>
+                                  </MetaRow>
+                                </SummaryStrip>
+                              ) : null}
+
+                              {repositoryAccessActionMessage ? (
+                                <p className="notice-banner">
+                                  {repositoryAccessActionMessage}
+                                </p>
+                              ) : null}
+
+                              {validationErrors.repositoryAccess ? (
+                                <p className="ui-field__error">
+                                  {validationErrors.repositoryAccess}
+                                </p>
+                              ) : null}
+
+                              {shouldShowRepositoryLoginAction(
+                                repositoryAccessAssessment,
+                              ) ? (
+                                <>
+                                  <SelectField
+                                    disabled={
+                                      isLoadingRepositoryCredentials ||
+                                      pendingRepositoryAccessAction
+                                    }
+                                    hint={formatRepositoryCredentialFieldHint(
+                                      repositoryAccessAssessment,
+                                      isLoadingRepositoryCredentials,
+                                    )}
+                                    label="Repository credential"
+                                    onChange={(event) =>
+                                      handleRepositoryCredentialSelectionChange(
+                                        event.currentTarget.value,
+                                      )
+                                    }
+                                    options={repositoryCredentialOptions}
+                                    value={
+                                      desiredRepositoryCredentialId?.toString() ??
+                                      ""
+                                    }
+                                  />
+
+                                  <div className="wizard-callout__actions">
+                                    {supportsShellRepositoryLoginAction(
+                                      repositoryAccessAssessment,
+                                    ) ? (
+                                      <Button
+                                        disabled={pendingRepositoryAccessAction}
+                                        leadingIcon="key"
+                                        onClick={() =>
+                                          void handleBindRepositoryAccess()
+                                        }
+                                        size="sm"
+                                        variant={
+                                          desiredRepositoryCredentialId !== null
+                                            ? "secondary"
+                                            : "primary"
+                                        }
+                                      >
+                                        {pendingRepositoryAccessAction
+                                          ? "Connecting login..."
+                                          : formatRepositoryBindingActionLabel(
+                                              repositoryAccessAssessment,
+                                              githubAuthProvider,
+                                              desiredRepositoryCredentialId,
+                                            )}
+                                      </Button>
+                                    ) : null}
+
+                                    {desiredRepositoryCredentialId !== null ? (
+                                      <Button
+                                        onClick={
+                                          handleClearRepositoryAccessBinding
+                                        }
+                                        size="sm"
+                                        variant="ghost"
+                                      >
+                                        Disconnect
+                                      </Button>
+                                    ) : null}
+                                  </div>
+                                </>
+                              ) : null}
                             </div>
                           </div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="project-detail-form-grid__span-full">
+                            <PathPickerField
+                              buttonLabel="Choose workspace"
+                              clearLabel="Reset"
+                              clearable
+                              dialogTitle="Select local workspace directory"
+                              disabled={isSaving}
+                              error={validationErrors.localPath}
+                              hint="Point HGP at the host-local Unity workspace that should be built directly."
+                              label="Local workspace path"
+                              onClear={() =>
+                                handleDraftFieldChange("localPath", "")
+                              }
+                              onError={(pickError) => {
+                                setSaveError(
+                                  buildProjectSaveErrorMessage(pickError),
+                                );
+                              }}
+                              onPathPicked={(path) =>
+                                handleDraftFieldChange("localPath", path)
+                              }
+                              pickerKind="directory"
+                              placeholder="C:/projects/revolutions"
+                              value={draft.localPath}
+                            />
+                          </div>
 
-                          {draft.repositoryUrl.trim() ||
-                          isAssessingRepositoryAccess ||
-                          repositoryAccessAssessment ||
-                          repositoryAccessError ? (
-                            <SummaryStrip className="wizard-callout__summary-strip">
-                              <MetaRow className="wizard-callout__meta">
-                                <MetaItem label="Provider">
-                                  {formatRepositoryAccessProviderLabel(
-                                    repositoryAccessAssessment,
-                                    isAssessingRepositoryAccess,
-                                    repositoryAccessError,
-                                  )}
+                          <div className="project-detail-form-grid__span-full">
+                            <SurfacePanel
+                              description="Local workspace projects build directly from one host path and do not use repository auth or remote polling."
+                              title="Source Behavior"
+                              tone="inset"
+                            >
+                              <MetaRow>
+                                <MetaItem label="Source">
+                                  {projectSourceLabel}
                                 </MetaItem>
-                                <MetaItem label="Visibility">
-                                  {formatRepositoryVisibilityLabel(
-                                    repositoryAccessAssessment,
-                                    isAssessingRepositoryAccess,
-                                    repositoryAccessError,
-                                  )}
+                                <MetaItem label="Mode">
+                                  {resolveProjectSourceModeSummary(draft)}
                                 </MetaItem>
-                                <MetaItem label="Login">
-                                  {formatRepositoryLoginStatus(
-                                    repositoryAccessAssessment,
-                                    githubAuthProvider,
-                                    isLoadingAuthProviders,
-                                  )}
-                                </MetaItem>
-                                <MetaItem label="Connection">
-                                  {formatRepositoryBindingStatus(
-                                    repositoryAccessAssessment,
-                                    desiredRepositoryCredentialId,
-                                    pendingRepositoryAccessAction,
-                                  )}
+                                <MetaItem label={projectSourceFieldLabel}>
+                                  {projectSourceValue || "not set"}
                                 </MetaItem>
                               </MetaRow>
-                            </SummaryStrip>
-                          ) : null}
-
-                          {repositoryAccessActionMessage ? (
-                            <p className="notice-banner">
-                              {repositoryAccessActionMessage}
-                            </p>
-                          ) : null}
-
-                          {validationErrors.repositoryAccess ? (
-                            <p className="ui-field__error">
-                              {validationErrors.repositoryAccess}
-                            </p>
-                          ) : null}
-
-                          {shouldShowRepositoryLoginAction(
-                            repositoryAccessAssessment,
-                          ) ? (
-                            <>
-                              <SelectField
-                                disabled={
-                                  isLoadingRepositoryCredentials ||
-                                  pendingRepositoryAccessAction
-                                }
-                                hint={formatRepositoryCredentialFieldHint(
-                                  repositoryAccessAssessment,
-                                  isLoadingRepositoryCredentials,
-                                )}
-                                label="Repository credential"
-                                onChange={(event) =>
-                                  handleRepositoryCredentialSelectionChange(
-                                    event.currentTarget.value,
-                                  )
-                                }
-                                options={repositoryCredentialOptions}
-                                value={
-                                  desiredRepositoryCredentialId?.toString() ??
-                                  ""
-                                }
-                              />
-
-                              <div className="wizard-callout__actions">
-                                {supportsShellRepositoryLoginAction(
-                                  repositoryAccessAssessment,
-                                ) ? (
-                                  <Button
-                                    disabled={pendingRepositoryAccessAction}
-                                    leadingIcon="key"
-                                    onClick={() =>
-                                      void handleBindRepositoryAccess()
-                                    }
-                                    size="sm"
-                                    variant={
-                                      desiredRepositoryCredentialId !== null
-                                        ? "secondary"
-                                        : "primary"
-                                    }
-                                  >
-                                    {pendingRepositoryAccessAction
-                                      ? "Connecting login..."
-                                      : formatRepositoryBindingActionLabel(
-                                          repositoryAccessAssessment,
-                                          githubAuthProvider,
-                                          desiredRepositoryCredentialId,
-                                        )}
-                                  </Button>
-                                ) : null}
-
-                                {desiredRepositoryCredentialId !== null ? (
-                                  <Button
-                                    onClick={handleClearRepositoryAccessBinding}
-                                    size="sm"
-                                    variant="ghost"
-                                  >
-                                    Disconnect
-                                  </Button>
-                                ) : null}
-                              </div>
-                            </>
-                          ) : null}
-                        </div>
-                      </div>
+                            </SurfacePanel>
+                          </div>
+                        </>
+                      )}
                     </div>
                   </div>
                 ) : null}
@@ -2085,7 +2336,11 @@ export function RepositoryProjectDetail({
               </ProjectDetailSectionPanel>
 
               <ProjectDetailSectionPanel
-                description="Queue and execution backlog for the registered repository."
+                description={
+                  isLocalWorkspaceSource(draft)
+                    ? "Queue manual local releases and inspect the current execution backlog for this project."
+                    : "Queue and execution backlog for the registered repository."
+                }
                 eyebrow="Automation"
                 open={sectionOpenState.automation}
                 sectionKey="automation"
@@ -2103,6 +2358,95 @@ export function RepositoryProjectDetail({
                 title="Runtime Status"
               >
                 <div className="project-detail-status-grid">
+                  {isLocalWorkspaceSource(draft) ? (
+                    <div className="project-detail-form-grid__span-full">
+                      <SurfacePanel
+                        description="Queue one local release from the persisted workspace path using an explicit operator-selected release identity."
+                        title="Queue Local Release"
+                        tone="inset"
+                      >
+                        <div className="project-detail-form">
+                          <div className="project-detail-form-grid">
+                            <SelectField
+                              hint="Choose whether HGP should use a manual release label or detect it from project settings."
+                              label="Version source"
+                              onChange={(event) =>
+                                handleLocalReleaseDraftFieldChange(
+                                  "versionSource",
+                                  event.target
+                                    .value as LocalReleaseDispatchDraft["versionSource"],
+                                )
+                              }
+                              options={LOCAL_RELEASE_VERSION_SOURCE_OPTIONS}
+                              value={localReleaseDraft.versionSource}
+                            />
+
+                            <TextField
+                              disabled={
+                                localReleaseDraft.versionSource !== "manual"
+                              }
+                              error={
+                                localReleaseValidationErrors.releaseVersion
+                              }
+                              hint={
+                                localReleaseDraft.versionSource === "manual"
+                                  ? "Use the release label that should identify this local snapshot."
+                                  : "Detected from project settings when the release is queued."
+                              }
+                              label="Release version"
+                              onChange={(event) =>
+                                handleLocalReleaseDraftFieldChange(
+                                  "releaseVersion",
+                                  event.target.value,
+                                )
+                              }
+                              placeholder="v1.2.3"
+                              value={localReleaseDraft.releaseVersion}
+                            />
+                          </div>
+
+                          {hasPendingChanges ? (
+                            <p className="feed-banner">
+                              Save project changes before queueing a local
+                              release so the runtime uses the current project
+                              configuration.
+                            </p>
+                          ) : null}
+
+                          {localReleaseDispatchError ? (
+                            <p className="feed-banner feed-banner--error">
+                              {localReleaseDispatchError}
+                            </p>
+                          ) : null}
+
+                          {localReleaseDispatchMessage ? (
+                            <p className="notice-banner">
+                              {localReleaseDispatchMessage}
+                            </p>
+                          ) : null}
+
+                          <div className="wizard-callout__actions">
+                            <Button
+                              disabled={
+                                hasPendingChanges ||
+                                isProjectMutationPending ||
+                                isEditingLocked
+                              }
+                              leadingIcon="arrowUpRight"
+                              onClick={() => void handleDispatchLocalRelease()}
+                              size="sm"
+                              variant="primary"
+                            >
+                              {isDispatchingLocalRelease
+                                ? "Queueing..."
+                                : "Queue Local Release"}
+                            </Button>
+                          </div>
+                        </div>
+                      </SurfacePanel>
+                    </div>
+                  ) : null}
+
                   <div className="project-detail-status-card">
                     <strong>{repository.pending_release_count}</strong>
                     <span>Pending releases</span>
@@ -2143,10 +2487,12 @@ function ProjectDetailSectionTabs({
   activeSection,
   disabled = false,
   onChange,
+  tabs,
 }: {
   activeSection: ProjectDetailSectionKey;
   disabled?: boolean;
   onChange: (sectionKey: ProjectDetailSectionKey) => void;
+  tabs: ProjectDetailSectionTab[];
 }) {
   const tabRefs = useRef<
     Partial<Record<ProjectDetailSectionKey, HTMLButtonElement | null>>
@@ -2159,9 +2505,7 @@ function ProjectDetailSectionTabs({
         return;
       }
 
-      const currentIndex = PROJECT_DETAIL_SECTION_TABS.findIndex(
-        (tab) => tab.key === key,
-      );
+      const currentIndex = tabs.findIndex((tab) => tab.key === key);
 
       if (currentIndex < 0) {
         return;
@@ -2171,16 +2515,10 @@ function ProjectDetailSectionTabs({
 
       switch (event.key) {
         case "ArrowUp":
-          nextIndex =
-            currentIndex === 0
-              ? PROJECT_DETAIL_SECTION_TABS.length - 1
-              : currentIndex - 1;
+          nextIndex = currentIndex === 0 ? tabs.length - 1 : currentIndex - 1;
           break;
         case "ArrowDown":
-          nextIndex =
-            currentIndex === PROJECT_DETAIL_SECTION_TABS.length - 1
-              ? 0
-              : currentIndex + 1;
+          nextIndex = currentIndex === tabs.length - 1 ? 0 : currentIndex + 1;
           break;
         case "Home":
           nextIndex = 0;
@@ -2194,7 +2532,7 @@ function ProjectDetailSectionTabs({
 
       event.preventDefault();
 
-      const nextTab = PROJECT_DETAIL_SECTION_TABS[nextIndex];
+      const nextTab = tabs[nextIndex];
 
       onChange(nextTab.key);
       requestAnimationFrame(() => {
@@ -2209,7 +2547,7 @@ function ProjectDetailSectionTabs({
       className="project-detail-tablist ui-panel ui-panel--inset"
       role="tablist"
     >
-      {PROJECT_DETAIL_SECTION_TABS.map((tab) => {
+      {tabs.map((tab) => {
         const isActive = tab.key === activeSection;
 
         return (
@@ -2996,6 +3334,28 @@ function createEmptyValidationErrors(): RepositoryProjectValidationErrors {
   };
 }
 
+function createLocalReleaseDispatchDraft(): LocalReleaseDispatchDraft {
+  return {
+    releaseVersion: "",
+    versionSource: "manual",
+  };
+}
+
+function validateLocalReleaseDispatchDraft(
+  draft: LocalReleaseDispatchDraft,
+): LocalReleaseDispatchValidationErrors {
+  if (draft.versionSource !== "manual") {
+    return {};
+  }
+
+  return draft.releaseVersion.trim()
+    ? {}
+    : {
+        releaseVersion:
+          "Release version is required for manual local dispatch.",
+      };
+}
+
 function createEmptyTargetEditorState(): RepositoryProjectTargetEditorState {
   return {
     buildTargets: [],
@@ -3022,10 +3382,20 @@ function buildRepositoryProjectDraft(
   repository: RepositoryInspectionEntry,
   buildTargets: RepositoryProjectBuildTargetDraft[],
 ): RepositoryProjectDraft {
+  const sourceMode = isLocalWorkspaceSource(repository)
+    ? "local_workspace"
+    : "managed_repository";
+
   return {
+    sourceMode,
     engineKind: normalizeRepositoryEngineKind(repository.engine_kind),
     name: repository.repository_name,
-    repositoryUrl: repository.repo_url,
+    repositoryUrl:
+      sourceMode === "managed_repository" ? repository.repo_url : "",
+    localPath:
+      sourceMode === "local_workspace"
+        ? (repository.local_path ?? repository.repo_url)
+        : "",
     repositoryVisibility: resolveRepositoryVisibilitySelection(repository),
     defaultBranch: repository.default_branch ?? "",
     artifactsRootOverride: repository.artifacts_root_override ?? "",
@@ -3047,6 +3417,10 @@ function buildRepositoryProjectDraft(
 function buildRepositoryAccessAssessmentFromRepository(
   repository: RepositoryInspectionEntry,
 ): RepositoryAccessAssessment | null {
+  if (!isManagedRepositorySource(repository)) {
+    return null;
+  }
+
   const normalizedUrl = repository.repo_url.trim();
   if (!normalizedUrl) {
     return null;
@@ -3154,73 +3528,86 @@ function validateRepositoryProjectDraft(
     errors.name = "Project name is required.";
   }
 
-  const repositoryUrl = draft.repositoryUrl.trim();
-  if (!repositoryUrl) {
-    errors.repositoryUrl = "Repository URL is required.";
-  } else if (
-    !repositoryUrl.startsWith("https://") &&
-    !repositoryUrl.startsWith("http://")
-  ) {
-    errors.repositoryUrl = "Repository URL must use http:// or https://.";
-  } else if (authState.isAssessingRepositoryAccess) {
-    errors.repositoryAccess = "Repository access is still being checked.";
-  } else if (authState.repositoryAccessError) {
-    errors.repositoryAccess =
-      "Repository access could not be checked from the desktop shell.";
-  } else if (!authState.repositoryAccessAssessment) {
-    errors.repositoryAccess = "Repository access has not been checked yet.";
-  } else if (
-    authState.repositoryAccessAssessment.visibility === "invalid" ||
-    authState.repositoryAccessAssessment.visibility === "unknown"
-  ) {
-    errors.repositoryAccess = authState.repositoryAccessAssessment.message;
-  } else if (
-    authState.repositoryAccessAssessment.auth_requirement === "required"
-  ) {
-    if (
-      !supportsShellRepositoryLoginAction(authState.repositoryAccessAssessment)
+  if (isManagedRepositorySource(draft)) {
+    const repositoryUrl = draft.repositoryUrl.trim();
+    if (!repositoryUrl) {
+      errors.repositoryUrl = "Repository URL is required.";
+    } else if (
+      !repositoryUrl.startsWith("https://") &&
+      !repositoryUrl.startsWith("http://")
     ) {
-      const providerLabel =
-        authState.repositoryAccessAssessment.provider_id === "unknown"
-          ? "this host"
-          : authState.repositoryAccessAssessment.provider_label || "this host";
+      errors.repositoryUrl = "Repository URL must use http:// or https://.";
+    } else if (authState.isAssessingRepositoryAccess) {
+      errors.repositoryAccess = "Repository access is still being checked.";
+    } else if (authState.repositoryAccessError) {
       errors.repositoryAccess =
-        authState.repositoryAccessAssessment.provider_id === "unknown"
-          ? "Private repositories are not supported for this host yet. Only public repositories can be saved right now."
-          : `Private ${providerLabel} repositories are not supported yet. Only public repositories are available for this platform right now.`;
-    } else if (authState.isLoadingRepositoryCredentials) {
-      errors.repositoryAccess =
-        "Repository credentials are still loading from the desktop shell.";
-    } else if (authState.repositoryCredentialsError) {
-      errors.repositoryAccess =
-        "Repository credentials could not be loaded from the desktop shell.";
-    } else if (!authState.repositoryCredentialId) {
-      const providerLabel =
-        authState.repositoryAccessAssessment.provider_label || "Repository";
-
+        "Repository access could not be checked from the desktop shell.";
+    } else if (!authState.repositoryAccessAssessment) {
+      errors.repositoryAccess = "Repository access has not been checked yet.";
+    } else if (
+      authState.repositoryAccessAssessment.visibility === "invalid" ||
+      authState.repositoryAccessAssessment.visibility === "unknown"
+    ) {
+      errors.repositoryAccess = authState.repositoryAccessAssessment.message;
+    } else if (
+      authState.repositoryAccessAssessment.auth_requirement === "required"
+    ) {
       if (
-        authState.repositoryAccessAssessment.provider_id === "github" &&
-        authState.repositoryAccessAssessment.supports_interactive_login
+        !supportsShellRepositoryLoginAction(
+          authState.repositoryAccessAssessment,
+        )
       ) {
-        if (authState.isLoadingAuthProviders) {
-          errors.repositoryAccess = "GitHub login status is still loading.";
-        } else if (authState.authProviderError) {
-          errors.repositoryAccess =
-            "GitHub login status could not be loaded from the desktop shell.";
-        } else if (authState.githubAuthProvider?.status !== "connected") {
-          errors.repositoryAccess =
-            "Private GitHub repository detected. Log in and connect a GitHub credential, or select another stored repository credential, before saving.";
+        const providerLabel =
+          authState.repositoryAccessAssessment.provider_id === "unknown"
+            ? "this host"
+            : authState.repositoryAccessAssessment.provider_label ||
+              "this host";
+        errors.repositoryAccess =
+          authState.repositoryAccessAssessment.provider_id === "unknown"
+            ? "Private repositories are not supported for this host yet. Only public repositories can be saved right now."
+            : `Private ${providerLabel} repositories are not supported yet. Only public repositories are available for this platform right now.`;
+      } else if (authState.isLoadingRepositoryCredentials) {
+        errors.repositoryAccess =
+          "Repository credentials are still loading from the desktop shell.";
+      } else if (authState.repositoryCredentialsError) {
+        errors.repositoryAccess =
+          "Repository credentials could not be loaded from the desktop shell.";
+      } else if (!authState.repositoryCredentialId) {
+        const providerLabel =
+          authState.repositoryAccessAssessment.provider_label || "Repository";
+
+        if (
+          authState.repositoryAccessAssessment.provider_id === "github" &&
+          authState.repositoryAccessAssessment.supports_interactive_login
+        ) {
+          if (authState.isLoadingAuthProviders) {
+            errors.repositoryAccess = "GitHub login status is still loading.";
+          } else if (authState.authProviderError) {
+            errors.repositoryAccess =
+              "GitHub login status could not be loaded from the desktop shell.";
+          } else if (authState.githubAuthProvider?.status !== "connected") {
+            errors.repositoryAccess =
+              "Private GitHub repository detected. Log in and connect a GitHub credential, or select another stored repository credential, before saving.";
+          } else {
+            errors.repositoryAccess =
+              "Private GitHub repository detected. Connect a credential to this project before saving.";
+          }
+        } else if (authState.repositoryCredentialCount === 0) {
+          errors.repositoryAccess = `Private ${providerLabel} repository detected. No stored repository credentials are available for this project yet.`;
         } else {
-          errors.repositoryAccess =
-            "Private GitHub repository detected. Connect a credential to this project before saving.";
+          errors.repositoryAccess = `Private ${providerLabel} repository detected. Select a stored repository credential before saving.`;
         }
-      } else if (authState.repositoryCredentialCount === 0) {
-        errors.repositoryAccess = `Private ${providerLabel} repository detected. No stored repository credentials are available for this project yet.`;
       } else {
-        errors.repositoryAccess = `Private ${providerLabel} repository detected. Select a stored repository credential before saving.`;
+        errors.repositoryAccess = undefined;
       }
-    } else {
-      errors.repositoryAccess = undefined;
+    }
+  } else {
+    const localPath = draft.localPath.trim();
+
+    if (!localPath) {
+      errors.localPath = "Local workspace path is required.";
+    } else if (!looksLikeAbsolutePath(localPath)) {
+      errors.localPath = "Local workspace path must be an absolute path.";
     }
   }
 
@@ -3297,6 +3684,7 @@ function hasValidationErrors(errors: RepositoryProjectValidationErrors) {
     errors.engineKind ||
     errors.name ||
     errors.repositoryUrl ||
+    errors.localPath ||
     errors.pollingIntervalSeconds ||
     errors.repositoryAccess ||
     errors.buildTargetsRoot ||
@@ -3353,6 +3741,19 @@ function buildProjectDetailSectionState(
   };
 }
 
+function resolveProjectDetailSectionTabs(
+  sourceMode: ProjectSourceMode,
+): ProjectDetailSectionTab[] {
+  return PROJECT_DETAIL_SECTION_TABS.map((tab) =>
+    tab.key === "repository"
+      ? {
+          ...tab,
+          label: sourceMode === "local_workspace" ? "Source" : "Repository",
+        }
+      : tab,
+  );
+}
+
 function resolveActiveProjectDetailSection(
   sectionOpenState: Record<ProjectDetailSectionKey, boolean>,
 ): ProjectDetailSectionKey {
@@ -3373,6 +3774,7 @@ function resolveInvalidProjectDetailSection(
 
   if (
     validationErrors.repositoryUrl ||
+    validationErrors.localPath ||
     validationErrors.pollingIntervalSeconds ||
     validationErrors.repositoryAccess
   ) {
@@ -3416,12 +3818,19 @@ function buildRepositoryProjectUpdateInput(
   draft: RepositoryProjectDraft,
   repositoryAccessAssessment: RepositoryAccessAssessment | null,
 ): UpdateRepositoryProjectInput {
+  const sourceMode = draft.sourceMode;
+
   return {
     repository_id: repositoryId,
+    source_mode: sourceMode,
     name: draft.name.trim(),
     engine_kind: draft.engineKind,
-    repository_url: draft.repositoryUrl.trim(),
-    repository_access_assessment: repositoryAccessAssessment,
+    repository_url:
+      sourceMode === "managed_repository" ? draft.repositoryUrl.trim() : null,
+    local_path:
+      sourceMode === "local_workspace" ? draft.localPath.trim() : null,
+    repository_access_assessment:
+      sourceMode === "managed_repository" ? repositoryAccessAssessment : null,
     default_branch: normalizeOptionalDraftValue(draft.defaultBranch),
     artifacts_root_override: normalizeOptionalDraftValue(
       draft.artifactsRootOverride,
@@ -3556,7 +3965,9 @@ function isRepositoryProjectDraftChanged(
 
   return (
     persistedDraft.name.trim() !== draft.name.trim() ||
+    persistedDraft.sourceMode !== draft.sourceMode ||
     persistedDraft.repositoryUrl.trim() !== draft.repositoryUrl.trim() ||
+    persistedDraft.localPath.trim() !== draft.localPath.trim() ||
     persistedDraft.defaultBranch.trim() !== draft.defaultBranch.trim() ||
     persistedDraft.artifactsRootOverride.trim() !==
       draft.artifactsRootOverride.trim() ||
@@ -3683,6 +4094,14 @@ function normalizeUnityTargetPlatformValue(value: string) {
     default:
       return value.trim();
   }
+}
+
+function looksLikeAbsolutePath(value: string) {
+  return (
+    /^[A-Za-z]:[\\/]/.test(value) ||
+    value.startsWith("/") ||
+    value.startsWith("\\\\")
+  );
 }
 
 function joinClassNames(...tokens: Array<string | false | null | undefined>) {

@@ -13,6 +13,7 @@ import {
   type AuthProviderConnectionResult,
 } from "./authProviderPresentation";
 import StepFlow, { type StepFlowStep } from "./wizard/StepFlow";
+import { useLocalization } from "../LocalizationProvider";
 import { loginWithGithubAuth, type AuthProviderStatus } from "../services/auth";
 
 type AuthProviderConnectionModalProps = {
@@ -22,31 +23,17 @@ type AuthProviderConnectionModalProps = {
 
 type AuthProviderConnectionStepKey = "summary" | "browser";
 
-const AUTH_PROVIDER_CONNECTION_STEPS: readonly StepFlowStep<AuthProviderConnectionStepKey>[] =
-  [
-    {
-      description:
-        "Review the selected provider state before starting the browser-driven credential flow.",
-      key: "summary",
-      label: "Summary",
-    },
-    {
-      description:
-        "Run the browser flow through Git Credential Manager and recover here if the host reports a transient auth failure.",
-      key: "browser",
-      label: "Browser",
-    },
-  ];
-
 export function AuthProviderConnectionModal({
   onResolve,
   provider,
 }: AuthProviderConnectionModalProps) {
+  const { t } = useLocalization();
   const [currentStepKey, setCurrentStepKey] =
     useState<AuthProviderConnectionStepKey>("summary");
   const [actionError, setActionError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const lifecycleSnapshot = buildAuthProviderLifecycleSnapshot(provider);
+  const lifecycleSnapshot = buildAuthProviderLifecycleSnapshot(t, provider);
+  const connectionSteps = buildAuthProviderConnectionSteps(t);
 
   const handleAdvanceStep = () => {
     setActionError(null);
@@ -70,9 +57,9 @@ export function AuthProviderConnectionModal({
       const nextProvider = await loginWithGithubAuth({
         force: provider.status === "connected",
       });
-      onResolve?.(buildAuthProviderConnectionResult(provider, nextProvider));
+      onResolve?.(buildAuthProviderConnectionResult(t, provider, nextProvider));
     } catch (error) {
-      setActionError(buildAuthProviderConnectionErrorMessage(error));
+      setActionError(buildAuthProviderConnectionErrorMessage(t, error));
     } finally {
       setIsSubmitting(false);
     }
@@ -81,28 +68,48 @@ export function AuthProviderConnectionModal({
   const currentStepSummary =
     currentStepKey === "summary" ? (
       <MetaRow>
-        <MetaItem label="Provider">{provider.label}</MetaItem>
-        <MetaItem label="Usage">
-          {formatBoundRepositoryCount(provider.bound_repository_count)}
+        <MetaItem
+          label={t("auth_provider_connection.summary.provider", "Provider")}
+        >
+          {provider.label}
+        </MetaItem>
+        <MetaItem label={t("auth_provider_connection.summary.usage", "Usage")}>
+          {formatBoundRepositoryCount(t, provider.bound_repository_count)}
         </MetaItem>
       </MetaRow>
     ) : (
       <MetaRow>
-        <MetaItem label="Current state">
-          {formatAuthProviderStatus(provider.status)}
+        <MetaItem
+          label={t(
+            "auth_provider_connection.summary.current_state",
+            "Current state",
+          )}
+        >
+          {formatAuthProviderStatus(t, provider.status)}
         </MetaItem>
-        <MetaItem label="Action">
-          {provider.status === "connected" ? "Reconnect" : "Bind"}
+        <MetaItem
+          label={t("auth_provider_connection.summary.action", "Action")}
+        >
+          {provider.status === "connected"
+            ? t("auth_provider_connection.action.reconnect", "Reconnect")
+            : t("auth_provider_connection.action.bind", "Bind")}
         </MetaItem>
       </MetaRow>
     );
 
   return (
     <FullScreenModal
-      description="Review the selected provider and open the browser login flow only when host-backed credentials need to be created or refreshed."
+      description={t(
+        "auth_provider_connection.modal.description",
+        "Review the selected provider and open the browser login flow only when host-backed credentials need to be created or refreshed.",
+      )}
       dismissible={!isSubmitting}
       onResolve={onResolve}
-      title={`${provider.label} connection`}
+      title={t(
+        "auth_provider_connection.modal.title",
+        "{{providerLabel}} connection",
+        { providerLabel: provider.label },
+      )}
     >
       {actionError ? (
         <p className="feed-banner feed-banner--error">{actionError}</p>
@@ -118,7 +125,7 @@ export function AuthProviderConnectionModal({
               size="sm"
               variant="primary"
             >
-              Continue
+              {t("auth_provider_connection.actions.continue", "Continue")}
             </Button>
           ) : (
             <Button
@@ -134,6 +141,7 @@ export function AuthProviderConnectionModal({
               }
             >
               {buildBrowserLoginLabel(
+                t,
                 provider.status,
                 actionError !== null,
                 isSubmitting,
@@ -149,17 +157,39 @@ export function AuthProviderConnectionModal({
             handleRetreatStep();
           }
         }}
-        progressDescription="The provider stays unchanged until the browser login completes successfully. Closing this overlay leaves the current shell state untouched."
-        progressEyebrow="Auth Flow"
+        progressDescription={t(
+          "auth_provider_connection.progress.description",
+          "The provider stays unchanged until the browser login completes successfully. Closing this overlay leaves the current shell state untouched.",
+        )}
+        progressEyebrow={t(
+          "auth_provider_connection.progress.eyebrow",
+          "Auth Flow",
+        )}
         progressSummary={
           <MetaRow>
-            <MetaItem label="Provider">{provider.label}</MetaItem>
-            <MetaItem label="Selected credential">
-              {provider.credential_name || "No reusable credential"}
+            <MetaItem
+              label={t("auth_provider_connection.summary.provider", "Provider")}
+            >
+              {provider.label}
+            </MetaItem>
+            <MetaItem
+              label={t(
+                "auth_provider_connection.progress.selected_credential",
+                "Selected credential",
+              )}
+            >
+              {provider.credential_name ||
+                t(
+                  "auth_providers.presentation.no_reusable_credential",
+                  "No reusable credential",
+                )}
             </MetaItem>
           </MetaRow>
         }
-        progressTitle="Connection Stages"
+        progressTitle={t(
+          "auth_provider_connection.progress.title",
+          "Connection Stages",
+        )}
         startActions={
           currentStepKey === "browser" ? (
             <Button
@@ -168,12 +198,12 @@ export function AuthProviderConnectionModal({
               size="sm"
               variant="ghost"
             >
-              Back
+              {t("auth_provider_connection.actions.back", "Back")}
             </Button>
           ) : null
         }
         stepSummary={currentStepSummary}
-        steps={AUTH_PROVIDER_CONNECTION_STEPS}
+        steps={connectionSteps}
       >
         <section className="auth-provider-card">
           <header className="auth-provider-card__header">
@@ -184,14 +214,14 @@ export function AuthProviderConnectionModal({
               </p>
             </div>
             <Badge tone={resolveAuthProviderTone(provider.status)}>
-              {formatAuthProviderStatus(provider.status)}
+              {formatAuthProviderStatus(t, provider.status)}
             </Badge>
           </header>
 
           <p className="auth-provider-card__copy">{provider.status_message}</p>
 
           <SummaryStrip className="auth-provider-card__summary-strip">
-            {buildAuthProviderSummaryRows(provider, lifecycleSnapshot, {
+            {buildAuthProviderSummaryRows(t, provider, lifecycleSnapshot, {
               includeLifecycleRow: false,
             }).map((summaryRow, summaryRowIndex) => (
               <MetaRow
@@ -209,17 +239,32 @@ export function AuthProviderConnectionModal({
 
           <p className="auth-provider-card__copy">
             {currentStepKey === "summary"
-              ? "Proceed to the browser stage only when this provider should be rebound or refreshed through Git Credential Manager."
+              ? t(
+                  "auth_provider_connection.copy.summary",
+                  "Proceed to the browser stage only when this provider should be rebound or refreshed through Git Credential Manager.",
+                )
               : provider.status === "connected"
-                ? "If the host reports that the current credential expired or was rejected, run the browser flow again to repair the binding."
-                : "Open the browser flow to create the host-backed credential that repository access will reuse."}
+                ? t(
+                    "auth_provider_connection.copy.browser.connected",
+                    "If the host reports that the current credential expired or was rejected, run the browser flow again to repair the binding.",
+                  )
+                : t(
+                    "auth_provider_connection.copy.browser.disconnected",
+                    "Open the browser flow to create the host-backed credential that repository access will reuse.",
+                  )}
           </p>
 
           {currentStepKey === "browser" ? (
             <p className="auth-provider-card__copy">
               {actionError
-                ? "Review the error, then retry the browser flow or close this overlay to leave the current provider unchanged."
-                : "The overlay will close only after the browser flow returns an updated provider state."}
+                ? t(
+                    "auth_provider_connection.copy.error",
+                    "Review the error, then retry the browser flow or close this overlay to leave the current provider unchanged.",
+                  )
+                : t(
+                    "auth_provider_connection.copy.success",
+                    "The overlay will close only after the browser flow returns an updated provider state.",
+                  )}
             </p>
           ) : null}
         </section>
@@ -228,27 +273,60 @@ export function AuthProviderConnectionModal({
   );
 }
 
+function buildAuthProviderConnectionSteps(
+  t: ReturnType<typeof useLocalization>["t"],
+): readonly StepFlowStep<AuthProviderConnectionStepKey>[] {
+  return [
+    {
+      description: t(
+        "auth_provider_connection.steps.summary.description",
+        "Review the selected provider state before starting the browser-driven credential flow.",
+      ),
+      key: "summary",
+      label: t("auth_provider_connection.steps.summary.label", "Summary"),
+    },
+    {
+      description: t(
+        "auth_provider_connection.steps.browser.description",
+        "Run the browser flow through Git Credential Manager and recover here if the host reports a transient auth failure.",
+      ),
+      key: "browser",
+      label: t("auth_provider_connection.steps.browser.label", "Browser"),
+    },
+  ];
+}
+
 function buildBrowserLoginLabel(
+  t: ReturnType<typeof useLocalization>["t"],
   status: string,
   hasActionError: boolean,
   isSubmitting: boolean,
 ) {
   if (isSubmitting) {
-    return "Connecting...";
+    return t("auth_provider_connection.actions.connecting", "Connecting...");
   }
 
   if (hasActionError) {
     return status === "connected"
-      ? "Retry reconnect with browser"
-      : "Retry browser login";
+      ? t(
+          "auth_provider_connection.actions.retry_reconnect",
+          "Retry reconnect with browser",
+        )
+      : t(
+          "auth_provider_connection.actions.retry_login",
+          "Retry browser login",
+        );
   }
 
   return status === "connected"
-    ? "Reconnect with browser"
-    : "Log in with browser";
+    ? t("auth_provider_connection.actions.reconnect", "Reconnect with browser")
+    : t("auth_provider_connection.actions.login", "Log in with browser");
 }
 
-function buildAuthProviderConnectionErrorMessage(error: unknown) {
+function buildAuthProviderConnectionErrorMessage(
+  t: ReturnType<typeof useLocalization>["t"],
+  error: unknown,
+) {
   if (error instanceof Error && error.message) {
     return error.message;
   }
@@ -257,7 +335,10 @@ function buildAuthProviderConnectionErrorMessage(error: unknown) {
     return error.trim();
   }
 
-  return "The desktop shell could not complete the browser login flow.";
+  return t(
+    "auth_provider_connection.error.fallback",
+    "The desktop shell could not complete the browser login flow.",
+  );
 }
 
 export default AuthProviderConnectionModal;

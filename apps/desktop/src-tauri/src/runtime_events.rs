@@ -243,20 +243,43 @@ fn should_show_native_notification(policy: NativeNotificationPolicy) -> bool {
 fn native_notification_content(event: &RuntimeEventRecord) -> (String, String) {
     let title = match event.topic.as_str() {
         "automation.poll_auth_failed" => String::from("Repository polling stopped"),
-        "automation.release_queued" => String::from("Automatic release queued"),
-        "build.run_started" => String::from("Automatic build started"),
+        "automation.release_queued" => {
+            format!("{} release queued", notification_release_mode_label(event))
+        }
+        "build.run_started" => {
+            format!("{} build started", notification_release_mode_label(event))
+        }
         "build.run_finished" => match build_status_from_event(event) {
-            Some("failed") => String::from("Automatic build failed"),
-            Some("canceled") | Some("cancelled") => String::from("Automatic build canceled"),
-            _ => String::from("Automatic build finished"),
+            Some("failed") => format!(
+                "{} build failed",
+                notification_release_mode_label(event)
+            ),
+            Some("canceled") | Some("cancelled") => format!(
+                "{} build canceled",
+                notification_release_mode_label(event)
+            ),
+            _ => format!(
+                "{} build finished",
+                notification_release_mode_label(event)
+            ),
         },
-        "publish.run_started" => String::from("Automatic publish started"),
+        "publish.run_started" => format!(
+            "{} publish started",
+            notification_release_mode_label(event)
+        ),
         "publish.run_finished" => match build_status_from_event(event) {
-            Some("failed") => String::from("Automatic publish failed"),
-            Some("canceled") | Some("cancelled") => {
-                String::from("Automatic publish canceled")
-            }
-            _ => String::from("Automatic publish finished"),
+            Some("failed") => format!(
+                "{} publish failed",
+                notification_release_mode_label(event)
+            ),
+            Some("canceled") | Some("cancelled") => format!(
+                "{} publish canceled",
+                notification_release_mode_label(event)
+            ),
+            _ => format!(
+                "{} publish finished",
+                notification_release_mode_label(event)
+            ),
         },
         _ => String::from("HGP build update"),
     };
@@ -266,6 +289,29 @@ fn native_notification_content(event: &RuntimeEventRecord) -> (String, String) {
 
 fn build_status_from_event(event: &RuntimeEventRecord) -> Option<&str> {
     event.payload.get("status").and_then(serde_json::Value::as_str)
+}
+
+fn notification_release_mode_label(event: &RuntimeEventRecord) -> &'static str {
+    if event
+        .payload
+        .get("trigger_source")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("poll"))
+    {
+        return "Automatic";
+    }
+
+    match event
+        .payload
+        .get("source_kind")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("local_workspace") => "On-demand local",
+        Some("managed_ref") => "On-demand ref",
+        Some("managed_tag") => "On-demand tag",
+        _ if event.user_requested => "Manual",
+        _ => "Automatic",
+    }
 }
 
 fn ensure_notification_permission<R: Runtime>(app_handle: &AppHandle<R>) -> io::Result<bool> {
@@ -545,7 +591,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn native_notification_content_uses_on_demand_titles() {
+        assert_eq!(
+            native_notification_content(&test_event_with_source(
+                "automation.release_queued",
+                true,
+                Some("queued"),
+                Some("local_workspace"),
+                Some("manual"),
+            ))
+            .0,
+            "On-demand local release queued"
+        );
+        assert_eq!(
+            native_notification_content(&test_event_with_source(
+                "build.run_finished",
+                true,
+                Some("failed"),
+                Some("managed_ref"),
+                Some("manual"),
+            ))
+            .0,
+            "On-demand ref build failed"
+        );
+    }
+
     fn test_event(topic: &str, user_requested: bool, status: Option<&str>) -> RuntimeEventRecord {
+        test_event_with_source(topic, user_requested, status, None, None)
+    }
+
+    fn test_event_with_source(
+        topic: &str,
+        user_requested: bool,
+        status: Option<&str>,
+        source_kind: Option<&str>,
+        trigger_source: Option<&str>,
+    ) -> RuntimeEventRecord {
         RuntimeEventRecord {
             event_id: String::from("evt_test"),
             occurred_at_unix_millis: 1,
@@ -560,7 +642,11 @@ mod tests {
             summary: String::from(
                 "Automatic polling stopped for Revolutions after an authentication failure",
             ),
-            payload: serde_json::json!({ "status": status }),
+            payload: serde_json::json!({
+                "status": status,
+                "source_kind": source_kind,
+                "trigger_source": trigger_source,
+            }),
         }
     }
 }

@@ -17,18 +17,19 @@ import { RetainedLogsPanel } from "./RetainedLogsPanel";
 import ScreenScaffold from "./ScreenScaffold";
 import { Badge, MetaItem, MetaRow, SurfacePanel } from "./Surface";
 import {
-  formatProcessFeedBuildCount,
-  formatProcessFeedEngineKindBadge,
-  formatProcessFeedEngineVersionBadge,
-  formatProcessFeedMetaValue,
-  formatProcessFeedPublishCount,
-  formatProcessFeedStatusLabel,
+  formatLocalizedProcessFeedBuildCount,
+  formatLocalizedProcessFeedEngineKindBadge,
+  formatLocalizedProcessFeedEngineVersionBadge,
+  formatLocalizedProcessFeedMetaValue,
+  formatLocalizedProcessFeedPublishCount,
+  formatLocalizedProcessFeedStatusLabel,
   normalizeProcessFeedDisplayStatus,
   resolveProcessFeedStatusTone,
   resolveProcessFeedStepDetail,
-  resolveProcessFeedStepLabel,
+  resolveLocalizedProcessFeedStepLabel,
   type ProcessFeedRecord,
 } from "./processFeedPresentation";
+import { type Translate, useLocalization } from "../LocalizationProvider";
 import {
   deleteReleaseProcessOutputs,
   loadArtifactInspection,
@@ -89,6 +90,7 @@ export function ProcessDetailFocusScreen({
   onRequestRerun,
 }: ProcessDetailFocusScreenProps) {
   const { openOverlay } = useOverlay();
+  const { t } = useLocalization();
   const [completedSnapshot, setCompletedSnapshot] =
     useState<CompletedProcessSnapshot>(EMPTY_COMPLETED_PROCESS_SNAPSHOT);
   const [logPreviewsByEntryPath, setLogPreviewsByEntryPath] = useState<
@@ -110,13 +112,25 @@ export function ProcessDetailFocusScreen({
   if (!process) {
     return (
       <ScreenScaffold
-        subtitle="The selected process is no longer present on the current feed page."
-        eyebrow="Process"
-        title="Process detail unavailable"
+        subtitle={t(
+          "process_detail.unavailable.subtitle",
+          "The selected process is no longer present on the current feed page.",
+        )}
+        eyebrow={t("process_detail.unavailable.eyebrow", "Process")}
+        title={t(
+          "process_detail.unavailable.title",
+          "Process detail unavailable",
+        )}
       >
         <SurfacePanel
-          description="Return to the main feed and reopen the process if you need a fresh runtime snapshot."
-          title="No cached snapshot"
+          description={t(
+            "process_detail.unavailable.panel.description",
+            "Return to the main feed and reopen the process if you need a fresh runtime snapshot.",
+          )}
+          title={t(
+            "process_detail.unavailable.panel.title",
+            "No cached snapshot",
+          )}
         />
       </ScreenScaffold>
     );
@@ -125,7 +139,11 @@ export function ProcessDetailFocusScreen({
   const normalizedStatus = normalizeProcessFeedDisplayStatus(
     process.display_status,
   );
-  const stepLabel = resolveProcessFeedStepLabel(process, normalizedStatus);
+  const stepLabel = resolveLocalizedProcessFeedStepLabel(
+    t,
+    process,
+    normalizedStatus,
+  );
   const stepDetail = resolveProcessFeedStepDetail(process);
   const isCompletedMode = isTerminalProcessStatus(normalizedStatus);
 
@@ -205,7 +223,7 @@ export function ProcessDetailFocusScreen({
               isLoading: false,
               isRefreshing: false,
               isStale: true,
-              error: buildProcessDetailErrorMessage(error),
+              error: buildProcessDetailErrorMessage(t, error),
             };
           }
 
@@ -213,7 +231,7 @@ export function ProcessDetailFocusScreen({
             ...EMPTY_COMPLETED_PROCESS_SNAPSHOT,
             releaseRunId,
             isLoading: false,
-            error: buildProcessDetailErrorMessage(error),
+            error: buildProcessDetailErrorMessage(t, error),
           };
         });
       });
@@ -259,7 +277,7 @@ export function ProcessDetailFocusScreen({
       });
     } catch (error) {
       startTransition(() => {
-        setActionError(buildProcessDetailErrorMessage(error));
+        setActionError(buildProcessDetailErrorMessage(t, error));
       });
     } finally {
       startTransition(() => {
@@ -276,8 +294,10 @@ export function ProcessDetailFocusScreen({
           ...current,
           [entryPath]: {
             payload: null,
-            error:
+            error: t(
+              "process_detail.logs.missing_entry_path",
               "No retained log entry path is currently attached to this process.",
+            ),
           },
         }));
       });
@@ -295,8 +315,10 @@ export function ProcessDetailFocusScreen({
           ...current,
           [normalizedEntryPath]: {
             payload: null,
-            error:
+            error: t(
+              "process_detail.logs.missing_build_anchor",
               "No completed build anchor is available to resolve retained logs for this process.",
+            ),
           },
         }));
       });
@@ -329,7 +351,7 @@ export function ProcessDetailFocusScreen({
           ...current,
           [normalizedEntryPath]: {
             payload: null,
-            error: buildProcessDetailErrorMessage(error),
+            error: buildProcessDetailErrorMessage(t, error),
           },
         }));
       });
@@ -348,17 +370,21 @@ export function ProcessDetailFocusScreen({
 
     await openOverlay(LogViewerModal, {
       content: reportJson,
-      description:
+      description: t(
+        "process_detail.report.viewer.description",
         "Full retained JSON captured for this completed process. Use the viewer controls to switch between wrapped and preserved line layout.",
+      ),
       downloadFileName: resolveLogViewerFileName(
         completedSnapshot.executionReport.report_path,
         "retained-report.json",
       ),
       initialWrap: false,
       meta: completedSnapshot.executionReport.report_path
-        ? `Report path: ${completedSnapshot.executionReport.report_path}`
+        ? t("process_detail.report.viewer.path_meta", "Report path: {{path}}", {
+            path: completedSnapshot.executionReport.report_path,
+          })
         : undefined,
-      title: "Retained report JSON",
+      title: t("process_detail.report.viewer.title", "Retained report JSON"),
     });
   });
 
@@ -380,11 +406,16 @@ export function ProcessDetailFocusScreen({
 
       await openOverlay(LogViewerModal, {
         content: preview.content,
-        description:
+        description: t(
+          "process_detail.logs.viewer.description",
           "Retained log content loaded from the durable execution archive.",
-        downloadFileName: resolveLogViewerFileName(entryName, "retained-log.txt"),
+        ),
+        downloadFileName: resolveLogViewerFileName(
+          entryName,
+          "retained-log.txt",
+        ),
         initialWrap: false,
-        meta: buildRetainedLogViewerMeta(preview),
+        meta: buildRetainedLogViewerMeta(t, preview),
         title: entryName,
       });
     },
@@ -392,13 +423,26 @@ export function ProcessDetailFocusScreen({
 
   const handleRequestDeleteOutputs = useEffectEvent(async () => {
     const shouldDelete = await openOverlay<boolean>(ConfirmDialog, {
-      cancelLabel: "Keep outputs",
-      confirmLabel: "Delete outputs",
-      description:
+      cancelLabel: t(
+        "process_detail.confirm.delete_outputs.cancel",
+        "Keep outputs",
+      ),
+      confirmLabel: t(
+        "process_detail.confirm.delete_outputs.confirm",
+        "Delete outputs",
+      ),
+      description: t(
+        "process_detail.confirm.delete_outputs.description",
         "This removes the shared outputs directory currently attached to the selected process.",
-      message:
+      ),
+      message: t(
+        "process_detail.confirm.delete_outputs.message",
         "Use this only when you want to remove the current process outputs from disk. Published destinations and database records are not rewritten by this action.",
-      title: "Delete outputs?",
+      ),
+      title: t(
+        "process_detail.confirm.delete_outputs.title",
+        "Delete outputs?",
+      ),
     });
 
     if (!shouldDelete) {
@@ -410,13 +454,26 @@ export function ProcessDetailFocusScreen({
 
   const handleRequestDeleteRetainedMaterial = useEffectEvent(async () => {
     const shouldDelete = await openOverlay<boolean>(ConfirmDialog, {
-      cancelLabel: "Keep retained material",
-      confirmLabel: "Delete retained material",
-      description:
+      cancelLabel: t(
+        "process_detail.confirm.delete_retained.cancel",
+        "Keep retained material",
+      ),
+      confirmLabel: t(
+        "process_detail.confirm.delete_retained.confirm",
+        "Delete retained material",
+      ),
+      description: t(
+        "process_detail.confirm.delete_retained.description",
         "This removes the retained execution report and archived logs currently attached to the completed process.",
-      message:
+      ),
+      message: t(
+        "process_detail.confirm.delete_retained.message",
         "Use this only when you want to discard durable retained execution material from disk. The runtime history record remains, but the retained files are removed.",
-      title: "Delete retained material?",
+      ),
+      title: t(
+        "process_detail.confirm.delete_retained.title",
+        "Delete retained material?",
+      ),
     });
 
     if (!shouldDelete) {
@@ -432,13 +489,17 @@ export function ProcessDetailFocusScreen({
     }
 
     const shouldRerun = await openOverlay<boolean>(ConfirmDialog, {
-      cancelLabel: "Keep current run",
-      confirmLabel: "Rerun process",
-      description:
+      cancelLabel: t("process_detail.confirm.rerun.cancel", "Keep current run"),
+      confirmLabel: t("process_detail.confirm.rerun.confirm", "Rerun process"),
+      description: t(
+        "process_detail.confirm.rerun.description",
         "This requeues the selected release process using the same repository and tag.",
-      message:
+      ),
+      message: t(
+        "process_detail.confirm.rerun.message",
         "HGP will clear the derived build and publish state for this release, return to the main feed, and queue the process again.",
-      title: "Rerun process?",
+      ),
+      title: t("process_detail.confirm.rerun.title", "Rerun process?"),
     });
 
     if (!shouldRerun) {
@@ -456,7 +517,7 @@ export function ProcessDetailFocusScreen({
       await onRequestRerun(process);
     } catch (error) {
       startTransition(() => {
-        setActionError(buildProcessDetailErrorMessage(error));
+        setActionError(buildProcessDetailErrorMessage(t, error));
       });
     } finally {
       startTransition(() => {
@@ -474,7 +535,10 @@ export function ProcessDetailFocusScreen({
         artifact,
         artifactAbsolutePath,
         artifactFolderPath,
-        artifactLocationSummary: formatArtifactActiveLocationSummary(artifact),
+        artifactLocationSummary: formatArtifactActiveLocationSummary(
+          t,
+          artifact,
+        ),
         onOpenArtifact: artifactAbsolutePath
           ? () => void handleOpenPath(artifactAbsolutePath)
           : undefined,
@@ -487,16 +551,25 @@ export function ProcessDetailFocusScreen({
           pendingOpenPath === artifactAbsolutePath,
         openArtifactLabel:
           artifactAbsolutePath && pendingOpenPath === artifactAbsolutePath
-            ? "Opening artifact..."
-            : "Open artifact",
+            ? t(
+                "process_detail.artifact_viewer.opening_artifact",
+                "Opening artifact...",
+              )
+            : t(
+                "process_detail.artifact_viewer.open_artifact",
+                "Open artifact",
+              ),
         openFolderDisabled:
           deletedOutputs ||
           !artifactFolderPath ||
           pendingOpenPath === artifactFolderPath,
         openFolderLabel:
           artifactFolderPath && pendingOpenPath === artifactFolderPath
-            ? "Opening folder..."
-            : "Open folder",
+            ? t(
+                "process_detail.artifact_viewer.opening_folder",
+                "Opening folder...",
+              )
+            : t("process_detail.artifact_viewer.open_folder", "Open folder"),
         resolvePublishTargetKindTone,
       });
     },
@@ -513,13 +586,19 @@ export function ProcessDetailFocusScreen({
         setActionError(null);
         setActionMessage(
           report.removed_paths.length > 0
-            ? "Process outputs were removed from disk."
-            : "Process outputs were already absent from disk.",
+            ? t(
+                "process_detail.actions.outputs_removed",
+                "Process outputs were removed from disk.",
+              )
+            : t(
+                "process_detail.actions.outputs_absent",
+                "Process outputs were already absent from disk.",
+              ),
         );
       });
     } catch (error) {
       startTransition(() => {
-        setActionError(buildProcessDetailErrorMessage(error));
+        setActionError(buildProcessDetailErrorMessage(t, error));
       });
     } finally {
       startTransition(() => {
@@ -537,7 +616,10 @@ export function ProcessDetailFocusScreen({
     if (!retentionAnchorBuildRunId) {
       startTransition(() => {
         setActionError(
-          "No completed build anchor is available to remove retained material for this process.",
+          t(
+            "process_detail.actions.missing_build_anchor_remove_retained",
+            "No completed build anchor is available to remove retained material for this process.",
+          ),
         );
       });
       return;
@@ -568,13 +650,19 @@ export function ProcessDetailFocusScreen({
         setActionError(null);
         setActionMessage(
           report.removed_paths.length > 0
-            ? "Retained report and archived logs were removed from disk."
-            : "Retained material was already absent from disk.",
+            ? t(
+                "process_detail.actions.retained_removed",
+                "Retained report and archived logs were removed from disk.",
+              )
+            : t(
+                "process_detail.actions.retained_absent",
+                "Retained material was already absent from disk.",
+              ),
         );
       });
     } catch (error) {
       startTransition(() => {
-        setActionError(buildProcessDetailErrorMessage(error));
+        setActionError(buildProcessDetailErrorMessage(t, error));
       });
     } finally {
       startTransition(() => {
@@ -584,8 +672,8 @@ export function ProcessDetailFocusScreen({
   });
 
   const frameDescription = isCompletedMode
-    ? buildCompletedProcessDescription(usesLiveSnapshot)
-    : buildOngoingProcessDescription(usesLiveSnapshot);
+    ? buildCompletedProcessDescription(t, usesLiveSnapshot)
+    : buildOngoingProcessDescription(t, usesLiveSnapshot);
   const retentionAnchorBuildRunId =
     completedSnapshot.executionReport?.build_run_id ??
     selectPrimaryBuild(completedSnapshot.builds)?.build_run_id ??
@@ -597,12 +685,14 @@ export function ProcessDetailFocusScreen({
   const retainedLogEntries =
     completedSnapshot.executionReport?.log_entries ?? [];
   const reportSummaryItems = buildExecutionReportSummary(
+    t,
     completedSnapshot.executionReport?.report ?? null,
   );
   const reportJson = formatJsonValue(
     completedSnapshot.executionReport?.report ?? null,
   );
   const reportInterruptionMessage = resolveReportInterruptionMessage(
+    t,
     completedSnapshot.executionReport?.report ?? null,
   );
   const showsCompletedSnapshotLoading =
@@ -616,24 +706,37 @@ export function ProcessDetailFocusScreen({
     <ScreenScaffold
       className="process-detail-screen"
       subtitle={frameDescription}
-      eyebrow={isCompletedMode ? "Process Report" : "Ongoing Process"}
+      eyebrow={
+        isCompletedMode
+          ? t("process_detail.eyebrow.completed", "Process Report")
+          : t("process_detail.eyebrow.ongoing", "Ongoing Process")
+      }
       summary={
         <>
           <Badge tone={resolveProcessFeedStatusTone(normalizedStatus)}>
-            {formatProcessFeedStatusLabel(normalizedStatus)}
+            {formatLocalizedProcessFeedStatusLabel(t, normalizedStatus)}
           </Badge>
           <Badge tone="neutral">{process.git_tag}</Badge>
           <Badge tone="muted">
-            {formatProcessFeedEngineKindBadge(process.repository_engine_kind)}
+            {formatLocalizedProcessFeedEngineKindBadge(
+              t,
+              process.repository_engine_kind,
+            )}
           </Badge>
           <Badge tone="muted">
-            {formatProcessFeedEngineVersionBadge(process.engine_version)}
+            {formatLocalizedProcessFeedEngineVersionBadge(
+              t,
+              process.engine_version,
+            )}
           </Badge>
           <Badge tone="muted">
-            {formatProcessFeedBuildCount(process.total_build_runs)}
+            {formatLocalizedProcessFeedBuildCount(t, process.total_build_runs)}
           </Badge>
           <Badge tone="muted">
-            {formatProcessFeedPublishCount(process.total_publish_runs)}
+            {formatLocalizedProcessFeedPublishCount(
+              t,
+              process.total_publish_runs,
+            )}
           </Badge>
         </>
       }
@@ -661,8 +764,10 @@ export function ProcessDetailFocusScreen({
             {completedSnapshot.error}
           </p>
           <p className="process-detail-report__copy">
-            Showing the last known completed snapshot while retained data
-            refresh recovers.
+            {t(
+              "process_detail.stale_copy",
+              "Showing the last known completed snapshot while retained data refresh recovers.",
+            )}
           </p>
         </>
       ) : null}
@@ -672,23 +777,48 @@ export function ProcessDetailFocusScreen({
           <SurfacePanel
             bodyClassName="process-detail-panel__body"
             className="process-detail-panel"
-            description="Terminal state language sourced from the durable release process snapshot."
+            description={t(
+              "process_detail.final_outcome.description",
+              "Terminal state language sourced from the durable release process snapshot.",
+            )}
             summary={
               <MetaRow className="process-detail-panel__meta-row">
-                <MetaItem label="Terminal state">
-                  {formatProcessFeedStatusLabel(
+                <MetaItem
+                  label={t(
+                    "process_detail.final_outcome.summary.terminal_state",
+                    "Terminal state",
+                  )}
+                >
+                  {formatLocalizedProcessFeedStatusLabel(
+                    t,
                     process.current_step_status || normalizedStatus,
                   )}
                 </MetaItem>
-                <MetaItem label="Builds">
-                  {formatProcessFeedBuildCount(process.total_build_runs)}
+                <MetaItem
+                  label={t(
+                    "process_detail.final_outcome.summary.builds",
+                    "Builds",
+                  )}
+                >
+                  {formatLocalizedProcessFeedBuildCount(
+                    t,
+                    process.total_build_runs,
+                  )}
                 </MetaItem>
-                <MetaItem label="Publishes">
-                  {formatProcessFeedPublishCount(process.total_publish_runs)}
+                <MetaItem
+                  label={t(
+                    "process_detail.final_outcome.summary.publishes",
+                    "Publishes",
+                  )}
+                >
+                  {formatLocalizedProcessFeedPublishCount(
+                    t,
+                    process.total_publish_runs,
+                  )}
                 </MetaItem>
               </MetaRow>
             }
-            title="Final Outcome"
+            title={t("process_detail.final_outcome.title", "Final Outcome")}
             actions={
               onRequestRerun || isCompletedMode ? (
                 <div className="process-detail-toolbar">
@@ -703,8 +833,14 @@ export function ProcessDetailFocusScreen({
                     variant="ghost"
                   >
                     {completedSnapshot.isRefreshing
-                      ? "Refreshing retained data..."
-                      : "Refresh retained data"}
+                      ? t(
+                          "process_detail.final_outcome.actions.refreshing",
+                          "Refreshing retained data...",
+                        )
+                      : t(
+                          "process_detail.final_outcome.actions.refresh",
+                          "Refresh retained data",
+                        )}
                   </Button>
                   {onRequestRerun ? (
                     <Button
@@ -714,7 +850,15 @@ export function ProcessDetailFocusScreen({
                       size="sm"
                       variant="secondary"
                     >
-                      {isRequestingRerun ? "Rerunning..." : "Rerun process"}
+                      {isRequestingRerun
+                        ? t(
+                            "process_detail.final_outcome.actions.rerunning",
+                            "Rerunning...",
+                          )
+                        : t(
+                            "process_detail.final_outcome.actions.rerun",
+                            "Rerun process",
+                          )}
                     </Button>
                   ) : null}
                 </div>
@@ -760,15 +904,19 @@ export function ProcessDetailFocusScreen({
             <OutputsPanel
               artifacts={completedSnapshot.artifacts}
               deletedOutputs={deletedOutputs}
-              formatArtifactActiveLocationKindLabel={
-                formatArtifactActiveLocationKindLabel
+              formatArtifactActiveLocationKindLabel={(kind) =>
+                formatArtifactActiveLocationKindLabel(t, kind)
               }
-              formatArtifactActiveLocationSummary={
-                formatArtifactActiveLocationSummary
+              formatArtifactActiveLocationSummary={(artifact) =>
+                formatArtifactActiveLocationSummary(t, artifact)
               }
-              formatArtifactPublishRunSummary={formatArtifactPublishRunSummary}
-              formatByteSize={formatByteSize}
-              formatPublishTargetKindLabel={formatPublishTargetKindLabel}
+              formatArtifactPublishRunSummary={(publishRun) =>
+                formatArtifactPublishRunSummary(t, publishRun)
+              }
+              formatByteSize={(size) => formatByteSize(t, size)}
+              formatPublishTargetKindLabel={(kind) =>
+                formatPublishTargetKindLabel(t, kind)
+              }
               isDeletingOutputs={isDeletingOutputs}
               onInspectArtifact={(artifact) => {
                 void handleOpenArtifactViewer(artifact);
@@ -790,7 +938,7 @@ export function ProcessDetailFocusScreen({
             <RetainedLogsPanel
               deletedRetention={deletedRetention}
               entries={retainedLogEntries}
-              formatByteSize={formatByteSize}
+              formatByteSize={(size) => formatByteSize(t, size)}
               logPreviewStatesByEntryPath={logPreviewsByEntryPath}
               logsArchiveExists={Boolean(
                 completedSnapshot.executionReport?.logs_archive_exists,
@@ -811,23 +959,48 @@ export function ProcessDetailFocusScreen({
         <SurfacePanel
           bodyClassName="process-detail-panel__body"
           className="process-detail-panel"
-          description="Short operator-facing progress language sourced from the runtime process feed."
+          description={t(
+            "process_detail.current_step.description",
+            "Short operator-facing progress language sourced from the runtime process feed.",
+          )}
           summary={
             <MetaRow className="process-detail-panel__meta-row">
-              <MetaItem label="Step state">
-                {formatProcessFeedStatusLabel(
+              <MetaItem
+                label={t(
+                  "process_detail.current_step.summary.step_state",
+                  "Step state",
+                )}
+              >
+                {formatLocalizedProcessFeedStatusLabel(
+                  t,
                   process.current_step_status || normalizedStatus,
                 )}
               </MetaItem>
-              <MetaItem label="Builds">
-                {formatProcessFeedBuildCount(process.total_build_runs)}
+              <MetaItem
+                label={t(
+                  "process_detail.current_step.summary.builds",
+                  "Builds",
+                )}
+              >
+                {formatLocalizedProcessFeedBuildCount(
+                  t,
+                  process.total_build_runs,
+                )}
               </MetaItem>
-              <MetaItem label="Publishes">
-                {formatProcessFeedPublishCount(process.total_publish_runs)}
+              <MetaItem
+                label={t(
+                  "process_detail.current_step.summary.publishes",
+                  "Publishes",
+                )}
+              >
+                {formatLocalizedProcessFeedPublishCount(
+                  t,
+                  process.total_publish_runs,
+                )}
               </MetaItem>
             </MetaRow>
           }
-          title="Current Step"
+          title={t("process_detail.current_step.title", "Current Step")}
         >
           <div className="process-detail-panel__step-block">
             <p className="process-detail-panel__step-label">{stepLabel}</p>
@@ -840,38 +1013,73 @@ export function ProcessDetailFocusScreen({
 
       <SurfacePanel
         bodyClassName="process-detail-panel__body"
-        description="Durable runtime timestamps and identifiers currently attached to this release process."
+        description={t(
+          "process_detail.runtime_metadata.description",
+          "Durable runtime timestamps and identifiers currently attached to this release process.",
+        )}
         summary={
           <>
             <MetaRow className="process-detail-panel__meta-row">
-              <MetaItem label="Started">
-                {formatProcessFeedMetaValue(process.started_at, "not started")}
+              <MetaItem
+                label={t("process_detail.runtime_metadata.started", "Started")}
+              >
+                {formatLocalizedProcessFeedMetaValue(
+                  t,
+                  process.started_at,
+                  "process_detail.meta.not_started",
+                  "not started",
+                )}
               </MetaItem>
-              <MetaItem label="Finished">
-                {formatProcessFeedMetaValue(process.finished_at, "still active")}
+              <MetaItem
+                label={t(
+                  "process_detail.runtime_metadata.finished",
+                  "Finished",
+                )}
+              >
+                {formatLocalizedProcessFeedMetaValue(
+                  t,
+                  process.finished_at,
+                  "process_detail.meta.still_active",
+                  "still active",
+                )}
               </MetaItem>
-              <MetaItem label="Updated">
-                {formatProcessFeedMetaValue(process.updated_at)}
+              <MetaItem
+                label={t("process_detail.runtime_metadata.updated", "Updated")}
+              >
+                {formatLocalizedProcessFeedMetaValue(t, process.updated_at)}
               </MetaItem>
             </MetaRow>
 
             <MetaRow className="process-detail-panel__meta-row">
-              <MetaItem label="Commit">
-                {formatProcessFeedMetaValue(process.git_commit, "pending")}
+              <MetaItem
+                label={t("process_detail.runtime_metadata.commit", "Commit")}
+              >
+                {formatLocalizedProcessFeedMetaValue(t, process.git_commit)}
               </MetaItem>
-              <MetaItem label="Created">
-                {formatProcessFeedMetaValue(process.created_at)}
+              <MetaItem
+                label={t("process_detail.runtime_metadata.created", "Created")}
+              >
+                {formatLocalizedProcessFeedMetaValue(t, process.created_at)}
               </MetaItem>
-              <MetaItem label="Repository">{process.repository_url}</MetaItem>
+              <MetaItem
+                label={t(
+                  "process_detail.runtime_metadata.repository",
+                  "Repository",
+                )}
+              >
+                {process.repository_url}
+              </MetaItem>
             </MetaRow>
           </>
         }
-        title="Runtime Metadata"
+        title={t("process_detail.runtime_metadata.title", "Runtime Metadata")}
         tone="inset"
       >
         <p className="process-detail-report__copy">
-          Runtime identity stays pinned in the shared summary strip so the
-          panel body can stay compact.
+          {t(
+            "process_detail.runtime_metadata.copy",
+            "Runtime identity stays pinned in the shared summary strip so the panel body can stay compact.",
+          )}
         </p>
       </SurfacePanel>
     </ScreenScaffold>
@@ -888,39 +1096,79 @@ function isTerminalProcessStatus(status: string) {
 }
 
 function buildRetainedLogViewerMeta(
+  t: Translate,
   payload: RetainedLogArchiveEntryPreviewPayload,
 ) {
   if (payload.truncated) {
-    return `Showing the last ${formatByteSize(DEFAULT_LOG_PREVIEW_MAX_BYTES)} of ${formatByteSize(payload.size_bytes)} from ${payload.archive_path}.`;
+    return t(
+      "process_detail.logs.viewer.meta.truncated",
+      "Showing the last {{maxBytes}} of {{sizeBytes}} from {{archivePath}}.",
+      {
+        maxBytes: formatByteSize(t, DEFAULT_LOG_PREVIEW_MAX_BYTES),
+        sizeBytes: formatByteSize(t, payload.size_bytes),
+        archivePath: payload.archive_path,
+      },
+    );
   }
 
-  return `Showing the full log file (${formatByteSize(payload.size_bytes)}) from ${payload.archive_path}.`;
+  return t(
+    "process_detail.logs.viewer.meta.full",
+    "Showing the full log file ({{sizeBytes}}) from {{archivePath}}.",
+    {
+      sizeBytes: formatByteSize(t, payload.size_bytes),
+      archivePath: payload.archive_path,
+    },
+  );
 }
 
-function resolveLogViewerFileName(value: string | null | undefined, fallback: string) {
+function resolveLogViewerFileName(
+  value: string | null | undefined,
+  fallback: string,
+) {
   const normalizedValue = value?.trim();
 
   if (!normalizedValue) {
     return fallback;
   }
 
-  const pathSeparators = [normalizedValue.lastIndexOf("/"), normalizedValue.lastIndexOf("\\")];
+  const pathSeparators = [
+    normalizedValue.lastIndexOf("/"),
+    normalizedValue.lastIndexOf("\\"),
+  ];
   const separatorIndex = Math.max(...pathSeparators);
   const fileName = normalizedValue.slice(separatorIndex + 1).trim();
 
   return fileName || fallback;
 }
 
-function buildOngoingProcessDescription(usesLiveSnapshot: boolean) {
+function buildOngoingProcessDescription(
+  t: Translate,
+  usesLiveSnapshot: boolean,
+) {
   return usesLiveSnapshot
-    ? "The shell is rendering the latest runtime snapshot for an ongoing process."
-    : "The shell is rendering the last cached snapshot for an ongoing process because this release is no longer visible on the current feed page.";
+    ? t(
+        "process_detail.frame.ongoing.live",
+        "The shell is rendering the latest runtime snapshot for an ongoing process.",
+      )
+    : t(
+        "process_detail.frame.ongoing.cached",
+        "The shell is rendering the last cached snapshot for an ongoing process because this release is no longer visible on the current feed page.",
+      );
 }
 
-function buildCompletedProcessDescription(usesLiveSnapshot: boolean) {
+function buildCompletedProcessDescription(
+  t: Translate,
+  usesLiveSnapshot: boolean,
+) {
   return usesLiveSnapshot
-    ? "The shell is rendering the durable report view for a completed process together with its retained outputs and logs."
-    : "The shell is rendering the last cached completed-process snapshot together with durable report data because this release is no longer visible on the current feed page.";
+    ? t(
+        "process_detail.frame.completed.live",
+        "The shell is rendering the durable report view for a completed process together with its retained outputs and logs.",
+      )
+    : t(
+        "process_detail.frame.completed.cached",
+        "The shell is rendering the last cached completed-process snapshot together with durable report data because this release is no longer visible on the current feed page.",
+      );
 }
 
 function selectPrimaryBuild(builds: BuildHistoryRecord[]) {
@@ -980,32 +1228,44 @@ function resolveArtifactFolderPath(artifact: ArtifactInspectionRecord) {
 }
 
 function formatArtifactActiveLocationSummary(
+  t: Translate,
   artifact: ArtifactInspectionRecord,
 ) {
   return `${formatArtifactActiveLocationKindLabel(
+    t,
     artifact.artifact_active_location_kind,
   )}: ${artifact.artifact_active_location_ref}`;
 }
 
-function formatArtifactActiveLocationKindLabel(kind: string) {
+function formatArtifactActiveLocationKindLabel(t: Translate, kind: string) {
   switch (kind.trim().toLocaleLowerCase()) {
     case "runtime_artifact":
-      return "Managed output root";
+      return t(
+        "process_detail.outputs.location_kind.runtime_artifact",
+        "Managed output root",
+      );
     case "filesystem_absolute":
-      return "Filesystem publish move";
+      return t(
+        "process_detail.outputs.location_kind.filesystem_absolute",
+        "Filesystem publish move",
+      );
     default:
       return kind.replace(/_/g, " ");
   }
 }
 
 function formatArtifactPublishRunSummary(
+  t: Translate,
   publishRun: ArtifactInspectionRecord["publish_runs"][number],
 ) {
   if (publishRun.destination_ref?.trim()) {
     return publishRun.destination_ref;
   }
 
-  return "Destination reference pending.";
+  return t(
+    "process_detail.outputs.publish_destination_pending",
+    "Destination reference pending.",
+  );
 }
 
 function resolveArtifactPublishRunTone(
@@ -1026,12 +1286,18 @@ function resolvePublishTargetKindTone(): "muted" {
   return "muted";
 }
 
-function formatPublishTargetKindLabel(kind: string) {
+function formatPublishTargetKindLabel(t: Translate, kind: string) {
   switch (kind.trim().toLocaleLowerCase()) {
     case "filesystem":
-      return "Move To Folder";
+      return t(
+        "process_detail.outputs.publish_target_kind.filesystem",
+        "Move To Folder",
+      );
     case "itch":
-      return "Itch.io Upload";
+      return t(
+        "process_detail.outputs.publish_target_kind.itch",
+        "Itch.io Upload",
+      );
     default:
       return kind;
   }
@@ -1045,17 +1311,32 @@ function looksLikeAbsoluteHostPath(value: string) {
   );
 }
 
-function buildExecutionReportSummary(report: JsonValue | null) {
+function buildExecutionReportSummary(t: Translate, report: JsonValue | null) {
   const items = [
-    buildSummaryItem("Schema", readJsonNumber(report, ["schema_version"])),
     buildSummaryItem(
-      "Build state",
+      t("process_detail.execution_report.summary.schema", "Schema"),
+      readJsonNumber(report, ["schema_version"]),
+    ),
+    buildSummaryItem(
+      t("process_detail.execution_report.summary.build_state", "Build state"),
       readJsonString(report, ["build_run", "status"]),
     ),
-    buildSummaryItem("Cleanup", readJsonString(report, ["cleanup", "status"])),
-    buildSummaryItem("Trigger", readJsonString(report, ["cleanup", "trigger"])),
-    buildSummaryItem("Attempts", readJsonArrayLength(report, ["attempts"])),
-    buildSummaryItem("Stages", readJsonArrayLength(report, ["stages"])),
+    buildSummaryItem(
+      t("process_detail.execution_report.summary.cleanup", "Cleanup"),
+      readJsonString(report, ["cleanup", "status"]),
+    ),
+    buildSummaryItem(
+      t("process_detail.execution_report.summary.trigger", "Trigger"),
+      readJsonString(report, ["cleanup", "trigger"]),
+    ),
+    buildSummaryItem(
+      t("process_detail.execution_report.summary.attempts", "Attempts"),
+      readJsonArrayLength(report, ["attempts"]),
+    ),
+    buildSummaryItem(
+      t("process_detail.execution_report.summary.stages", "Stages"),
+      readJsonArrayLength(report, ["stages"]),
+    ),
   ];
 
   return items.filter(
@@ -1063,7 +1344,10 @@ function buildExecutionReportSummary(report: JsonValue | null) {
   );
 }
 
-function resolveReportInterruptionMessage(report: JsonValue | null) {
+function resolveReportInterruptionMessage(
+  t: Translate,
+  report: JsonValue | null,
+) {
   const kind = readJsonString(report, ["interruption", "kind"]);
   const message = readJsonString(report, ["interruption", "message"]);
 
@@ -1072,7 +1356,11 @@ function resolveReportInterruptionMessage(report: JsonValue | null) {
   }
 
   if (kind && message) {
-    return `Interruption: ${kind} · ${message}`;
+    return t(
+      "process_detail.execution_report.interruption.full",
+      "Interruption: {{kind}} · {{message}}",
+      { kind, message },
+    );
   }
 
   return kind || message;
@@ -1130,9 +1418,9 @@ function formatJsonValue(value: JsonValue | null) {
   return JSON.stringify(value, null, 2);
 }
 
-function formatByteSize(sizeBytes: number | null) {
+function formatByteSize(t: Translate, sizeBytes: number | null) {
   if (sizeBytes === null || Number.isNaN(sizeBytes)) {
-    return "unknown";
+    return t("process_detail.byte_size.unknown", "unknown");
   }
 
   if (sizeBytes < 1024) {
@@ -1151,7 +1439,7 @@ function formatByteSize(sizeBytes: number | null) {
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
-function buildProcessDetailErrorMessage(error: unknown) {
+function buildProcessDetailErrorMessage(t: Translate, error: unknown) {
   if (typeof error === "string" && error.trim()) {
     return error;
   }
@@ -1160,5 +1448,8 @@ function buildProcessDetailErrorMessage(error: unknown) {
     return error.message;
   }
 
-  return "The desktop shell could not load process report data.";
+  return t(
+    "process_detail.error.fallback",
+    "The desktop shell could not load process report data.",
+  );
 }

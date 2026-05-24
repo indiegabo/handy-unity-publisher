@@ -1,4 +1,5 @@
 import { Button } from "./Button";
+import { useLocalization } from "../LocalizationProvider";
 import { MetaItem, MetaRow, SurfacePanel } from "./Surface";
 
 type ExecutionReportPanelProps = {
@@ -45,13 +46,17 @@ export function ExecutionReportPanel({
   showsLoading,
   showsUnavailable,
 }: ExecutionReportPanelProps) {
+  const { t } = useLocalization();
   const reportPath = report?.report_path ?? null;
 
   return (
     <SurfacePanel
       bodyClassName="process-detail-panel__body"
       className="process-detail-report-panel"
-      description="Retained report data captured after this release process reached a terminal state."
+      description={t(
+        "process_detail.execution_report.description",
+        "Retained report data captured after this release process reached a terminal state.",
+      )}
       summary={
         report?.exists && report.report && reportSummaryItems.length > 0 ? (
           <MetaRow className="process-detail-panel__meta-row">
@@ -63,7 +68,7 @@ export function ExecutionReportPanel({
           </MetaRow>
         ) : null
       }
-      title="Execution Report"
+      title={t("process_detail.execution_report.title", "Execution Report")}
       tone="inset"
       actions={
         <div className="process-detail-toolbar process-detail-toolbar--report-header">
@@ -75,7 +80,10 @@ export function ExecutionReportPanel({
               size="sm"
               variant="ghost"
             >
-              Open report file
+              {t(
+                "process_detail.execution_report.actions.open_file",
+                "Open report file",
+              )}
             </Button>
           ) : null}
           {retainedDirPath ? (
@@ -86,7 +94,10 @@ export function ExecutionReportPanel({
               size="sm"
               variant="ghost"
             >
-              Open retained folder
+              {t(
+                "process_detail.execution_report.actions.open_folder",
+                "Open retained folder",
+              )}
             </Button>
           ) : null}
           {retentionAnchorBuildRunId ? (
@@ -97,7 +108,15 @@ export function ExecutionReportPanel({
               size="sm"
               variant="ghost"
             >
-              {isDeletingRetention ? "Deleting..." : "Delete retained material"}
+              {isDeletingRetention
+                ? t(
+                    "process_detail.execution_report.actions.deleting",
+                    "Deleting...",
+                  )
+                : t(
+                    "process_detail.execution_report.actions.delete",
+                    "Delete retained material",
+                  )}
             </Button>
           ) : null}
         </div>
@@ -105,7 +124,10 @@ export function ExecutionReportPanel({
     >
       {showsLoading ? (
         <p className="process-detail-report__copy">
-          Loading retained report data for this completed process...
+          {t(
+            "process_detail.execution_report.loading",
+            "Loading retained report data for this completed process...",
+          )}
         </p>
       ) : showsUnavailable ? (
         <div className="process-detail-toolbar">
@@ -117,13 +139,18 @@ export function ExecutionReportPanel({
             size="sm"
             variant="secondary"
           >
-            Retry retained data
+            {t(
+              "process_detail.execution_report.actions.retry",
+              "Retry retained data",
+            )}
           </Button>
         </div>
       ) : deletedRetention ? (
         <p className="process-detail-report__copy">
-          The retained report directory for this completed process has been
-          removed from disk.
+          {t(
+            "process_detail.execution_report.deleted_copy",
+            "The retained report directory for this completed process has been removed from disk.",
+          )}
         </p>
       ) : report?.exists && report.report ? (
         <div className="process-detail-report-shell">
@@ -133,8 +160,10 @@ export function ExecutionReportPanel({
 
           <div className="process-detail-log-preview">
             <p className="process-detail-report__copy">
-              Open the full retained JSON in the viewer when you need raw
-              details; the inline screen stays compact.
+              {t(
+                "process_detail.execution_report.viewer_copy",
+                "Open the full retained JSON in the viewer when you need raw details; the inline screen stays compact.",
+              )}
             </p>
             <div className="process-detail-toolbar">
               <Button
@@ -143,15 +172,20 @@ export function ExecutionReportPanel({
                 size="sm"
                 variant="ghost"
               >
-                View JSON report
+                {t(
+                  "process_detail.execution_report.actions.view_json",
+                  "View JSON report",
+                )}
               </Button>
             </div>
           </div>
         </div>
       ) : (
         <p className="process-detail-report__copy">
-          No retained execution report file was found for this completed
-          process.
+          {t(
+            "process_detail.execution_report.empty",
+            "No retained execution report file was found for this completed process.",
+          )}
         </p>
       )}
     </SurfacePanel>

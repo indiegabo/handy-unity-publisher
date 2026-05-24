@@ -107,7 +107,7 @@ describe("CreateProjectWizard", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows an unavailable state instead of repository fields for local workspace access", async () => {
+  it("shows local workspace fields instead of repository access fields for local workspace access", async () => {
     render(
       <CreateProjectWizard
         initialSnapshot={buildLocalAccessStepSnapshot()}
@@ -120,10 +120,12 @@ describe("CreateProjectWizard", () => {
     expect(
       screen.getByRole("heading", { name: "Local workspace source" }),
     ).toBeInTheDocument();
+    expect(screen.getByText("Local workspace path")).toBeInTheDocument();
     expect(
-      screen.getByText(
-        "The create-project wizard does not have a local workspace source adapter yet, so repository-specific fields stay hidden for this draft.",
-      ),
+      screen.getByRole("button", { name: "Choose workspace" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByDisplayValue("C:/projects/red-horizon"),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("textbox", { name: "Repository URL" }),
@@ -173,12 +175,10 @@ describe("CreateProjectWizard", () => {
     expect(
       screen.queryByRole("option", { name: "6000.1.9f1" }),
     ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("option", { name: "6000.3.11f1" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("option", { name: "6000.4.3f1" }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(installedEditorsSelect).toHaveTextContent("6000.3.11f1");
+      expect(installedEditorsSelect).toHaveTextContent("6000.4.3f1");
+    });
 
     fireEvent.change(installedEditorsSelect, {
       target: {
@@ -381,6 +381,44 @@ describe("CreateProjectWizard", () => {
     });
   });
 
+  it("creates a local workspace project from the review step", async () => {
+    const onCreated = vi.fn();
+
+    render(
+      <CreateProjectWizard
+        initialSnapshot={buildLocalReviewSnapshot()}
+        onCreated={onCreated}
+        onManageAuth={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("6. Review")).toBeInTheDocument();
+    });
+
+    const createButton = await screen.findByRole("button", {
+      name: "Create project",
+    });
+    expect(createButton).toBeEnabled();
+
+    fireEvent.click(createButton);
+
+    await waitFor(() => {
+      expect(createRepositoryProjectMock).toHaveBeenCalledTimes(1);
+      const payload = createRepositoryProjectMock.mock.calls[0]?.[0];
+      expect(payload).toEqual(
+        expect.objectContaining({
+          source_mode: "local_workspace",
+          local_path: "C:/projects/red-horizon",
+        }),
+      );
+      expect(payload?.repository_url ?? null).toBeNull();
+      expect(payload?.repository_access_assessment ?? null).toBeNull();
+      expect(payload?.repository_credentials_id ?? null).toBeNull();
+      expect(onCreated).toHaveBeenCalledWith(1);
+    });
+  });
+
   it("keeps late-step path validation local instead of advancing into review", async () => {
     render(
       <CreateProjectWizard
@@ -432,6 +470,7 @@ function buildReviewSnapshot(): CreateProjectWizardSnapshot {
         },
       ],
       engineKind: "unity",
+      localPath: "",
       name: "Red Horizon",
       pollingIntervalSeconds: "300",
       projectKind: "repository",
@@ -481,6 +520,21 @@ function buildLocalAccessStepSnapshot(): CreateProjectWizardSnapshot {
     draft: {
       ...snapshot.draft,
       engineKind: "unity",
+      localPath: "C:/projects/red-horizon",
+      projectKind: "local",
+      repositoryUrl: "",
+    },
+  };
+}
+
+function buildLocalReviewSnapshot(): CreateProjectWizardSnapshot {
+  const snapshot = buildReviewSnapshot();
+
+  return {
+    ...snapshot,
+    draft: {
+      ...snapshot.draft,
+      localPath: "C:/projects/red-horizon",
       projectKind: "local",
       repositoryUrl: "",
     },

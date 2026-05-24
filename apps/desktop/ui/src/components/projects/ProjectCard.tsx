@@ -4,6 +4,12 @@ import { Button } from "../Button";
 import { Icon } from "../Icon";
 import { Badge, MetaItem, MetaRow, SummaryStrip } from "../Surface";
 import type { RepositoryInspectionEntry } from "../../services/projects";
+import {
+  buildLocalizedProjectSourceDisplay,
+  resolveLocalizedProjectAutomationCadenceLabel,
+  resolveLocalizedProjectSourceModeSummary,
+} from "../../projectSourcePresentation";
+import { useLocalization } from "../../LocalizationProvider";
 
 export type ProjectCardProps = {
   repository: RepositoryInspectionEntry;
@@ -18,6 +24,7 @@ export type ProjectCardProps = {
 
 const ProjectCard = React.forwardRef<HTMLButtonElement, ProjectCardProps>(
   ({ repository, highlighted, onCardKeyDown, onOpen, onQuickView }, ref) => {
+    const { t } = useLocalization();
     const showStatusBadge = highlighted || !repository.enabled;
 
     return (
@@ -28,7 +35,13 @@ const ProjectCard = React.forwardRef<HTMLButtonElement, ProjectCardProps>(
         )}
       >
         <button
-          aria-label={`Open project ${repository.repository_name}`}
+          aria-label={t(
+            "projects.card.actions.open_project_named",
+            "Open project {{repositoryName}}",
+            {
+              repositoryName: repository.repository_name,
+            },
+          )}
           ref={ref}
           className="project-list-card__open"
           onKeyDown={(event) =>
@@ -37,7 +50,13 @@ const ProjectCard = React.forwardRef<HTMLButtonElement, ProjectCardProps>(
           onClick={() =>
             onOpen(repository.repository_id, repository.repository_name)
           }
-          title={`Open project ${repository.repository_name}`}
+          title={t(
+            "projects.card.actions.open_project_named",
+            "Open project {{repositoryName}}",
+            {
+              repositoryName: repository.repository_name,
+            },
+          )}
           type="button"
         >
           <div className="project-list-card__header">
@@ -48,50 +67,74 @@ const ProjectCard = React.forwardRef<HTMLButtonElement, ProjectCardProps>(
                 </h3>
                 {showStatusBadge ? (
                   <div className="project-list-card__badges">
-                    {highlighted ? <Badge tone="strong">new</Badge> : null}
+                    {highlighted ? (
+                      <Badge tone="strong">
+                        {t("projects.card.badges.new", "new")}
+                      </Badge>
+                    ) : null}
                     {!repository.enabled ? (
-                      <Badge tone="muted">disabled</Badge>
+                      <Badge tone="muted">
+                        {t("projects.card.badges.disabled", "disabled")}
+                      </Badge>
                     ) : null}
                   </div>
                 ) : null}
               </div>
 
-              <p className="project-list-card__copy">{repository.repo_url}</p>
+              <p className="project-list-card__copy">
+                {buildLocalizedProjectSourceDisplay(t, repository)}
+              </p>
             </div>
 
             <span className="project-list-card__direction">
-              <span className="project-list-card__direction-label">Edit</span>
+              <span className="project-list-card__direction-label">
+                {t("projects.card.direction.edit", "Edit")}
+              </span>
               <Icon name="arrowUpRight" size={14} />
             </span>
           </div>
 
           <SummaryStrip className="project-list-card__summary-strip">
             <MetaRow className="project-list-card__meta">
-              <MetaItem label="Engine">{repository.engine_kind}</MetaItem>
-              <MetaItem label="Poll">
-                {`${repository.polling_interval_seconds}s cadence`}
+              <MetaItem label={t("projects.card.summary.engine", "Engine")}>
+                {repository.engine_kind}
               </MetaItem>
-              <MetaItem label="Targets">
-                {formatTargetCount(repository.enabled_build_target_count)}
+              <MetaItem label={t("projects.card.summary.mode", "Mode")}>
+                {resolveLocalizedProjectSourceModeSummary(t, repository)}
+              </MetaItem>
+              <MetaItem label={t("projects.card.summary.targets", "Targets")}>
+                {formatTargetCount(t, repository.enabled_build_target_count)}
               </MetaItem>
             </MetaRow>
 
             <p className="project-list-card__summary">
-              {buildRepositorySummary(repository)}
+              {buildRepositorySummary(t, repository)}
             </p>
           </SummaryStrip>
         </button>
 
         <div className="project-list-card__actions">
           <Button
-            aria-label={`Quick view for ${repository.repository_name}`}
+            aria-label={t(
+              "projects.card.actions.quick_view_named",
+              "Quick view for {{repositoryName}}",
+              {
+                repositoryName: repository.repository_name,
+              },
+            )}
             leadingIcon="search"
             onClick={() => onQuickView(repository.repository_id)}
             size="sm"
-            title={`Quick view for ${repository.repository_name}`}
+            title={t(
+              "projects.card.actions.quick_view_named",
+              "Quick view for {{repositoryName}}",
+              {
+                repositoryName: repository.repository_name,
+              },
+            )}
             variant="ghost"
           >
-            Quick view
+            {t("projects.card.actions.quick_view", "Quick view")}
           </Button>
         </div>
       </article>
@@ -101,20 +144,48 @@ const ProjectCard = React.forwardRef<HTMLButtonElement, ProjectCardProps>(
 
 export default ProjectCard;
 
-function buildRepositorySummary(repository: RepositoryInspectionEntry) {
+function buildRepositorySummary(
+  t: ReturnType<typeof useLocalization>["t"],
+  repository: RepositoryInspectionEntry,
+) {
+  const sourceMode = resolveLocalizedProjectAutomationCadenceLabel(
+    t,
+    repository,
+  );
   const pipelineState = repository.enabled
-    ? "Pipeline enabled."
-    : "Pipeline disabled.";
+    ? t("projects.card.pipeline.enabled", "Pipeline enabled.")
+    : t("projects.card.pipeline.disabled", "Pipeline disabled.");
   const lastSeenTag = repository.last_seen_tag
-    ? `Last seen tag ${repository.last_seen_tag}.`
-    : "No baseline tag recorded yet.";
+    ? t("projects.card.last_seen_tag.known", "Last seen tag {{tag}}.", {
+        tag: repository.last_seen_tag,
+      })
+    : t("projects.card.last_seen_tag.none", "No baseline tag recorded yet.");
   const publishDestinationCount = repository.publish_targets.length;
 
-  return `${pipelineState} ${lastSeenTag} ${publishDestinationCount} publish destination${publishDestinationCount === 1 ? "" : "s"} registered.`;
+  const publishSummary =
+    publishDestinationCount === 1
+      ? t(
+          "projects.card.publish_destinations.one",
+          "1 publish destination registered.",
+        )
+      : t(
+          "projects.card.publish_destinations.other",
+          "{{count}} publish destinations registered.",
+          { count: publishDestinationCount },
+        );
+
+  return `${sourceMode}. ${pipelineState} ${lastSeenTag} ${publishSummary}`;
 }
 
-function formatTargetCount(targetCount: number) {
-  return `${targetCount} active target${targetCount === 1 ? "" : "s"}`;
+function formatTargetCount(
+  t: ReturnType<typeof useLocalization>["t"],
+  targetCount: number,
+) {
+  return targetCount === 1
+    ? t("projects.card.count.targets.one", "1 active target")
+    : t("projects.card.count.targets.other", "{{count}} active targets", {
+        count: targetCount,
+      });
 }
 
 function joinClassNames(...tokens: Array<string | false | null | undefined>) {

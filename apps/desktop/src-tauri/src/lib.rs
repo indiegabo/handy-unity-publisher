@@ -51,11 +51,13 @@ use runtime_store::{
     CreateRepositoryProjectPublishBindingInput as StoreCreateRepositoryProjectPublishBindingInput,
     CreateRepositoryProjectPublishTargetInput as StoreCreateRepositoryProjectPublishTargetInput,
     CreateRepositoryProjectInput as StoreCreateRepositoryProjectInput,
-    ManualReleaseDispatchInput,
+    OnDemandReleaseDispatchInput as StoreOnDemandReleaseDispatchInput,
     CreatedRepositoryProjectRecord,
-    PollingRepositoryRecord as StorePollingRepositoryRecord,
+    RepositoryProjectRecord as StoreRepositoryProjectRecord,
     RemoveRepositoryProjectInput as StoreRemoveRepositoryProjectInput,
     RemoveRepositoryProjectReport as StoreRemoveRepositoryProjectReport,
+    ReleaseRunRecord,
+    ReleaseSourceMetadata,
     RemoveRepositoryProjectStrategy,
     RepositoryAutomationStatus as StoreRepositoryAutomationStatus,
     UpdateRepositoryAuthStateInput as StoreUpdateRepositoryAuthStateInput,
@@ -123,6 +125,7 @@ const MIN_REPOSITORY_POLL_INTERVAL_SECONDS: i64 = 5;
 const SUPPORTED_REPOSITORY_ENGINE_KIND_UNITY: &str = "unity";
 const GITHUB_AUTH_PROVIDER_ID: &str = "github";
 const EVENT_TOPIC_AUTOMATION_MODE_CHANGED: &str = "automation.mode_changed";
+const EVENT_TOPIC_RELEASE_QUEUED: &str = "automation.release_queued";
 const GITHUB_AUTH_PROVIDER_LABEL: &str = "GitHub";
 const GITHUB_AUTH_INSTANCE_URL: &str = "https://github.com";
 const GITHUB_AUTH_CREDENTIAL_NAME: &str = "GitHub.com";
@@ -132,6 +135,11 @@ const AUTH_PROVIDER_STATUS_CONNECTED: &str = "connected";
 const AUTH_PROVIDER_STATUS_DISCONNECTED: &str = "disconnected";
 const AUTH_PROVIDER_STATUS_UNAVAILABLE: &str = "unavailable";
 const DESKTOP_SHELL_RERUN_REQUESTED_VIA: &str = "desktop-shell-ui";
+const LOCALIZATION_RESOURCE_DIR_NAME: &str = "localizations";
+const LOCALIZATION_SETTINGS_FILE_NAME: &str = "localization-settings.json";
+const DEFAULT_PRIMARY_LOCALE_CODE: &str = "en";
+const DEFAULT_FALLBACK_LOCALE_CODE: &str = "pt-BR";
+const OFFICIAL_LOCALE_CODES: &[&str] = &["en", "pt-BR"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WindowLayoutPreset {
@@ -313,6 +321,45 @@ struct RuntimeDirectorySettings {
     runtime_events_path: PathBuf,
     runtime_events_cursor_path: PathBuf,
     runtime_log_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct LocalizationLocaleSettings {
+    code: String,
+    display_name: String,
+    native_name: String,
+    message_count: usize,
+    is_official: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct LocalizationSettings {
+    localization_root: PathBuf,
+    primary_locale: String,
+    fallback_locale: String,
+    available_locales: Vec<LocalizationLocaleSettings>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct SaveLocalizationPreferencesInput {
+    primary_locale: String,
+    fallback_locale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedLocalizationPreferences {
+    primary_locale: String,
+    fallback_locale: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct LocalizationPackDocument {
+    display_name: String,
+    #[serde(default)]
+    native_name: String,
+    #[serde(default)]
+    messages: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -521,7 +568,9 @@ struct PickHostPathInput {
 struct CreateRepositoryProjectCommandInput {
     name: String,
     engine_kind: String,
-    repository_url: String,
+    source_mode: Option<String>,
+    repository_url: Option<String>,
+    local_path: Option<String>,
     repository_access_assessment: Option<RepositoryAccessAssessment>,
     repository_credentials_id: Option<i64>,
     personal_access_token: Option<String>,
@@ -567,7 +616,9 @@ struct UpdateRepositoryProjectCommandInput {
     repository_id: i64,
     name: String,
     engine_kind: String,
-    repository_url: String,
+    source_mode: String,
+    repository_url: Option<String>,
+    local_path: Option<String>,
     repository_access_assessment: Option<RepositoryAccessAssessment>,
     default_branch: Option<String>,
     artifacts_root_override: Option<String>,
@@ -588,6 +639,17 @@ struct RemoveRepositoryProjectCommandInput {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct RepositoryInstantCheckInput {
     repository_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct OnDemandReleaseProcessCommandInput {
+    repository_id: i64,
+    release_version: Option<String>,
+    version_source: String,
+    source_kind: String,
+    source_ref: Option<String>,
+    local_path: Option<String>,
+    unity_executable_path_override: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -619,7 +681,9 @@ struct NormalizedCreateRepositoryProjectPublishTargetCommandInput {
 struct NormalizedCreateRepositoryProjectCommandInput {
     name: String,
     engine_kind: String,
-    repository_url: String,
+    source_mode: String,
+    repository_url: Option<String>,
+    local_path: Option<String>,
     repository_access_assessment: Option<RepositoryAccessAssessment>,
     repository_credentials_id: Option<i64>,
     default_branch: Option<String>,
@@ -663,7 +727,9 @@ struct NormalizedUpdateRepositoryProjectCommandInput {
     repository_id: i64,
     name: String,
     engine_kind: String,
-    repository_url: String,
+    source_mode: String,
+    repository_url: Option<String>,
+    local_path: Option<String>,
     repository_access_assessment: Option<RepositoryAccessAssessment>,
     default_branch: Option<String>,
     artifacts_root_override: Option<String>,
@@ -746,7 +812,10 @@ struct RepositoryPublishTargetInspection {
 struct RepositoryInspectionEntry {
     repository_id: i64,
     repository_name: String,
+    source_mode: String,
+    workspace_strategy: String,
     repo_url: String,
+    local_path: Option<String>,
     engine_kind: String,
     enabled: bool,
     polling_interval_seconds: i64,
@@ -1154,6 +1223,7 @@ pub fn run() {
             application_version,
             process_feed,
             open_host_path,
+            open_external_url,
             read_host_text_file,
             transition_window_focus,
             main_window_pin_state,
@@ -1169,6 +1239,8 @@ pub fn run() {
             runtime_automation_status,
             runtime_logs,
             runtime_directories,
+            localization_settings,
+            save_localization_preferences,
             runtime_lifecycle_settings,
             release_status,
             repository_inspection,
@@ -1195,6 +1267,7 @@ pub fn run() {
             stop_runtime,
             restart_runtime,
             set_runtime_automation_mode,
+            dispatch_on_demand_release_process,
             rerun_release_process,
             request_repository_instant_check,
             unity_adapter_settings,
@@ -1408,6 +1481,35 @@ fn runtime_directories() -> Result<RuntimeDirectorySettings, String> {
 }
 
 #[tauri::command]
+fn localization_settings(app_handle: AppHandle) -> Result<LocalizationSettings, String> {
+    let localization_root =
+        resolve_localization_resource_root(&app_handle).map_err(|error| error.to_string())?;
+    let settings_dir =
+        resolve_localization_settings_dir(&app_handle).map_err(|error| error.to_string())?;
+
+    load_localization_settings_from_paths(&localization_root, &settings_dir)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_localization_preferences(
+    app_handle: AppHandle,
+    input: SaveLocalizationPreferencesInput,
+) -> Result<LocalizationSettings, String> {
+    let localization_root =
+        resolve_localization_resource_root(&app_handle).map_err(|error| error.to_string())?;
+    let settings_dir =
+        resolve_localization_settings_dir(&app_handle).map_err(|error| error.to_string())?;
+
+    persist_localization_preferences_to_paths(
+        &localization_root,
+        &settings_dir,
+        input,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn runtime_lifecycle_settings() -> Result<RuntimeLifecycleSettings, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     load_runtime_lifecycle_settings(&config).map_err(|error| error.to_string())
@@ -1416,6 +1518,11 @@ fn runtime_lifecycle_settings() -> Result<RuntimeLifecycleSettings, String> {
 #[tauri::command]
 fn open_host_path(path: String) -> Result<(), String> {
     open_path_in_host(Path::new(path.trim())).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    open_url_in_host(url.trim()).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1502,15 +1609,29 @@ fn delete_release_process_outputs(
 }
 
 #[tauri::command]
+fn dispatch_on_demand_release_process(
+    app_handle: AppHandle,
+    input: OnDemandReleaseProcessCommandInput,
+) -> Result<ReleaseRunRecord, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    let record = request_on_demand_release_process(&config, input)
+        .map_err(|error| error.to_string())?;
+
+    launch_runtime_process_handle(&app_handle).map_err(|error| error.to_string())?;
+    Ok(record)
+}
+
+#[tauri::command]
 fn rerun_release_process(
     app_handle: AppHandle,
     release_run_id: i64,
-) -> Result<(), String> {
+) -> Result<ReleaseRunRecord, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    request_release_process_rerun(&config, release_run_id)
+    let record = request_release_process_rerun(&config, release_run_id)
         .map_err(|error| error.to_string())?;
 
-    launch_runtime_process_handle(&app_handle).map_err(|error| error.to_string())
+    launch_runtime_process_handle(&app_handle).map_err(|error| error.to_string())?;
+    Ok(record)
 }
 
 #[tauri::command]
@@ -1854,6 +1975,317 @@ fn load_runtime_directory_settings(
     })
 }
 
+fn resolve_localization_resource_root<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> io::Result<PathBuf> {
+    if cfg!(debug_assertions) {
+        return Ok(workspace_localization_resource_root());
+    }
+
+    app_handle
+        .path()
+        .resource_dir()
+        .map(|path| path.join(LOCALIZATION_RESOURCE_DIR_NAME))
+        .map_err(|error| io::Error::other(error.to_string()))
+}
+
+fn resolve_localization_settings_dir<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> io::Result<PathBuf> {
+    app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|error| io::Error::other(error.to_string()))
+}
+
+fn workspace_localization_resource_root() -> PathBuf {
+    workspace_root()
+        .join("apps")
+        .join("desktop")
+        .join("src-tauri")
+        .join(LOCALIZATION_RESOURCE_DIR_NAME)
+}
+
+fn localization_preferences_path(settings_dir: &Path) -> PathBuf {
+    settings_dir.join(LOCALIZATION_SETTINGS_FILE_NAME)
+}
+
+fn load_localization_settings_from_paths(
+    localization_root: &Path,
+    settings_dir: &Path,
+) -> io::Result<LocalizationSettings> {
+    let (available_locales, mut warnings) =
+        discover_localization_locale_settings(localization_root)?;
+    let (persisted_preferences, persisted_warning) =
+        read_persisted_localization_preferences(settings_dir)?;
+
+    if let Some(persisted_warning) = persisted_warning {
+        warnings.push(persisted_warning);
+    }
+
+    let primary_locale = resolve_configured_locale_code(
+        persisted_preferences
+            .as_ref()
+            .map(|preferences| preferences.primary_locale.as_str()),
+        default_primary_locale_code(&available_locales),
+        &available_locales,
+        "primary",
+        &mut warnings,
+    );
+    let fallback_locale = resolve_configured_locale_code(
+        persisted_preferences
+            .as_ref()
+            .map(|preferences| preferences.fallback_locale.as_str()),
+        default_fallback_locale_code(&available_locales, &primary_locale),
+        &available_locales,
+        "fallback",
+        &mut warnings,
+    );
+
+    Ok(LocalizationSettings {
+        localization_root: localization_root.to_path_buf(),
+        primary_locale,
+        fallback_locale,
+        available_locales,
+        warnings,
+    })
+}
+
+fn persist_localization_preferences_to_paths(
+    localization_root: &Path,
+    settings_dir: &Path,
+    input: SaveLocalizationPreferencesInput,
+) -> io::Result<LocalizationSettings> {
+    let normalized_primary_locale = input.primary_locale.trim();
+    let normalized_fallback_locale = input.fallback_locale.trim();
+    let (available_locales, _) = discover_localization_locale_settings(localization_root)?;
+
+    if available_locales.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::NotFound,
+            format!(
+                "no locale packs were discovered at {}",
+                localization_root.display()
+            ),
+        ));
+    }
+
+    if normalized_primary_locale.is_empty() || normalized_fallback_locale.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "primary and fallback locale codes are required",
+        ));
+    }
+
+    if !locale_code_exists(normalized_primary_locale, &available_locales) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "primary locale {:?} is not available in {}",
+                normalized_primary_locale,
+                localization_root.display()
+            ),
+        ));
+    }
+
+    if !locale_code_exists(normalized_fallback_locale, &available_locales) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "fallback locale {:?} is not available in {}",
+                normalized_fallback_locale,
+                localization_root.display()
+            ),
+        ));
+    }
+
+    fs::create_dir_all(settings_dir)?;
+    fs::write(
+        localization_preferences_path(settings_dir),
+        serde_json::to_vec_pretty(&PersistedLocalizationPreferences {
+            primary_locale: normalized_primary_locale.to_owned(),
+            fallback_locale: normalized_fallback_locale.to_owned(),
+        })
+        .map_err(|error| io::Error::other(error.to_string()))?,
+    )?;
+
+    load_localization_settings_from_paths(localization_root, settings_dir)
+}
+
+fn discover_localization_locale_settings(
+    localization_root: &Path,
+) -> io::Result<(Vec<LocalizationLocaleSettings>, Vec<String>)> {
+    let mut available_locales = Vec::new();
+    let mut warnings = Vec::new();
+
+    let entries = match fs::read_dir(localization_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            warnings.push(format!(
+                "No locale packs were found at {}.",
+                localization_root.display()
+            ));
+            return Ok((available_locales, warnings));
+        }
+        Err(error) => return Err(error),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+
+        if !path.is_file()
+            || path.extension().and_then(|extension| extension.to_str()) != Some("json")
+        {
+            continue;
+        }
+
+        let Some(file_stem) = path.file_stem().and_then(|file_stem| file_stem.to_str()) else {
+            warnings.push(format!(
+                "Ignoring locale pack with a non-UTF8 file name at {}.",
+                path.display()
+            ));
+            continue;
+        };
+
+        match load_localization_locale_setting(&path, file_stem) {
+            Ok(locale_setting) => available_locales.push(locale_setting),
+            Err(error) => warnings.push(format!(
+                "Could not load locale pack {}: {}",
+                path.display(),
+                error
+            )),
+        }
+    }
+
+    available_locales.sort_by(|left, right| left.code.cmp(&right.code));
+    Ok((available_locales, warnings))
+}
+
+fn load_localization_locale_setting(
+    path: &Path,
+    locale_code: &str,
+) -> io::Result<LocalizationLocaleSettings> {
+    let document = serde_json::from_slice::<LocalizationPackDocument>(&fs::read(path)?)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
+    let display_name = document.display_name.trim();
+    if display_name.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "display_name is required",
+        ));
+    }
+
+    let native_name = if document.native_name.trim().is_empty() {
+        display_name.to_owned()
+    } else {
+        document.native_name.trim().to_owned()
+    };
+
+    Ok(LocalizationLocaleSettings {
+        code: locale_code.trim().to_owned(),
+        display_name: display_name.to_owned(),
+        native_name,
+        message_count: document.messages.len(),
+        is_official: OFFICIAL_LOCALE_CODES.contains(&locale_code.trim()),
+    })
+}
+
+fn read_persisted_localization_preferences(
+    settings_dir: &Path,
+) -> io::Result<(Option<PersistedLocalizationPreferences>, Option<String>)> {
+    let settings_path = localization_preferences_path(settings_dir);
+    let bytes = match fs::read(&settings_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok((None, None)),
+        Err(error) => return Err(error),
+    };
+
+    match serde_json::from_slice::<PersistedLocalizationPreferences>(&bytes) {
+        Ok(preferences) => Ok((Some(preferences), None)),
+        Err(error) => Ok((
+            None,
+            Some(format!(
+                "Saved localization settings at {} could not be parsed and were ignored: {}",
+                settings_path.display(),
+                error
+            )),
+        )),
+    }
+}
+
+fn resolve_configured_locale_code(
+    saved_locale_code: Option<&str>,
+    preferred_default_locale_code: Option<&str>,
+    available_locales: &[LocalizationLocaleSettings],
+    setting_name: &str,
+    warnings: &mut Vec<String>,
+) -> String {
+    if let Some(saved_locale_code) = saved_locale_code.map(str::trim) {
+        if !saved_locale_code.is_empty()
+            && locale_code_exists(saved_locale_code, available_locales)
+        {
+            return saved_locale_code.to_owned();
+        }
+
+        if !saved_locale_code.is_empty() {
+            warnings.push(format!(
+                "Saved {} locale {:?} is not available and was replaced.",
+                setting_name,
+                saved_locale_code
+            ));
+        }
+    }
+
+    if let Some(preferred_default_locale_code) = preferred_default_locale_code {
+        return preferred_default_locale_code.to_owned();
+    }
+
+    String::from(DEFAULT_PRIMARY_LOCALE_CODE)
+}
+
+fn default_primary_locale_code(
+    available_locales: &[LocalizationLocaleSettings],
+) -> Option<&str> {
+    if locale_code_exists(DEFAULT_PRIMARY_LOCALE_CODE, available_locales) {
+        return Some(DEFAULT_PRIMARY_LOCALE_CODE);
+    }
+
+    available_locales.first().map(|locale| locale.code.as_str())
+}
+
+fn default_fallback_locale_code<'a>(
+    available_locales: &'a [LocalizationLocaleSettings],
+    primary_locale_code: &'a str,
+) -> Option<&'a str> {
+    if primary_locale_code != DEFAULT_FALLBACK_LOCALE_CODE
+        && locale_code_exists(DEFAULT_FALLBACK_LOCALE_CODE, available_locales)
+    {
+        return Some(DEFAULT_FALLBACK_LOCALE_CODE);
+    }
+
+    if primary_locale_code != DEFAULT_PRIMARY_LOCALE_CODE
+        && locale_code_exists(DEFAULT_PRIMARY_LOCALE_CODE, available_locales)
+    {
+        return Some(DEFAULT_PRIMARY_LOCALE_CODE);
+    }
+
+    available_locales
+        .iter()
+        .find(|locale| locale.code != primary_locale_code)
+        .map(|locale| locale.code.as_str())
+        .or(Some(primary_locale_code))
+}
+
+fn locale_code_exists(
+    locale_code: &str,
+    available_locales: &[LocalizationLocaleSettings],
+) -> bool {
+    available_locales
+        .iter()
+        .any(|locale| locale.code == locale_code)
+}
+
 fn load_runtime_lifecycle_settings(
     config: &RuntimeConfig,
 ) -> io::Result<RuntimeLifecycleSettings> {
@@ -1913,7 +2345,7 @@ fn load_repository_inspection(
 
     let coordinator = LocalCoordinator::new(&storage);
     let repositories = coordinator
-        .list_polling_repositories()?
+        .list_repository_projects()?
         .into_iter()
         .map(|repository| build_repository_inspection_entry(repository, &mut resources))
         .collect();
@@ -1939,7 +2371,7 @@ fn load_repository_project_detail(
 
     let mut resources = load_repository_inspection_resources(config, &storage)?;
     let repository = LocalCoordinator::new(&storage)
-        .list_polling_repositories()?
+        .list_repository_projects()?
         .into_iter()
         .find(|repository| repository.id == repository_id)
         .ok_or_else(|| {
@@ -2064,7 +2496,7 @@ fn load_repository_publish_targets(
 }
 
 fn build_repository_inspection_entry(
-    repository: StorePollingRepositoryRecord,
+    repository: StoreRepositoryProjectRecord,
     resources: &mut RepositoryInspectionResources,
 ) -> RepositoryInspectionEntry {
     let release_status = resources.release_status_by_repository.get(&repository.id);
@@ -2072,7 +2504,14 @@ fn build_repository_inspection_entry(
     RepositoryInspectionEntry {
         repository_id: repository.id,
         repository_name: repository.name,
-        repo_url: repository.repo_url,
+        source_mode: repository.source_mode,
+        workspace_strategy: repository.workspace_strategy,
+        repo_url: repository
+            .repo_url
+            .clone()
+            .or_else(|| repository.local_path.clone())
+            .unwrap_or_default(),
+        local_path: repository.local_path,
         engine_kind: repository.engine_kind,
         enabled: repository.enabled,
         polling_interval_seconds: repository.polling_interval_seconds,
@@ -2148,7 +2587,7 @@ fn load_process_feed(
 fn request_release_process_rerun(
     config: &RuntimeConfig,
     release_run_id: i64,
-) -> io::Result<()> {
+) -> io::Result<ReleaseRunRecord> {
     config.directories.ensure_exists()?;
     let storage = StorageLayout::from_directories(&config.directories);
     if !storage.database_path.is_file() {
@@ -2159,16 +2598,101 @@ fn request_release_process_rerun(
     }
 
     let coordinator = LocalCoordinator::new(&storage);
-    let release_run = coordinator.get_release_run_record(release_run_id)?;
+    coordinator.get_release_run_record(release_run_id)?;
 
-    coordinator.dispatch_manual_release_rebuild(ManualReleaseDispatchInput {
-        repository_id: release_run.repository_id,
-        git_tag: release_run.git_tag,
-        git_commit: release_run.git_commit.unwrap_or_default(),
-        requested_via: String::from(DESKTOP_SHELL_RERUN_REQUESTED_VIA),
-    })?;
+    let record = coordinator.dispatch_release_rebuild_by_id(
+        release_run_id,
+        DESKTOP_SHELL_RERUN_REQUESTED_VIA,
+    )?;
+    emit_shell_release_queued_event(&storage, &coordinator, &record)?;
+
+    Ok(record)
+}
+
+fn request_on_demand_release_process(
+    config: &RuntimeConfig,
+    input: OnDemandReleaseProcessCommandInput,
+) -> io::Result<ReleaseRunRecord> {
+    config.directories.ensure_exists()?;
+    let storage = StorageLayout::from_directories(&config.directories);
+    if !storage.database_path.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::NotFound,
+            format!("repository {} was not found", input.repository_id),
+        ));
+    }
+
+    let coordinator = LocalCoordinator::new(&storage);
+    let record = coordinator.dispatch_on_demand_release(
+        normalize_on_demand_release_process_command_input(input),
+    )?;
+    emit_shell_release_queued_event(&storage, &coordinator, &record)?;
+
+    Ok(record)
+}
+
+fn emit_shell_release_queued_event(
+    storage: &StorageLayout,
+    coordinator: &LocalCoordinator,
+    record: &ReleaseRunRecord,
+) -> io::Result<()> {
+    let repository = coordinator.get_repository_checkout_record(record.repository_id)?;
+    let source_metadata = decode_shell_release_source_metadata(record);
+    let mode = shell_release_event_mode_label(
+        record.trigger_source.as_str(),
+        source_metadata.source_kind.as_deref(),
+    );
+
+    emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: String::from(EVENT_TOPIC_RELEASE_QUEUED),
+            severity: String::from("info"),
+            origin: String::from("desktop-shell"),
+            user_requested: true,
+            repository_id: Some(record.repository_id),
+            release_run_id: Some(record.id),
+            build_run_id: None,
+            publish_run_id: None,
+            summary: format!(
+                "{mode} release queued for {} {}",
+                repository.name, record.git_tag
+            ),
+            payload: serde_json::json!({
+                "repository_name": repository.name,
+                "git_tag": record.git_tag,
+                "git_commit": record.git_commit,
+                "trigger_source": record.trigger_source,
+                "source_kind": source_metadata.source_kind,
+                "source_ref": source_metadata.source_ref,
+                "local_path": source_metadata.local_path,
+                "requested_via": source_metadata.requested_via,
+                "status": "queued",
+            }),
+        },
+    )?;
 
     Ok(())
+}
+
+fn decode_shell_release_source_metadata(record: &ReleaseRunRecord) -> ReleaseSourceMetadata {
+    serde_json::from_str(record.source_metadata_json.trim()).unwrap_or_default()
+}
+
+fn shell_release_event_mode_label(
+    trigger_source: &str,
+    source_kind: Option<&str>,
+) -> &'static str {
+    if trigger_source.eq_ignore_ascii_case("poll") {
+        return "Automatic";
+    }
+
+    match source_kind {
+        Some("local_workspace") => "On-demand local",
+        Some("managed_ref") => "On-demand ref",
+        Some("managed_tag") => "On-demand tag",
+        _ => "Manual",
+    }
 }
 
 fn load_artifact_inspection(
@@ -2593,6 +3117,88 @@ fn open_path_in_host(path: &Path) -> io::Result<()> {
         ErrorKind::Unsupported,
         "host path opening is not supported on this platform",
     ))
+}
+
+fn open_url_in_host(url: &str) -> io::Result<()> {
+    let normalized_url = normalize_external_url(url)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(normalized_url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(normalized_url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(normalized_url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err(io::Error::new(
+        ErrorKind::Unsupported,
+        "external URL opening is not supported on this platform",
+    ))
+}
+
+fn normalize_external_url(url: &str) -> io::Result<&str> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "external URL must not be empty",
+        ));
+    }
+
+    if trimmed.chars().any(char::is_whitespace)
+        || trimmed.chars().any(char::is_control)
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "external URL must not contain whitespace or control characters",
+        ));
+    }
+
+    let Some((scheme, remainder)) = trimmed.split_once("://") else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "external URL must include an http or https scheme",
+        ));
+    };
+
+    if remainder.is_empty()
+        || (!scheme.eq_ignore_ascii_case("http")
+            && !scheme.eq_ignore_ascii_case("https"))
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "external URL must use http or https",
+        ));
+    }
+
+    Ok(trimmed)
 }
 
 fn require_existing_path(path: &Path) -> io::Result<PathBuf> {
@@ -3223,7 +3829,9 @@ fn persist_repository_project(
         StoreCreateRepositoryProjectInput {
             name: normalized.name,
             engine_kind: normalized.engine_kind,
+            source_mode: normalized.source_mode,
             repo_url: normalized.repository_url,
+            local_path: normalized.local_path,
             credentials: None,
             default_branch: normalized.default_branch,
             artifacts_root_override: normalized.artifacts_root_override,
@@ -3305,7 +3913,9 @@ fn persist_repository_project_update(
             repository_id: normalized.repository_id,
             name: normalized.name,
             engine_kind: normalized.engine_kind,
+            source_mode: normalized.source_mode,
             repo_url: normalized.repository_url,
+            local_path: normalized.local_path,
             default_branch: normalized.default_branch,
             artifacts_root_override: normalized.artifacts_root_override,
             workspace_root_override: normalized.workspace_root_override,
@@ -3536,15 +4146,53 @@ fn normalize_create_repository_project_command_input(
 ) -> io::Result<NormalizedCreateRepositoryProjectCommandInput> {
     let engine_kind = normalize_repository_project_engine_kind(&input.engine_kind)?;
     let name = require_shell_non_empty(&input.name, "repository project name")?;
-    let repository_url = require_shell_non_empty(
-        &input.repository_url,
-        "repository project URL",
-    )?;
-    if !(repository_url.starts_with("https://") || repository_url.starts_with("http://")) {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "repository project URL must use http:// or https://",
-        ));
+    let source_mode = normalize_optional_shell_string(input.source_mode)
+        .unwrap_or_else(|| String::from("managed_repository"));
+    let repository_url = normalize_optional_shell_string(input.repository_url);
+    let local_path = normalize_optional_shell_string(input.local_path);
+
+    match source_mode.as_str() {
+        "managed_repository" => {
+            let repository_url = repository_url.as_deref().ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "repository project URL must not be empty",
+                )
+            })?;
+
+            if !(repository_url.starts_with("https://")
+                || repository_url.starts_with("http://"))
+            {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "repository project URL must use http:// or https://",
+                ));
+            }
+        }
+        "local_workspace" => {
+            let local_path = local_path.as_deref().ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "local workspace path must not be empty",
+                )
+            })?;
+
+            if !PathBuf::from(local_path).is_absolute() {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "local workspace path must be an absolute path",
+                ));
+            }
+        }
+        _ => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "repository project source_mode {:?} is not supported",
+                    source_mode
+                ),
+            ));
+        }
     }
     if input.polling_interval_seconds < MIN_REPOSITORY_POLL_INTERVAL_SECONDS {
         return Err(io::Error::new(
@@ -3608,7 +4256,9 @@ fn normalize_create_repository_project_command_input(
     Ok(NormalizedCreateRepositoryProjectCommandInput {
         name,
         engine_kind,
+        source_mode,
         repository_url,
+        local_path,
         repository_access_assessment: input.repository_access_assessment,
         repository_credentials_id: input.repository_credentials_id,
         default_branch: normalize_optional_shell_string(input.default_branch),
@@ -3632,16 +4282,51 @@ fn normalize_update_repository_project_command_input(
 
     let engine_kind = normalize_repository_project_engine_kind(&input.engine_kind)?;
     let name = require_shell_non_empty(&input.name, "repository project name")?;
-    let repository_url = require_shell_non_empty(
-        &input.repository_url,
-        "repository project URL",
-    )?;
-    if !(repository_url.starts_with("https://") || repository_url.starts_with("http://")) {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "repository project URL must use http:// or https://",
-        ));
+    let source_mode = require_shell_non_empty(&input.source_mode, "repository project source_mode")?
+        .to_ascii_lowercase();
+    let repository_url = normalize_optional_shell_string(input.repository_url);
+    let local_path = normalize_optional_shell_string(input.local_path);
+
+    match source_mode.as_str() {
+        "managed_repository" => {
+            let repository_url = repository_url.as_deref().ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "repository project URL must not be empty",
+                )
+            })?;
+            if !(repository_url.starts_with("https://") || repository_url.starts_with("http://")) {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "repository project URL must use http:// or https://",
+                ));
+            }
+        }
+        "local_workspace" => {
+            let local_path = local_path.as_deref().ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "repository project local workspace path must not be empty",
+                )
+            })?;
+            if !PathBuf::from(local_path).is_absolute() {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "repository project local workspace path must be absolute",
+                ));
+            }
+        }
+        _ => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "repository project source_mode {:?} is not supported",
+                    source_mode
+                ),
+            ));
+        }
     }
+
     if input.polling_interval_seconds < MIN_REPOSITORY_POLL_INTERVAL_SECONDS {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -3716,7 +4401,9 @@ fn normalize_update_repository_project_command_input(
         repository_id: input.repository_id,
         name,
         engine_kind,
+        source_mode,
         repository_url,
+        local_path,
         repository_access_assessment: input.repository_access_assessment,
         default_branch: normalize_optional_shell_string(input.default_branch),
         artifacts_root_override: normalize_optional_shell_string(input.artifacts_root_override),
@@ -3973,6 +4660,23 @@ fn normalize_optional_shell_string(value: Option<String>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn normalize_on_demand_release_process_command_input(
+    input: OnDemandReleaseProcessCommandInput,
+) -> StoreOnDemandReleaseDispatchInput {
+    StoreOnDemandReleaseDispatchInput {
+        repository_id: input.repository_id,
+        release_version: normalize_optional_shell_string(input.release_version),
+        version_source: input.version_source.trim().to_owned(),
+        source_kind: input.source_kind.trim().to_owned(),
+        source_ref: normalize_optional_shell_string(input.source_ref),
+        local_path: normalize_optional_shell_string(input.local_path),
+        requested_via: String::from(DESKTOP_SHELL_RERUN_REQUESTED_VIA),
+        unity_executable_path_override: normalize_optional_shell_string(
+            input.unity_executable_path_override,
+        ),
+    }
 }
 
 fn credential_binding_references(
@@ -4605,16 +5309,22 @@ mod tests {
         load_build_execution_report,
         load_build_history,
         load_process_feed,
+        OnDemandReleaseProcessCommandInput,
+        request_on_demand_release_process,
         request_release_process_rerun,
         load_repository_inspection,
         load_repository_project_detail,
         load_release_status,
+        load_localization_settings_from_paths,
+        localization_preferences_path,
         development_runtime_command_plan, load_runtime_directory_settings,
         load_runtime_health_report, load_runtime_lifecycle_settings,
         load_runtime_log_lines,
         detect_repository_provider,
+        EVENT_TOPIC_RELEASE_QUEUED,
         has_active_system_dialogs,
         is_main_window_focus_loss_suppressed,
+        normalize_external_url,
         runtime_process_ids,
         persist_repository_auth_assessment,
         persist_repository_auth_connect,
@@ -4623,12 +5333,14 @@ mod tests {
         persist_repository_project,
         persist_repository_project_removal,
         persist_repository_project_update,
+        persist_localization_preferences_to_paths,
         persist_publish_target_secret_binding,
         persist_secret_credential,
         process_identity_matches_runtime,
         purge_build_execution_retention_files,
         packaged_butler_sidecar_path,
         load_secret_settings,
+        PersistedLocalizationPreferences,
         resolve_github_auth_credential,
         ShellLifecycleState,
         should_hide_main_window_on_focus_loss_state,
@@ -4648,15 +5360,17 @@ mod tests {
         UpdateRepositoryProjectBuildTargetCommandInput,
         UpdateRepositoryProjectCommandInput,
         ConnectRepositoryAuthInput, DisconnectRepositoryAuthInput,
-        ReconnectRepositoryAuthInput, SaveSecretCredentialInput,
+        ReconnectRepositoryAuthInput, SaveLocalizationPreferencesInput,
+        SaveSecretCredentialInput,
         SyncRepositoryAuthAssessmentInput,
         UpdatePublishTargetSecretBindingInput, UnityBuildContractCommandInput,
         window_transition_settings,
     };
     use runtime_config::{RuntimeConfig, RUNTIME_ROOT_ENV};
     use runtime_core::{
-        bootstrap_runtime, write_supervisor_snapshot, RuntimeRestartPolicy,
-        RuntimeStatus, RuntimeSupervisorSnapshot, RuntimeSupervisorStatus,
+        bootstrap_runtime, read_runtime_event_batch, write_supervisor_snapshot,
+        RuntimeRestartPolicy, RuntimeStatus, RuntimeSupervisorSnapshot,
+        RuntimeSupervisorStatus,
     };
     use runtime_store::{
         initialize_database, open_connection, LocalCoordinator,
@@ -4915,6 +5629,27 @@ mod tests {
     }
 
     #[test]
+    fn normalize_external_url_accepts_http_and_https_targets() {
+        assert_eq!(
+            normalize_external_url("https://indiegabo.github.io/handy-games-publisher/")
+                .expect("https URL should be accepted"),
+            "https://indiegabo.github.io/handy-games-publisher/"
+        );
+        assert_eq!(
+            normalize_external_url("http://localhost:4173/docs")
+                .expect("http URL should be accepted"),
+            "http://localhost:4173/docs"
+        );
+    }
+
+    #[test]
+    fn normalize_external_url_rejects_blank_and_unsupported_targets() {
+        assert!(normalize_external_url("   ").is_err());
+        assert!(normalize_external_url("ftp://example.com").is_err());
+        assert!(normalize_external_url("https://example.com docs").is_err());
+    }
+
+    #[test]
     fn window_transition_settings_expand_focus_mode_from_main_preset() {
         let settings = window_transition_settings();
 
@@ -5021,6 +5756,128 @@ mod tests {
 
         std::fs::remove_dir_all(&settings.data_dir)
             .expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn load_localization_settings_from_paths_discovers_official_locale_packs() {
+        let root = std::env::temp_dir().join("desktop-shell-localization-settings-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let localization_root = root.join("localizations");
+        let settings_dir = root.join("config");
+        std::fs::create_dir_all(&localization_root)
+            .expect("localization root should create");
+        std::fs::write(
+            localization_root.join("en.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_name": "English",
+                "native_name": "English",
+                "messages": {
+                    "settings.language.title": "Language"
+                }
+            }))
+            .expect("english locale should serialize"),
+        )
+        .expect("english locale should write");
+        std::fs::write(
+            localization_root.join("pt-BR.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_name": "Portuguese (Brazil)",
+                "native_name": "Portugues (Brasil)",
+                "messages": {
+                    "settings.language.title": "Idioma"
+                }
+            }))
+            .expect("portuguese locale should serialize"),
+        )
+        .expect("portuguese locale should write");
+
+        let settings = load_localization_settings_from_paths(
+            &localization_root,
+            &settings_dir,
+        )
+        .expect("localization settings should load");
+
+        assert_eq!(settings.localization_root, localization_root);
+        assert_eq!(settings.primary_locale, "en");
+        assert_eq!(settings.fallback_locale, "pt-BR");
+        assert_eq!(settings.available_locales.len(), 2);
+        assert_eq!(settings.available_locales[0].code, "en");
+        assert_eq!(settings.available_locales[1].code, "pt-BR");
+        assert!(settings.available_locales.iter().all(|locale| locale.is_official));
+        assert!(settings.warnings.is_empty());
+
+        std::fs::remove_dir_all(&root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn persist_localization_preferences_to_paths_round_trips_selected_locales() {
+        let root = std::env::temp_dir().join("desktop-shell-localization-persist-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let localization_root = root.join("localizations");
+        let settings_dir = root.join("config");
+        std::fs::create_dir_all(&localization_root)
+            .expect("localization root should create");
+        std::fs::write(
+            localization_root.join("en.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_name": "English",
+                "messages": {
+                    "settings.language.title": "Language"
+                }
+            }))
+            .expect("english locale should serialize"),
+        )
+        .expect("english locale should write");
+        std::fs::write(
+            localization_root.join("es.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_name": "Spanish",
+                "native_name": "Espanol",
+                "messages": {
+                    "settings.language.title": "Idioma"
+                }
+            }))
+            .expect("spanish locale should serialize"),
+        )
+        .expect("spanish locale should write");
+        std::fs::write(
+            localization_root.join("broken.json"),
+            b"{not-json",
+        )
+        .expect("broken locale should write");
+
+        let settings = persist_localization_preferences_to_paths(
+            &localization_root,
+            &settings_dir,
+            SaveLocalizationPreferencesInput {
+                primary_locale: String::from("es"),
+                fallback_locale: String::from("en"),
+            },
+        )
+        .expect("localization preferences should persist");
+
+        assert_eq!(settings.primary_locale, "es");
+        assert_eq!(settings.fallback_locale, "en");
+        assert_eq!(settings.available_locales.len(), 2);
+        assert_eq!(settings.available_locales[0].code, "en");
+        assert_eq!(settings.available_locales[1].code, "es");
+        assert!(!settings.available_locales[1].is_official);
+        assert!(settings.warnings.iter().any(|warning| warning.contains("broken.json")));
+
+        let persisted = std::fs::read(localization_preferences_path(&settings_dir))
+            .expect("localization preferences file should exist");
+        let persisted = serde_json::from_slice::<PersistedLocalizationPreferences>(&persisted)
+            .expect("persisted localization preferences should deserialize");
+        assert_eq!(persisted.primary_locale, "es");
+        assert_eq!(persisted.fallback_locale, "en");
+
+        std::fs::remove_dir_all(&root).expect("temp directory should be removable");
     }
 
     #[test]
@@ -5201,12 +6058,8 @@ mod tests {
             })
             .expect("manual release dispatch should succeed");
 
-        request_release_process_rerun(&config, initial_release.id)
+        let rerun_release = request_release_process_rerun(&config, initial_release.id)
             .expect("release rerun request should succeed");
-
-        let rerun_release = LocalCoordinator::new(&storage)
-            .get_release_run_record(initial_release.id)
-            .expect("rerun release should reload");
 
         assert_eq!(rerun_release.id, initial_release.id);
         assert_eq!(rerun_release.repository_id, repository_id);
@@ -5214,7 +6067,170 @@ mod tests {
         assert_eq!(rerun_release.git_commit.as_deref(), Some("deadbeef"));
         assert!(rerun_release.source_metadata_json.contains("desktop-shell-ui"));
 
+        let queued_event = latest_runtime_event(&storage);
+        assert_eq!(queued_event.topic, EVENT_TOPIC_RELEASE_QUEUED);
+        assert_eq!(queued_event.origin, "desktop-shell");
+        assert_eq!(queued_event.release_run_id, Some(rerun_release.id));
+        assert_eq!(queued_event.payload["requested_via"], "desktop-shell-ui");
+        assert_eq!(queued_event.payload["source_kind"], "managed_tag");
+        assert_eq!(
+            queued_event.summary,
+            "On-demand tag release queued for release-rerun-repo v9.1.0"
+        );
+
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn request_on_demand_release_process_dispatches_managed_ref_release() {
+        let root = std::env::temp_dir().join("desktop-shell-on-demand-managed-ref-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO repositories (name, repo_url, engine_kind, default_branch) VALUES (?, ?, ?, ?)",
+                params![
+                    "on-demand-managed-ref-repo",
+                    "https://example.com/on-demand-managed-ref.git",
+                    "unity",
+                    "main",
+                ],
+            )
+            .expect("repository should insert");
+        let repository_id = connection.last_insert_rowid();
+        drop(connection);
+
+        let record = request_on_demand_release_process(
+            &config,
+            OnDemandReleaseProcessCommandInput {
+                repository_id,
+                release_version: Some(String::from("v9.2.0")),
+                version_source: String::from("manual"),
+                source_kind: String::from("managed_ref"),
+                source_ref: Some(String::from("release/next")),
+                local_path: None,
+                unity_executable_path_override: Some(String::from("  C:/Unity/Editor/Unity.exe  ")),
+            },
+        )
+        .expect("on-demand managed-ref dispatch should succeed");
+
+        assert_eq!(record.repository_id, repository_id);
+        assert_eq!(record.git_tag, "v9.2.0");
+        assert_eq!(record.trigger_source, "manual");
+        let metadata: serde_json::Value = serde_json::from_str(&record.source_metadata_json)
+            .expect("source metadata should decode");
+        assert_eq!(metadata["requested_via"], "desktop-shell-ui");
+        assert_eq!(metadata["source_kind"], "managed_ref");
+        assert_eq!(metadata["source_ref"], "release/next");
+        assert_eq!(
+            metadata["unity_executable_path_override"],
+            "C:/Unity/Editor/Unity.exe"
+        );
+
+        let queued_event = latest_runtime_event(&storage);
+        assert_eq!(queued_event.topic, EVENT_TOPIC_RELEASE_QUEUED);
+        assert_eq!(queued_event.origin, "desktop-shell");
+        assert_eq!(queued_event.release_run_id, Some(record.id));
+        assert_eq!(queued_event.payload["source_kind"], "managed_ref");
+        assert_eq!(queued_event.payload["source_ref"], "release/next");
+        assert_eq!(
+            queued_event.summary,
+            "On-demand ref release queued for on-demand-managed-ref-repo v9.2.0"
+        );
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn request_on_demand_release_process_dispatches_local_workspace_release() {
+        let root = std::env::temp_dir().join("desktop-shell-on-demand-local-workspace-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let local_workspace = root.join("local-project");
+        std::fs::create_dir_all(&local_workspace)
+            .expect("local workspace directory should create");
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
+                params![
+                    "on-demand-local-workspace-repo",
+                    "https://example.com/on-demand-local-workspace.git",
+                    "unity",
+                ],
+            )
+            .expect("repository should insert");
+        let repository_id = connection.last_insert_rowid();
+        drop(connection);
+
+        let record = request_on_demand_release_process(
+            &config,
+            OnDemandReleaseProcessCommandInput {
+                repository_id,
+                release_version: Some(String::from("v9.3.0")),
+                version_source: String::from("manual"),
+                source_kind: String::from("local_workspace"),
+                source_ref: None,
+                local_path: Some(local_workspace.display().to_string()),
+                unity_executable_path_override: None,
+            },
+        )
+        .expect("on-demand local-workspace dispatch should succeed");
+
+        assert_eq!(record.repository_id, repository_id);
+        assert_eq!(record.git_tag, "v9.3.0");
+        assert_eq!(record.trigger_source, "manual");
+        let metadata: serde_json::Value = serde_json::from_str(&record.source_metadata_json)
+            .expect("source metadata should decode");
+        assert_eq!(metadata["requested_via"], "desktop-shell-ui");
+        assert_eq!(metadata["source_kind"], "local_workspace");
+        let persisted_local_path = PathBuf::from(
+            metadata["local_path"]
+                .as_str()
+                .expect("local workspace path should serialize as a string"),
+        );
+        assert_eq!(persisted_local_path, local_workspace);
+
+        let queued_event = latest_runtime_event(&storage);
+        assert_eq!(queued_event.topic, EVENT_TOPIC_RELEASE_QUEUED);
+        assert_eq!(queued_event.origin, "desktop-shell");
+        assert_eq!(queued_event.release_run_id, Some(record.id));
+        assert_eq!(queued_event.payload["source_kind"], "local_workspace");
+        let event_local_path = PathBuf::from(
+            queued_event.payload["local_path"]
+                .as_str()
+                .expect("event local path should serialize as a string"),
+        );
+        assert_eq!(event_local_path, local_workspace);
+        assert_eq!(
+            queued_event.summary,
+            "On-demand local release queued for on-demand-local-workspace-repo v9.3.0"
+        );
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    fn latest_runtime_event(storage: &StorageLayout) -> runtime_core::RuntimeEventRecord {
+        read_runtime_event_batch(&storage.runtime_events_path, 0)
+            .expect("runtime event stream should load")
+            .events
+            .into_iter()
+            .last()
+            .expect("runtime event stream should contain at least one event")
     }
 
     #[test]
@@ -6775,7 +7791,9 @@ mod tests {
             CreateRepositoryProjectCommandInput {
                 name: String::from("Workers"),
                 engine_kind: String::from("unity"),
-                repository_url: String::from("https://example.com/workers.git"),
+                source_mode: Some(String::from("managed_repository")),
+                repository_url: Some(String::from("https://example.com/workers.git")),
+                local_path: None,
                 repository_access_assessment: None,
                 repository_credentials_id: None,
                 personal_access_token: None,
@@ -6815,6 +7833,81 @@ mod tests {
     }
 
     #[test]
+    fn persist_repository_project_creates_local_workspace_inspection_entry() {
+        let root = std::env::temp_dir().join("desktop-shell-project-create-local-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let config = RuntimeConfig::from_root(&root);
+        let unity_executable_path = std::env::current_exe()
+            .expect("current executable path should resolve")
+            .display()
+            .to_string();
+        let local_workspace = root.join("local-project");
+        std::fs::create_dir_all(&local_workspace)
+            .expect("local workspace directory should create");
+        let local_workspace_path = local_workspace.display().to_string();
+
+        let created = persist_repository_project(
+            &config,
+            CreateRepositoryProjectCommandInput {
+                name: String::from("Workers Local"),
+                engine_kind: String::from("unity"),
+                source_mode: Some(String::from("local_workspace")),
+                repository_url: None,
+                local_path: Some(local_workspace_path.clone()),
+                repository_access_assessment: None,
+                repository_credentials_id: None,
+                personal_access_token: None,
+                default_branch: None,
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                build_targets: vec![CreateRepositoryProjectBuildTargetCommandInput {
+                    name: String::from("Windows"),
+                    contract: BuildContractCommandInput {
+                        unity: Some(UnityBuildContractCommandInput {
+                            target_platform: String::from("StandaloneWindows64"),
+                            build_method: String::from("Builder.PerformWindows"),
+                        }),
+                    },
+                    unity_executable_path: unity_executable_path.clone(),
+                }],
+                publish_targets: vec![],
+            },
+        )
+        .expect("local workspace project should persist");
+
+        let inspection = load_repository_inspection(&config)
+            .expect("repository inspection should reflect created local project");
+
+        assert_eq!(inspection.repositories.len(), 1);
+        assert_eq!(inspection.repositories[0].repository_id, created.repository_id);
+        assert_eq!(inspection.repositories[0].repository_name, "Workers Local");
+        assert_eq!(inspection.repositories[0].source_mode, "local_workspace");
+        assert_eq!(inspection.repositories[0].workspace_strategy, "direct");
+        assert_eq!(
+            inspection.repositories[0]
+                .local_path
+                .as_deref()
+                .map(|path| path.replace('\\', "/")),
+            Some(local_workspace_path.replace('\\', "/"))
+        );
+        assert_eq!(
+            inspection.repositories[0].repo_url.replace('\\', "/"),
+            local_workspace_path.replace('\\', "/")
+        );
+        assert_eq!(inspection.repositories[0].engine_kind, "unity");
+        assert_eq!(inspection.repositories[0].polling_interval_seconds, 300);
+        assert_eq!(inspection.repositories[0].build_targets.len(), 1);
+        assert_eq!(inspection.repositories[0].build_targets[0].target_name, "Windows");
+        assert_eq!(inspection.repositories[0].build_targets[0].diagnostic_status, "ready");
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
     fn persist_repository_project_persists_repository_auth_state_in_inspection() {
         let root = std::env::temp_dir().join("desktop-shell-project-auth-state-test");
         if root.exists() {
@@ -6832,7 +7925,9 @@ mod tests {
             CreateRepositoryProjectCommandInput {
                 name: String::from("Workers"),
                 engine_kind: String::from("unity"),
-                repository_url: String::from("https://github.com/indiegabo/workers.git"),
+                source_mode: Some(String::from("managed_repository")),
+                repository_url: Some(String::from("https://github.com/indiegabo/workers.git")),
+                local_path: None,
                 repository_access_assessment: Some(RepositoryAccessAssessment {
                     provider_id: String::from("github"),
                     provider_label: String::from("GitHub"),
@@ -6926,7 +8021,9 @@ mod tests {
             CreateRepositoryProjectCommandInput {
                 name: String::from("Workers"),
                 engine_kind: String::from("unity"),
-                repository_url: String::from("https://github.com/indiegabo/workers.git"),
+                source_mode: Some(String::from("managed_repository")),
+                repository_url: Some(String::from("https://github.com/indiegabo/workers.git")),
+                local_path: None,
                 repository_access_assessment: None,
                 repository_credentials_id: None,
                 personal_access_token: None,
@@ -7106,7 +8203,9 @@ mod tests {
             CreateRepositoryProjectCommandInput {
                 name: String::from("Workers"),
                 engine_kind: String::from("unity"),
-                repository_url: String::from("https://github.com/indiegabo/workers.git"),
+                source_mode: Some(String::from("managed_repository")),
+                repository_url: Some(String::from("https://github.com/indiegabo/workers.git")),
+                local_path: None,
                 repository_access_assessment: None,
                 repository_credentials_id: Some(github_credentials_id),
                 personal_access_token: None,
@@ -7161,7 +8260,9 @@ mod tests {
             CreateRepositoryProjectCommandInput {
                 name: String::from("Workers"),
                 engine_kind: String::from("unity"),
-                repository_url: String::from("https://github.com/indiegabo/workers.git"),
+                source_mode: Some(String::from("managed_repository")),
+                repository_url: Some(String::from("https://github.com/indiegabo/workers.git")),
+                local_path: None,
                 repository_access_assessment: None,
                 repository_credentials_id: None,
                 personal_access_token: Some(String::from("ghp-legacy-token")),
@@ -7213,7 +8314,9 @@ mod tests {
             CreateRepositoryProjectCommandInput {
                 name: String::from("Workers"),
                 engine_kind: String::from("unreal"),
-                repository_url: String::from("https://example.com/workers.git"),
+                source_mode: Some(String::from("managed_repository")),
+                repository_url: Some(String::from("https://example.com/workers.git")),
+                local_path: None,
                 repository_access_assessment: None,
                 repository_credentials_id: None,
                 personal_access_token: None,
@@ -7265,7 +8368,9 @@ mod tests {
             CreateRepositoryProjectCommandInput {
                 name: String::from("Workers"),
                 engine_kind: String::from("unity"),
-                repository_url: String::from("https://example.com/workers.git"),
+                source_mode: Some(String::from("managed_repository")),
+                repository_url: Some(String::from("https://example.com/workers.git")),
+                local_path: None,
                 repository_access_assessment: None,
                 repository_credentials_id: None,
                 personal_access_token: None,
@@ -7294,7 +8399,9 @@ mod tests {
                 repository_id: created.repository_id,
                 name: String::from("Workers Updated"),
                 engine_kind: String::from("unity"),
-                repository_url: String::from("https://example.com/workers-updated.git"),
+                source_mode: String::from("managed_repository"),
+                repository_url: Some(String::from("https://example.com/workers-updated.git")),
+                local_path: None,
                 repository_access_assessment: None,
                 default_branch: Some(String::from("release")),
                 artifacts_root_override: None,
@@ -7374,7 +8481,9 @@ mod tests {
             CreateRepositoryProjectCommandInput {
                 name: String::from("Workers"),
                 engine_kind: String::from("unity"),
-                repository_url: String::from("https://example.com/workers.git"),
+                source_mode: Some(String::from("managed_repository")),
+                repository_url: Some(String::from("https://example.com/workers.git")),
+                local_path: None,
                 repository_access_assessment: None,
                 repository_credentials_id: None,
                 personal_access_token: None,
@@ -7403,7 +8512,9 @@ mod tests {
                 repository_id: created.repository_id,
                 name: String::from("Workers Updated"),
                 engine_kind: String::from("unreal"),
-                repository_url: String::from("https://example.com/workers-updated.git"),
+                source_mode: String::from("managed_repository"),
+                repository_url: Some(String::from("https://example.com/workers-updated.git")),
+                local_path: None,
                 repository_access_assessment: None,
                 default_branch: Some(String::from("main")),
                 artifacts_root_override: None,

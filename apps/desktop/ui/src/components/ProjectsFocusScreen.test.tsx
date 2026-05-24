@@ -338,6 +338,74 @@ describe("ProjectsFocusScreen", () => {
     });
   });
 
+  it("searches and previews local workspace projects by their source path", async () => {
+    const onOpenProject = vi.fn();
+
+    loadRepositoryInspectionMock.mockResolvedValueOnce({
+      repositories: [
+        ...buildRepositoryInspection().repositories,
+        {
+          ...buildRepositoryInspection().repositories[0],
+          auth_binding_status: "not_required",
+          auth_requirement_status: "not_required",
+          auth_status_message: "Local workspace projects do not need auth.",
+          local_path: "C:/projects/local-forge",
+          pending_release_count: 1,
+          repo_url: "C:/projects/local-forge",
+          repository_id: 2,
+          repository_name: "Local Forge",
+          source_mode: "local_workspace",
+          source_provider_id: null,
+          visibility_status: "unknown",
+        },
+      ],
+    });
+
+    render(
+      <OverlayProvider>
+        <ProjectsFocusScreen onOpenProject={onOpenProject} />
+      </OverlayProvider>,
+    );
+
+    const quickOpenInput = await screen.findByRole("textbox", {
+      name: "Quick open",
+    });
+
+    fireEvent.change(quickOpenInput, {
+      target: { value: "C:/projects/local-forge" },
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Open project Local Forge" }),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: "Open project Worker Demo" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.keyDown(quickOpenInput, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(onOpenProject).toHaveBeenCalledWith(2, "Local Forge");
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Quick view for Local Forge" }),
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Local Forge",
+    });
+
+    expect(
+      within(dialog).getByText("Local workspace · C:/projects/local-forge"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("C:/projects/local-forge"),
+    ).toBeInTheDocument();
+  });
+
   it("opens the project quick view and escalates to the project editor on demand", async () => {
     const requestAnimationFrameSpy = vi
       .spyOn(window, "requestAnimationFrame")
@@ -537,6 +605,7 @@ function buildRepositoryInspection() {
         enabled_build_target_count: 1,
         engine_kind: "unity",
         last_seen_tag: "v0.1.0",
+        local_path: null,
         pending_release_count: 0,
         polling_interval_seconds: 30,
         publish_targets: [],
@@ -548,6 +617,7 @@ function buildRepositoryInspection() {
         repository_name: "Worker Demo",
         running_build_runs: 0,
         running_publish_runs: 0,
+        source_mode: "managed_repository",
         source_instance_url: "https://github.com",
         source_provider_id: "github",
         visibility_status: "private",

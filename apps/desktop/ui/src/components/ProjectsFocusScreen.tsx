@@ -22,6 +22,11 @@ import {
   loadRepositoryInspection,
   type RepositoryInspectionEntry,
 } from "../services/projects";
+import {
+  buildProjectSourceDisplay,
+  buildProjectSourceSearchTerms,
+} from "../projectSourcePresentation";
+import { useLocalization } from "../LocalizationProvider";
 import { useOverlay } from "./OverlayManager";
 
 type ProjectsFocusScreenProps = {
@@ -33,6 +38,7 @@ export function ProjectsFocusScreen({
   highlightedRepositoryId = null,
   onOpenProject,
 }: ProjectsFocusScreenProps) {
+  const { t } = useLocalization();
   const { openOverlay } = useOverlay();
   const [repositories, setRepositories] = useState<RepositoryInspectionEntry[]>(
     [],
@@ -102,7 +108,7 @@ export function ProjectsFocusScreen({
       });
     } catch (loadError) {
       startTransition(() => {
-        setError(buildProjectsListErrorMessage(loadError));
+        setError(buildProjectsListErrorMessage(t, loadError));
         setIsLoading(false);
         setIsRefreshing(false);
       });
@@ -187,9 +193,13 @@ export function ProjectsFocusScreen({
       }
 
       const exactRepository = filteredRepositories.find((repository) => {
+        const sourceTerms = buildProjectSourceSearchTerms(repository).map(
+          (term) => term.toLowerCase(),
+        );
+
         return (
           repository.repository_name.toLowerCase() === normalizedQuery ||
-          repository.repo_url.toLowerCase() === normalizedQuery
+          sourceTerms.includes(normalizedQuery)
         );
       });
 
@@ -261,24 +271,35 @@ export function ProjectsFocusScreen({
   return (
     <div className="project-list-shell">
       <ScreenScaffold
-        eyebrow="Projects"
-        title="Project List"
-        subtitle="Browse registered repositories, inspect current automation health, and jump into project editing without losing context."
+        eyebrow={t("projects.eyebrow", "Projects")}
+        title={t("projects.title", "Project List")}
+        subtitle={t(
+          "projects.subtitle",
+          "Browse registered repositories, inspect current automation health, and jump into project editing without losing context.",
+        )}
         summary={
           <MetaRow>
-            <MetaItem label="Projects">
+            <MetaItem label={t("projects.summary.projects", "Projects")}>
               {isLoading
-                ? "Loading snapshot..."
-                : `${repositories.length} registered`}
+                ? t("projects.summary.loading", "Loading snapshot...")
+                : t("projects.summary.registered", "{{count}} registered", {
+                    count: repositories.length,
+                  })}
             </MetaItem>
             {!isLoading ? (
-              <MetaItem label="Enabled">{enabledRepositoryCount}</MetaItem>
+              <MetaItem label={t("projects.summary.enabled", "Enabled")}>
+                {enabledRepositoryCount}
+              </MetaItem>
             ) : null}
             {!isLoading ? (
-              <MetaItem label="Disabled">{disabledRepositoryCount}</MetaItem>
+              <MetaItem label={t("projects.summary.disabled", "Disabled")}>
+                {disabledRepositoryCount}
+              </MetaItem>
             ) : null}
             {!isLoading ? (
-              <MetaItem label="Active targets">
+              <MetaItem
+                label={t("projects.summary.active_targets", "Active targets")}
+              >
                 {activeBuildTargetCount}
               </MetaItem>
             ) : null}
@@ -292,44 +313,69 @@ export function ProjectsFocusScreen({
             size="sm"
             variant="secondary"
           >
-            {isRefreshing ? "Refreshing..." : "Refresh"}
+            {isRefreshing
+              ? t("projects.actions.refreshing", "Refreshing...")
+              : t("projects.actions.refresh", "Refresh")}
           </Button>
         }
       >
         {highlightedProject ? (
           <p className="notice-banner">
-            {`${highlightedProject.repository_name} was created. Open it to continue editing.`}
+            {t(
+              "projects.notice.created",
+              "{{repositoryName}} was created. Open it to continue editing.",
+              {
+                repositoryName: highlightedProject.repository_name,
+              },
+            )}
           </p>
         ) : null}
 
         <InputWithPicker
           autoComplete="off"
           buttonIcon="search"
-          buttonLabel="Browse"
+          buttonLabel={t("projects.quick_open.browse", "Browse")}
           className="project-list-toolbar"
           disabled={isLoading || repositories.length === 0}
           hint={
             isLoading
-              ? "Loading inventory..."
-              : `${filteredRepositories.length} matching project${filteredRepositories.length === 1 ? "" : "s"}`
+              ? t("projects.quick_open.loading", "Loading inventory...")
+              : filteredRepositories.length === 1
+                ? t("projects.quick_open.matching.one", "1 matching project")
+                : t(
+                    "projects.quick_open.matching.other",
+                    "{{count}} matching projects",
+                    { count: filteredRepositories.length },
+                  )
           }
           inputRef={quickOpenInputRef}
-          label="Quick open"
+          label={t("projects.quick_open.label", "Quick open")}
           leadingIcon="search"
           onChange={setQuickOpenQuery}
           onKeyDown={handleQuickOpenKeyDown}
           onPick={handleQuickOpenPick}
           pickerComponent={SelectListFullScreen}
           pickerProps={{
-            description:
-              "Search the registered repository inventory and open a project without leaving this screen.",
-            emptyStateCopy: "Try a different repository name or remote URL.",
-            emptyStateTitle: "No projects matched the current filter.",
+            description: t(
+              "projects.quick_open.picker.description",
+              "Search the registered project inventory and open a project without leaving this screen.",
+            ),
+            emptyStateCopy: t(
+              "projects.quick_open.picker.empty_copy",
+              "Try a different project name, remote URL, or local workspace path.",
+            ),
+            emptyStateTitle: t(
+              "projects.quick_open.picker.empty_title",
+              "No projects matched the current filter.",
+            ),
             initialQuery: quickOpenQuery,
             items: quickOpenItems,
-            title: "Open project",
+            title: t("projects.quick_open.picker.title", "Open project"),
           }}
-          placeholder="Filter by project name or repository URL"
+          placeholder={t(
+            "projects.quick_open.placeholder",
+            "Filter by project name, remote URL, or local workspace path",
+          )}
           value={quickOpenQuery}
         />
 
@@ -343,7 +389,7 @@ export function ProjectsFocusScreen({
                 size="sm"
                 variant="ghost"
               >
-                Retry load
+                {t("projects.actions.retry", "Retry load")}
               </Button>
             </div>
           </div>
@@ -351,23 +397,32 @@ export function ProjectsFocusScreen({
 
         {isRefreshing && repositories.length > 0 ? (
           <p className="notice-banner">
-            Refreshing repository inventory while keeping the latest known
-            snapshot visible.
+            {t(
+              "projects.notice.refreshing",
+              "Refreshing repository inventory while keeping the latest known snapshot visible.",
+            )}
           </p>
         ) : null}
 
         {isLoading ? (
           <div className="feed-state">
-            <p className="feed-state__title">Loading projects...</p>
+            <p className="feed-state__title">
+              {t("projects.loading.title", "Loading projects...")}
+            </p>
             <p className="feed-state__copy">
-              The shell is resolving the latest repository inspection snapshot.
+              {t(
+                "projects.loading.copy",
+                "The shell is resolving the latest project inspection snapshot.",
+              )}
             </p>
           </div>
         ) : null}
 
         {!isLoading && error && repositories.length === 0 ? (
           <div className="feed-state project-list-state">
-            <p className="feed-state__title">Could not load projects.</p>
+            <p className="feed-state__title">
+              {t("projects.error.title", "Could not load projects.")}
+            </p>
             <p className="feed-state__copy">{error}</p>
             <div className="project-list-state__actions">
               <Button
@@ -376,7 +431,7 @@ export function ProjectsFocusScreen({
                 size="sm"
                 variant="secondary"
               >
-                Retry load
+                {t("projects.actions.retry", "Retry load")}
               </Button>
             </div>
           </div>
@@ -384,10 +439,17 @@ export function ProjectsFocusScreen({
 
         {!isLoading && repositories.length === 0 ? (
           <div className="feed-state">
-            <p className="feed-state__title">No projects configured yet.</p>
+            <p className="feed-state__title">
+              {t(
+                "projects.empty.none_configured.title",
+                "No projects configured yet.",
+              )}
+            </p>
             <p className="feed-state__copy">
-              Create a repository project from the home screen to manage it
-              here.
+              {t(
+                "projects.empty.none_configured.copy",
+                "Create a repository project from the home screen to manage it here.",
+              )}
             </p>
           </div>
         ) : null}
@@ -396,10 +458,17 @@ export function ProjectsFocusScreen({
         repositories.length > 0 &&
         filteredRepositories.length === 0 ? (
           <div className="feed-state">
-            <p className="feed-state__title">No projects match this filter.</p>
+            <p className="feed-state__title">
+              {t(
+                "projects.empty.no_match.title",
+                "No projects match this filter.",
+              )}
+            </p>
             <p className="feed-state__copy">
-              Clear or broaden the quick-open query to inspect the rest of the
-              repository inventory.
+              {t(
+                "projects.empty.no_match.copy",
+                "Clear or broaden the quick-open query to inspect the rest of the project inventory.",
+              )}
             </p>
           </div>
         ) : null}
@@ -421,7 +490,10 @@ export function ProjectsFocusScreen({
   );
 }
 
-function buildProjectsListErrorMessage(error: unknown) {
+function buildProjectsListErrorMessage(
+  t: ReturnType<typeof useLocalization>["t"],
+  error: unknown,
+) {
   if (error instanceof Error && error.message) {
     return error.message;
   }
@@ -430,7 +502,10 @@ function buildProjectsListErrorMessage(error: unknown) {
     return error.trim();
   }
 
-  return "The desktop shell could not load the project list.";
+  return t(
+    "projects.error.fallback",
+    "The desktop shell could not load the project list.",
+  );
 }
 
 function filterRepositories(
@@ -444,9 +519,13 @@ function filterRepositories(
   }
 
   return repositories.filter((repository) => {
+    const sourceTerms = buildProjectSourceSearchTerms(repository);
+
     return (
       repository.repository_name.toLowerCase().includes(normalizedQuery) ||
-      repository.repo_url.toLowerCase().includes(normalizedQuery) ||
+      sourceTerms.some((term) =>
+        term.toLowerCase().includes(normalizedQuery),
+      ) ||
       repository.engine_kind.toLowerCase().includes(normalizedQuery)
     );
   });
@@ -456,6 +535,6 @@ function buildProjectPickerItem(repository: RepositoryInspectionEntry) {
   return {
     id: String(repository.repository_id),
     label: repository.repository_name,
-    subtitle: repository.repo_url,
+    subtitle: buildProjectSourceDisplay(repository),
   };
 }

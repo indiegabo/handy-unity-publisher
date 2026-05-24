@@ -1,4 +1,6 @@
 import {
+  Suspense,
+  lazy,
   startTransition,
   useEffect,
   useEffectEvent,
@@ -8,20 +10,13 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import { useLocalization, type Translate } from "./LocalizationProvider";
 import { Button, IconButton } from "./components/Button";
 import { type IconName } from "./components/Icon";
-import { AuthProvidersFocusScreen } from "./components/AuthProvidersFocusScreen";
 import { type AuthProviderConnectionResult } from "./components/authProviderPresentation";
 import { ConfirmDialog } from "./components/ConfirmDialog";
-import {
-  CreateProjectWizard,
-  type CreateProjectWizardSnapshot,
-} from "./components/CreateProjectWizard";
 import { useOverlay } from "./components/OverlayManager";
 import { ProcessFeedItem } from "./components/ProcessFeedItem";
-import { ProcessDetailFocusScreen } from "./components/ProcessDetailFocusScreen";
-import { ProjectsFocusScreen } from "./components/ProjectsFocusScreen";
-import { RepositoryProjectDetail } from "./components/RepositoryProjectDetail";
 import SelectListFullScreen, {
   type SelectListItem,
 } from "./components/SelectListFullScreen";
@@ -34,8 +29,8 @@ import {
   type WorkerStatusTone,
 } from "./components/WorkerStatusIndicator";
 import { type ProcessFeedRecord } from "./components/processFeedPresentation";
+import { type CreateProjectWizardSnapshot } from "./components/CreateProjectWizard";
 import {
-  ProjectWorkersFocusScreen,
   type ProjectWorkerEntry,
   type RuntimeControlAction,
 } from "./components/ProjectWorkersFocusScreen";
@@ -107,7 +102,10 @@ type ShellNavigationAction = {
 type AppScreen =
   | { kind: "main" }
   | { kind: "create-project" }
-  | { kind: "auth-providers"; returnTo: "main" | "create-project" }
+  | {
+      kind: "auth-providers";
+      returnTo: "main" | "create-project" | "settings";
+    }
   | { kind: "settings" }
   | { kind: "project-list"; highlightedRepositoryId: number | null }
   | { kind: "project-workers" }
@@ -119,7 +117,7 @@ type AppScreen =
   | { kind: "process-detail"; process: ProcessFeedRecord };
 
 const PROCESS_FEED_PAGE_SIZE = 5;
-const PRODUCT_NAME = "Handy Games Publisher";
+const PRODUCT_NAME_FALLBACK = "Handy Games Publisher";
 const EMPTY_PROCESS_FEED_PAGE: ProcessFeedPage = {
   generated_at: "",
   page: 1,
@@ -155,6 +153,48 @@ const PROCESS_FEED_RESET_PAGE_EVENT_TOPICS = new Set<string>([
   "publish.run_finished",
 ]);
 
+const AuthProvidersFocusScreen = lazy(() =>
+  import("./components/AuthProvidersFocusScreen").then((module) => ({
+    default: module.AuthProvidersFocusScreen,
+  })),
+);
+
+const CreateProjectWizard = lazy(() =>
+  import("./components/CreateProjectWizard").then((module) => ({
+    default: module.CreateProjectWizard,
+  })),
+);
+
+const ProcessDetailFocusScreen = lazy(() =>
+  import("./components/ProcessDetailFocusScreen").then((module) => ({
+    default: module.ProcessDetailFocusScreen,
+  })),
+);
+
+const ProjectsFocusScreen = lazy(() =>
+  import("./components/ProjectsFocusScreen").then((module) => ({
+    default: module.ProjectsFocusScreen,
+  })),
+);
+
+const ProjectWorkersFocusScreen = lazy(() =>
+  import("./components/ProjectWorkersFocusScreen").then((module) => ({
+    default: module.ProjectWorkersFocusScreen,
+  })),
+);
+
+const RepositoryProjectDetail = lazy(() =>
+  import("./components/RepositoryProjectDetail").then((module) => ({
+    default: module.RepositoryProjectDetail,
+  })),
+);
+
+const SettingsFocusScreen = lazy(() =>
+  import("./components/SettingsFocusScreen").then((module) => ({
+    default: module.SettingsFocusScreen,
+  })),
+);
+
 // Shell routing stays local to App so the audited entry points remain explicit.
 // Navigation enters through the home action bars, process-feed detail actions,
 // focus-screen back handling, and overlay result hand-offs. Overlay entry
@@ -162,6 +202,7 @@ const PROCESS_FEED_RESET_PAGE_EVENT_TOPICS = new Set<string>([
 // instant-check selection and confirmation, and the create-project discard
 // guard.
 function App() {
+  const { t } = useLocalization();
   const { dismissTopOverlay, hasOpenOverlay, openOverlay } = useOverlay();
   const [page, setPage] = useState(1);
   const [activeScreen, setActiveScreen] = useState<AppScreen>({ kind: "main" });
@@ -204,13 +245,16 @@ function App() {
   const isNavigatingRef = useRef(false);
   const githubReauthPromptedRepositoryIdsRef = useRef<Set<number>>(new Set());
   const githubReauthPromptInFlightRef = useRef(false);
-  const workerStatus = resolveWorkerStatusSummary(workerSnapshot);
+  const productName = t("app.product_name", PRODUCT_NAME_FALLBACK);
   const projectWorkers = collectProjectWorkers(workerSnapshot.repositories);
+  const workerStatus = resolveWorkerStatusSummary(t, workerSnapshot);
   const workerStatusDescription = buildWorkerStatusDescription(
+    t,
     workerSnapshot,
     projectWorkers,
   );
   const workerStatusTooltip = buildWorkerStatusTooltip(
+    t,
     workerSnapshot.automationMode,
     projectWorkers,
   );
@@ -659,6 +703,13 @@ function App() {
     });
   });
 
+  const handleOpenAuthProvidersFromSettings = useEffectEvent(() => {
+    void transitionToScreen({
+      kind: "auth-providers",
+      returnTo: "settings",
+    });
+  });
+
   const handleOpenAuthProvidersFromWizard = useEffectEvent(() => {
     startTransition(() => {
       setCreateProjectAuthProviderResult(null);
@@ -1014,6 +1065,14 @@ function App() {
       return;
     }
 
+    if (
+      activeScreen.kind === "auth-providers" &&
+      activeScreen.returnTo === "settings"
+    ) {
+      void transitionToScreen({ kind: "settings" });
+      return;
+    }
+
     void transitionToScreen({ kind: "main" });
   });
 
@@ -1068,13 +1127,13 @@ function App() {
   const homePrimaryNavigationActions: ShellNavigationAction[] = [
     {
       icon: "layout",
-      label: "Projects",
+      label: t("app.main.navigation.projects", "Projects"),
       onClick: handleOpenProjects,
       variant: "secondary" as const,
     },
     {
       icon: "plus",
-      label: "Create project",
+      label: t("app.main.navigation.create_project", "Create project"),
       onClick: handleOpenCreateProject,
       variant: "primary" as const,
     },
@@ -1082,18 +1141,18 @@ function App() {
   const homeSecondaryNavigationActions: ShellNavigationAction[] = [
     {
       icon: "key",
-      label: "Auth",
+      label: t("app.main.navigation.auth", "Auth"),
       onClick: handleOpenAuthProviders,
       variant: "ghost" as const,
     },
     {
       icon: "settings",
-      label: "Settings",
+      label: t("app.main.navigation.settings", "Settings"),
       onClick: handleOpenSettings,
       variant: "ghost" as const,
     },
   ];
-  const focusBackLabel = resolveFocusBackLabel(activeScreen);
+  const focusBackLabel = resolveFocusBackLabel(t, activeScreen);
   const focusScreenShellClassName =
     resolveFocusScreenShellClassName(activeScreen);
 
@@ -1137,7 +1196,12 @@ function App() {
           }}
         >
           <span className="window-titlebar__title">
-            {resolveWindowTitle(activeScreen, activeProjectTitle)}
+            {resolveWindowTitle(
+              t,
+              productName,
+              activeScreen,
+              activeProjectTitle,
+            )}
           </span>
         </div>
         <div className="window-titlebar__actions">
@@ -1145,7 +1209,11 @@ function App() {
             aria-pressed={isMainWindowPinned}
             className="window-titlebar__action window-titlebar__action--pin"
             icon={isMainWindowPinned ? "unpin" : "pin"}
-            label={isMainWindowPinned ? "Unpin window" : "Pin window"}
+            label={
+              isMainWindowPinned
+                ? t("app.window.unpin", "Unpin window")
+                : t("app.window.pin", "Pin window")
+            }
             onClick={handleToggleMainWindowPinned}
             size="sm"
             variant="ghost"
@@ -1153,7 +1221,7 @@ function App() {
           <IconButton
             className="window-titlebar__action window-titlebar__action--close"
             icon="close"
-            label="Close window"
+            label={t("app.window.close", "Close window")}
             onClick={handleRequestShellClose}
             size="sm"
             variant="ghost"
@@ -1164,7 +1232,10 @@ function App() {
       <div className="app-shell__content">
         {isScreenBlank ? null : activeScreen.kind === "main" ? (
           <div className="home-frame">
-            <section className="action-bar" aria-label="Primary actions">
+            <section
+              className="action-bar"
+              aria-label={t("app.main.primary_actions", "Primary actions")}
+            >
               <div className="action-bar__leading">
                 <div className="worker-status-shell">
                   <WorkerStatusIndicator
@@ -1200,6 +1271,7 @@ function App() {
                     }
                   >
                     {resolveAutomationToggleLabel(
+                      t,
                       workerSnapshot.automationMode,
                       pendingAutomationMode,
                     )}
@@ -1221,7 +1293,10 @@ function App() {
               </div>
             </section>
 
-            <section className="process-feed-shell" aria-label="Process list">
+            <section
+              className="process-feed-shell"
+              aria-label={t("app.main.process_list", "Process list")}
+            >
               {transitionError ? (
                 <p className="feed-banner feed-banner--error">
                   {transitionError}
@@ -1234,10 +1309,17 @@ function App() {
 
               {isLoadingFeed && processPage.items.length === 0 ? (
                 <div className="feed-state">
-                  <p className="feed-state__title">Loading process feed...</p>
+                  <p className="feed-state__title">
+                    {t(
+                      "app.main.feed.loading.title",
+                      "Loading process feed...",
+                    )}
+                  </p>
                   <p className="feed-state__copy">
-                    The shell is querying the runtime for recent build and
-                    publishing activity.
+                    {t(
+                      "app.main.feed.loading.copy",
+                      "The shell is querying the runtime for recent build and publishing activity.",
+                    )}
                   </p>
                 </div>
               ) : null}
@@ -1245,11 +1327,16 @@ function App() {
               {!isLoadingFeed && processPage.items.length === 0 ? (
                 <div className="feed-state">
                   <p className="feed-state__title">
-                    No processes recorded yet.
+                    {t(
+                      "app.main.feed.empty.title",
+                      "No processes recorded yet.",
+                    )}
                   </p>
                   <p className="feed-state__copy">
-                    New build or publishing runs will appear here as soon as the
-                    runtime creates them.
+                    {t(
+                      "app.main.feed.empty.copy",
+                      "New build or publishing runs will appear here as soon as the runtime creates them.",
+                    )}
                   </p>
                 </div>
               ) : null}
@@ -1279,7 +1366,7 @@ function App() {
                       size="sm"
                       variant="ghost"
                     >
-                      Previous
+                      {t("app.main.pagination.previous", "Previous")}
                     </Button>
                     <Button
                       disabled={!processPage.has_next_page || isLoadingFeed}
@@ -1291,7 +1378,7 @@ function App() {
                       size="sm"
                       variant="secondary"
                     >
-                      Next
+                      {t("app.main.pagination.next", "Next")}
                     </Button>
                   </div>
                 </footer>
@@ -1300,7 +1387,7 @@ function App() {
 
             <section
               className="action-bar action-bar--home-bottom"
-              aria-label="Secondary actions"
+              aria-label={t("app.main.secondary_actions", "Secondary actions")}
             >
               <div className="action-bar__actions">
                 {homeSecondaryNavigationActions.map((action) => (
@@ -1320,7 +1407,7 @@ function App() {
           <div className="focus-frame">
             <section
               className="action-bar action-bar--focus"
-              aria-label="Process detail actions"
+              aria-label={t("app.main.focus_actions", "Focus actions")}
             >
               <div className="action-bar__actions action-bar__actions--leading">
                 <IconButton
@@ -1335,80 +1422,91 @@ function App() {
 
             <section
               className={focusScreenShellClassName}
-              aria-label="Focus screen"
+              aria-label={t("app.main.focus_screen", "Focus screen")}
             >
-              {transitionError ? (
-                <p className="feed-banner feed-banner--error">
-                  {transitionError}
-                </p>
-              ) : null}
+              <Suspense fallback={null}>
+                {transitionError ? (
+                  <p className="feed-banner feed-banner--error">
+                    {transitionError}
+                  </p>
+                ) : null}
 
-              {activeScreen.kind === "create-project" ? (
-                <CreateProjectWizard
-                  authProviderResult={createProjectAuthProviderResult}
-                  initialSnapshot={createProjectWizardSnapshot}
-                  onCreated={handleProjectCreated}
-                  onDirtyChange={setIsCreateProjectWizardDirty}
-                  onManageAuth={handleOpenAuthProvidersFromWizard}
-                  onRequestClose={handleRequestCreateProjectClose}
-                  onSnapshotChange={setCreateProjectWizardSnapshot}
-                />
-              ) : null}
+                {activeScreen.kind === "create-project" ? (
+                  <CreateProjectWizard
+                    authProviderResult={createProjectAuthProviderResult}
+                    initialSnapshot={createProjectWizardSnapshot}
+                    onCreated={handleProjectCreated}
+                    onDirtyChange={setIsCreateProjectWizardDirty}
+                    onManageAuth={handleOpenAuthProvidersFromWizard}
+                    onRequestClose={handleRequestCreateProjectClose}
+                    onSnapshotChange={setCreateProjectWizardSnapshot}
+                  />
+                ) : null}
 
-              {activeScreen.kind === "auth-providers" ? (
-                <AuthProvidersFocusScreen onResult={handleAuthProviderResult} />
-              ) : null}
+                {activeScreen.kind === "auth-providers" ? (
+                  <AuthProvidersFocusScreen
+                    onResult={handleAuthProviderResult}
+                  />
+                ) : null}
 
-              {activeScreen.kind === "settings" ? (
-                <p className="focus-screen-shell__title">Settings</p>
-              ) : null}
+                {activeScreen.kind === "settings" ? (
+                  <SettingsFocusScreen
+                    automationMode={workerSnapshot.automationMode}
+                    onManageAuthProviders={handleOpenAuthProvidersFromSettings}
+                    onOpenProjectWorkers={handleOpenProjectWorkers}
+                    onOpenProjects={handleOpenProjects}
+                  />
+                ) : null}
 
-              {activeScreen.kind === "project-list" ? (
-                <ProjectsFocusScreen
-                  highlightedRepositoryId={activeScreen.highlightedRepositoryId}
-                  onOpenProject={handleOpenProjectDetail}
-                />
-              ) : null}
+                {activeScreen.kind === "project-list" ? (
+                  <ProjectsFocusScreen
+                    highlightedRepositoryId={
+                      activeScreen.highlightedRepositoryId
+                    }
+                    onOpenProject={handleOpenProjectDetail}
+                  />
+                ) : null}
 
-              {activeScreen.kind === "project-workers" ? (
-                <ProjectWorkersFocusScreen
-                  actionError={workerActionError}
-                  actionMessage={workerActionMessage}
-                  automationMode={workerSnapshot.automationMode}
-                  inspectionAvailable={workerSnapshot.inspectionAvailable}
-                  inspectionError={workerSnapshot.inspectionError}
-                  inspectionStale={workerSnapshot.inspectionStale}
-                  onBulkInstantCheck={handleBulkRepositoryInstantCheck}
-                  onInstantCheck={handleRepositoryInstantCheck}
-                  onRestartRuntime={handleRestartRuntime}
-                  onRetryInventory={handleRetryWorkerInventory}
-                  onStartRuntime={handleStartRuntime}
-                  onStopRuntime={handleStopRuntime}
-                  pendingBulkInstantCheck={pendingBulkInstantCheck}
-                  pendingInstantCheckRepositoryId={
-                    pendingInstantCheckRepositoryId
-                  }
-                  pendingRuntimeAction={pendingRuntimeAction}
-                  projectWorkers={projectWorkers}
-                  runtimeStatus={workerSnapshot.runtimeStatus}
-                />
-              ) : null}
+                {activeScreen.kind === "project-workers" ? (
+                  <ProjectWorkersFocusScreen
+                    actionError={workerActionError}
+                    actionMessage={workerActionMessage}
+                    automationMode={workerSnapshot.automationMode}
+                    inspectionAvailable={workerSnapshot.inspectionAvailable}
+                    inspectionError={workerSnapshot.inspectionError}
+                    inspectionStale={workerSnapshot.inspectionStale}
+                    onBulkInstantCheck={handleBulkRepositoryInstantCheck}
+                    onInstantCheck={handleRepositoryInstantCheck}
+                    onRestartRuntime={handleRestartRuntime}
+                    onRetryInventory={handleRetryWorkerInventory}
+                    onStartRuntime={handleStartRuntime}
+                    onStopRuntime={handleStopRuntime}
+                    pendingBulkInstantCheck={pendingBulkInstantCheck}
+                    pendingInstantCheckRepositoryId={
+                      pendingInstantCheckRepositoryId
+                    }
+                    pendingRuntimeAction={pendingRuntimeAction}
+                    projectWorkers={projectWorkers}
+                    runtimeStatus={workerSnapshot.runtimeStatus}
+                  />
+                ) : null}
 
-              {activeScreen.kind === "project-detail" ? (
-                <RepositoryProjectDetail
-                  onProjectNameResolved={handleProjectNameResolved}
-                  onProjectRemoved={handleProjectRemoved}
-                  repositoryId={activeScreen.repositoryId}
-                />
-              ) : null}
+                {activeScreen.kind === "project-detail" ? (
+                  <RepositoryProjectDetail
+                    onProjectNameResolved={handleProjectNameResolved}
+                    onProjectRemoved={handleProjectRemoved}
+                    repositoryId={activeScreen.repositoryId}
+                  />
+                ) : null}
 
-              {activeScreen.kind === "process-detail" ? (
-                <ProcessDetailFocusScreen
-                  onRequestRerun={handleRerunProcess}
-                  process={activeProcessDetail}
-                  usesLiveSnapshot={activeProcessDetailUsesLiveSnapshot}
-                />
-              ) : null}
+                {activeScreen.kind === "process-detail" ? (
+                  <ProcessDetailFocusScreen
+                    onRequestRerun={handleRerunProcess}
+                    process={activeProcessDetail}
+                    usesLiveSnapshot={activeProcessDetailUsesLiveSnapshot}
+                  />
+                ) : null}
+              </Suspense>
             </section>
           </div>
         )}
@@ -1616,6 +1714,7 @@ function readErrorMessage(error: unknown): string | null {
 }
 
 function resolveWorkerStatusSummary(
+  t: Translate,
   snapshot: WorkerStatusSnapshot,
 ): WorkerStatusSummary {
   const projectWorkers = collectProjectWorkers(snapshot.repositories);
@@ -1623,8 +1722,10 @@ function resolveWorkerStatusSummary(
   if (snapshot.inspectionError && !snapshot.inspectionAvailable) {
     return {
       tone: "warning",
-      label:
+      label: t(
+        "app.main.worker_status.inventory_unavailable",
         "Project worker inventory is unavailable until repository inspection succeeds again.",
+      ),
       animated: false,
     };
   }
@@ -1632,9 +1733,13 @@ function resolveWorkerStatusSummary(
   if (snapshot.inspectionStale) {
     return {
       tone: "warning",
-      label: `Project worker inventory may be stale for ${formatProjectCount(
-        projectWorkers.length,
-      )} while repository inspection recovers.`,
+      label: t(
+        "app.main.worker_status.inventory_stale",
+        "Project worker inventory may be stale for {{projectCount}} while repository inspection recovers.",
+        {
+          projectCount: formatProjectCount(t, projectWorkers.length),
+        },
+      ),
       animated: false,
     };
   }
@@ -1642,8 +1747,10 @@ function resolveWorkerStatusSummary(
   if (!snapshot.inspectionAvailable) {
     return {
       tone: "idle",
-      label:
+      label: t(
+        "app.main.worker_status.loading",
         "Project worker status is unavailable while the shell loads repository inspection.",
+      ),
       animated: false,
     };
   }
@@ -1651,7 +1758,10 @@ function resolveWorkerStatusSummary(
   if (projectWorkers.length === 0) {
     return {
       tone: "idle",
-      label: "No active project workers are configured.",
+      label: t(
+        "app.main.worker_status.none_configured",
+        "No active project workers are configured.",
+      ),
       animated: false,
     };
   }
@@ -1659,7 +1769,13 @@ function resolveWorkerStatusSummary(
   if (snapshot.runtimeStatus === null) {
     return {
       tone: "idle",
-      label: `Project workers are down for ${formatProjectCount(projectWorkers.length)} because runtime health is unavailable.`,
+      label: t(
+        "app.main.worker_status.runtime_unavailable",
+        "Project workers are down for {{projectCount}} because runtime health is unavailable.",
+        {
+          projectCount: formatProjectCount(t, projectWorkers.length),
+        },
+      ),
       animated: false,
     };
   }
@@ -1667,7 +1783,13 @@ function resolveWorkerStatusSummary(
   if (snapshot.runtimeStatus === "unhealthy") {
     return {
       tone: "warning",
-      label: `Worker warning: the runtime is unhealthy for ${formatProjectCount(projectWorkers.length)}.`,
+      label: t(
+        "app.main.worker_status.runtime_unhealthy",
+        "Worker warning: the runtime is unhealthy for {{projectCount}}.",
+        {
+          projectCount: formatProjectCount(t, projectWorkers.length),
+        },
+      ),
       animated: true,
     };
   }
@@ -1675,7 +1797,14 @@ function resolveWorkerStatusSummary(
   if (snapshot.runtimeStatus !== "healthy") {
     return {
       tone: "idle",
-      label: `Project workers are down for ${formatProjectCount(projectWorkers.length)} while the runtime is ${formatRuntimeStatus(snapshot.runtimeStatus)}.`,
+      label: t(
+        "app.main.worker_status.runtime_down",
+        "Project workers are down for {{projectCount}} while the runtime is {{runtimeStatus}}.",
+        {
+          projectCount: formatProjectCount(t, projectWorkers.length),
+          runtimeStatus: formatRuntimeStatus(t, snapshot.runtimeStatus),
+        },
+      ),
       animated: false,
     };
   }
@@ -1683,7 +1812,13 @@ function resolveWorkerStatusSummary(
   if (snapshot.automationMode === "idle") {
     return {
       tone: "idle",
-      label: `Automatic polling paused for ${formatProjectCount(projectWorkers.length)}.`,
+      label: t(
+        "app.main.worker_status.polling_paused",
+        "Automatic polling paused for {{projectCount}}.",
+        {
+          projectCount: formatProjectCount(t, projectWorkers.length),
+        },
+      ),
       animated: false,
     };
   }
@@ -1695,14 +1830,27 @@ function resolveWorkerStatusSummary(
   if (failingTargets.length > 0) {
     return {
       tone: "warning",
-      label: `Build target warning: ${formatBuildTargetCount(failingTargets.length)} ${failingTargets.length === 1 ? "needs" : "need"} attention across ${formatProjectCount(projectWorkers.length)}.`,
+      label: t(
+        "app.main.worker_status.build_target_warning",
+        "Build target warning across {{projectCount}}: {{buildTargetCount}} requiring attention.",
+        {
+          buildTargetCount: formatBuildTargetCount(t, failingTargets.length),
+          projectCount: formatProjectCount(t, projectWorkers.length),
+        },
+      ),
       animated: true,
     };
   }
 
   return {
     tone: "success",
-    label: `Project workers active for ${formatProjectCount(projectWorkers.length)}.`,
+    label: t(
+      "app.main.worker_status.active",
+      "Project workers active for {{projectCount}}.",
+      {
+        projectCount: formatProjectCount(t, projectWorkers.length),
+      },
+    ),
     animated: true,
   };
 }
@@ -1745,15 +1893,24 @@ function collectProjectWorkers(
     .filter((projectWorker) => projectWorker.buildTargets.length > 0);
 }
 
-function formatProjectCount(projectCount: number) {
-  return `${projectCount} active project${projectCount === 1 ? "" : "s"}`;
+function formatProjectCount(t: Translate, projectCount: number) {
+  return projectCount === 1
+    ? t("app.count.active_project.one", "1 active project")
+    : t("app.count.active_project.other", "{{count}} active projects", {
+        count: projectCount,
+      });
 }
 
-function formatBuildTargetCount(buildTargetCount: number) {
-  return `${buildTargetCount} build target${buildTargetCount === 1 ? "" : "s"}`;
+function formatBuildTargetCount(t: Translate, buildTargetCount: number) {
+  return buildTargetCount === 1
+    ? t("app.count.build_target.one", "1 build target")
+    : t("app.count.build_target.other", "{{count}} build targets", {
+        count: buildTargetCount,
+      });
 }
 
 function buildWorkerStatusDescription(
+  t: Translate,
   snapshot: WorkerStatusSnapshot,
   projectWorkers: ProjectWorkerEntry[],
 ) {
@@ -1762,26 +1919,50 @@ function buildWorkerStatusDescription(
   }
 
   if (snapshot.inspectionStale) {
-    return `Showing the last known worker snapshot while repository inspection recovers. ${projectWorkers.length > 0 ? buildActiveWorkersDescription(projectWorkers) : ""}`.trim();
+    return t(
+      "app.main.worker_description.stale",
+      "Showing the last known worker snapshot while repository inspection recovers. {{activeWorkers}}",
+      {
+        activeWorkers:
+          projectWorkers.length > 0
+            ? buildActiveWorkersDescription(t, projectWorkers)
+            : "",
+      },
+    ).trim();
   }
 
   if (!snapshot.inspectionAvailable) {
-    return "Loading active workers...";
+    return t(
+      "app.main.worker_description.loading",
+      "Loading active workers...",
+    );
   }
 
   if (projectWorkers.length === 0) {
-    return "No active workers configured.";
+    return t(
+      "app.main.worker_description.none",
+      "No active workers configured.",
+    );
   }
 
   if (snapshot.automationMode === "idle") {
-    return `Automatic polling is paused. Manual instant checks remain available. ${buildActiveWorkersDescription(projectWorkers)}`;
+    return t(
+      "app.main.worker_description.polling_paused",
+      "Automatic polling is paused. Manual instant checks remain available. {{activeWorkers}}",
+      {
+        activeWorkers: buildActiveWorkersDescription(t, projectWorkers),
+      },
+    );
   }
 
-  return buildActiveWorkersDescription(projectWorkers);
+  return buildActiveWorkersDescription(t, projectWorkers);
 }
 
-function buildActiveWorkersDescription(projectWorkers: ProjectWorkerEntry[]) {
-  return `Active workers: ${projectWorkers
+function buildActiveWorkersDescription(
+  t: Translate,
+  projectWorkers: ProjectWorkerEntry[],
+) {
+  return `${t("app.main.worker_description.active_prefix", "Active workers:")} ${projectWorkers
     .map((projectWorker) => {
       const buildTargetNames = projectWorker.buildTargets
         .map((buildTarget) => buildTarget.name)
@@ -1793,11 +1974,14 @@ function buildActiveWorkersDescription(projectWorkers: ProjectWorkerEntry[]) {
 }
 
 function buildWorkerStatusTooltip(
+  t: Translate,
   automationMode: RuntimeAutomationMode | null,
   projectWorkers: ProjectWorkerEntry[],
 ) {
   if (projectWorkers.length === 0) {
-    return automationMode === "idle" ? "Automatic polling paused" : undefined;
+    return automationMode === "idle"
+      ? t("app.main.worker_tooltip.paused", "Automatic polling paused")
+      : undefined;
   }
 
   const repositoryNames = projectWorkers
@@ -1805,81 +1989,105 @@ function buildWorkerStatusTooltip(
     .join(", ");
 
   if (automationMode === "idle") {
-    return `Automatic polling paused · ${repositoryNames}`;
+    return (
+      t("app.main.worker_tooltip.paused", "Automatic polling paused") +
+      ` · ${repositoryNames}`
+    );
   }
 
   return repositoryNames;
 }
 
 function resolveAutomationToggleLabel(
+  t: Translate,
   automationMode: RuntimeAutomationMode | null,
   pendingAutomationMode: RuntimeAutomationMode | null,
 ) {
   if (pendingAutomationMode === "idle") {
-    return "Pausing...";
+    return t("app.main.automation_toggle.pausing", "Pausing...");
   }
 
   if (pendingAutomationMode === "active") {
-    return "Resuming...";
+    return t("app.main.automation_toggle.resuming", "Resuming...");
   }
 
   if (automationMode === "idle") {
-    return "Resume polling";
+    return t("app.main.automation_toggle.resume", "Resume polling");
   }
 
   if (automationMode === "active") {
-    return "Pause polling";
+    return t("app.main.automation_toggle.pause", "Pause polling");
   }
 
-  return "Polling status...";
+  return t("app.main.automation_toggle.status", "Polling status...");
 }
 
-function formatRuntimeStatus(status: RuntimeHealthStatus) {
-  return status.replace(/_/g, " ");
+function formatRuntimeStatus(t: Translate, status: RuntimeHealthStatus) {
+  switch (status) {
+    case "bootstrapping":
+      return t("app.runtime_status.bootstrapping", "bootstrapping");
+    case "healthy":
+      return t("app.runtime_status.healthy", "healthy");
+    case "shutting_down":
+      return t("app.runtime_status.shutting_down", "shutting down");
+    case "stopped":
+      return t("app.runtime_status.stopped", "stopped");
+    case "unhealthy":
+      return t("app.runtime_status.unhealthy", "unhealthy");
+  }
 }
 
 function resolveWindowTitle(
+  t: Translate,
+  productName: string,
   activeScreen: AppScreen,
   activeProjectTitle: string | null,
 ) {
   switch (activeScreen.kind) {
     case "main":
-      return PRODUCT_NAME;
+      return productName;
     case "create-project":
-      return `${PRODUCT_NAME} · Create Project`;
+      return `${productName} · ${t("app.window.title.create_project", "Create Project")}`;
     case "auth-providers":
-      return `${PRODUCT_NAME} · Logins`;
+      return `${productName} · ${t("app.window.title.auth_providers", "Logins")}`;
     case "settings":
-      return `${PRODUCT_NAME} · Settings`;
+      return `${productName} · ${t("app.window.title.settings", "Settings")}`;
     case "project-list":
-      return `${PRODUCT_NAME} · Projects`;
+      return `${productName} · ${t("app.window.title.projects", "Projects")}`;
     case "project-workers":
-      return `${PRODUCT_NAME} · Project Workers`;
+      return `${productName} · ${t("app.window.title.project_workers", "Project Workers")}`;
     case "project-detail":
       return activeProjectTitle?.trim()
-        ? `${PRODUCT_NAME} · ${activeProjectTitle.trim()}`
-        : `${PRODUCT_NAME} · Project #${activeScreen.repositoryId}`;
+        ? `${productName} · ${activeProjectTitle.trim()}`
+        : `${productName} · ${t("app.window.title.project_number", "Project #{{repositoryId}}", { repositoryId: activeScreen.repositoryId })}`;
     case "process-detail":
-      return `${PRODUCT_NAME} · Process #${activeScreen.process.release_run_id}`;
+      return `${productName} · ${t("app.window.title.process_number", "Process #{{releaseRunId}}", { releaseRunId: activeScreen.process.release_run_id })}`;
   }
 }
 
-function resolveFocusBackLabel(activeScreen: AppScreen) {
+function resolveFocusBackLabel(t: Translate, activeScreen: AppScreen) {
   if (
     activeScreen.kind === "project-detail" &&
     activeScreen.returnTo === "project-list"
   ) {
-    return "Back to project list";
+    return t("app.back.project_list", "Back to project list");
   }
 
   if (
     activeScreen.kind === "auth-providers" &&
     activeScreen.returnTo === "create-project"
   ) {
-    return "Back to project creation";
+    return t("app.back.project_creation", "Back to project creation");
   }
 
-  return "Back to main screen";
+  if (
+    activeScreen.kind === "auth-providers" &&
+    activeScreen.returnTo === "settings"
+  ) {
+    return t("app.back.settings", "Back to settings");
+  }
+
+  return t("app.back.main", "Back to main screen");
 }
 
 function resolveFocusScreenShellClassName(activeScreen: AppScreen) {

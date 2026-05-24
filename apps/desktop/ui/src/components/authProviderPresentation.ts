@@ -1,6 +1,12 @@
 import type { BadgeTone } from "./Surface";
 import type { AuthProviderStatus } from "../services/auth";
 
+export type AuthProviderTranslate = (
+    key: string,
+    fallback: string,
+    values?: Record<string, string | number>,
+) => string;
+
 export type AuthProviderConnectionResult = {
     message: string;
     outcome: "connected" | "reconnected";
@@ -23,48 +29,78 @@ type AuthProviderSummaryItem = {
 type AuthProviderSummaryRow = readonly AuthProviderSummaryItem[];
 
 export function buildAuthProviderConnectionResult(
+    translate: AuthProviderTranslate,
     previousProvider: AuthProviderStatus,
     nextProvider: AuthProviderStatus,
 ): AuthProviderConnectionResult {
     const outcome =
         previousProvider.status === "connected" ? "reconnected" : "connected";
     const boundRepositorySummary = buildBoundRepositorySummary(
+        translate,
         nextProvider.bound_repository_count,
     );
 
     return {
         message:
             outcome === "reconnected"
-                ? `${nextProvider.label} browser reconnect completed. ${boundRepositorySummary}`
-                : `${nextProvider.label} browser login completed. ${boundRepositorySummary}`,
+                ? translate(
+                    "auth_providers.presentation.connection_result.reconnected",
+                    "{{providerLabel}} browser reconnect completed. {{boundRepositorySummary}}",
+                    {
+                        boundRepositorySummary,
+                        providerLabel: nextProvider.label,
+                    },
+                )
+                : translate(
+                    "auth_providers.presentation.connection_result.connected",
+                    "{{providerLabel}} browser login completed. {{boundRepositorySummary}}",
+                    {
+                        boundRepositorySummary,
+                        providerLabel: nextProvider.label,
+                    },
+                ),
         outcome,
         provider: nextProvider,
         sessionEventLabel:
             outcome === "reconnected"
-                ? "Browser reconnect completed in this session"
-                : "Browser login completed in this session",
+                ? translate(
+                    "auth_providers.presentation.session_event.reconnected",
+                    "Browser reconnect completed in this session",
+                )
+                : translate(
+                    "auth_providers.presentation.session_event.connected",
+                    "Browser login completed in this session",
+                ),
     };
 }
 
 export function buildAuthProviderLifecycleSnapshot(
+    translate: AuthProviderTranslate,
     provider: AuthProviderStatus,
     connectionResult?: AuthProviderConnectionResult,
 ): AuthProviderLifecycleSnapshot {
     return {
         lifecycleLabel: connectionResult
             ? connectionResult.sessionEventLabel
-            : buildDefaultLifecycleLabel(provider.status),
+            : buildDefaultLifecycleLabel(translate, provider.status),
         nextActionLabel: connectionResult
             ? provider.status === "connected"
-                ? "Reuse the host credential until repository access fails again"
-                : "Run the browser flow again to repair the host binding"
-            : buildDefaultNextActionLabel(provider.status),
-        refreshedAtLabel: formatAuthProviderRefreshTimestamp(provider),
-        storedAtLabel: formatAuthProviderStoredTimestamp(provider),
+                ? translate(
+                    "auth_providers.presentation.next_action.connected_session",
+                    "Reuse the host credential until repository access fails again",
+                )
+                : translate(
+                    "auth_providers.presentation.next_action.disconnected_session",
+                    "Run the browser flow again to repair the host binding",
+                )
+            : buildDefaultNextActionLabel(translate, provider.status),
+        refreshedAtLabel: formatAuthProviderRefreshTimestamp(translate, provider),
+        storedAtLabel: formatAuthProviderStoredTimestamp(translate, provider),
     };
 }
 
 export function buildAuthProviderSummaryRows(
+    translate: AuthProviderTranslate,
     provider: AuthProviderStatus,
     lifecycleSnapshot: AuthProviderLifecycleSnapshot,
     options: {
@@ -75,21 +111,38 @@ export function buildAuthProviderSummaryRows(
     const rows: AuthProviderSummaryRow[] = [
         [
             {
-                label: "Credential",
-                value: provider.credential_name || "No reusable credential",
+                label: translate(
+                    "auth_providers.presentation.summary.credential",
+                    "Credential",
+                ),
+                value:
+                    provider.credential_name ||
+                    resolveNoReusableCredentialLabel(translate),
             },
             {
-                label: "Usage",
-                value: formatBoundRepositoryCount(provider.bound_repository_count),
+                label: translate(
+                    "auth_providers.presentation.summary.usage",
+                    "Usage",
+                ),
+                value: formatBoundRepositoryCount(
+                    translate,
+                    provider.bound_repository_count,
+                ),
             },
         ],
         [
             {
-                label: "Stored",
+                label: translate(
+                    "auth_providers.presentation.summary.stored",
+                    "Stored",
+                ),
                 value: lifecycleSnapshot.storedAtLabel,
             },
             {
-                label: "Refreshed",
+                label: translate(
+                    "auth_providers.presentation.summary.refreshed",
+                    "Refreshed",
+                ),
                 value: lifecycleSnapshot.refreshedAtLabel,
             },
         ],
@@ -98,11 +151,17 @@ export function buildAuthProviderSummaryRows(
     if (includeLifecycleRow) {
         rows.push([
             {
-                label: "Lifecycle",
+                label: translate(
+                    "auth_providers.presentation.summary.lifecycle",
+                    "Lifecycle",
+                ),
                 value: lifecycleSnapshot.lifecycleLabel,
             },
             {
-                label: "Next step",
+                label: translate(
+                    "auth_providers.presentation.summary.next_step",
+                    "Next step",
+                ),
                 value: lifecycleSnapshot.nextActionLabel,
             },
         ]);
@@ -112,18 +171,31 @@ export function buildAuthProviderSummaryRows(
 }
 
 export function buildAuthProviderActionLabel(
+    translate: AuthProviderTranslate,
     provider: AuthProviderStatus,
     connectionResult?: AuthProviderConnectionResult,
 ) {
     if (connectionResult) {
         return provider.status === "connected"
-            ? "Review recent reconnect"
-            : "Review recovery flow";
+            ? translate(
+                "auth_providers.presentation.action.review_recent_reconnect",
+                "Review recent reconnect",
+            )
+            : translate(
+                "auth_providers.presentation.action.review_recovery_flow",
+                "Review recovery flow",
+            );
     }
 
     return provider.status === "connected"
-        ? "Review reconnect"
-        : "Review connection";
+        ? translate(
+            "auth_providers.presentation.action.review_reconnect",
+            "Review reconnect",
+        )
+        : translate(
+            "auth_providers.presentation.action.review_connection",
+            "Review connection",
+        );
 }
 
 export function resolveAuthProviderTone(status: string): BadgeTone {
@@ -137,73 +209,156 @@ export function resolveAuthProviderTone(status: string): BadgeTone {
     }
 }
 
-export function formatAuthProviderStatus(status: string) {
+export function formatAuthProviderStatus(
+    translate: AuthProviderTranslate,
+    status: string,
+) {
     switch (status) {
         case "connected":
-            return "connected";
+            return translate(
+                "auth_providers.presentation.status.connected",
+                "connected",
+            );
         case "disconnected":
-            return "ready to connect";
+            return translate(
+                "auth_providers.presentation.status.disconnected",
+                "ready to connect",
+            );
         default:
-            return "unavailable";
+            return translate(
+                "auth_providers.presentation.status.unavailable",
+                "unavailable",
+            );
     }
 }
 
-export function formatBoundRepositoryCount(boundRepositoryCount: number) {
-    return `${boundRepositoryCount} repository project${boundRepositoryCount === 1 ? "" : "s"
-        }`;
+export function formatBoundRepositoryCount(
+    translate: AuthProviderTranslate,
+    boundRepositoryCount: number,
+) {
+    if (boundRepositoryCount === 1) {
+        return translate(
+            "auth_providers.presentation.bound_repository.one",
+            "1 repository project",
+        );
+    }
+
+    return translate(
+        "auth_providers.presentation.bound_repository.other",
+        "{{count}} repository projects",
+        {
+            count: boundRepositoryCount,
+        },
+    );
 }
 
-function buildBoundRepositorySummary(boundRepositoryCount: number) {
-    const boundRepositoryLabel = formatBoundRepositoryCount(boundRepositoryCount);
+function buildBoundRepositorySummary(
+    translate: AuthProviderTranslate,
+    boundRepositoryCount: number,
+) {
+    if (boundRepositoryCount === 1) {
+        return translate(
+            "auth_providers.presentation.bound_summary.one",
+            "1 repository project is currently bound to it.",
+        );
+    }
 
-    return `${boundRepositoryLabel} ${boundRepositoryCount === 1 ? "is" : "are"
-        } currently bound to it.`;
+    return translate(
+        "auth_providers.presentation.bound_summary.other",
+        "{{count}} repository projects are currently bound to it.",
+        {
+            count: boundRepositoryCount,
+        },
+    );
 }
 
-function buildDefaultLifecycleLabel(status: string) {
+function buildDefaultLifecycleLabel(
+    translate: AuthProviderTranslate,
+    status: string,
+) {
     switch (status) {
         case "connected":
-            return "Host credential already bound on this machine";
+            return translate(
+                "auth_providers.presentation.lifecycle.connected",
+                "Host credential already bound on this machine",
+            );
         case "disconnected":
-            return "No host-backed credential is currently bound";
+            return translate(
+                "auth_providers.presentation.lifecycle.disconnected",
+                "No host-backed credential is currently bound",
+            );
         default:
-            return "Host tooling is not ready for this provider";
+            return translate(
+                "auth_providers.presentation.lifecycle.unavailable",
+                "Host tooling is not ready for this provider",
+            );
     }
 }
 
-function buildDefaultNextActionLabel(status: string) {
+function buildDefaultNextActionLabel(
+    translate: AuthProviderTranslate,
+    status: string,
+) {
     switch (status) {
         case "connected":
-            return "Reopen the connection flow only after a real auth failure";
+            return translate(
+                "auth_providers.presentation.next_action.connected",
+                "Reopen the connection flow only after a real auth failure",
+            );
         case "disconnected":
-            return "Run the browser flow to create the reusable binding";
+            return translate(
+                "auth_providers.presentation.next_action.disconnected",
+                "Run the browser flow to create the reusable binding",
+            );
         default:
-            return "Verify Git Credential Manager availability first";
+            return translate(
+                "auth_providers.presentation.next_action.unavailable",
+                "Verify Git Credential Manager availability first",
+            );
     }
 }
 
-function formatAuthProviderStoredTimestamp(provider: AuthProviderStatus) {
+function formatAuthProviderStoredTimestamp(
+    translate: AuthProviderTranslate,
+    provider: AuthProviderStatus,
+) {
     if (!provider.credential_created_at) {
-        return "No reusable credential";
+        return resolveNoReusableCredentialLabel(translate);
     }
 
     return formatAuthProviderTimestamp(provider.credential_created_at);
 }
 
-function formatAuthProviderRefreshTimestamp(provider: AuthProviderStatus) {
+function formatAuthProviderRefreshTimestamp(
+    translate: AuthProviderTranslate,
+    provider: AuthProviderStatus,
+) {
     if (!provider.credential_created_at) {
-        return "No reusable credential";
+        return resolveNoReusableCredentialLabel(translate);
     }
 
     if (!provider.credential_updated_at) {
-        return "No refresh recorded";
+        return translate(
+            "auth_providers.presentation.no_refresh_recorded",
+            "No refresh recorded",
+        );
     }
 
     if (provider.credential_updated_at === provider.credential_created_at) {
-        return "No separate refresh recorded";
+        return translate(
+            "auth_providers.presentation.no_separate_refresh_recorded",
+            "No separate refresh recorded",
+        );
     }
 
     return formatAuthProviderTimestamp(provider.credential_updated_at);
+}
+
+function resolveNoReusableCredentialLabel(translate: AuthProviderTranslate) {
+    return translate(
+        "auth_providers.presentation.no_reusable_credential",
+        "No reusable credential",
+    );
 }
 
 function formatAuthProviderTimestamp(value: string) {

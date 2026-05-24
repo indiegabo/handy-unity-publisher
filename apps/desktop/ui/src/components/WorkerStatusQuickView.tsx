@@ -1,3 +1,4 @@
+import { useLocalization } from "../LocalizationProvider";
 import { Button } from "./Button";
 import FullScreenModal from "./FullScreenModal";
 import { MetaItem, MetaRow, SummaryStrip } from "./Surface";
@@ -24,24 +25,48 @@ export function WorkerStatusQuickView({
   projectWorkers,
   runtimeStatus,
 }: WorkerStatusQuickViewProps) {
+  const { t } = useLocalization();
+
   return (
     <FullScreenModal
       className="worker-status-quick-view__modal"
-      description="Inspect the current worker footprint without leaving the main feed, or open the full worker control screen."
+      description={t(
+        "app.worker_quick_view.description",
+        "Inspect the current worker footprint without leaving the main feed, or open the full worker control screen.",
+      )}
       onResolve={onResolve}
-      title="Project Workers"
+      title={t("app.worker_quick_view.title", "Project Workers")}
     >
       <div className="worker-status-quick-view">
         <SummaryStrip className="worker-status-quick-view__summary-strip">
           <MetaRow className="worker-status-quick-view__summary-row">
-            <MetaItem label="Runtime">
-              {formatRuntimeStatus(runtimeStatus)}
+            <MetaItem
+              label={t("app.worker_quick_view.summary.runtime", "Runtime")}
+            >
+              {formatRuntimeStatus(t, runtimeStatus)}
             </MetaItem>
-            <MetaItem label="Automation">
-              {formatAutomationMode(automationMode)}
+            <MetaItem
+              label={t(
+                "app.worker_quick_view.summary.automation",
+                "Automation",
+              )}
+            >
+              {formatAutomationMode(t, automationMode)}
             </MetaItem>
-            <MetaItem label="Active projects">{projectWorkers.length}</MetaItem>
-            <MetaItem label="Enabled targets">
+            <MetaItem
+              label={t(
+                "app.worker_quick_view.summary.active_projects",
+                "Active projects",
+              )}
+            >
+              {projectWorkers.length}
+            </MetaItem>
+            <MetaItem
+              label={t(
+                "app.worker_quick_view.summary.enabled_targets",
+                "Enabled targets",
+              )}
+            >
               {countBuildTargets(projectWorkers)}
             </MetaItem>
           </MetaRow>
@@ -49,8 +74,10 @@ export function WorkerStatusQuickView({
 
         {automationMode === "idle" ? (
           <p className="worker-status-quick-view__notice">
-            Automatic polling is paused. Manual instant checks remain available
-            from Project Workers.
+            {t(
+              "app.worker_quick_view.notice.polling_paused",
+              "Automatic polling is paused. Manual instant checks remain available from Project Workers.",
+            )}
           </p>
         ) : null}
 
@@ -61,7 +88,10 @@ export function WorkerStatusQuickView({
               data-overlay-autofocus
               tabIndex={-1}
             >
-              Loading project worker inventory...
+              {t(
+                "app.worker_quick_view.loading",
+                "Loading project worker inventory...",
+              )}
             </p>
           ) : null}
 
@@ -71,7 +101,10 @@ export function WorkerStatusQuickView({
               data-overlay-autofocus
               tabIndex={-1}
             >
-              No active project workers configured.
+              {t(
+                "app.worker_quick_view.empty",
+                "No active project workers configured.",
+              )}
             </p>
           ) : null}
 
@@ -92,13 +125,19 @@ export function WorkerStatusQuickView({
                         {projectWorker.repositoryName}
                       </p>
                       <p className="worker-status-tooltip__project-meta">
-                        {projectWorker.buildTargets.length} target
-                        {projectWorker.buildTargets.length === 1 ? "" : "s"}
+                        {formatTargetCount(
+                          t,
+                          projectWorker.buildTargets.length,
+                        )}
                       </p>
                     </div>
 
                     <p className="worker-status-tooltip__project-meta">
-                      Polling every {projectWorker.pollingIntervalSeconds}s.
+                      {t(
+                        "app.worker_quick_view.polling_interval",
+                        "Polling every {{seconds}}s.",
+                        { seconds: projectWorker.pollingIntervalSeconds },
+                      )}
                     </p>
 
                     <div className="worker-status-tooltip__worker-list">
@@ -118,9 +157,16 @@ export function WorkerStatusQuickView({
 
                     {attentionTargetCount > 0 ? (
                       <p className="worker-status-tooltip__project-meta">
-                        {attentionTargetCount} target
-                        {attentionTargetCount === 1 ? " needs" : "s need"}{" "}
-                        attention.
+                        {t(
+                          "app.worker_quick_view.attention_required",
+                          "{{targetCount}} requiring attention.",
+                          {
+                            targetCount: formatTargetCount(
+                              t,
+                              attentionTargetCount,
+                            ),
+                          },
+                        )}
                       </p>
                     ) : null}
                   </li>
@@ -140,7 +186,10 @@ export function WorkerStatusQuickView({
             size="sm"
             variant="primary"
           >
-            Open Project Workers
+            {t(
+              "app.worker_quick_view.open_project_workers",
+              "Open Project Workers",
+            )}
           </Button>
         </div>
       </div>
@@ -155,20 +204,50 @@ function countBuildTargets(projectWorkers: ProjectWorkerEntry[]) {
   );
 }
 
-function formatRuntimeStatus(status: RuntimeHealthStatus | null) {
+function formatRuntimeStatus(
+  t: ReturnType<typeof useLocalization>["t"],
+  status: RuntimeHealthStatus | null,
+) {
   if (!status) {
-    return "unavailable";
+    return t("app.runtime_status.unavailable", "unavailable");
   }
 
-  return status.replace(/_/g, " ");
+  switch (status) {
+    case "bootstrapping":
+      return t("app.runtime_status.bootstrapping", "bootstrapping");
+    case "healthy":
+      return t("app.runtime_status.healthy", "healthy");
+    case "shutting_down":
+      return t("app.runtime_status.shutting_down", "shutting down");
+    case "stopped":
+      return t("app.runtime_status.stopped", "stopped");
+    case "unhealthy":
+      return t("app.runtime_status.unhealthy", "unhealthy");
+  }
 }
 
-function formatAutomationMode(mode: RuntimeAutomationMode | null) {
+function formatAutomationMode(
+  t: ReturnType<typeof useLocalization>["t"],
+  mode: RuntimeAutomationMode | null,
+) {
   if (!mode) {
-    return "unavailable";
+    return t("app.runtime_status.unavailable", "unavailable");
   }
 
-  return mode === "idle" ? "paused" : "active";
+  return mode === "idle"
+    ? t("app.worker_quick_view.automation.paused", "paused")
+    : t("app.worker_quick_view.automation.active", "active");
+}
+
+function formatTargetCount(
+  t: ReturnType<typeof useLocalization>["t"],
+  targetCount: number,
+) {
+  return targetCount === 1
+    ? t("app.worker_quick_view.count.target.one", "1 target")
+    : t("app.worker_quick_view.count.target.other", "{{count}} targets", {
+        count: targetCount,
+      });
 }
 
 function joinClassNames(...tokens: Array<string | false>) {

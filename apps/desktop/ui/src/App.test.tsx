@@ -14,16 +14,23 @@ const {
   detectRepositoryProviderMock,
   getCurrentWindowMock,
   invokeMock,
+  loadApplicationVersionMock,
   loadAuthProvidersMock,
+  loadLocalizationSettingsMock,
   loadRepositoryInspectionMock,
+  loadRuntimeDirectoriesMock,
   loadRuntimeAutomationStatusMock,
   loadSecretSettingsMock,
   loginWithGithubAuthMock,
   loadRuntimeHealthMock,
+  openExternalUrlMock,
+  openHostPathMock,
+  readHostTextFileMock,
   reconnectRepositoryAuthMock,
   rerunReleaseProcessMock,
   requestRepositoryInstantCheckMock,
   restartRuntimeMock,
+  saveLocalizationPreferencesMock,
   saveSecretCredentialMock,
   setRuntimeAutomationModeMock,
   startDraggingMock,
@@ -39,16 +46,23 @@ const {
   detectRepositoryProviderMock: vi.fn(),
   getCurrentWindowMock: vi.fn(),
   invokeMock: vi.fn(),
+  loadApplicationVersionMock: vi.fn(),
   loadAuthProvidersMock: vi.fn(),
+  loadLocalizationSettingsMock: vi.fn(),
   loadRepositoryInspectionMock: vi.fn(),
+  loadRuntimeDirectoriesMock: vi.fn(),
   loadRuntimeAutomationStatusMock: vi.fn(),
   loadSecretSettingsMock: vi.fn(),
   loginWithGithubAuthMock: vi.fn(),
   loadRuntimeHealthMock: vi.fn(),
+  openExternalUrlMock: vi.fn(),
+  openHostPathMock: vi.fn(),
+  readHostTextFileMock: vi.fn(),
   reconnectRepositoryAuthMock: vi.fn(),
   rerunReleaseProcessMock: vi.fn(),
   requestRepositoryInstantCheckMock: vi.fn(),
   restartRuntimeMock: vi.fn(),
+  saveLocalizationPreferencesMock: vi.fn(),
   saveSecretCredentialMock: vi.fn(),
   setRuntimeAutomationModeMock: vi.fn(),
   startDraggingMock: vi.fn(() => Promise.resolve()),
@@ -93,20 +107,28 @@ vi.mock("./services/runtimeEvents", () => ({
 }));
 
 vi.mock("./services/processDetail", () => ({
+  readHostTextFile: readHostTextFileMock,
   rerunReleaseProcess: rerunReleaseProcessMock,
 }));
 
 vi.mock("./services/runtime", () => ({
+  loadApplicationVersion: loadApplicationVersionMock,
+  loadLocalizationSettings: loadLocalizationSettingsMock,
+  loadRuntimeDirectories: loadRuntimeDirectoriesMock,
   loadRuntimeAutomationStatus: loadRuntimeAutomationStatusMock,
   loadRuntimeHealth: loadRuntimeHealthMock,
+  openExternalUrl: openExternalUrlMock,
+  openHostPath: openHostPathMock,
   requestRepositoryInstantCheck: requestRepositoryInstantCheckMock,
   restartRuntime: restartRuntimeMock,
+  saveLocalizationPreferences: saveLocalizationPreferencesMock,
   setRuntimeAutomationMode: setRuntimeAutomationModeMock,
   startRuntime: startRuntimeMock,
   stopRuntime: stopRuntimeMock,
 }));
 
 import App from "./App";
+import { LocalizationProvider } from "./LocalizationProvider";
 import OverlayProvider, { useOverlay } from "./components/OverlayManager";
 
 const EMPTY_PROCESS_FEED_PAGE = {
@@ -200,18 +222,57 @@ beforeEach(() => {
 
   createRepositoryProjectMock.mockResolvedValue({ repository_id: 7 });
   detectRepositoryProviderMock.mockResolvedValue(buildRepositoryProvider());
+  loadApplicationVersionMock.mockResolvedValue(buildApplicationVersion());
   loadAuthProvidersMock.mockResolvedValue([buildGithubAuthProvider()]);
+  loadLocalizationSettingsMock.mockResolvedValue(buildLocalizationSettings());
+  loadRuntimeDirectoriesMock.mockResolvedValue(buildRuntimeDirectories());
   loadSecretSettingsMock.mockResolvedValue(buildSecretSettings());
   loginWithGithubAuthMock.mockResolvedValue(buildGithubAuthProvider());
   loadRuntimeAutomationStatusMock.mockResolvedValue({
     mode: "active",
     updated_at_unix: 1,
   });
-  loadRuntimeHealthMock.mockResolvedValue({ status: "healthy" });
+  loadRuntimeHealthMock.mockResolvedValue(buildRuntimeHealth());
+  openExternalUrlMock.mockResolvedValue(undefined);
+  openHostPathMock.mockResolvedValue(undefined);
+  readHostTextFileMock.mockImplementation(async (path: string) => {
+    if (path.endsWith("en.json")) {
+      return buildHostTextFilePayload(
+        path,
+        JSON.stringify({
+          messages: {
+            "app.main.navigation.auth": "Auth",
+            "app.main.navigation.create_project": "Create project",
+            "app.main.navigation.projects": "Projects",
+            "app.main.navigation.settings": "Settings",
+          },
+        }),
+      );
+    }
+
+    if (path.endsWith("pt-BR.json")) {
+      return buildHostTextFilePayload(
+        path,
+        JSON.stringify({
+          messages: {
+            "app.main.navigation.auth": "Auth",
+            "app.main.navigation.create_project": "Criar projeto",
+            "app.main.navigation.projects": "Projetos",
+            "app.main.navigation.settings": "Configurações",
+          },
+        }),
+      );
+    }
+
+    return buildHostTextFilePayload(path, JSON.stringify({ messages: {} }));
+  });
   reconnectRepositoryAuthMock.mockResolvedValue(undefined);
   requestRepositoryInstantCheckMock.mockResolvedValue(undefined);
   restartRuntimeMock.mockResolvedValue(undefined);
   rerunReleaseProcessMock.mockResolvedValue(undefined);
+  saveLocalizationPreferencesMock.mockResolvedValue(
+    buildLocalizationSettings(),
+  );
   saveSecretCredentialMock.mockResolvedValue(undefined);
   setRuntimeAutomationModeMock.mockResolvedValue({
     mode: "idle",
@@ -231,6 +292,30 @@ beforeEach(() => {
 });
 
 describe("App shell overlays", () => {
+  it("renders translated main-shell navigation when the localization provider is active", async () => {
+    loadLocalizationSettingsMock.mockResolvedValueOnce(
+      buildLocalizationSettings({
+        fallback_locale: "en",
+        primary_locale: "pt-BR",
+      }),
+    );
+
+    render(
+      <LocalizationProvider>
+        <OverlayProvider>
+          <App />
+        </OverlayProvider>
+      </LocalizationProvider>,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Projetos" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Criar projeto" }),
+    ).toBeInTheDocument();
+  });
+
   it("opens the worker quick view and closes it on Escape without navigating away from the main feed", async () => {
     const requestAnimationFrameSpy = vi
       .spyOn(window, "requestAnimationFrame")
@@ -866,6 +951,34 @@ describe("App shell overlays", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("returns to the settings screen after managing auth providers from settings", async () => {
+    render(
+      <OverlayProvider>
+        <App />
+      </OverlayProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Settings" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Manage auth providers" }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Back to settings" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to settings" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Settings" }),
+    ).toBeInTheDocument();
+  });
+
   it("closes the top-most overlay on Back before leaving the current focus screen", async () => {
     const requestAnimationFrameSpy = vi
       .spyOn(window, "requestAnimationFrame")
@@ -1431,6 +1544,93 @@ function buildRepositoryProvider() {
     provider_id: "github",
     provider_label: "GitHub",
     supports_interactive_login: true,
+  };
+}
+
+function buildApplicationVersion() {
+  return {
+    app_version: "0.1.0",
+    product_name: "HGP",
+  };
+}
+
+function buildLocalizationSettings(overrides?: {
+  fallback_locale?: string;
+  primary_locale?: string;
+}) {
+  return {
+    available_locales: [
+      {
+        code: "en",
+        display_name: "English",
+        is_official: true,
+        message_count: 3,
+        native_name: "English",
+      },
+      {
+        code: "pt-BR",
+        display_name: "Brazilian Portuguese",
+        is_official: true,
+        message_count: 3,
+        native_name: "Português (Brasil)",
+      },
+    ],
+    fallback_locale: overrides?.fallback_locale ?? "pt-BR",
+    localization_root:
+      "C:/Users/indie/projetos/Apps/handy-unity-publisher/apps/desktop/src-tauri/localizations",
+    primary_locale: overrides?.primary_locale ?? "en",
+    warnings: [],
+  };
+}
+
+function buildHostTextFilePayload(path: string, content: string) {
+  return {
+    content,
+    exists: true,
+    path,
+    size_bytes: content.length,
+    truncated: false,
+  };
+}
+
+function buildRuntimeDirectories() {
+  return {
+    artifacts_dir: "C:/Users/indie/AppData/Roaming/HGP/data/artifacts",
+    data_dir: "C:/Users/indie/AppData/Roaming/HGP/data",
+    database_path: "C:/Users/indie/AppData/Roaming/HGP/data/runtime.sqlite3",
+    health_report_path:
+      "C:/Users/indie/AppData/Roaming/HGP/data/runtime/health.json",
+    logs_dir: "C:/Users/indie/AppData/Roaming/HGP/data/logs",
+    runs_dir: "C:/Users/indie/AppData/Roaming/HGP/data/runs",
+    runtime_events_cursor_path:
+      "C:/Users/indie/AppData/Roaming/HGP/data/runtime/events.cursor",
+    runtime_events_path:
+      "C:/Users/indie/AppData/Roaming/HGP/data/runtime/events.jsonl",
+    runtime_log_path:
+      "C:/Users/indie/AppData/Roaming/HGP/data/logs/runtime.log",
+    state_dir: "C:/Users/indie/AppData/Roaming/HGP/data/runtime",
+    supervision_contract_path:
+      "C:/Users/indie/AppData/Roaming/HGP/data/runtime/supervision.json",
+    supervisor_state_path:
+      "C:/Users/indie/AppData/Roaming/HGP/data/runtime/supervisor-state.json",
+  };
+}
+
+function buildRuntimeHealth() {
+  return {
+    data_dir: "C:/Users/indie/AppData/Roaming/HGP/data",
+    database_path: "C:/Users/indie/AppData/Roaming/HGP/data/runtime.sqlite3",
+    health_report_path:
+      "C:/Users/indie/AppData/Roaming/HGP/data/runtime/health.json",
+    log_file_path: "C:/Users/indie/AppData/Roaming/HGP/data/logs/runtime.log",
+    log_level: "info",
+    platform: "windows-x64",
+    process_id: 4242,
+    runtime_name: "handy-games-publisher-runtime",
+    runtime_version: "0.1.0",
+    started_at_unix: 1,
+    status: "healthy",
+    updated_at_unix: 2,
   };
 }
 

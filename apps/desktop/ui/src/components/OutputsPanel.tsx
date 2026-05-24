@@ -1,4 +1,5 @@
 import type { ArtifactInspectionRecord } from "../services/processDetail";
+import { useLocalization } from "../LocalizationProvider";
 
 import { Button } from "./Button";
 import {
@@ -48,21 +49,34 @@ export function OutputsPanel({
   resolveArtifactPublishRunTone,
   resolvePublishTargetKindTone,
 }: OutputsPanelProps) {
+  const { t } = useLocalization();
+
   return (
     <SurfacePanel
       bodyClassName="process-detail-panel__body"
-      description="Artifacts registered for this process and the shared outputs directory they live under."
+      description={t(
+        "process_detail.outputs.description",
+        "Artifacts registered for this process and the shared outputs directory they live under.",
+      )}
       summary={
         <MetaRow className="process-detail-panel__meta-row">
-          <MetaItem label="Outputs root">
-            {outputsPath || "not recorded"}
+          <MetaItem
+            label={t("process_detail.outputs.summary.root", "Outputs root")}
+          >
+            {outputsPath ||
+              t("process_detail.meta.not_recorded", "not recorded")}
           </MetaItem>
-          <MetaItem label="Artifacts recorded">
+          <MetaItem
+            label={t(
+              "process_detail.outputs.summary.artifacts",
+              "Artifacts recorded",
+            )}
+          >
             {String(artifacts.length)}
           </MetaItem>
         </MetaRow>
       }
-      title="Outputs"
+      title={t("process_detail.outputs.title", "Outputs")}
       actions={
         <div className="process-detail-toolbar">
           {outputsPath ? (
@@ -73,7 +87,7 @@ export function OutputsPanel({
               size="sm"
               variant="ghost"
             >
-              Open outputs
+              {t("process_detail.outputs.actions.open", "Open outputs")}
             </Button>
           ) : null}
           {outputsPath ? (
@@ -84,7 +98,9 @@ export function OutputsPanel({
               size="sm"
               variant="ghost"
             >
-              {isDeletingOutputs ? "Deleting..." : "Delete outputs"}
+              {isDeletingOutputs
+                ? t("process_detail.outputs.actions.deleting", "Deleting...")
+                : t("process_detail.outputs.actions.delete", "Delete outputs")}
             </Button>
           ) : null}
         </div>
@@ -92,14 +108,19 @@ export function OutputsPanel({
     >
       {deletedOutputs ? (
         <p className="process-detail-report__copy">
-          The shared outputs directory for this process has been removed from
-          disk.
+          {t(
+            "process_detail.outputs.deleted_copy",
+            "The shared outputs directory for this process has been removed from disk.",
+          )}
         </p>
       ) : null}
 
       {artifacts.length === 0 ? (
         <p className="process-detail-report__copy">
-          No artifact records are currently attached to this process.
+          {t(
+            "process_detail.outputs.empty",
+            "No artifact records are currently attached to this process.",
+          )}
         </p>
       ) : (
         <div className="process-detail-artifact-list">
@@ -128,25 +149,49 @@ export function OutputsPanel({
                     size="sm"
                     variant="ghost"
                   >
-                    Inspect artifact
+                    {t(
+                      "process_detail.outputs.actions.inspect_artifact",
+                      "Inspect artifact",
+                    )}
                   </Button>
                 </div>
               </div>
 
               <MetaRow className="process-detail-panel__meta-row">
-                <MetaItem label="Kind">{artifact.artifact_kind}</MetaItem>
-                <MetaItem label="Build target">
+                <MetaItem
+                  label={t("process_detail.outputs.labels.kind", "Kind")}
+                >
+                  {artifact.artifact_kind}
+                </MetaItem>
+                <MetaItem
+                  label={t(
+                    "process_detail.outputs.labels.build_target",
+                    "Build target",
+                  )}
+                >
                   {artifact.build_target_name}
                 </MetaItem>
-                <MetaItem label="Active location">
+                <MetaItem
+                  label={t(
+                    "process_detail.outputs.labels.active_location",
+                    "Active location",
+                  )}
+                >
                   {formatArtifactActiveLocationKindLabel(
                     artifact.artifact_active_location_kind,
                   )}
                 </MetaItem>
-                <MetaItem label="Size">
+                <MetaItem
+                  label={t("process_detail.outputs.labels.size", "Size")}
+                >
                   {formatByteSize(artifact.size_bytes)}
                 </MetaItem>
-                <MetaItem label="Publishes">
+                <MetaItem
+                  label={t(
+                    "process_detail.outputs.labels.publishes",
+                    "Publishes",
+                  )}
+                >
                   {String(artifact.publish_run_count)}
                 </MetaItem>
               </MetaRow>
@@ -174,7 +219,10 @@ export function OutputsPanel({
                               publishRun.status,
                             )}
                           >
-                            {publishRun.status}
+                            {formatArtifactPublishRunStatusLabel(
+                              t,
+                              publishRun.status,
+                            )}
                           </Badge>
                           <Badge
                             tone={resolvePublishTargetKindTone(
@@ -197,4 +245,28 @@ export function OutputsPanel({
       )}
     </SurfacePanel>
   );
+}
+
+function formatArtifactPublishRunStatusLabel(
+  t: ReturnType<typeof useLocalization>["t"],
+  status: string,
+) {
+  const normalizedStatus = status.trim().toLowerCase();
+
+  switch (normalizedStatus) {
+    case "queued":
+      return t("process_detail.publish_status.queued", "Queued");
+    case "running":
+      return t("process_detail.publish_status.running", "Running");
+    case "succeeded":
+      return t("process_detail.publish_status.succeeded", "Succeeded");
+    case "failed":
+      return t("process_detail.publish_status.failed", "Failed");
+    case "canceled":
+      return t("process_detail.publish_status.canceled", "Canceled");
+    default:
+      return normalizedStatus
+        ? normalizedStatus.replace(/_/g, " ")
+        : t("process_detail.publish_status.unknown", "Unknown");
+  }
 }

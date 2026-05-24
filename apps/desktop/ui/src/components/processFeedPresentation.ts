@@ -1,5 +1,11 @@
 import type { BadgeTone } from "./Surface";
 
+export type ProcessFeedTranslate = (
+  key: string,
+  fallback: string,
+  values?: Record<string, string | number>,
+) => string;
+
 export type ProcessFeedRecord = {
   release_run_id: number;
   repository_id: number;
@@ -43,6 +49,18 @@ export function resolveProcessFeedStepLabel(
   );
 }
 
+export function resolveLocalizedProcessFeedStepLabel(
+  translate: ProcessFeedTranslate,
+  process: ProcessFeedRecord,
+  status: string,
+) {
+  return (
+    process.current_step_label.trim() ||
+    process.current_step_detail?.trim() ||
+    buildLocalizedFallbackStep(translate, status)
+  );
+}
+
 export function resolveProcessFeedStepDetail(process: ProcessFeedRecord) {
   const detail = process.current_step_detail?.trim();
   if (!detail) {
@@ -64,6 +82,23 @@ export function formatProcessFeedEngineVersionBadge(engineVersion: string | null
   return "Engine pending";
 }
 
+export function formatLocalizedProcessFeedEngineVersionBadge(
+  translate: ProcessFeedTranslate,
+  engineVersion: string | null,
+) {
+  if (engineVersion?.trim()) {
+    return translate(
+      "process_feed.badges.engine_version",
+      "Engine {{engineVersion}}",
+      {
+        engineVersion: engineVersion.trim(),
+      },
+    );
+  }
+
+  return translate("process_feed.badges.engine_pending", "Engine pending");
+}
+
 export function formatProcessFeedEngineKindBadge(engineKind: string) {
   const normalized = engineKind.trim();
   if (!normalized) {
@@ -71,6 +106,27 @@ export function formatProcessFeedEngineKindBadge(engineKind: string) {
   }
 
   return `engine: ${normalized}`;
+}
+
+export function formatLocalizedProcessFeedEngineKindBadge(
+  translate: ProcessFeedTranslate,
+  engineKind: string,
+) {
+  const normalized = engineKind.trim();
+  if (!normalized) {
+    return translate(
+      "process_feed.badges.engine_kind_unknown",
+      "engine: unknown",
+    );
+  }
+
+  return translate(
+    "process_feed.badges.engine_kind",
+    "engine: {{engineKind}}",
+    {
+      engineKind: normalized,
+    },
+  );
 }
 
 export function formatProcessFeedBuildCount(totalBuildRuns: number) {
@@ -81,12 +137,46 @@ export function formatProcessFeedBuildCount(totalBuildRuns: number) {
   return `${totalBuildRuns} builds`;
 }
 
+export function formatLocalizedProcessFeedBuildCount(
+  translate: ProcessFeedTranslate,
+  totalBuildRuns: number,
+) {
+  if (totalBuildRuns === 1) {
+    return translate("process_feed.count.build.one", "1 build");
+  }
+
+  return translate(
+    "process_feed.count.build.other",
+    "{{count}} builds",
+    {
+      count: totalBuildRuns,
+    },
+  );
+}
+
 export function formatProcessFeedPublishCount(totalPublishRuns: number) {
   if (totalPublishRuns === 1) {
     return "1 publish";
   }
 
   return `${totalPublishRuns} publishes`;
+}
+
+export function formatLocalizedProcessFeedPublishCount(
+  translate: ProcessFeedTranslate,
+  totalPublishRuns: number,
+) {
+  if (totalPublishRuns === 1) {
+    return translate("process_feed.count.publish.one", "1 publish");
+  }
+
+  return translate(
+    "process_feed.count.publish.other",
+    "{{count}} publishes",
+    {
+      count: totalPublishRuns,
+    },
+  );
 }
 
 export function normalizeProcessFeedDisplayStatus(status: string) {
@@ -119,11 +209,38 @@ export function formatProcessFeedStatusLabel(status: string) {
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
+export function formatLocalizedProcessFeedStatusLabel(
+  translate: ProcessFeedTranslate,
+  status: string,
+) {
+  switch (normalizeProcessFeedDisplayStatus(status)) {
+    case "queued":
+      return translate("process_feed.status.queued", "Queued");
+    case "running":
+      return translate("process_feed.status.running", "Running");
+    case "succeeded":
+      return translate("process_feed.status.succeeded", "Succeeded");
+    case "failed":
+      return translate("process_feed.status.failed", "Failed");
+    case "canceled":
+      return translate("process_feed.status.canceled", "Canceled");
+  }
+}
+
 export function formatProcessFeedMetaValue(
   value: string | null,
   emptyLabel = "pending",
 ) {
   return value?.trim() || emptyLabel;
+}
+
+export function formatLocalizedProcessFeedMetaValue(
+  translate: ProcessFeedTranslate,
+  value: string | null,
+  emptyKey = "process_feed.meta.pending",
+  emptyFallback = "pending",
+) {
+  return value?.trim() || translate(emptyKey, emptyFallback);
 }
 
 function buildFallbackStep(status: string) {
@@ -140,5 +257,43 @@ function buildFallbackStep(status: string) {
       return "The process stopped before every child task finished.";
     default:
       return "The runtime is still planning this process.";
+  }
+}
+
+function buildLocalizedFallbackStep(
+  translate: ProcessFeedTranslate,
+  status: string,
+) {
+  switch (status) {
+    case "queued":
+      return translate(
+        "process_feed.fallback_step.queued",
+        "The runtime is still planning this process.",
+      );
+    case "running":
+      return translate(
+        "process_feed.fallback_step.running",
+        "The runtime is still updating this process.",
+      );
+    case "succeeded":
+      return translate(
+        "process_feed.fallback_step.succeeded",
+        "All recorded work for this process finished cleanly.",
+      );
+    case "failed":
+      return translate(
+        "process_feed.fallback_step.failed",
+        "At least one build or publish task failed.",
+      );
+    case "canceled":
+      return translate(
+        "process_feed.fallback_step.canceled",
+        "The process stopped before every child task finished.",
+      );
+    default:
+      return translate(
+        "process_feed.fallback_step.queued",
+        "The runtime is still planning this process.",
+      );
   }
 }

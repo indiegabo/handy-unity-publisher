@@ -2,12 +2,13 @@ import { Badge, SummaryStrip } from "./Surface";
 import type { IconName } from "./Icon";
 import { IconButton } from "./Button";
 import { VerticalAccordion } from "./VerticalAccordion";
+import { useLocalization } from "../LocalizationProvider";
 import {
-  formatProcessFeedBuildCount,
-  formatProcessFeedEngineKindBadge,
-  formatProcessFeedEngineVersionBadge,
+  formatLocalizedProcessFeedBuildCount,
+  formatLocalizedProcessFeedEngineKindBadge,
+  formatLocalizedProcessFeedEngineVersionBadge,
   normalizeProcessFeedDisplayStatus,
-  resolveProcessFeedStepLabel,
+  resolveLocalizedProcessFeedStepLabel,
   type ProcessFeedRecord,
 } from "./processFeedPresentation";
 
@@ -20,10 +21,15 @@ export function ProcessFeedItem({
   process,
   onOpenDetail,
 }: ProcessFeedItemProps) {
+  const { t } = useLocalization();
   const normalizedStatus = normalizeProcessFeedDisplayStatus(
     process.display_status,
   );
-  const currentStep = resolveProcessFeedStepLabel(process, normalizedStatus);
+  const currentStep = resolveLocalizedProcessFeedStepLabel(
+    t,
+    process,
+    normalizedStatus,
+  );
 
   return (
     <article>
@@ -34,8 +40,16 @@ export function ProcessFeedItem({
           "process-item",
           `process-item--${normalizedStatus}`,
         )}
-        collapsedToggleLabel={`Expand process #${process.release_run_id}`}
-        expandedToggleLabel={`Collapse process #${process.release_run_id}`}
+        collapsedToggleLabel={t(
+          "process_feed.item.accordion.expand",
+          "Expand process #{{releaseRunId}}",
+          { releaseRunId: process.release_run_id },
+        )}
+        expandedToggleLabel={t(
+          "process_feed.item.accordion.collapse",
+          "Collapse process #{{releaseRunId}}",
+          { releaseRunId: process.release_run_id },
+        )}
         header={
           <div className="process-item__summary">
             <div className="process-item__summary-main">
@@ -54,7 +68,11 @@ export function ProcessFeedItem({
                   `process-status-trigger--${normalizedStatus}`,
                 )}
                 icon={resolveStatusIcon(normalizedStatus)}
-                label={`Open process detail #${process.release_run_id}`}
+                label={t(
+                  "process_feed.item.actions.open_detail",
+                  "Open process detail #{{releaseRunId}}",
+                  { releaseRunId: process.release_run_id },
+                )}
                 onClick={() => onOpenDetail(process)}
                 size="sm"
                 variant="ghost"
@@ -67,15 +85,22 @@ export function ProcessFeedItem({
                   {process.git_tag}
                 </Badge>
                 <Badge className="process-item__badge" tone="muted">
-                  {formatProcessFeedEngineKindBadge(
+                  {formatLocalizedProcessFeedEngineKindBadge(
+                    t,
                     process.repository_engine_kind,
                   )}
                 </Badge>
                 <Badge className="process-item__badge" tone="muted">
-                  {formatProcessFeedEngineVersionBadge(process.engine_version)}
+                  {formatLocalizedProcessFeedEngineVersionBadge(
+                    t,
+                    process.engine_version,
+                  )}
                 </Badge>
                 <Badge className="process-item__badge" tone="muted">
-                  {formatProcessFeedBuildCount(process.total_build_runs)}
+                  {formatLocalizedProcessFeedBuildCount(
+                    t,
+                    process.total_build_runs,
+                  )}
                 </Badge>
               </div>
             </SummaryStrip>
