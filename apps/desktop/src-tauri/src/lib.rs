@@ -106,12 +106,12 @@ const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ICON_ID: &str = "hgp-tray";
 const TRAY_MENU_OPEN_ID: &str = "tray-open";
 const TRAY_MENU_QUIT_ID: &str = "tray-quit";
-const POPUP_WINDOW_WIDTH: u32 = 360;
-const POPUP_WINDOW_HEIGHT: u32 = 420;
-const FOCUS_WINDOW_WIDTH: u32 = POPUP_WINDOW_WIDTH + (POPUP_WINDOW_WIDTH / 2);
-const FOCUS_WINDOW_HEIGHT: u32 = POPUP_WINDOW_HEIGHT * 2;
-const POPUP_WINDOW_MIN_WIDTH: u32 = 360;
-const POPUP_WINDOW_MIN_HEIGHT: u32 = 420;
+const POPUP_WINDOW_WIDTH: u32 = 480;
+const POPUP_WINDOW_HEIGHT: u32 = 525;
+const FOCUS_WINDOW_WIDTH: u32 = 540;
+const FOCUS_WINDOW_HEIGHT: u32 = 840;
+const POPUP_WINDOW_MIN_WIDTH: u32 = 480;
+const POPUP_WINDOW_MIN_HEIGHT: u32 = 525;
 const POPUP_WINDOW_EDGE_MARGIN: i32 = 16;
 const WINDOW_FOCUS_TRANSITION_MILLIS: u64 = 150;
 const WINDOW_FOCUS_TRANSITION_STEP_MILLIS: u64 = 15;
@@ -5653,8 +5653,8 @@ mod tests {
     fn window_transition_settings_expand_focus_mode_from_main_preset() {
         let settings = window_transition_settings();
 
-        assert_eq!(settings.main.width, 360);
-        assert_eq!(settings.main.height, 420);
+        assert_eq!(settings.main.width, 480);
+        assert_eq!(settings.main.height, 525);
         assert_eq!(settings.focus.width, 540);
         assert_eq!(settings.focus.height, 840);
         assert_eq!(settings.duration_millis, 150);

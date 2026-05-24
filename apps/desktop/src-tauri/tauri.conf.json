@@ -4,8 +4,8 @@
     "identifier": "com.indiegabo.handygamespublisher",
     "mainBinaryName": "HGP",
     "build": {
-        "beforeDevCommand": "node ../../scripts/sync-app-version.mjs && node ../../scripts/start-desktop-ui-dev-server.mjs",
-        "beforeBuildCommand": "node ../../scripts/sync-app-version.mjs && npm run build --prefix ui",
+        "beforeDevCommand": "node ../../../scripts/sync-app-version.mjs && node ../../../scripts/start-desktop-ui-dev-server.mjs",
+        "beforeBuildCommand": "node ../../../scripts/sync-app-version.mjs && npm run build --prefix ui",
         "devUrl": "http://127.0.0.1:1420",
         "frontendDist": "../ui/dist"
     },
@@ -16,8 +16,8 @@
                 "label": "main",
                 "title": "Handy Games Publisher",
                 "decorations": false,
-                "width": 360,
-                "height": 420,
+                "width": 480,
+                "height": 525,
                 "resizable": false,
                 "visible": false,
                 "alwaysOnTop": true,
