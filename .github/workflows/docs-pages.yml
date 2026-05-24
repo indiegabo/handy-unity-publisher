@@ -24,7 +24,7 @@ jobs:
     name: Deploy Docs Site
     runs-on: ubuntu-latest
     environment:
-      name: github-pages
+      name: ${{ vars.PAGES_ENVIRONMENT || 'github-pages' }}
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
