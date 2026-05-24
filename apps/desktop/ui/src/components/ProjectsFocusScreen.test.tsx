@@ -11,11 +11,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import OverlayProvider from "./OverlayManager";
 import { ProjectsFocusScreen } from "./ProjectsFocusScreen";
 
-const { loadRepositoryInspectionMock } = vi.hoisted(() => ({
-  loadRepositoryInspectionMock: vi.fn(),
-}));
+const { loadRepositoryInspectionMock, dispatchOnDemandReleaseProcessMock } =
+  vi.hoisted(() => ({
+    loadRepositoryInspectionMock: vi.fn(),
+    dispatchOnDemandReleaseProcessMock: vi.fn(),
+  }));
 
 vi.mock("../services/projects", () => ({
+  dispatchOnDemandReleaseProcess: dispatchOnDemandReleaseProcessMock,
   loadRepositoryInspection: loadRepositoryInspectionMock,
 }));
 
@@ -27,6 +30,12 @@ afterEach(() => {
 
 beforeEach(() => {
   loadRepositoryInspectionMock.mockResolvedValue(buildRepositoryInspection());
+  dispatchOnDemandReleaseProcessMock.mockResolvedValue({
+    git_tag: "v1.2.3",
+    id: 7,
+    repository_id: 2,
+    status: "queued",
+  });
 });
 
 describe("ProjectsFocusScreen", () => {
