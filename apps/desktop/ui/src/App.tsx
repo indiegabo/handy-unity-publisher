@@ -12,6 +12,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { useLocalization, type Translate } from "./LocalizationProvider";
 import { Button, IconButton } from "./components/Button";
+import { SelectField, TextField, type SelectOption } from "./components/Field";
+import FullScreenModal from "./components/FullScreenModal";
 import { type IconName } from "./components/Icon";
 import { type AuthProviderConnectionResult } from "./components/authProviderPresentation";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -35,10 +37,16 @@ import {
   type RuntimeControlAction,
 } from "./components/ProjectWorkersFocusScreen";
 import {
+  dispatchOnDemandReleaseProcess,
   loadRepositoryInspection,
+  type OnDemandReleaseVersionSource,
   reconnectRepositoryAuth,
   type RepositoryInspectionEntry,
 } from "./services/projects";
+import {
+  buildProjectSourceDisplay,
+  isLocalWorkspaceSource,
+} from "./projectSourcePresentation";
 import { loginWithGithubAuth } from "./services/auth";
 import {
   subscribeToProcessFeedEvents,
@@ -99,6 +107,24 @@ type ShellNavigationAction = {
   variant: "primary" | "secondary" | "ghost";
 };
 
+type MainQuickReleaseDraft = {
+  releaseVersion: string;
+  versionSource: OnDemandReleaseVersionSource;
+};
+
+type MainQuickReleaseValidationErrors = {
+  releaseVersion?: string;
+};
+
+type MainQuickReleaseOverlayResult =
+  | {
+      kind: "queued";
+      gitTag: string;
+    }
+  | {
+      kind: "open-project-list";
+    };
+
 type AppScreen =
   | { kind: "main" }
   | { kind: "create-project" }
@@ -145,6 +171,16 @@ const WORKER_STATUS_REPOSITORY_EVENT_TOPICS = new Set<string>([
   "publish.run_finished",
   "automation.poll_auth_failed",
 ]);
+const MAIN_QUICK_RELEASE_VERSION_SOURCE_OPTIONS: SelectOption[] = [
+  {
+    label: "Manual version label",
+    value: "manual",
+  },
+  {
+    label: "Detect from project settings",
+    value: "project_settings",
+  },
+];
 const PROCESS_FEED_RESET_PAGE_EVENT_TOPICS = new Set<string>([
   "automation.release_queued",
   "build.run_started",
@@ -224,6 +260,9 @@ function App() {
   const [workerActionError, setWorkerActionError] = useState<string | null>(
     null,
   );
+  const [mainQuickReleaseMessage, setMainQuickReleaseMessage] = useState<
+    string | null
+  >(null);
   const [workerActionMessage, setWorkerActionMessage] = useState<string | null>(
     null,
   );
@@ -745,6 +784,67 @@ function App() {
       kind: "project-list",
       highlightedRepositoryId: null,
     });
+  });
+
+  const handleOpenMainQuickRelease = useEffectEvent(async () => {
+    const repositories = workerSnapshot.repositories;
+
+    const selectedRepositoryId = await openOverlay<string>(
+      SelectListFullScreen,
+      {
+        description:
+          "Choose one registered project to open the quick release start flow.",
+        emptyStateCopy:
+          "Register a project first, then return here to queue a release from the main screen.",
+        emptyStateTitle: "No registered projects available.",
+        items: repositories.map((repository) => ({
+          id: String(repository.repository_id),
+          label: repository.repository_name,
+          subtitle: buildProjectSourceDisplay(repository),
+        })),
+        title: "Start release",
+      },
+    );
+
+    if (!selectedRepositoryId) {
+      return;
+    }
+
+    const selectedRepository = repositories.find(
+      (repository) => String(repository.repository_id) === selectedRepositoryId,
+    );
+
+    if (!selectedRepository) {
+      return;
+    }
+
+    const result = await openOverlay<MainQuickReleaseOverlayResult>(
+      MainQuickReleaseOverlay,
+      {
+        repository: selectedRepository,
+      },
+    );
+
+    if (!result) {
+      return;
+    }
+
+    if (result.kind === "open-project-list") {
+      handleOpenProjects();
+      return;
+    }
+
+    startTransition(() => {
+      setMainQuickReleaseMessage(
+        `Queued local release ${result.gitTag} for ${selectedRepository.repository_name}.`,
+      );
+    });
+
+    await loadWorkerStatus();
+    startTransition(() => {
+      setPage(1);
+    });
+    await loadProcessFeed(1, "event");
   });
 
   const handleProjectRemoved = useEffectEvent(() => {
@@ -1280,6 +1380,16 @@ function App() {
               </div>
 
               <div className="action-bar__actions">
+                <Button
+                  leadingIcon="queue"
+                  onClick={() => {
+                    void handleOpenMainQuickRelease();
+                  }}
+                  size="sm"
+                  variant="secondary"
+                >
+                  {t("app.main.navigation.start_release", "Start release")}
+                </Button>
                 {homePrimaryNavigationActions.map((action) => (
                   <IconButton
                     icon={action.icon}
@@ -1292,6 +1402,10 @@ function App() {
                 ))}
               </div>
             </section>
+
+            {mainQuickReleaseMessage ? (
+              <p className="notice-banner">{mainQuickReleaseMessage}</p>
+            ) : null}
 
             <section
               className="process-feed-shell"
@@ -1515,6 +1629,155 @@ function App() {
   );
 }
 
+type MainQuickReleaseOverlayProps = {
+  repository: RepositoryInspectionEntry;
+  onResolve?: (value?: MainQuickReleaseOverlayResult | null) => void;
+};
+
+function MainQuickReleaseOverlay({
+  repository,
+  onResolve,
+}: MainQuickReleaseOverlayProps) {
+  const [draft, setDraft] = useState<MainQuickReleaseDraft>({
+    releaseVersion: "",
+    versionSource: "manual",
+  });
+  const [validationErrors, setValidationErrors] =
+    useState<MainQuickReleaseValidationErrors>({});
+  const [dispatchError, setDispatchError] = useState<string | null>(null);
+  const [isQueueing, setIsQueueing] = useState(false);
+  const isLocalWorkspace = isLocalWorkspaceSource(repository);
+
+  const handleQueueRelease = async () => {
+    if (!isLocalWorkspace || isQueueing) {
+      return;
+    }
+
+    const nextValidationErrors = validateMainQuickReleaseDraft(draft);
+    if (nextValidationErrors.releaseVersion) {
+      setValidationErrors(nextValidationErrors);
+      return;
+    }
+
+    setIsQueueing(true);
+    setDispatchError(null);
+
+    try {
+      const release = await dispatchOnDemandReleaseProcess({
+        repository_id: repository.repository_id,
+        release_version:
+          draft.versionSource === "manual" ? draft.releaseVersion.trim() : null,
+        version_source: draft.versionSource,
+        source_kind: "local_workspace",
+        source_ref: null,
+        local_path: repository.local_path ?? repository.repo_url,
+        unity_executable_path_override: null,
+      });
+
+      onResolve?.({
+        gitTag: release.git_tag,
+        kind: "queued",
+      });
+    } catch (error) {
+      setDispatchError(buildRuntimeActionErrorMessage(error, "start"));
+      setIsQueueing(false);
+    }
+  };
+
+  return (
+    <FullScreenModal
+      description={buildProjectSourceDisplay(repository)}
+      dismissible={!isQueueing}
+      footer={
+        <div className="publish-destination-editor-modal__footer">
+          <Button
+            disabled={isQueueing}
+            onClick={() => onResolve?.(null)}
+            size="sm"
+            variant="ghost"
+          >
+            Cancel
+          </Button>
+          {isLocalWorkspace ? (
+            <Button
+              disabled={isQueueing}
+              leadingIcon="arrowUpRight"
+              onClick={() => {
+                void handleQueueRelease();
+              }}
+              size="sm"
+              variant="secondary"
+            >
+              {isQueueing ? "Queueing..." : "Queue Local Release"}
+            </Button>
+          ) : (
+            <Button
+              leadingIcon="layout"
+              onClick={() => onResolve?.({ kind: "open-project-list" })}
+              size="sm"
+              variant="secondary"
+            >
+              Open projects
+            </Button>
+          )}
+        </div>
+      }
+      onResolve={onResolve}
+      title={`Start release · ${repository.repository_name}`}
+    >
+      {isLocalWorkspace ? (
+        <div className="project-detail-form-grid">
+          <SelectField
+            hint="Choose whether HGP should use a manual release label or detect it from project settings."
+            label="Version source"
+            onChange={(event) =>
+              setDraft((current) => ({
+                ...current,
+                versionSource: event.currentTarget
+                  .value as OnDemandReleaseVersionSource,
+              }))
+            }
+            options={MAIN_QUICK_RELEASE_VERSION_SOURCE_OPTIONS}
+            value={draft.versionSource}
+          />
+          <TextField
+            data-overlay-autofocus
+            disabled={draft.versionSource !== "manual"}
+            error={validationErrors.releaseVersion}
+            hint={
+              draft.versionSource === "manual"
+                ? "Use the release label that should identify this local snapshot."
+                : "Detected from project settings when the release is queued."
+            }
+            label="Release version"
+            onChange={(event) =>
+              setDraft((current) => ({
+                ...current,
+                releaseVersion: event.currentTarget.value,
+              }))
+            }
+            placeholder="v1.2.3"
+            value={draft.releaseVersion}
+          />
+          {dispatchError ? (
+            <p className="feed-banner feed-banner--error">{dispatchError}</p>
+          ) : null}
+        </div>
+      ) : (
+        <div className="feed-state">
+          <p className="feed-state__title">
+            Quick release from main is currently available for local workspace
+            projects.
+          </p>
+          <p className="feed-state__copy">
+            Open project list to continue with managed repository release flows.
+          </p>
+        </div>
+      )}
+    </FullScreenModal>
+  );
+}
+
 async function waitForShellTransitionPhase() {
   if (prefersReducedMotion()) {
     return;
@@ -1640,6 +1903,21 @@ function buildRuntimeAutomationErrorMessage(
   return mode === "idle"
     ? "The desktop shell could not pause automatic polling."
     : "The desktop shell could not resume automatic polling.";
+}
+
+function validateMainQuickReleaseDraft(
+  draft: MainQuickReleaseDraft,
+): MainQuickReleaseValidationErrors {
+  if (draft.versionSource !== "manual") {
+    return {};
+  }
+
+  return draft.releaseVersion.trim()
+    ? {}
+    : {
+        releaseVersion:
+          "Release version is required for manual local dispatch.",
+      };
 }
 
 function buildRepositoryInstantCheckErrorMessage(
