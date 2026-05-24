@@ -16,6 +16,7 @@ import {
   type ProjectBuildTargetReference,
   type PublishDestinationDraft,
 } from "./PublishDestinationsEditor";
+import type { SecretCredentialSetting } from "../services/projects";
 
 const BUILD_TARGETS: ProjectBuildTargetReference[] = [
   {
@@ -85,25 +86,41 @@ describe("PublishDestinationsEditor interactions", () => {
     });
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Add target" }));
-    expect(within(dialog).queryByLabelText("Status")).not.toBeInTheDocument();
+    const bindingDialog = await screen.findByRole("dialog", {
+      name: "Add target binding",
+    });
+
     expect(
-      within(dialog).queryByText(
+      within(bindingDialog).queryByLabelText("Status"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(bindingDialog).queryByText(
         "Use the Itch channel that should receive this build target artifact.",
       ),
     ).not.toBeInTheDocument();
     expect(
-      within(dialog).queryByText(
+      within(bindingDialog).queryByText(
         "Optional template. Leave empty to use the git tag as the userversion.",
       ),
     ).not.toBeInTheDocument();
 
-    fireEvent.change(await within(dialog).findByLabelText("Itch channel"), {
-      target: { value: "windows" },
+    fireEvent.change(
+      await within(bindingDialog).findByLabelText("Itch channel"),
+      {
+        target: { value: "windows" },
+      },
+    );
+    fireEvent.click(
+      within(bindingDialog).getByRole("button", { name: "Confirm" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Add target binding" }),
+      ).not.toBeInTheDocument();
     });
 
-    fireEvent.click(
-      within(dialog).getByRole("button", { name: "Add destination" }),
-    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
 
     await waitFor(() => {
       expect(
@@ -136,11 +153,18 @@ describe("PublishDestinationsEditor interactions", () => {
     expect(
       within(dialog).getByRole("heading", { name: "Target bindings" }),
     ).toBeInTheDocument();
-    expect(within(dialog).getByLabelText("Target")).toHaveFocus();
+    expect(
+      within(dialog).getByRole("button", { name: "Add target" }),
+    ).toHaveFocus();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Add target" }));
+    const bindingDialog = await screen.findByRole("dialog", {
+      name: "Add target binding",
+    });
 
-    expect(within(dialog).queryByLabelText("Status")).not.toBeInTheDocument();
+    expect(
+      within(bindingDialog).queryByLabelText("Status"),
+    ).not.toBeInTheDocument();
   });
 
   it("reopens an existing destination in the overlay with its current data", async () => {
@@ -337,6 +361,37 @@ describe("PublishDestinationsEditor interactions", () => {
 
     expect(screen.getByRole("button", { name: "Folder" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Itch" })).toBeDisabled();
+  });
+
+  it("keeps the current credential name visible when selected credential is not selectable", async () => {
+    render(
+      <Harness
+        credentials={[]}
+        editingMode="overlay"
+        initialDestinations={[
+          {
+            ...createEmptyPublishDestinationDraft("itch"),
+            credentialsId: 2,
+            credentialsName: "Itch Production Key",
+            itchAccountName: "indiegabo",
+            itchGameSlug: "red-horizon",
+          },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Edit Itch destination",
+    });
+
+    const credentialSelect = within(dialog).getByRole("combobox", {
+      name: "Credential",
+    });
+
+    expect(credentialSelect).toHaveTextContent("Itch Production Key");
+    expect(credentialSelect).not.toHaveTextContent("Current credential #2");
   });
 
   it("keeps a compact summary visible when a destination accordion is collapsed", () => {
@@ -706,11 +761,13 @@ describe("PublishDestinationsEditor interactions", () => {
 
 function Harness({
   buildTargets = BUILD_TARGETS,
+  credentials = [],
   editingMode = "inline",
   initialDestinations,
   onSaveCredential,
 }: {
   buildTargets?: ProjectBuildTargetReference[];
+  credentials?: SecretCredentialSetting[];
   editingMode?: "inline" | "overlay";
   initialDestinations: PublishDestinationDraft[];
   onSaveCredential?: (
@@ -724,7 +781,7 @@ function Harness({
     <OverlayProvider>
       <PublishDestinationsEditor
         buildTargets={buildTargets}
-        credentials={[]}
+        credentials={credentials}
         destinations={destinations}
         editingMode={editingMode}
         onChange={setDestinations}

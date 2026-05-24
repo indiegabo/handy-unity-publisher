@@ -15,12 +15,10 @@ import FormSection from "./forms/FormSection";
 import {
   PublishDestinationsEditor,
   buildPublishDestinationDrafts,
-  buildPublishDestinationReviewSummary,
   buildUpdateProjectPublishTargetsInput,
   collectBuildTargetBindingImpact,
   createEmptyPublishDestinationValidationErrors,
   hasPublishDestinationValidationErrors,
-  listUnboundBuildTargetNames,
   removeBuildTargetBindings,
   type ProjectBuildTargetReference,
   type PublishDestinationDraft,
@@ -1448,18 +1446,6 @@ export function RepositoryProjectDetail({
       }).length
     : 0;
   const publishDestinationCount = draft?.publishDestinations.length ?? 0;
-  const publishDestinationReviewSummary = draft
-    ? buildPublishDestinationReviewSummary(
-        draft.publishDestinations,
-        buildTargetReferences,
-      )
-    : [];
-  const unboundPublishTargetNames = draft
-    ? listUnboundBuildTargetNames(
-        draft.publishDestinations,
-        buildTargetReferences,
-      )
-    : [];
   const enabledNonConsumingBindingCount = draft
     ? countEnabledPublishDestinationBindings(
         draft.publishDestinations,
@@ -1760,7 +1746,7 @@ export function RepositoryProjectDetail({
                           />
 
                           <div className="project-detail-form-grid__span-full">
-                            <div className="wizard-callout wizard-callout--compact wizard-callout--auth wizard-callout--support">
+                            <div className="wizard-callout wizard-callout--compact wizard-callout--auth">
                               <div className="wizard-callout__header">
                                 <div>
                                   <p className="wizard-callout__title">
@@ -2325,13 +2311,6 @@ export function RepositoryProjectDetail({
                     }}
                     onSaveCredential={handleSavePublishCredential}
                   />
-
-                  <ProjectDetailPublishSupportPanel
-                    publishDestinationReviewSummary={
-                      publishDestinationReviewSummary
-                    }
-                    unboundPublishTargetNames={unboundPublishTargetNames}
-                  />
                 </div>
               </ProjectDetailSectionPanel>
 
@@ -2667,47 +2646,6 @@ function ProjectDetailBuildTargetSummary({
         </MetaRow>
       </SummaryStrip>
     </div>
-  );
-}
-
-function ProjectDetailPublishSupportPanel({
-  publishDestinationReviewSummary,
-  unboundPublishTargetNames,
-}: {
-  publishDestinationReviewSummary: ReturnType<
-    typeof buildPublishDestinationReviewSummary
-  >;
-  unboundPublishTargetNames: string[];
-}) {
-  const missingCredentialCount = publishDestinationReviewSummary.filter(
-    (destination) => destination.missingCredential,
-  ).length;
-  const draftImpactSummary = publishDestinationReviewSummary.length
-    ? publishDestinationReviewSummary
-        .map((destination) => {
-          const targetSummary = destination.bindingTargetNames.length
-            ? destination.bindingTargetNames.join(", ")
-            : "no bound targets";
-          return `${destination.name}: ${targetSummary}`;
-        })
-        .join(" | ")
-    : "No publish destinations are currently configured.";
-
-  return (
-    <SurfacePanel
-      description="Unbound targets stay local under the runtime-managed output root until a destination binding consumes or uploads them."
-      eyebrow="Support"
-      title="Draft impact"
-      tone="inset"
-    >
-      <MetaRow>
-        <MetaItem label="Unbound targets">
-          {String(unboundPublishTargetNames.length)}
-        </MetaItem>
-        <MetaItem label="Credential gaps">{missingCredentialCount}</MetaItem>
-      </MetaRow>
-      <p className="project-detail-target-card__copy">{draftImpactSummary}</p>
-    </SurfacePanel>
   );
 }
 

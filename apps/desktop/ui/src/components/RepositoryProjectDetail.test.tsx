@@ -609,9 +609,11 @@ describe("RepositoryProjectDetail", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: "Draft impact" }),
+      await screen.findByRole("button", { name: "Add destination" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Unbound targets")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Draft impact" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps a stable focus order through the publish destination accordion and binding controls", async () => {

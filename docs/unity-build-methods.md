@@ -82,6 +82,14 @@ current manifest contract and the recommended method names used in this guide.
 | `WebGL`                         | `WebGL`               | `Builder.PerformWebGL`   |
 | `Android`                       | `Android`             | `Builder.PerformAndroid` |
 
+HGP now suggests these method names automatically in the build-target UI based
+on the selected `targetPlatform`. This suggestion is only a convention for a
+smooth setup flow. The Unity project must still implement the referenced static
+methods in its own Editor scripts.
+
+Operators can use the `Override method name` action in the build-target
+overlay whenever a project uses a non-standard method path.
+
 ## Recommended Unity Script Location
 
 Place the build script inside the Unity project at:

@@ -6,8 +6,9 @@ import {
   useState,
 } from "react";
 
-import { Button, IconButton } from "./Button";
+import { Button } from "./Button";
 import { BuildTargetRemovalCallout } from "./BuildTargetRemovalCallout";
+import FullScreenModal from "./FullScreenModal";
 import {
   PublishDestinationsEditor,
   buildCreateProjectPublishTargetsInput,
@@ -33,7 +34,7 @@ import {
   MetaRow,
   SurfacePanel,
 } from "./Surface";
-import { VerticalAccordion } from "./VerticalAccordion";
+import { useOverlay } from "./OverlayManager";
 import { type AuthProviderConnectionResult } from "./authProviderPresentation";
 import {
   createRepositoryProject,
@@ -65,7 +66,6 @@ export type BuildTargetDraft = {
   name: string;
   targetPlatform: string;
   buildMethod: string;
-  unityExecutablePath: string;
 };
 
 export type ProjectDraft = {
@@ -78,6 +78,7 @@ export type ProjectDraft = {
   pollingIntervalSeconds: string;
   artifactsRootOverride: string;
   workspaceRootOverride: string;
+  unityExecutablePath: string;
   buildTargets: BuildTargetDraft[];
   publishDestinations: PublishDestinationDraft[];
 };
@@ -94,12 +95,15 @@ type TargetFieldErrors = {
   name?: string;
   targetPlatform?: string;
   buildMethod?: string;
-  unityExecutablePath?: string;
 };
 
 type TargetStepErrors = {
   root?: string;
   targets: Record<string, TargetFieldErrors>;
+};
+
+type BuildTargetEditorOverlayResult = {
+  target: BuildTargetDraft;
 };
 
 type PathStepErrors = {
@@ -112,7 +116,7 @@ export type CreateProjectWizardSnapshot = {
   currentStepIndex: number;
   draft: ProjectDraft;
   expandedTargetIds: Record<string, boolean>;
-  pathDiagnostics: Record<string, UnityExecutableValidation | null>;
+  unityExecutableDiagnostics: UnityExecutableValidation | null;
   pendingBuildTargetRemovalId: string | null;
   repositoryCredentialId: number | null;
   touchedFields: Record<string, boolean>;
@@ -132,8 +136,6 @@ type CreateProjectWizardProps = {
   onRequestClose?: () => void;
   onSnapshotChange?: (snapshot: CreateProjectWizardSnapshot) => void;
 };
-
-type ValidationTimerMap = Record<string, number | undefined>;
 
 type WizardStepDefinition = {
   key: WizardStepKey;
@@ -199,6 +201,8 @@ const EMPTY_VALIDATION_ATTEMPTS: Record<WizardStepKey, boolean> = {
   review: false,
 };
 
+const DEFAULT_CUSTOM_TARGET_PLATFORM = "StandaloneWindows64";
+
 const INITIAL_PROJECT_DRAFT = createInitialProjectDraft();
 const INITIAL_PROJECT_DRAFT_DIRTY_KEY = buildProjectDraftDirtyKey(
   INITIAL_PROJECT_DRAFT,
@@ -215,6 +219,7 @@ export function CreateProjectWizard({
 }: CreateProjectWizardProps) {
   const initialSnapshot =
     initialSnapshotProp ?? createInitialCreateProjectWizardSnapshot();
+  const { openOverlay } = useOverlay();
   const [draft, setDraft] = useState<ProjectDraft>(() =>
     cloneProjectDraft(initialSnapshot.draft),
   );
@@ -276,14 +281,12 @@ export function CreateProjectWizard({
   const [unityAdapterSettingsError, setUnityAdapterSettingsError] = useState<
     string | null
   >(null);
-  const [pathDiagnostics, setPathDiagnostics] = useState<
-    Record<string, UnityExecutableValidation | null>
-  >(() => ({
-    ...initialSnapshot.pathDiagnostics,
-  }));
-  const [validatingTargets, setValidatingTargets] = useState<
-    Record<string, boolean>
-  >({});
+  const [unityExecutableDiagnostics, setUnityExecutableDiagnostics] =
+    useState<UnityExecutableValidation | null>(
+      initialSnapshot.unityExecutableDiagnostics,
+    );
+  const [isValidatingUnityExecutable, setIsValidatingUnityExecutable] =
+    useState(false);
   const [expandedTargetIds, setExpandedTargetIds] = useState<
     Record<string, boolean>
   >(() => {
@@ -302,8 +305,10 @@ export function CreateProjectWizard({
   const nextBuildTargetIdRef = useRef(
     resolveNextBuildTargetIndex(initialSnapshot.draft.buildTargets),
   );
-  const validationTimersRef = useRef<ValidationTimerMap>({});
-  const validationTokenRef = useRef<Record<string, number>>({});
+  const unityExecutableValidationTimerRef = useRef<number | undefined>(
+    undefined,
+  );
+  const unityExecutableValidationTokenRef = useRef(0);
   const accessAssessmentTimerRef = useRef<number | undefined>(undefined);
   const accessAssessmentTokenRef = useRef(0);
 
@@ -342,8 +347,8 @@ export function CreateProjectWizard({
   );
   const targetErrors = validateTargetsStep(
     draft,
-    pathDiagnostics,
-    validatingTargets,
+    unityExecutableDiagnostics,
+    isValidatingUnityExecutable,
     buildTargetStepAdapter,
   );
   const buildTargetReferences: ProjectBuildTargetReference[] =
@@ -414,9 +419,7 @@ export function CreateProjectWizard({
       expandedTargetIds: {
         ...expandedTargetIds,
       },
-      pathDiagnostics: {
-        ...pathDiagnostics,
-      },
+      unityExecutableDiagnostics,
       pendingBuildTargetRemovalId,
       repositoryCredentialId,
       touchedFields: {
@@ -429,7 +432,7 @@ export function CreateProjectWizard({
     draft,
     expandedTargetIds,
     onSnapshotChange,
-    pathDiagnostics,
+    unityExecutableDiagnostics,
     pendingBuildTargetRemovalId,
     repositoryCredentialId,
     touchedFields,
@@ -693,10 +696,8 @@ export function CreateProjectWizard({
       if (accessAssessmentTimerRef.current !== undefined) {
         window.clearTimeout(accessAssessmentTimerRef.current);
       }
-      for (const timerId of Object.values(validationTimersRef.current)) {
-        if (timerId !== undefined) {
-          window.clearTimeout(timerId);
-        }
+      if (unityExecutableValidationTimerRef.current !== undefined) {
+        window.clearTimeout(unityExecutableValidationTimerRef.current);
       }
     };
   }, []);
@@ -706,24 +707,21 @@ export function CreateProjectWizard({
       return;
     }
 
-    for (const target of draft.buildTargets) {
-      const unityExecutablePath = target.unityExecutablePath.trim();
-
-      if (
-        !unityExecutablePath ||
-        pathDiagnostics[target.id] ||
-        validatingTargets[target.id]
-      ) {
-        continue;
-      }
-
-      scheduleUnityExecutableValidation(target.id, unityExecutablePath, 0);
+    const unityExecutablePath = draft.unityExecutablePath.trim();
+    if (
+      !unityExecutablePath ||
+      unityExecutableDiagnostics ||
+      isValidatingUnityExecutable
+    ) {
+      return;
     }
+
+    scheduleUnityExecutableValidation(unityExecutablePath, 0);
   }, [
     buildTargetStepAdapter.kind,
-    draft.buildTargets,
-    pathDiagnostics,
-    validatingTargets,
+    draft.unityExecutablePath,
+    unityExecutableDiagnostics,
+    isValidatingUnityExecutable,
   ]);
 
   useEffect(() => {
@@ -900,64 +898,46 @@ export function CreateProjectWizard({
   });
 
   const scheduleUnityExecutableValidation = useEffectEvent(
-    (targetId: string, path: string, delayMillis = 250) => {
-      const existingTimerId = validationTimersRef.current[targetId];
-      if (existingTimerId !== undefined) {
-        window.clearTimeout(existingTimerId);
+    (path: string, delayMillis = 250) => {
+      if (unityExecutableValidationTimerRef.current !== undefined) {
+        window.clearTimeout(unityExecutableValidationTimerRef.current);
       }
 
-      validationTokenRef.current[targetId] =
-        (validationTokenRef.current[targetId] ?? 0) + 1;
-      const validationToken = validationTokenRef.current[targetId];
+      unityExecutableValidationTokenRef.current += 1;
+      const validationToken = unityExecutableValidationTokenRef.current;
       const trimmedPath = path.trim();
 
       if (!trimmedPath) {
         startTransition(() => {
-          setPathDiagnostics((current) => ({
-            ...current,
-            [targetId]: null,
-          }));
-          setValidatingTargets((current) => ({
-            ...current,
-            [targetId]: false,
-          }));
+          setUnityExecutableDiagnostics(null);
+          setIsValidatingUnityExecutable(false);
         });
         return;
       }
 
       startTransition(() => {
-        setValidatingTargets((current) => ({
-          ...current,
-          [targetId]: true,
-        }));
+        setIsValidatingUnityExecutable(true);
       });
 
-      validationTimersRef.current[targetId] = window.setTimeout(async () => {
-        try {
-          const diagnostics = await validateUnityExecutablePath(trimmedPath);
-          if (validationTokenRef.current[targetId] !== validationToken) {
-            return;
-          }
+      unityExecutableValidationTimerRef.current = window.setTimeout(
+        async () => {
+          try {
+            const diagnostics = await validateUnityExecutablePath(trimmedPath);
+            if (unityExecutableValidationTokenRef.current !== validationToken) {
+              return;
+            }
 
-          startTransition(() => {
-            setPathDiagnostics((current) => ({
-              ...current,
-              [targetId]: diagnostics,
-            }));
-            setValidatingTargets((current) => ({
-              ...current,
-              [targetId]: false,
-            }));
-          });
-        } catch (error) {
-          if (validationTokenRef.current[targetId] !== validationToken) {
-            return;
-          }
+            startTransition(() => {
+              setUnityExecutableDiagnostics(diagnostics);
+              setIsValidatingUnityExecutable(false);
+            });
+          } catch (error) {
+            if (unityExecutableValidationTokenRef.current !== validationToken) {
+              return;
+            }
 
-          startTransition(() => {
-            setPathDiagnostics((current) => ({
-              ...current,
-              [targetId]: {
+            startTransition(() => {
+              setUnityExecutableDiagnostics({
                 runner_family: "host-native",
                 unity_executable_path: trimmedPath,
                 unity_executable_exists: false,
@@ -966,28 +946,13 @@ export function CreateProjectWizard({
                 environment_variable_count: 0,
                 status: "validation_failed",
                 message: buildProjectErrorMessage(error),
-              },
-            }));
-            setValidatingTargets((current) => ({
-              ...current,
-              [targetId]: false,
-            }));
-          });
-        }
-      }, delayMillis);
-    },
-  );
-
-  const updateBuildTarget = useEffectEvent(
-    (targetId: string, patch: Partial<BuildTargetDraft>) => {
-      startTransition(() => {
-        setDraft((current) => ({
-          ...current,
-          buildTargets: current.buildTargets.map((target) =>
-            target.id === targetId ? { ...target, ...patch } : target,
-          ),
-        }));
-      });
+              });
+              setIsValidatingUnityExecutable(false);
+            });
+          }
+        },
+        delayMillis,
+      );
     },
   );
 
@@ -996,14 +961,6 @@ export function CreateProjectWizard({
       setSubmitError(buildProjectErrorMessage(error));
     });
   });
-
-  const handlePickUnityExecutablePath = useEffectEvent(
-    (targetId: string, selectedPath: string) => {
-      updateBuildTarget(targetId, { unityExecutablePath: selectedPath });
-      markFieldTouched(buildTargetFieldKey(targetId, "unityExecutablePath"));
-      scheduleUnityExecutableValidation(targetId, selectedPath, 0);
-    },
-  );
 
   const handleProjectPathPicked = useEffectEvent(
     (fieldName: ProjectPathFieldName, selectedPath: string) => {
@@ -1029,30 +986,63 @@ export function CreateProjectWizard({
     },
   );
 
-  const handleAddBuildTarget = useEffectEvent(() => {
-    const nextTarget = createEmptyBuildTargetDraft(
-      nextBuildTargetIdRef.current,
+  const handleAddBuildTarget = useEffectEvent(async () => {
+    const targetId = `target-${nextBuildTargetIdRef.current}`;
+    const created = await openOverlay<BuildTargetEditorOverlayResult>(
+      BuildTargetEditorOverlay,
+      {
+        initialTarget: createEmptyBuildTargetDraft(
+          nextBuildTargetIdRef.current,
+        ),
+        mode: "create",
+        targetId,
+      },
     );
+
+    if (!created) {
+      return;
+    }
+
     nextBuildTargetIdRef.current += 1;
 
     startTransition(() => {
       setDraft((current) => ({
         ...current,
-        buildTargets: [...current.buildTargets, nextTarget],
+        buildTargets: [...current.buildTargets, created.target],
       }));
-      setExpandedTargetIds((current) => ({
+    });
+  });
+
+  const handleEditBuildTarget = useEffectEvent(async (targetId: string) => {
+    const target = draft.buildTargets.find((entry) => entry.id === targetId);
+    if (!target) {
+      return;
+    }
+
+    const updated = await openOverlay<BuildTargetEditorOverlayResult>(
+      BuildTargetEditorOverlay,
+      {
+        initialTarget: target,
+        mode: "edit",
+        targetId,
+      },
+    );
+
+    if (!updated) {
+      return;
+    }
+
+    startTransition(() => {
+      setDraft((current) => ({
         ...current,
-        [nextTarget.id]: true,
+        buildTargets: current.buildTargets.map((entry) =>
+          entry.id === targetId ? updated.target : entry,
+        ),
       }));
     });
   });
 
   const finalizeBuildTargetRemoval = useEffectEvent((targetId: string) => {
-    const existingTimerId = validationTimersRef.current[targetId];
-    if (existingTimerId !== undefined) {
-      window.clearTimeout(existingTimerId);
-    }
-
     startTransition(() => {
       setDraft((current) => ({
         ...current,
@@ -1064,16 +1054,6 @@ export function CreateProjectWizard({
           targetId,
         ),
       }));
-      setPathDiagnostics((current) => {
-        const next = { ...current };
-        delete next[targetId];
-        return next;
-      });
-      setValidatingTargets((current) => {
-        const next = { ...current };
-        delete next[targetId];
-        return next;
-      });
       setExpandedTargetIds((current) => {
         const next = { ...current };
         delete next[targetId];
@@ -1106,17 +1086,6 @@ export function CreateProjectWizard({
       setPendingBuildTargetRemovalId(null);
     });
   });
-
-  const handleTargetAccordionChange = useEffectEvent(
-    (targetId: string, nextOpen: boolean) => {
-      startTransition(() => {
-        setExpandedTargetIds((current) => ({
-          ...current,
-          [targetId]: nextOpen,
-        }));
-      });
-    },
-  );
 
   const handleAdvanceStep = useEffectEvent(() => {
     if (currentStep.key === "identity") {
@@ -1262,7 +1231,7 @@ export function CreateProjectWizard({
     }
   });
 
-  const currentStepSupport =
+  const repositoryAccessPanel =
     currentStep.key === "access" ? (
       projectSourceStepAdapter.kind === "repository" ? (
         <SurfacePanel
@@ -1289,7 +1258,7 @@ export function CreateProjectWizard({
             isAssessingRepositoryAccess,
             repositoryAccessError,
           )}
-          eyebrow="Support"
+          eyebrow="Repository"
           headerSeparated
           summary={
             draft.repositoryUrl.trim() ||
@@ -1459,26 +1428,10 @@ export function CreateProjectWizard({
             </>
           ) : null}
         </SurfacePanel>
-      ) : (
-        <SurfacePanel
-          className="wizard-support-panel"
-          description={projectSourceStepAdapter.supportDescription}
-          eyebrow="Support"
-          headerSeparated
-          title={projectSourceStepAdapter.supportTitle}
-          tone="inset"
-        >
-          <p className="wizard-callout__copy">
-            {projectSourceStepAdapter.supportCopy}
-          </p>
-        </SurfacePanel>
-      )
+      ) : null
     ) : null;
 
-  const wizardStageContentClassName = joinClassNames(
-    "wizard-stage-content-shell",
-    currentStepSupport ? "wizard-stage-content-shell--with-support" : undefined,
-  );
+  const wizardStageContentClassName = "wizard-stage-content-shell";
   const stagePanelClassName = joinClassNames(
     "wizard-stage-panel",
     currentStep.key === "targets" && "wizard-stage-panel--full-bleed",
@@ -1633,85 +1586,91 @@ export function CreateProjectWizard({
 
               {currentStep.key === "access" ? (
                 projectSourceStepAdapter.kind === "repository" ? (
-                  <div className="wizard-form-grid">
-                    <TextField
-                      error={
-                        shouldShowFieldError(
-                          attemptedSteps.access,
-                          touchedFields,
-                          "repositoryUrl",
-                        )
-                          ? accessErrors.repositoryUrl
-                          : undefined
-                      }
-                      hint="Use the HTTPS remote that HGP will poll and clone."
-                      label="Repository URL"
-                      leadingIcon="server"
-                      onBlur={() => {
-                        markFieldTouched("repositoryUrl");
-                        markFieldTouched("repositoryAccess");
-                      }}
-                      onChange={(event) => {
-                        const nextValue = event.currentTarget.value;
-                        startTransition(() => {
-                          setDraft((current) => ({
-                            ...current,
-                            repositoryUrl: nextValue,
-                          }));
-                        });
-                        markFieldTouched("repositoryUrl");
-                        markFieldTouched("repositoryAccess");
-                      }}
-                      placeholder="https://github.com/org/project.git"
-                      value={draft.repositoryUrl}
-                    />
-                    <SelectField
-                      hint="Tell HGP whether this remote should be treated as public or private."
-                      label="Repository visibility"
-                      onBlur={() => markFieldTouched("repositoryAccess")}
-                      onChange={(event) => {
-                        const nextValue = event.currentTarget
-                          .value as ProjectDraft["repositoryVisibility"];
-                        startTransition(() => {
-                          setDraft((current) => ({
-                            ...current,
-                            repositoryVisibility: nextValue,
-                          }));
-                        });
-                        markFieldTouched("repositoryAccess");
-                      }}
-                      options={REPOSITORY_VISIBILITY_OPTIONS}
-                      value={draft.repositoryVisibility}
-                    />
-                    <TextField
-                      error={
-                        shouldShowFieldError(
-                          attemptedSteps.access,
-                          touchedFields,
-                          "pollingIntervalSeconds",
-                        )
-                          ? accessErrors.pollingIntervalSeconds
-                          : undefined
-                      }
-                      hint="Polling stays operator-visible. The runtime requires at least 5 seconds."
-                      label="Polling interval (seconds)"
-                      min={5}
-                      onBlur={() => markFieldTouched("pollingIntervalSeconds")}
-                      onChange={(event) => {
-                        const nextValue = event.currentTarget.value;
-                        startTransition(() => {
-                          setDraft((current) => ({
-                            ...current,
-                            pollingIntervalSeconds: nextValue,
-                          }));
-                        });
-                        markFieldTouched("pollingIntervalSeconds");
-                      }}
-                      step={5}
-                      type="number"
-                      value={draft.pollingIntervalSeconds}
-                    />
-                  </div>
+                  <>
+                    <div className="wizard-form-grid">
+                      <TextField
+                        error={
+                          shouldShowFieldError(
+                            attemptedSteps.access,
+                            touchedFields,
+                            "repositoryUrl",
+                          )
+                            ? accessErrors.repositoryUrl
+                            : undefined
+                        }
+                        hint="Use the HTTPS remote that HGP will poll and clone."
+                        label="Repository URL"
+                        leadingIcon="server"
+                        onBlur={() => {
+                          markFieldTouched("repositoryUrl");
+                          markFieldTouched("repositoryAccess");
+                        }}
+                        onChange={(event) => {
+                          const nextValue = event.currentTarget.value;
+                          startTransition(() => {
+                            setDraft((current) => ({
+                              ...current,
+                              repositoryUrl: nextValue,
+                            }));
+                          });
+                          markFieldTouched("repositoryUrl");
+                          markFieldTouched("repositoryAccess");
+                        }}
+                        placeholder="https://github.com/org/project.git"
+                        value={draft.repositoryUrl}
+                      />
+                      <SelectField
+                        hint="Tell HGP whether this remote should be treated as public or private."
+                        label="Repository visibility"
+                        onBlur={() => markFieldTouched("repositoryAccess")}
+                        onChange={(event) => {
+                          const nextValue = event.currentTarget
+                            .value as ProjectDraft["repositoryVisibility"];
+                          startTransition(() => {
+                            setDraft((current) => ({
+                              ...current,
+                              repositoryVisibility: nextValue,
+                            }));
+                          });
+                          markFieldTouched("repositoryAccess");
+                        }}
+                        options={REPOSITORY_VISIBILITY_OPTIONS}
+                        value={draft.repositoryVisibility}
+                      />
+                      <TextField
+                        error={
+                          shouldShowFieldError(
+                            attemptedSteps.access,
+                            touchedFields,
+                            "pollingIntervalSeconds",
+                          )
+                            ? accessErrors.pollingIntervalSeconds
+                            : undefined
+                        }
+                        hint="Polling stays operator-visible. The runtime requires at least 5 seconds."
+                        label="Polling interval (seconds)"
+                        min={5}
+                        onBlur={() =>
+                          markFieldTouched("pollingIntervalSeconds")
+                        }
+                        onChange={(event) => {
+                          const nextValue = event.currentTarget.value;
+                          startTransition(() => {
+                            setDraft((current) => ({
+                              ...current,
+                              pollingIntervalSeconds: nextValue,
+                            }));
+                          });
+                          markFieldTouched("pollingIntervalSeconds");
+                        }}
+                        step={5}
+                        type="number"
+                        value={draft.pollingIntervalSeconds}
+                      />
+                    </div>
+
+                    {repositoryAccessPanel}
+                  </>
                 ) : (
                   <div className="wizard-form-grid">
                     <PathPickerField
@@ -1762,258 +1721,170 @@ export function CreateProjectWizard({
                       />
                     ) : null}
 
+                    <SelectField
+                      disabled={
+                        isLoadingUnityAdapterSettings ||
+                        discoveredUnityEditors.length === 0
+                      }
+                      hint={buildDetectedUnityEditorHint(
+                        unityAdapterSettingsError,
+                        discoveredUnityEditors.length,
+                      )}
+                      label="Installed Unity editors"
+                      onChange={(event) => {
+                        const selectedPath = event.currentTarget.value.trim();
+                        if (!selectedPath) {
+                          return;
+                        }
+
+                        startTransition(() => {
+                          setDraft((current) => ({
+                            ...current,
+                            unityExecutablePath: selectedPath,
+                          }));
+                          setUnityExecutableDiagnostics(null);
+                        });
+                        scheduleUnityExecutableValidation(selectedPath);
+                      }}
+                      options={buildDetectedUnityEditorOptions(
+                        discoveredUnityEditors,
+                        isLoadingUnityAdapterSettings,
+                        unityAdapterSettingsError,
+                      )}
+                      value={resolveDetectedUnityEditorValue(
+                        draft.unityExecutablePath,
+                        discoveredUnityEditors,
+                      )}
+                    />
+
+                    <PathPickerField
+                      buttonLabel="Choose Unity executable"
+                      dialogTitle="Select Unity Editor executable"
+                      error={
+                        shouldShowStepError(attemptedSteps.targets)
+                          ? targetErrors.root
+                          : undefined
+                      }
+                      filters={[
+                        {
+                          extensions: ["exe", "app"],
+                          name: "Unity Editor",
+                        },
+                      ]}
+                      hint="Select the host-local Unity Editor executable that should run every build target in this project."
+                      label="Unity executable"
+                      onError={handlePathPickerError}
+                      onPathPicked={(selectedPath) => {
+                        startTransition(() => {
+                          setDraft((current) => ({
+                            ...current,
+                            unityExecutablePath: selectedPath,
+                          }));
+                          setUnityExecutableDiagnostics(null);
+                        });
+                        scheduleUnityExecutableValidation(selectedPath);
+                      }}
+                      pickerKind="file"
+                      placeholder="C:/Program Files/Unity/Hub/Editor/.../Unity.exe"
+                      value={draft.unityExecutablePath}
+                    />
+
+                    {unityExecutableDiagnostics ? (
+                      <p
+                        className={joinClassNames(
+                          "wizard-target-card__diagnostic",
+                          unityExecutableDiagnostics.status !== "ready" &&
+                            "wizard-target-card__diagnostic--error",
+                        )}
+                      >
+                        {unityExecutableDiagnostics.message}
+                      </p>
+                    ) : null}
+
+                    {isValidatingUnityExecutable ? (
+                      <p className="wizard-target-card__diagnostic">
+                        Validating Unity executable path...
+                      </p>
+                    ) : null}
+
+                    {draft.buildTargets.length === 0 ? (
+                      <div className="feed-state">
+                        <p className="feed-state__title">
+                          No build targets configured.
+                        </p>
+                      </div>
+                    ) : null}
+
                     {draft.buildTargets.map((target, index) => {
-                      const diagnostics = pathDiagnostics[target.id];
                       const fieldErrors = targetErrors.targets[target.id] ?? {};
-                      const detectedUnityEditorOptions =
-                        buildDetectedUnityEditorOptions(
-                          discoveredUnityEditors,
-                          isLoadingUnityAdapterSettings,
-                          unityAdapterSettingsError,
-                        );
-                      const detectedUnityEditorValue =
-                        resolveDetectedUnityEditorValue(
-                          target.unityExecutablePath,
-                          discoveredUnityEditors,
-                        );
+                      const errorPreview = shouldShowStepError(
+                        attemptedSteps.targets,
+                      )
+                        ? firstBuildTargetFieldError(fieldErrors)
+                        : null;
 
                       return (
-                        <VerticalAccordion
-                          bodyClassName="wizard-target-card__body"
-                          className="wizard-target-card"
-                          collapsedToggleLabel={`Expand build target ${index + 1}`}
-                          expandedToggleLabel={`Collapse build target ${index + 1}`}
-                          header={
-                            <div className="wizard-target-card__header">
-                              <div className="wizard-target-card__top-row">
-                                <p className="wizard-target-card__eyebrow">
-                                  Build target {index + 1}
-                                </p>
-                              </div>
-
-                              <IconButton
-                                className="wizard-target-card__remove"
-                                disabled={draft.buildTargets.length === 1}
-                                icon="trash"
-                                label={`Remove build target ${index + 1}`}
+                        <SurfacePanel
+                          actions={
+                            <div className="publish-destination-quick-view__actions">
+                              <Button
+                                disabled={isSubmitting}
+                                onClick={() =>
+                                  void handleEditBuildTarget(target.id)
+                                }
+                                size="sm"
+                                variant="ghost"
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                disabled={isSubmitting}
+                                leadingIcon="trash"
                                 onClick={() =>
                                   handleRemoveBuildTarget(target.id)
                                 }
                                 size="sm"
                                 variant="ghost"
-                              />
-
-                              <div className="wizard-target-card__title-block">
-                                <h3 className="wizard-target-card__title">
-                                  {target.name.trim() || "Unnamed target"}
-                                </h3>
-                              </div>
-
-                              <div className="wizard-target-card__badges">
-                                {diagnostics ? (
-                                  <Badge
-                                    tone={
-                                      diagnostics.status === "ready"
-                                        ? "strong"
-                                        : "muted"
-                                    }
-                                  >
-                                    {formatDiagnosticStatus(diagnostics.status)}
-                                  </Badge>
-                                ) : null}
-                              </div>
+                              >
+                                Remove
+                              </Button>
                             </div>
                           }
-                          headerSeparated
+                          className="publish-destination-quick-view"
                           key={target.id}
-                          onOpenChange={(nextOpen) =>
-                            handleTargetAccordionChange(target.id, nextOpen)
-                          }
-                          open={Boolean(expandedTargetIds[target.id])}
-                          tone="section"
-                          triggerMode="button"
-                        >
-                          <div className="wizard-form-grid wizard-form-grid--targets">
-                            <TextField
-                              error={
-                                shouldShowFieldError(
-                                  attemptedSteps.targets,
-                                  touchedFields,
-                                  buildTargetFieldKey(target.id, "name"),
-                                )
-                                  ? fieldErrors.name
-                                  : undefined
-                              }
-                              hint="Keep the target name stable. It becomes part of the artifact file name."
-                              label="Target name"
-                              onBlur={() =>
-                                markFieldTouched(
-                                  buildTargetFieldKey(target.id, "name"),
-                                )
-                              }
-                              onChange={(event) => {
-                                updateBuildTarget(target.id, {
-                                  name: event.currentTarget.value,
-                                });
-                                markFieldTouched(
-                                  buildTargetFieldKey(target.id, "name"),
-                                );
-                              }}
-                              placeholder="Windows"
-                              value={target.name}
-                            />
-                            <SelectField
-                              error={
-                                shouldShowFieldError(
-                                  attemptedSteps.targets,
-                                  touchedFields,
-                                  buildTargetFieldKey(
-                                    target.id,
-                                    "targetPlatform",
-                                  ),
-                                )
-                                  ? fieldErrors.targetPlatform
-                                  : undefined
-                              }
-                              hint="This writes the Unity targetPlatform contract field directly."
-                              label="Unity target platform"
-                              onBlur={() =>
-                                markFieldTouched(
-                                  buildTargetFieldKey(
-                                    target.id,
-                                    "targetPlatform",
-                                  ),
-                                )
-                              }
-                              onChange={(event) => {
-                                updateBuildTarget(target.id, {
-                                  targetPlatform:
-                                    normalizeUnityTargetPlatformValue(
-                                      event.currentTarget.value,
-                                    ),
-                                });
-                                markFieldTouched(
-                                  buildTargetFieldKey(
-                                    target.id,
-                                    "targetPlatform",
-                                  ),
-                                );
-                              }}
-                              options={PLATFORM_OPTIONS}
-                              value={normalizeUnityTargetPlatformValue(
-                                target.targetPlatform,
-                              )}
-                            />
-                            <TextField
-                              error={
-                                shouldShowFieldError(
-                                  attemptedSteps.targets,
-                                  touchedFields,
-                                  buildTargetFieldKey(target.id, "buildMethod"),
-                                )
-                                  ? fieldErrors.buildMethod
-                                  : undefined
-                              }
-                              hint="Point this at a real static Unity method, for example Builder.PerformWindows."
-                              label="Unity build method"
-                              onBlur={() =>
-                                markFieldTouched(
-                                  buildTargetFieldKey(target.id, "buildMethod"),
-                                )
-                              }
-                              onChange={(event) => {
-                                updateBuildTarget(target.id, {
-                                  buildMethod: event.currentTarget.value,
-                                });
-                                markFieldTouched(
-                                  buildTargetFieldKey(target.id, "buildMethod"),
-                                );
-                              }}
-                              placeholder="Builder.PerformWindows"
-                              value={target.buildMethod}
-                            />
-                            <SelectField
-                              disabled={
-                                isSubmitting ||
-                                isLoadingUnityAdapterSettings ||
-                                detectedUnityEditorOptions.length <= 1
-                              }
-                              hint={buildDetectedUnityEditorHint(
-                                unityAdapterSettingsError,
-                                discoveredUnityEditors.length,
-                              )}
-                              label="Installed Unity editors"
-                              onChange={(event) => {
-                                const selectedPath =
-                                  event.currentTarget.value.trim();
-
-                                if (!selectedPath) {
-                                  return;
-                                }
-
-                                handlePickUnityExecutablePath(
-                                  target.id,
-                                  selectedPath,
-                                );
-                              }}
-                              options={detectedUnityEditorOptions}
-                              value={detectedUnityEditorValue}
-                            />
-                            <PathPickerField
-                              buttonLabel="Choose Unity executable"
-                              disabled={isSubmitting}
-                              dialogTitle="Select Unity Editor executable"
-                              error={
-                                shouldShowFieldError(
-                                  attemptedSteps.targets,
-                                  touchedFields,
-                                  buildTargetFieldKey(
-                                    target.id,
-                                    "unityExecutablePath",
-                                  ),
-                                )
-                                  ? fieldErrors.unityExecutablePath
-                                  : undefined
-                              }
-                              filters={[
-                                {
-                                  name: "Unity Editor",
-                                  extensions: ["exe", "app"],
-                                },
-                              ]}
-                              hint="Select the host-local Unity Editor executable that should run this target."
-                              label="Unity executable"
-                              onError={handlePathPickerError}
-                              onPathPicked={(selectedPath) =>
-                                handlePickUnityExecutablePath(
-                                  target.id,
-                                  selectedPath,
-                                )
-                              }
-                              pickerKind="file"
-                              placeholder="C:/Program Files/Unity/Hub/Editor/.../Unity.exe"
-                              value={target.unityExecutablePath}
-                            />
-
-                            {diagnostics ? (
-                              <p
-                                className={joinClassNames(
-                                  "wizard-target-card__diagnostic",
-                                  diagnostics.status !== "ready" &&
-                                    "wizard-target-card__diagnostic--error",
+                          summary={
+                            <MetaRow className="wizard-target-card__summary">
+                              <MetaItem label="Platform">
+                                {target.targetPlatform.trim() || "pending"}
+                              </MetaItem>
+                              <MetaItem label="Build method">
+                                {target.buildMethod.trim() || "pending"}
+                              </MetaItem>
+                              <MetaItem label="Unity executable">
+                                {formatBuildTargetExecutableSummary(
+                                  unityExecutableDiagnostics,
+                                  isValidatingUnityExecutable,
                                 )}
-                              >
-                                {diagnostics.message}
-                              </p>
-                            ) : null}
-
-                            {validatingTargets[target.id] ? (
-                              <p className="wizard-target-card__diagnostic">
-                                Validating Unity executable path...
-                              </p>
-                            ) : null}
-                          </div>
-                        </VerticalAccordion>
+                              </MetaItem>
+                            </MetaRow>
+                          }
+                          title={
+                            target.name.trim() || `Build target ${index + 1}`
+                          }
+                          tone="inset"
+                        >
+                          {errorPreview ? (
+                            <p className="ui-field__error">{errorPreview}</p>
+                          ) : (
+                            <p className="project-detail-target-card__copy project-detail-target-card__copy--muted">
+                              {buildBuildTargetQuickViewCopy(
+                                target,
+                                unityExecutableDiagnostics,
+                                draft.unityExecutablePath,
+                              )}
+                            </p>
+                          )}
+                        </SurfacePanel>
                       );
                     })}
 
@@ -2202,12 +2073,23 @@ export function CreateProjectWizard({
                               {target.buildMethod.trim() ||
                                 "Unity build method pending"}
                             </p>
-                            <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
-                              {target.unityExecutablePath.trim() ||
-                                "Unity executable pending"}
-                            </p>
                           </div>
                         ))}
+                        <div className="wizard-summary-list__item">
+                          <div className="wizard-summary-list__title-row">
+                            <strong>Shared Unity executable</strong>
+                            <Badge tone="muted">
+                              {formatBuildTargetExecutableSummary(
+                                unityExecutableDiagnostics,
+                                isValidatingUnityExecutable,
+                              )}
+                            </Badge>
+                          </div>
+                          <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
+                            {draft.unityExecutablePath.trim() ||
+                              "Unity executable pending"}
+                          </p>
+                        </div>
                       </div>
                     ) : (
                       <div className="wizard-summary-list">
@@ -2336,12 +2218,6 @@ export function CreateProjectWizard({
                 </div>
               ) : null}
             </SurfacePanel>
-
-            {currentStepSupport ? (
-              <div className="wizard-stage-support-shell">
-                {currentStepSupport}
-              </div>
-            ) : null}
           </div>
         </div>
 
@@ -2396,6 +2272,250 @@ export function CreateProjectWizard({
         </footer>
       </section>
     </FocusPageFrame>
+  );
+}
+
+type BuildTargetEditorOverlayProps = {
+  initialTarget: BuildTargetDraft;
+  mode: "create" | "edit";
+  onResolve?: (value?: BuildTargetEditorOverlayResult | null) => void;
+  targetId: string;
+};
+
+function BuildTargetEditorOverlay({
+  initialTarget,
+  mode,
+  onResolve,
+  targetId,
+}: BuildTargetEditorOverlayProps) {
+  const isCreateMode = mode === "create";
+  const initialNormalizedPlatform = normalizeUnityTargetPlatformValue(
+    initialTarget.targetPlatform,
+  );
+  const initialSuggestedMethod = resolveSuggestedUnityBuildMethod(
+    initialNormalizedPlatform,
+  );
+  const initialSuggestedName = resolveUnityBuildTargetName(
+    initialNormalizedPlatform,
+  );
+  const [draft, setDraft] = useState<BuildTargetDraft>(() => ({
+    ...initialTarget,
+    id: targetId,
+  }));
+  const [isCustomConfigurationEnabled, setIsCustomConfigurationEnabled] =
+    useState(() => {
+      if (isCreateMode) {
+        return false;
+      }
+
+      const normalizedCurrentMethod = initialTarget.buildMethod.trim();
+      const normalizedCurrentName = initialTarget.name.trim();
+
+      return (
+        normalizedCurrentMethod !== (initialSuggestedMethod ?? "") ||
+        normalizedCurrentName !== initialSuggestedName
+      );
+    });
+  const [attemptedSave, setAttemptedSave] = useState(false);
+
+  const normalizedTargetPlatform = normalizeUnityTargetPlatformValue(
+    draft.targetPlatform,
+  );
+  const suggestedBuildMethod = resolveSuggestedUnityBuildMethod(
+    normalizedTargetPlatform,
+  );
+
+  const fieldErrors = attemptedSave
+    ? validateBuildTargetDraftForOverlay(
+        draft,
+        isCustomConfigurationEnabled,
+        suggestedBuildMethod,
+      )
+    : {};
+
+  const enableCustomConfiguration = () => {
+    setIsCustomConfigurationEnabled(true);
+    setDraft((current) => {
+      const fallbackPlatform = current.targetPlatform.trim()
+        ? normalizeUnityTargetPlatformValue(current.targetPlatform)
+        : DEFAULT_CUSTOM_TARGET_PLATFORM;
+
+      return {
+        ...current,
+        targetPlatform: fallbackPlatform,
+        buildMethod:
+          current.buildMethod.trim() ||
+          resolveSuggestedUnityBuildMethod(fallbackPlatform) ||
+          "",
+        name:
+          current.name.trim() || resolveUnityBuildTargetName(fallbackPlatform),
+      };
+    });
+  };
+
+  const disableCustomConfiguration = () => {
+    setIsCustomConfigurationEnabled(false);
+    setDraft((current) => {
+      const normalizedPlatform = normalizeUnityTargetPlatformValue(
+        current.targetPlatform,
+      );
+
+      return {
+        ...current,
+        buildMethod: resolveSuggestedUnityBuildMethod(normalizedPlatform) ?? "",
+        name: resolveUnityBuildTargetName(normalizedPlatform),
+      };
+    });
+  };
+
+  const handleSave = () => {
+    setAttemptedSave(true);
+
+    const errors = validateBuildTargetDraftForOverlay(
+      draft,
+      isCustomConfigurationEnabled,
+      suggestedBuildMethod,
+    );
+
+    if (firstBuildTargetFieldError(errors)) {
+      return;
+    }
+
+    onResolve?.({
+      target: {
+        ...draft,
+        buildMethod: isCustomConfigurationEnabled
+          ? draft.buildMethod.trim()
+          : (suggestedBuildMethod ?? ""),
+        name: isCustomConfigurationEnabled
+          ? draft.name.trim()
+          : resolveUnityBuildTargetName(normalizedTargetPlatform),
+        targetPlatform: normalizedTargetPlatform,
+      },
+    });
+  };
+
+  return (
+    <FullScreenModal
+      description={
+        isCreateMode
+          ? "Configure one build target and return to the wizard with a compact summary card."
+          : "Update this build target and return to the wizard once the target contract is ready."
+      }
+      footer={
+        <div className="publish-destination-editor-modal__footer">
+          <Button onClick={() => onResolve?.(null)} size="sm" variant="ghost">
+            Cancel
+          </Button>
+          <Button
+            leadingIcon="plus"
+            onClick={handleSave}
+            size="sm"
+            variant="primary"
+          >
+            {isCreateMode ? "Confirm" : "Save target"}
+          </Button>
+        </div>
+      }
+      onResolve={onResolve}
+      title={isCreateMode ? "Add build target" : "Edit build target"}
+    >
+      <div className="project-detail-form-grid publish-destination-editor-modal__content">
+        <div className="build-target-editor__mode-actions">
+          <Button
+            onClick={() => {
+              if (isCustomConfigurationEnabled) {
+                disableCustomConfiguration();
+                return;
+              }
+
+              enableCustomConfiguration();
+            }}
+            size="sm"
+            variant={isCustomConfigurationEnabled ? "ghost" : "secondary"}
+          >
+            {isCustomConfigurationEnabled
+              ? "Default configuration"
+              : "Custom configuration"}
+          </Button>
+        </div>
+
+        {!isCustomConfigurationEnabled ? (
+          <>
+            <SelectField
+              data-overlay-autofocus
+              error={fieldErrors.targetPlatform}
+              hint="This writes the Unity targetPlatform contract field directly."
+              label="Unity target platform"
+              onChange={(event) => {
+                const nextTargetPlatform = normalizeUnityTargetPlatformValue(
+                  event.currentTarget.value,
+                );
+                setDraft((current) => ({
+                  ...current,
+                  targetPlatform: nextTargetPlatform,
+                  buildMethod:
+                    resolveSuggestedUnityBuildMethod(nextTargetPlatform) ?? "",
+                  name: resolveUnityBuildTargetName(nextTargetPlatform),
+                }));
+              }}
+              options={PLATFORM_OPTIONS}
+              value={normalizedTargetPlatform}
+            />
+
+            <div className="wizard-callout wizard-callout--compact">
+              <p className="wizard-callout__title">Platform defaults</p>
+              <p className="wizard-callout__copy">
+                HGP derives the target name and Unity build method from the
+                selected target platform by default. You still need to implement
+                the static method in your Unity project.
+              </p>
+              <p className="wizard-callout__copy wizard-summary-list__copy--muted">
+                Default target name:{" "}
+                {resolveUnityBuildTargetName(normalizedTargetPlatform)}
+              </p>
+              <p className="wizard-callout__copy wizard-summary-list__copy--muted">
+                Default build method:{" "}
+                {suggestedBuildMethod ?? "Select a platform first"}
+              </p>
+            </div>
+          </>
+        ) : null}
+
+        {isCustomConfigurationEnabled ? (
+          <>
+            <TextField
+              data-overlay-autofocus
+              error={fieldErrors.name}
+              hint="Keep the custom target name stable. It becomes part of the artifact file name."
+              label="Custom target name"
+              onChange={(event) => {
+                const nextName = event.currentTarget.value;
+                setDraft((current) => ({ ...current, name: nextName }));
+              }}
+              placeholder={resolveUnityBuildTargetName(
+                normalizedTargetPlatform,
+              )}
+              value={draft.name}
+            />
+            <TextField
+              error={fieldErrors.buildMethod}
+              hint="Use this only when your Unity project requires a non-standard method path for this custom target."
+              label="Custom build method"
+              onChange={(event) => {
+                const nextBuildMethod = event.currentTarget.value;
+                setDraft((current) => ({
+                  ...current,
+                  buildMethod: nextBuildMethod,
+                }));
+              }}
+              placeholder={suggestedBuildMethod ?? "Builder.PerformWindows"}
+              value={draft.buildMethod}
+            />
+          </>
+        ) : null}
+      </div>
+    </FullScreenModal>
   );
 }
 
@@ -2558,7 +2678,8 @@ function createInitialProjectDraft(): ProjectDraft {
     pollingIntervalSeconds: "300",
     artifactsRootOverride: "",
     workspaceRootOverride: "",
-    buildTargets: [createEmptyBuildTargetDraft(1)],
+    unityExecutablePath: "",
+    buildTargets: [],
     publishDestinations: [],
   };
 }
@@ -2570,10 +2691,8 @@ function createInitialCreateProjectWizardSnapshot(): CreateProjectWizardSnapshot
     },
     currentStepIndex: 0,
     draft: cloneProjectDraft(INITIAL_PROJECT_DRAFT),
-    expandedTargetIds: {
-      "target-1": true,
-    },
-    pathDiagnostics: {},
+    expandedTargetIds: {},
+    unityExecutableDiagnostics: null,
     pendingBuildTargetRemovalId: null,
     repositoryCredentialId: null,
     touchedFields: {},
@@ -2586,7 +2705,6 @@ function createEmptyBuildTargetDraft(index: number): BuildTargetDraft {
     name: "",
     targetPlatform: "",
     buildMethod: "",
-    unityExecutablePath: "",
   };
 }
 
@@ -2749,13 +2867,12 @@ function validateAccessStep(
             errors.repositoryAccess =
               "Private GitHub repository detected. Connect a credential to this project before setup can continue.";
           }
-        } else if (authState.repositoryCredentialCount === 0) {
-          errors.repositoryAccess = `Private ${providerLabel} repository detected. No stored repository credentials are available for this project yet.`;
+        } else if (authState.repositoryCredentialCount <= 0) {
+          errors.repositoryAccess =
+            "No stored repository credentials are available yet. Save one before setup can continue.";
         } else {
           errors.repositoryAccess = `Private ${providerLabel} repository detected. Select a stored repository credential before setup can continue.`;
         }
-      } else {
-        errors.repositoryAccess = undefined;
       }
     }
   }
@@ -2765,8 +2882,8 @@ function validateAccessStep(
 
 function validateTargetsStep(
   draft: ProjectDraft,
-  pathDiagnostics: Record<string, UnityExecutableValidation | null>,
-  validatingTargets: Record<string, boolean>,
+  unityExecutableDiagnostics: UnityExecutableValidation | null,
+  isValidatingUnityExecutable: boolean,
   buildTargetAdapter: BuildTargetWizardAdapter,
 ): TargetStepErrors {
   const errors: TargetStepErrors = {
@@ -2811,21 +2928,18 @@ function validateTargetsStep(
         "Use a full static method path such as Builder.PerformWindows.";
     }
 
-    if (!target.unityExecutablePath.trim()) {
-      fieldErrors.unityExecutablePath = "Unity executable path is required.";
-    } else if (validatingTargets[target.id]) {
-      fieldErrors.unityExecutablePath =
-        "Unity executable validation is still running.";
-    } else if (!pathDiagnostics[target.id]) {
-      fieldErrors.unityExecutablePath =
-        "Unity executable path has not been validated yet.";
-    } else if (pathDiagnostics[target.id]?.status !== "ready") {
-      fieldErrors.unityExecutablePath =
-        pathDiagnostics[target.id]?.message ||
-        "Unity executable path is invalid.";
-    }
-
     errors.targets[target.id] = fieldErrors;
+  }
+
+  if (!draft.unityExecutablePath.trim()) {
+    errors.root = "Unity executable path is required for all build targets.";
+  } else if (isValidatingUnityExecutable) {
+    errors.root = "Unity executable validation is still running.";
+  } else if (!unityExecutableDiagnostics) {
+    errors.root = "Unity executable path has not been validated yet.";
+  } else if (unityExecutableDiagnostics.status !== "ready") {
+    errors.root =
+      unityExecutableDiagnostics.message || "Unity executable path is invalid.";
   }
 
   return errors;
@@ -2876,12 +2990,72 @@ function hasTargetErrors(errors: TargetStepErrors) {
 }
 
 function hasTargetFieldErrors(errors: TargetFieldErrors) {
-  return Boolean(
-    errors.name ||
-    errors.targetPlatform ||
-    errors.buildMethod ||
-    errors.unityExecutablePath,
-  );
+  return Boolean(errors.name || errors.targetPlatform || errors.buildMethod);
+}
+
+function firstBuildTargetFieldError(errors: TargetFieldErrors) {
+  return errors.name || errors.targetPlatform || errors.buildMethod || null;
+}
+
+function validateBuildTargetDraftForOverlay(
+  target: BuildTargetDraft,
+  isCustomConfigurationEnabled: boolean,
+  suggestedBuildMethod: string | null,
+): TargetFieldErrors {
+  const errors: TargetFieldErrors = {};
+
+  if (!target.targetPlatform.trim()) {
+    errors.targetPlatform = "Unity target platform is required.";
+  }
+
+  if (isCustomConfigurationEnabled) {
+    if (!target.name.trim()) {
+      errors.name = "Custom target name is required.";
+    }
+
+    if (!target.buildMethod.trim()) {
+      errors.buildMethod = "Custom build method is required.";
+    } else if (!target.buildMethod.includes(".")) {
+      errors.buildMethod =
+        "Use a full static method path such as Builder.PerformWindows.";
+    }
+  } else if (!suggestedBuildMethod) {
+    errors.buildMethod =
+      "Select a supported Unity target platform or enable method override.";
+  }
+
+  return errors;
+}
+
+function formatBuildTargetExecutableSummary(
+  diagnostics: UnityExecutableValidation | null,
+  isValidating: boolean,
+) {
+  if (isValidating) {
+    return "checking";
+  }
+
+  if (!diagnostics) {
+    return "pending";
+  }
+
+  return formatDiagnosticStatus(diagnostics.status);
+}
+
+function buildBuildTargetQuickViewCopy(
+  target: BuildTargetDraft,
+  diagnostics: UnityExecutableValidation | null,
+  unityExecutablePath: string,
+) {
+  if (diagnostics && diagnostics.status !== "ready") {
+    return diagnostics.message;
+  }
+
+  if (!unityExecutablePath.trim()) {
+    return "Unity executable path is still pending.";
+  }
+
+  return `${target.buildMethod.trim() || "Build method pending"} • ${unityExecutablePath.trim()}`;
 }
 
 function collectInvalidTargetIds(errors: TargetStepErrors) {
@@ -2969,7 +3143,11 @@ function buildCreateProjectInput(
     workspace_root_override: optionalTrimmedString(draft.workspaceRootOverride),
     polling_interval_seconds: Number(draft.pollingIntervalSeconds.trim()),
     build_targets: draft.buildTargets.map((target) =>
-      buildCreateProjectBuildTargetInput(draft.engineKind, target),
+      buildCreateProjectBuildTargetInput(
+        draft.engineKind,
+        target,
+        draft.unityExecutablePath,
+      ),
     ),
     publish_targets: buildCreateProjectPublishTargetsInput(
       draft.publishDestinations,
@@ -2985,6 +3163,7 @@ function buildCreateProjectInput(
 function buildCreateProjectBuildTargetInput(
   engineKind: RepositoryEngineKind,
   target: BuildTargetDraft,
+  unityExecutablePath: string,
 ) {
   if (engineKind !== "unity") {
     throw new Error(
@@ -3002,7 +3181,7 @@ function buildCreateProjectBuildTargetInput(
         build_method: target.buildMethod.trim(),
       },
     },
-    unity_executable_path: target.unityExecutablePath.trim(),
+    unity_executable_path: unityExecutablePath.trim(),
   };
 }
 
@@ -3016,13 +3195,6 @@ function shouldShowFieldError(
 
 function shouldShowStepError(attemptedStep: boolean) {
   return attemptedStep;
-}
-
-function buildTargetFieldKey(
-  targetId: string,
-  fieldName: keyof Omit<BuildTargetDraft, "id">,
-) {
-  return `${targetId}:${fieldName}`;
 }
 
 function normalizeUnityTargetPlatformValue(value: string) {
@@ -3042,6 +3214,33 @@ function normalizeUnityTargetPlatformValue(value: string) {
     default:
       return value.trim();
   }
+}
+
+function resolveSuggestedUnityBuildMethod(targetPlatform: string) {
+  switch (targetPlatform.trim()) {
+    case "StandaloneWindows64":
+      return "Builder.PerformWindows";
+    case "StandaloneLinux64":
+      return "Builder.PerformLinux";
+    case "StandaloneOSX":
+      return "Builder.PerformMacOS";
+    case "WebGL":
+      return "Builder.PerformWebGL";
+    case "Android":
+      return "Builder.PerformAndroid";
+    default:
+      return null;
+  }
+}
+
+function resolveUnityBuildTargetName(targetPlatform: string) {
+  const normalizedTargetPlatform =
+    normalizeUnityTargetPlatformValue(targetPlatform);
+  const option = PLATFORM_OPTIONS.find(
+    (entry) => entry.value === normalizedTargetPlatform,
+  );
+
+  return option?.label || normalizedTargetPlatform || "";
 }
 
 function listSelectableUnityEditors(
@@ -3156,7 +3355,7 @@ function resolveNextBuildTargetIndex(buildTargets: BuildTargetDraft[]) {
     }
 
     return Math.max(nextIndex, Number(match[1]) + 1);
-  }, 2);
+  }, 1);
 }
 
 function buildProjectDraftDirtyKey(draft: ProjectDraft) {

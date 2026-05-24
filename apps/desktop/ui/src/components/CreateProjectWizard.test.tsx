@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,6 +12,7 @@ import {
   CreateProjectWizard,
   type CreateProjectWizardSnapshot,
 } from "./CreateProjectWizard";
+import OverlayProvider from "./OverlayManager";
 
 const {
   createRepositoryProjectMock,
@@ -85,7 +87,7 @@ describe("CreateProjectWizard", () => {
     expect(screen.getByText("2 of 6")).toBeInTheDocument();
   });
 
-  it("renders access guidance inside a dedicated support panel", async () => {
+  it("renders repository access controls in the repository access step", async () => {
     render(<CreateProjectWizard onCreated={vi.fn()} onManageAuth={vi.fn()} />);
 
     expect(
@@ -117,9 +119,6 @@ describe("CreateProjectWizard", () => {
     );
 
     expect(await screen.findByText("2. Workspace")).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { name: "Local workspace source" }),
-    ).toBeInTheDocument();
     expect(screen.getByText("Local workspace path")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Choose workspace" }),
@@ -155,13 +154,119 @@ describe("CreateProjectWizard", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("lists detected Unity editors and fills the executable path from the selected install", async () => {
+  it("adds a build target through the overlay and returns to a summary card", async () => {
     render(
-      <CreateProjectWizard
-        initialSnapshot={buildUnityTargetsStepSnapshot()}
-        onCreated={vi.fn()}
-        onManageAuth={vi.fn()}
-      />,
+      <OverlayProvider>
+        <CreateProjectWizard
+          initialSnapshot={buildEmptyUnityTargetsStepSnapshot()}
+          onCreated={vi.fn()}
+          onManageAuth={vi.fn()}
+        />
+      </OverlayProvider>,
+    );
+
+    expect(
+      await screen.findByText("No build targets configured."),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add target" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Add build target",
+    });
+
+    fireEvent.change(within(dialog).getByLabelText("Unity target platform"), {
+      target: { value: "StandaloneWindows64" },
+    });
+    expect(
+      within(dialog).getByText("Default target name: Windows"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Default build method: Builder.PerformWindows"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Add build target" }),
+      ).not.toBeInTheDocument();
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "Windows" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/Builder\.PerformWindows/).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("allows custom configuration for target name and method", async () => {
+    render(
+      <OverlayProvider>
+        <CreateProjectWizard
+          initialSnapshot={buildEmptyUnityTargetsStepSnapshot()}
+          onCreated={vi.fn()}
+          onManageAuth={vi.fn()}
+        />
+      </OverlayProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add target" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Add build target",
+    });
+
+    fireEvent.change(within(dialog).getByLabelText("Unity target platform"), {
+      target: { value: "StandaloneLinux64" },
+    });
+
+    expect(
+      within(dialog).getByText("Default build method: Builder.PerformLinux"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Custom configuration" }),
+    );
+
+    expect(
+      within(dialog).queryByLabelText("Unity target platform"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.change(within(dialog).getByLabelText("Custom target name"), {
+      target: { value: "Linux Release" },
+    });
+
+    fireEvent.change(within(dialog).getByLabelText("Custom build method"), {
+      target: { value: "CustomBuilder.PerformLinuxRelease" },
+    });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Add build target" }),
+      ).not.toBeInTheDocument();
+    });
+
+    expect(
+      screen.getAllByText(/CustomBuilder\.PerformLinuxRelease/).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("heading", { name: "Linux Release" }),
+    ).toBeInTheDocument();
+  });
+
+  it("lists detected Unity editors in the step and fills the shared executable path", async () => {
+    render(
+      <OverlayProvider>
+        <CreateProjectWizard
+          initialSnapshot={buildUnityTargetsStepSnapshot()}
+          onCreated={vi.fn()}
+          onManageAuth={vi.fn()}
+        />
+      </OverlayProvider>,
     );
 
     const installedEditorsSelect = await screen.findByRole("combobox", {
@@ -465,8 +570,6 @@ function buildReviewSnapshot(): CreateProjectWizardSnapshot {
           id: "target-1",
           name: "Windows",
           targetPlatform: "StandaloneWindows64",
-          unityExecutablePath:
-            "C:/Program Files/Unity/Hub/Editor/6000.0.23f1/Editor/Unity.exe",
         },
       ],
       engineKind: "unity",
@@ -477,14 +580,14 @@ function buildReviewSnapshot(): CreateProjectWizardSnapshot {
       publishDestinations: [],
       repositoryUrl: "https://github.com/indiegabo/red-horizon.git",
       repositoryVisibility: "public",
+      unityExecutablePath:
+        "C:/Program Files/Unity/Hub/Editor/6000.0.23f1/Editor/Unity.exe",
       workspaceRootOverride: "",
     },
     expandedTargetIds: {
       "target-1": true,
     },
-    pathDiagnostics: {
-      "target-1": buildUnityExecutableValidation(),
-    },
+    unityExecutableDiagnostics: buildUnityExecutableValidation(),
     pendingBuildTargetRemovalId: null,
     repositoryCredentialId: null,
     touchedFields: {},
@@ -558,9 +661,22 @@ function buildUnityTargetsStepSnapshot(): CreateProjectWizardSnapshot {
   return {
     ...buildReviewSnapshot(),
     currentStepIndex: 2,
-    pathDiagnostics: {
-      "target-1": null,
+    unityExecutableDiagnostics: null,
+  };
+}
+
+function buildEmptyUnityTargetsStepSnapshot(): CreateProjectWizardSnapshot {
+  const snapshot = buildReviewSnapshot();
+
+  return {
+    ...snapshot,
+    currentStepIndex: 2,
+    draft: {
+      ...snapshot.draft,
+      buildTargets: [],
     },
+    expandedTargetIds: {},
+    unityExecutableDiagnostics: null,
   };
 }
 
