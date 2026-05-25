@@ -3,7 +3,6 @@ import { useDeferredValue, useMemo, useRef, useState } from "react";
 import { Button } from "./Button";
 import { TextField } from "./Field";
 import FullScreenModal from "./FullScreenModal";
-import { MetaItem, MetaRow, SummaryStrip, SurfacePanel } from "./Surface";
 
 export type SelectListItem = {
   id: string;
@@ -34,7 +33,6 @@ const SelectListFullScreen = ({
   initialValue,
   initialValues,
   items = [],
-  selectionLabel = "Selected",
   selectionMode = "single",
   submitLabel = "Apply selection",
   title = "Select item",
@@ -104,28 +102,10 @@ const SelectListFullScreen = ({
           value={query}
         />
 
-        <SummaryStrip className="select-list-modal__summary-strip">
-          <MetaRow className="select-list-modal__summary">
-            <MetaItem label="Items">{items.length}</MetaItem>
-            <MetaItem label="Visible">{filtered.length}</MetaItem>
-            {selectionMode === "multiple" ? (
-              <MetaItem label={selectionLabel}>{selectedIds.length}</MetaItem>
-            ) : null}
-            {deferredQuery.trim() ? (
-              <MetaItem label="Query">{deferredQuery.trim()}</MetaItem>
-            ) : null}
-          </MetaRow>
-        </SummaryStrip>
-
-        <SurfacePanel
-          bodyClassName="select-list-modal__panel-body"
-          description={
-            selectionMode === "multiple"
-              ? "Use the filter above to narrow the list, then toggle every result that should be included in the batch action."
-              : "Use the filter above to narrow the list, then choose a single result."
-          }
-          title="Results"
-          tone="inset"
+        <div
+          aria-label="Selectable results"
+          className="select-list-modal__list"
+          role="list"
         >
           {filtered.length === 0 ? (
             <div className="feed-state select-list-modal__empty">
@@ -133,11 +113,7 @@ const SelectListFullScreen = ({
               <p className="feed-state__copy">{emptyStateCopy}</p>
             </div>
           ) : (
-            <div
-              aria-label="Selectable results"
-              className="select-list-modal__list"
-              role="list"
-            >
+            <>
               {filtered.map((item, index) => (
                 <button
                   aria-pressed={
@@ -214,30 +190,30 @@ const SelectListFullScreen = ({
                   </span>
                 </button>
               ))}
-            </div>
+            </>
           )}
+        </div>
 
-          {selectionMode === "multiple" ? (
-            <div className="select-list-modal__actions">
-              <Button
-                disabled={selectedIds.length === 0}
-                onClick={() => setSelectedIds([])}
-                size="sm"
-                variant="ghost"
-              >
-                Clear selection
-              </Button>
-              <Button
-                disabled={selectedIds.length === 0}
-                onClick={() => onResolve?.(selectedIds)}
-                size="sm"
-                variant="primary"
-              >
-                {submitLabel}
-              </Button>
-            </div>
-          ) : null}
-        </SurfacePanel>
+        {selectionMode === "multiple" ? (
+          <div className="select-list-modal__actions">
+            <Button
+              disabled={selectedIds.length === 0}
+              onClick={() => setSelectedIds([])}
+              size="sm"
+              variant="ghost"
+            >
+              Clear selection
+            </Button>
+            <Button
+              disabled={selectedIds.length === 0}
+              onClick={() => onResolve?.(selectedIds)}
+              size="sm"
+              variant="primary"
+            >
+              {submitLabel}
+            </Button>
+          </div>
+        ) : null}
       </div>
     </FullScreenModal>
   );

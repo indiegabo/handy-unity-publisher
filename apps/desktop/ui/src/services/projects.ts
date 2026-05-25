@@ -449,6 +449,15 @@ export async function dispatchOnDemandReleaseProcess(
     });
 }
 
+/** Reads the Unity `bundleVersion` from `ProjectSettings/ProjectSettings.asset`
+ * inside the given local workspace path. Throws with a descriptive message on
+ * IO or parse errors. */
+export async function readProjectSettingsVersion(
+    localPath: string,
+): Promise<string> {
+    return invoke<string>("read_project_settings_version", { localPath });
+}
+
 export async function connectRepositoryAuth(
     repositoryId: number,
     credentialsId: number,
