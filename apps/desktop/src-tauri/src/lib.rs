@@ -73,6 +73,7 @@ use runtime_store::{
     list_build_target_runtime_settings, list_credential_records,
     list_publish_target_binding_runtime_settings,
     list_publish_target_runtime_settings, LocalCoordinator, StorageLayout,
+    read_unity_local_workspace_version,
     KIND_ITCH_API_KEY,
 };
 use runtime_events::start_runtime_event_bridge;
@@ -255,6 +256,9 @@ struct RuntimeProcessState {
 struct ShellLifecycleState {
     is_quitting: Mutex<bool>,
     is_main_window_pinned: Mutex<bool>,
+    // True while a focus screen is active. The window must not auto-hide on
+    // focus loss when the operator is interacting with a focus screen workflow.
+    is_focus_screen_active: Mutex<bool>,
     active_system_dialogs: Mutex<u32>,
     suppress_main_window_focus_loss_until: Mutex<Option<Instant>>,
 }
@@ -1007,11 +1011,13 @@ fn should_hide_main_window_on_focus_loss_state(
     is_pinned: bool,
     has_active_system_dialogs: bool,
     is_focus_loss_suppressed: bool,
+    is_focus_screen_active: bool,
 ) -> bool {
     should_keep_running
         && !is_pinned
         && !has_active_system_dialogs
         && !is_focus_loss_suppressed
+        && !is_focus_screen_active
 }
 
 fn should_hide_main_window_on_focus_loss(app_handle: &AppHandle) -> bool {
@@ -1027,12 +1033,18 @@ fn should_hide_main_window_on_focus_loss(app_handle: &AppHandle) -> bool {
         .unwrap_or(true);
     let has_active_system_dialogs = has_active_system_dialogs(&lifecycle);
     let is_focus_loss_suppressed = is_main_window_focus_loss_suppressed(&lifecycle);
+    let is_focus_screen_active = lifecycle
+        .is_focus_screen_active
+        .lock()
+        .map(|v| *v)
+        .unwrap_or(true);
 
     should_hide_main_window_on_focus_loss_state(
         true,
         is_pinned,
         has_active_system_dialogs,
         is_focus_loss_suppressed,
+        is_focus_screen_active,
     )
 }
 
@@ -1269,6 +1281,7 @@ pub fn run() {
             set_runtime_automation_mode,
             dispatch_on_demand_release_process,
             rerun_release_process,
+            read_project_settings_version,
             request_repository_instant_check,
             unity_adapter_settings,
         ])
@@ -1356,7 +1369,14 @@ fn process_feed(input: Option<ProcessFeedInput>) -> Result<ProcessFeedPage, Stri
 
 #[tauri::command]
 fn transition_window_focus(app_handle: AppHandle, target: String) -> Result<(), String> {
-    animate_main_window_focus_transition(&app_handle, WindowFocusTarget::parse(&target)?)
+    let parsed = WindowFocusTarget::parse(&target)?;
+    // Track whether a focus screen is active so the auto-hide-on-blur policy
+    // can be suspended while the operator is interacting with a focus workflow.
+    let lifecycle = app_handle.state::<ShellLifecycleState>();
+    if let Ok(mut flag) = lifecycle.is_focus_screen_active.lock() {
+        *flag = matches!(parsed, WindowFocusTarget::Focus);
+    }
+    animate_main_window_focus_transition(&app_handle, parsed)
 }
 
 #[tauri::command]
@@ -1606,6 +1626,14 @@ fn delete_release_process_outputs(
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     delete_release_process_outputs_files(&config, release_run_id)
         .map_err(|error| error.to_string())
+}
+
+/// Reads the `bundleVersion` from `ProjectSettings/ProjectSettings.asset`
+/// inside the given local Unity workspace path. Returns the version string or
+/// an error message describing why detection failed.
+#[tauri::command]
+fn read_project_settings_version(local_path: String) -> Result<String, String> {
+    read_unity_local_workspace_version(local_path.trim()).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -5662,35 +5690,29 @@ mod tests {
 
     #[test]
     fn focus_loss_policy_hides_only_when_window_is_unpinned_and_idle() {
+        // Hides when running, unpinned, no dialogs, not suppressed, not in focus screen.
         assert!(should_hide_main_window_on_focus_loss_state(
-            true,
-            false,
-            false,
-            false,
+            true, false, false, false, false,
         ));
+        // Does not hide when the runtime is not running.
         assert!(!should_hide_main_window_on_focus_loss_state(
-            false,
-            false,
-            false,
-            false,
+            false, false, false, false, false,
         ));
+        // Does not hide when pinned.
         assert!(!should_hide_main_window_on_focus_loss_state(
-            true,
-            true,
-            false,
-            false,
+            true, true, false, false, false,
         ));
+        // Does not hide when a system dialog is active.
         assert!(!should_hide_main_window_on_focus_loss_state(
-            true,
-            false,
-            true,
-            false,
+            true, false, true, false, false,
         ));
+        // Does not hide when focus loss is suppressed.
         assert!(!should_hide_main_window_on_focus_loss_state(
-            true,
-            false,
-            false,
-            true,
+            true, false, false, true, false,
+        ));
+        // Does not hide when a focus screen is active.
+        assert!(!should_hide_main_window_on_focus_loss_state(
+            true, false, false, false, true,
         ));
     }
 
