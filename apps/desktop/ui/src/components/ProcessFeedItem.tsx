@@ -1,6 +1,6 @@
 import { Badge, SummaryStrip } from "./Surface";
 import type { IconName } from "./Icon";
-import { IconButton } from "./Button";
+import { Button, IconButton } from "./Button";
 import { VerticalAccordion } from "./VerticalAccordion";
 import { useLocalization } from "../LocalizationProvider";
 import {
@@ -15,21 +15,27 @@ import {
 type ProcessFeedItemProps = {
   process: ProcessFeedRecord;
   onOpenDetail: (process: ProcessFeedRecord) => void;
+  onRequestCancel?: (process: ProcessFeedRecord) => void | Promise<void>;
+  isCanceling?: boolean;
 };
 
 export function ProcessFeedItem({
   process,
   onOpenDetail,
+  onRequestCancel,
+  isCanceling = false,
 }: ProcessFeedItemProps) {
   const { t } = useLocalization();
   const normalizedStatus = normalizeProcessFeedDisplayStatus(
     process.display_status,
   );
+  const isOnHold = normalizedStatus === "on_hold";
   const currentStep = resolveLocalizedProcessFeedStepLabel(
     t,
     process,
     normalizedStatus,
   );
+  const onHoldReason = isOnHold ? resolveOnHoldReasonLabel(t, process) : null;
 
   return (
     <article>
@@ -62,21 +68,40 @@ export function ProcessFeedItem({
                 </span>
               </h3>
 
-              <IconButton
-                className={joinClassNames(
-                  "process-status-trigger",
-                  `process-status-trigger--${normalizedStatus}`,
-                )}
-                icon={resolveStatusIcon(normalizedStatus)}
-                label={t(
-                  "process_feed.item.actions.open_detail",
-                  "Open process detail #{{releaseRunId}}",
-                  { releaseRunId: process.release_run_id },
-                )}
-                onClick={() => onOpenDetail(process)}
-                size="sm"
-                variant="ghost"
-              />
+              <div className="process-item__summary-actions">
+                {isOnHold && onRequestCancel ? (
+                  <Button
+                    className="process-item__cancel-button"
+                    disabled={isCanceling}
+                    leadingIcon="close"
+                    onClick={() => {
+                      void onRequestCancel(process);
+                    }}
+                    size="sm"
+                    variant="secondary"
+                  >
+                    {isCanceling
+                      ? t("process_feed.item.actions.canceling", "Canceling...")
+                      : t("process_feed.item.actions.cancel", "Cancel process")}
+                  </Button>
+                ) : null}
+
+                <IconButton
+                  className={joinClassNames(
+                    "process-status-trigger",
+                    `process-status-trigger--${normalizedStatus}`,
+                  )}
+                  icon={resolveStatusIcon(normalizedStatus)}
+                  label={t(
+                    "process_feed.item.actions.open_detail",
+                    "Open process detail #{{releaseRunId}}",
+                    { releaseRunId: process.release_run_id },
+                  )}
+                  onClick={() => onOpenDetail(process)}
+                  size="sm"
+                  variant="ghost"
+                />
+              </div>
             </div>
 
             <SummaryStrip className="process-item__summary-strip">
@@ -103,6 +128,10 @@ export function ProcessFeedItem({
                   )}
                 </Badge>
               </div>
+
+              {onHoldReason ? (
+                <p className="process-item__on-hold-reason">{onHoldReason}</p>
+              ) : null}
             </SummaryStrip>
           </div>
         }
@@ -122,6 +151,8 @@ function resolveStatusIcon(status: string): IconName {
       return "box";
     case "running":
       return "play";
+    case "on_hold":
+      return "alertCircle";
     case "succeeded":
       return "checkCircle";
     case "failed":
@@ -130,6 +161,21 @@ function resolveStatusIcon(status: string): IconName {
     default:
       return "box";
   }
+}
+
+function resolveOnHoldReasonLabel(
+  translate: ReturnType<typeof useLocalization>["t"],
+  process: ProcessFeedRecord,
+) {
+  const detail = process.current_step_detail?.trim();
+  if (detail) {
+    return detail;
+  }
+
+  return translate(
+    "process_feed.on_hold.reason",
+    "On hold because Unity Editor is open for this local workspace. Close Unity to resume, or cancel this process.",
+  );
 }
 
 function joinClassNames(...tokens: Array<string | false | null | undefined>) {

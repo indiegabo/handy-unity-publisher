@@ -216,6 +216,14 @@ export async function rerunReleaseProcess(
     });
 }
 
+export async function cancelReleaseProcess(
+    releaseRunId: number,
+): Promise<void> {
+    return invoke<void>("cancel_release_process", {
+        releaseRunId,
+    });
+}
+
 export async function deleteBuildLog(
     buildRunId: number,
 ): Promise<BuildLogDeleteReport> {

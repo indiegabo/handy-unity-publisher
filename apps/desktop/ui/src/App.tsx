@@ -41,6 +41,7 @@ import {
 } from "./services/projects";
 import { loginWithGithubAuth } from "./services/auth";
 import {
+  notifyProcessOnHold,
   subscribeToProcessFeedEvents,
   type ProcessFeedRuntimeEvent,
 } from "./services/processFeed";
@@ -48,7 +49,10 @@ import {
   subscribeToRuntimeEvents,
   type RuntimeEventRecord,
 } from "./services/runtimeEvents";
-import { rerunReleaseProcess } from "./services/processDetail";
+import {
+  cancelReleaseProcess,
+  rerunReleaseProcess,
+} from "./services/processDetail";
 import {
   loadRuntimeAutomationStatus,
   loadRuntimeHealth,
@@ -141,6 +145,7 @@ const WORKER_STATUS_REPOSITORY_EVENT_TOPICS = new Set<string>([
   "automation.release_queued",
   "build.run_started",
   "build.run_finished",
+  "build.run_on_hold",
   "build.stage_updated",
   "publish.run_started",
   "publish.run_finished",
@@ -150,6 +155,7 @@ const PROCESS_FEED_RESET_PAGE_EVENT_TOPICS = new Set<string>([
   "automation.release_queued",
   "build.run_started",
   "build.run_finished",
+  "build.run_on_hold",
   "publish.run_started",
   "publish.run_finished",
 ]);
@@ -253,8 +259,11 @@ function App() {
   const latestRequestIdRef = useRef(0);
   const latestWorkerStatusRequestIdRef = useRef(0);
   const isNavigatingRef = useRef(false);
+  const notifiedOnHoldReleaseRunIdsRef = useRef<Set<number>>(new Set());
   const githubReauthPromptedRepositoryIdsRef = useRef<Set<number>>(new Set());
   const githubReauthPromptInFlightRef = useRef(false);
+  const [pendingFeedCancelReleaseRunId, setPendingFeedCancelReleaseRunId] =
+    useState<number | null>(null);
   const productName = t("app.product_name", PRODUCT_NAME_FALLBACK);
   const projectWorkers = collectProjectWorkers(workerSnapshot.repositories);
   const workerStatus = resolveWorkerStatusSummary(t, workerSnapshot);
@@ -332,6 +341,21 @@ function App() {
 
         if (requestId !== latestRequestIdRef.current) {
           return;
+        }
+
+        for (const process of response.items) {
+          if (process.display_status !== "on_hold") {
+            continue;
+          }
+          void triggerOnHoldNotification({
+            gitTag: process.git_tag,
+            reason:
+              process.current_step_detail?.trim() ||
+              process.current_step_label.trim() ||
+              null,
+            releaseRunId: process.release_run_id,
+            repositoryName: process.repository_name,
+          });
         }
 
         startTransition(() => {
@@ -550,6 +574,15 @@ function App() {
 
   const handleProcessFeedEvent = useEffectEvent(
     (event: ProcessFeedRuntimeEvent) => {
+      if (event.topic === "build.run_on_hold" && event.release_run_id) {
+        void triggerOnHoldNotification({
+          gitTag: stringPayloadValue(event.payload.git_tag),
+          reason: stringPayloadValue(event.payload.reason),
+          releaseRunId: event.release_run_id,
+          repositoryName: stringPayloadValue(event.payload.repository_name),
+        });
+      }
+
       if (PROCESS_FEED_RESET_PAGE_EVENT_TOPICS.has(event.topic) && page !== 1) {
         startTransition(() => {
           setPage(1);
@@ -558,6 +591,43 @@ function App() {
       }
 
       void loadProcessFeed(page, "event");
+    },
+  );
+
+  const triggerOnHoldNotification = useEffectEvent(
+    async (input: {
+      releaseRunId: number;
+      repositoryName: string | null;
+      gitTag: string | null;
+      reason: string | null;
+    }) => {
+      if (input.releaseRunId <= 0) {
+        return;
+      }
+
+      if (notifiedOnHoldReleaseRunIdsRef.current.has(input.releaseRunId)) {
+        return;
+      }
+
+      const repositoryName =
+        input.repositoryName?.trim() || "Unknown repository";
+      const gitTag = input.gitTag?.trim() || "";
+
+      try {
+        await notifyProcessOnHold({
+          gitTag,
+          reason: input.reason,
+          releaseRunId: input.releaseRunId,
+          repositoryName,
+        });
+        notifiedOnHoldReleaseRunIdsRef.current.add(input.releaseRunId);
+      } catch (error) {
+        console.error(
+          "failed to emit on-hold native notification",
+          input.releaseRunId,
+          error,
+        );
+      }
     },
   );
 
@@ -677,6 +747,26 @@ function App() {
       await loadProcessFeed(1, "event");
       await loadWorkerStatus();
       await transitionToScreen({ kind: "main" });
+    },
+  );
+
+  const handleCancelProcess = useEffectEvent(
+    async (process: ProcessFeedRecord) => {
+      startTransition(() => {
+        setPendingFeedCancelReleaseRunId(process.release_run_id);
+      });
+
+      try {
+        await cancelReleaseProcess(process.release_run_id);
+        await loadProcessFeed(1, "event");
+        await loadWorkerStatus();
+      } finally {
+        startTransition(() => {
+          setPendingFeedCancelReleaseRunId((current) =>
+            current === process.release_run_id ? null : current,
+          );
+        });
+      }
     },
   );
 
@@ -1391,8 +1481,12 @@ function App() {
                 <div className="process-list" aria-live="polite">
                   {processPage.items.map((process) => (
                     <ProcessFeedItem
+                      isCanceling={
+                        pendingFeedCancelReleaseRunId === process.release_run_id
+                      }
                       key={process.release_run_id}
                       onOpenDetail={handleOpenProcessDetail}
+                      onRequestCancel={handleCancelProcess}
                       process={process}
                     />
                   ))}
@@ -1547,6 +1641,7 @@ function App() {
 
                 {activeScreen.kind === "process-detail" ? (
                   <ProcessDetailFocusScreen
+                    onRequestCancel={handleCancelProcess}
                     onRequestRerun={handleRerunProcess}
                     process={activeProcessDetail}
                     usesLiveSnapshot={activeProcessDetailUsesLiveSnapshot}
@@ -1630,6 +1725,15 @@ function buildWindowTransitionErrorMessage(error: unknown): string {
   }
 
   return "The desktop shell could not transition the current window.";
+}
+
+function stringPayloadValue(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim();
+  return normalized ? normalized : null;
 }
 
 function buildWorkerInspectionErrorMessage(error: unknown): string {

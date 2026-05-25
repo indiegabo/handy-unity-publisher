@@ -48,6 +48,7 @@ import {
 type ProcessDetailFocusScreenProps = {
   process: ProcessFeedRecord | null;
   usesLiveSnapshot: boolean;
+  onRequestCancel?: (process: ProcessFeedRecord) => Promise<void>;
   onRequestRerun?: (process: ProcessFeedRecord) => Promise<void>;
 };
 
@@ -87,6 +88,7 @@ const DEFAULT_LOG_PREVIEW_MAX_BYTES = 128 * 1024;
 export function ProcessDetailFocusScreen({
   process,
   usesLiveSnapshot,
+  onRequestCancel,
   onRequestRerun,
 }: ProcessDetailFocusScreenProps) {
   const { openOverlay } = useOverlay();
@@ -102,6 +104,7 @@ export function ProcessDetailFocusScreen({
   >(null);
   const [isDeletingOutputs, setIsDeletingOutputs] = useState(false);
   const [isDeletingRetention, setIsDeletingRetention] = useState(false);
+  const [isCancelingProcess, setIsCancelingProcess] = useState(false);
   const [isRequestingRerun, setIsRequestingRerun] = useState(false);
   const [deletedOutputs, setDeletedOutputs] = useState(false);
   const [deletedRetention, setDeletedRetention] = useState(false);
@@ -146,6 +149,7 @@ export function ProcessDetailFocusScreen({
   );
   const stepDetail = resolveProcessFeedStepDetail(process);
   const isCompletedMode = isTerminalProcessStatus(normalizedStatus);
+  const isOnHold = isProcessOnHold(process);
 
   const loadCompletedSnapshot = useEffectEvent(async (releaseRunId: number) => {
     const requestId = latestCompletedSnapshotRequestIdRef.current + 1;
@@ -522,6 +526,64 @@ export function ProcessDetailFocusScreen({
     } finally {
       startTransition(() => {
         setIsRequestingRerun(false);
+      });
+    }
+  });
+
+  const handleRequestCancel = useEffectEvent(async () => {
+    if (!onRequestCancel || isCompletedMode) {
+      return;
+    }
+
+    const shouldCancel = await openOverlay<boolean>(ConfirmDialog, {
+      cancelLabel: t(
+        "process_detail.confirm.cancel.cancel",
+        "Keep process running",
+      ),
+      confirmLabel: t(
+        "process_detail.confirm.cancel.confirm",
+        "Cancel process",
+      ),
+      description: t(
+        "process_detail.confirm.cancel.description",
+        "This cancels the active process and marks the in-flight build as canceled.",
+      ),
+      message: t(
+        "process_detail.confirm.cancel.message",
+        "Use this when you do not want to close Unity right now. To continue this run, close Unity Editor and HGP will resume from the on-hold gate.",
+      ),
+      title: t("process_detail.confirm.cancel.title", "Cancel process?"),
+    });
+
+    if (!shouldCancel) {
+      return;
+    }
+
+    setIsCancelingProcess(true);
+
+    try {
+      startTransition(() => {
+        setActionError(null);
+        setActionMessage(null);
+      });
+
+      await onRequestCancel(process);
+
+      startTransition(() => {
+        setActionMessage(
+          t(
+            "process_detail.actions.cancel_requested",
+            "Cancel request accepted. The process feed will refresh as soon as the runtime snapshot advances.",
+          ),
+        );
+      });
+    } catch (error) {
+      startTransition(() => {
+        setActionError(buildProcessDetailErrorMessage(t, error));
+      });
+    } finally {
+      startTransition(() => {
+        setIsCancelingProcess(false);
       });
     }
   });
@@ -1000,12 +1062,45 @@ export function ProcessDetailFocusScreen({
               </MetaItem>
             </MetaRow>
           }
+          actions={
+            isOnHold ? (
+              <div className="process-detail-toolbar">
+                <Button
+                  disabled={isCancelingProcess || !onRequestCancel}
+                  leadingIcon="close"
+                  onClick={() => {
+                    void handleRequestCancel();
+                  }}
+                  size="sm"
+                  variant="secondary"
+                >
+                  {isCancelingProcess
+                    ? t(
+                        "process_detail.current_step.actions.canceling",
+                        "Canceling...",
+                      )
+                    : t(
+                        "process_detail.current_step.actions.cancel",
+                        "Cancel process",
+                      )}
+                </Button>
+              </div>
+            ) : null
+          }
           title={t("process_detail.current_step.title", "Current Step")}
         >
           <div className="process-detail-panel__step-block">
             <p className="process-detail-panel__step-label">{stepLabel}</p>
             {stepDetail ? (
               <p className="process-detail-panel__step-detail">{stepDetail}</p>
+            ) : null}
+            {isOnHold ? (
+              <p className="process-detail-panel__step-detail">
+                {t(
+                  "process_detail.current_step.on_hold.guidance",
+                  "Close Unity Editor to continue this process. HGP blocks this step intentionally to keep automation consistent, because changing files while a local snapshot is being prepared can invalidate build inputs.",
+                )}
+              </p>
             ) : null}
           </div>
         </SurfacePanel>
@@ -1095,6 +1190,14 @@ function isTerminalProcessStatus(status: string) {
     normalizedStatus === "succeeded" ||
     normalizedStatus === "failed" ||
     normalizedStatus === "canceled"
+  );
+}
+
+function isProcessOnHold(process: ProcessFeedRecord) {
+  return (
+    normalizeProcessFeedDisplayStatus(process.current_step_status) ===
+      "on_hold" ||
+    process.current_step_status.trim().toLowerCase() === "on_hold"
   );
 }
 

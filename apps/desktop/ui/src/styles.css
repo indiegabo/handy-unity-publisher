@@ -857,6 +857,18 @@ button {
   gap: 10px;
 }
 
+.process-item__summary-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.process-item__cancel-button.ui-button {
+  min-height: 30px;
+  padding-inline: 9px;
+  border-radius: 999px;
+}
+
 .process-item__summary-strip {
   display: grid;
   gap: 8px;
@@ -883,6 +895,17 @@ button {
   font-size: 0.72rem;
   color: var(--text-muted);
   line-height: 1.25;
+}
+
+.process-item__on-hold-reason {
+  margin: 0;
+  color: var(--accent-warning);
+  font-size: 0.72rem;
+  line-height: 1.3;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .process-item__badges {
@@ -1257,6 +1280,11 @@ button {
 .process-status-trigger--queued.ui-button,
 .process-status-trigger--queued.ui-button:hover {
   color: var(--text-muted);
+}
+
+.process-status-trigger--on_hold.ui-button,
+.process-status-trigger--on_hold.ui-button:hover {
+  color: var(--accent-warning);
 }
 
 .process-status-trigger--succeeded.ui-button,

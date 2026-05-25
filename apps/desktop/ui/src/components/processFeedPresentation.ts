@@ -183,6 +183,7 @@ export function normalizeProcessFeedDisplayStatus(status: string) {
   switch (status) {
     case "queued":
     case "running":
+    case "on_hold":
     case "succeeded":
     case "failed":
     case "canceled":
@@ -196,6 +197,8 @@ export function resolveProcessFeedStatusTone(status: string): BadgeTone {
   switch (normalizeProcessFeedDisplayStatus(status)) {
     case "succeeded":
       return "strong";
+    case "on_hold":
+      return "neutral";
     case "failed":
     case "canceled":
       return "neutral";
@@ -218,6 +221,8 @@ export function formatLocalizedProcessFeedStatusLabel(
       return translate("process_feed.status.queued", "Queued");
     case "running":
       return translate("process_feed.status.running", "Running");
+    case "on_hold":
+      return translate("process_feed.status.on_hold", "On hold");
     case "succeeded":
       return translate("process_feed.status.succeeded", "Succeeded");
     case "failed":
@@ -249,6 +254,8 @@ function buildFallbackStep(status: string) {
       return "The runtime is still planning this process.";
     case "running":
       return "The runtime is still updating this process.";
+    case "on_hold":
+      return "This process is on hold until the local workspace lock is released.";
     case "succeeded":
       return "All recorded work for this process finished cleanly.";
     case "failed":
@@ -274,6 +281,11 @@ function buildLocalizedFallbackStep(
       return translate(
         "process_feed.fallback_step.running",
         "The runtime is still updating this process.",
+      );
+    case "on_hold":
+      return translate(
+        "process_feed.fallback_step.on_hold",
+        "This process is on hold until the local workspace lock is released.",
       );
     case "succeeded":
       return translate(

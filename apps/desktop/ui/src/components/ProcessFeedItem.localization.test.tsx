@@ -59,14 +59,20 @@ beforeEach(() => {
             "process_feed.badges.engine_kind": "engine: {{engineKind}}",
             "process_feed.badges.engine_pending": "Engine pending",
             "process_feed.count.build.one": "1 build",
+            "process_feed.fallback_step.on_hold":
+              "This process is on hold until the local workspace lock is released.",
             "process_feed.fallback_step.succeeded":
               "All recorded work for this process finished cleanly.",
             "process_feed.item.accordion.collapse":
               "Collapse process #{{releaseRunId}}",
             "process_feed.item.accordion.expand":
               "Expand process #{{releaseRunId}}",
+            "process_feed.item.actions.cancel": "Cancel process",
             "process_feed.item.actions.open_detail":
               "Open process detail #{{releaseRunId}}",
+            "process_feed.on_hold.reason":
+              "On hold because Unity Editor is open for this local workspace. Close Unity to resume, or cancel this process.",
+            "process_feed.status.on_hold": "On hold",
           },
         }),
       );
@@ -80,14 +86,20 @@ beforeEach(() => {
             "process_feed.badges.engine_kind": "engine: {{engineKind}}",
             "process_feed.badges.engine_pending": "Engine pendente",
             "process_feed.count.build.one": "1 build",
+            "process_feed.fallback_step.on_hold":
+              "Este processo está em espera até que o lock do workspace local seja liberado.",
             "process_feed.fallback_step.succeeded":
               "Todo o trabalho registrado para este processo terminou com sucesso.",
             "process_feed.item.accordion.collapse":
               "Recolher processo #{{releaseRunId}}",
             "process_feed.item.accordion.expand":
               "Expandir processo #{{releaseRunId}}",
+            "process_feed.item.actions.cancel": "Cancelar processo",
             "process_feed.item.actions.open_detail":
               "Abrir detalhe do processo #{{releaseRunId}}",
+            "process_feed.on_hold.reason":
+              "Em espera porque o Unity Editor está aberto para este workspace local. Feche o Unity para retomar ou cancele este processo.",
+            "process_feed.status.on_hold": "Em espera",
           },
         }),
       );
@@ -124,6 +136,42 @@ describe("ProcessFeedItem localization", () => {
       screen.getByRole("button", { name: "Expandir processo #77" }),
     ).toBeInTheDocument();
     expect(onOpenDetail).toHaveBeenCalledWith(PROCESS_RECORD);
+  });
+
+  it("renders translated on-hold status and fallback guidance", async () => {
+    const onRequestCancel = vi.fn();
+
+    render(
+      <LocalizationProvider>
+        <ProcessFeedItem
+          onOpenDetail={vi.fn()}
+          onRequestCancel={onRequestCancel}
+          process={{
+            ...PROCESS_RECORD,
+            current_step_status: "on_hold",
+            display_status: "on_hold",
+            current_step_detail: null,
+          }}
+        />
+      </LocalizationProvider>,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Cancelar processo" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Expandir processo #77" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "Em espera porque o Unity Editor está aberto para este workspace local. Feche o Unity para retomar ou cancele este processo.",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancelar processo" }));
+    expect(onRequestCancel).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -1,4 +1,11 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import OverlayProvider from "./OverlayManager";
@@ -76,6 +83,20 @@ const COMPLETED_PROCESS: ProcessFeedRecord = {
   updated_at: "2026-05-19T00:12:00Z",
 };
 
+const ON_HOLD_PROCESS: ProcessFeedRecord = {
+  ...COMPLETED_PROCESS,
+  current_step_detail:
+    "Process on hold because Unity Editor appears to be open for the local workspace.",
+  current_step_label: "Awaiting Unity editor lock release",
+  current_step_status: "on_hold",
+  display_status: "on_hold",
+  finished_at: null,
+  running_build_runs: 1,
+  succeeded_build_runs: 0,
+  succeeded_publish_runs: 0,
+  updated_at: "2026-05-19T00:03:00Z",
+};
+
 afterEach(() => {
   cleanup();
   document.body.style.overflow = "";
@@ -112,10 +133,23 @@ beforeEach(() => {
         path,
         JSON.stringify({
           messages: {
+            "process_detail.actions.cancel_requested":
+              "Cancel request accepted. The process feed will refresh as soon as the runtime snapshot advances.",
+            "process_detail.confirm.cancel.cancel": "Keep process running",
+            "process_detail.confirm.cancel.confirm": "Cancel process",
+            "process_detail.confirm.cancel.description":
+              "This cancels the active process and marks the in-flight build as canceled.",
+            "process_detail.confirm.cancel.message":
+              "Use this when you do not want to close Unity right now. To continue this run, close Unity Editor and HGP will resume from the on-hold gate.",
+            "process_detail.confirm.cancel.title": "Cancel process?",
+            "process_detail.current_step.actions.cancel": "Cancel process",
+            "process_detail.current_step.on_hold.guidance":
+              "Close Unity Editor to continue this process. HGP blocks this step intentionally to keep automation consistent, because changing files while a local snapshot is being prepared can invalidate build inputs.",
             "process_detail.final_outcome.title": "Final Outcome",
             "process_detail.execution_report.title": "Execution Report",
             "process_detail.execution_report.actions.view_json":
               "View JSON report",
+            "process_feed.status.on_hold": "On hold",
             "process_detail.retained_logs.title": "Retained Logs",
             "process_detail.runtime_metadata.title": "Runtime Metadata",
           },
@@ -128,10 +162,24 @@ beforeEach(() => {
         path,
         JSON.stringify({
           messages: {
+            "process_detail.actions.cancel_requested":
+              "Solicitação de cancelamento aceita. O feed de processos será atualizado assim que o snapshot do runtime avançar.",
+            "process_detail.confirm.cancel.cancel":
+              "Manter processo em execução",
+            "process_detail.confirm.cancel.confirm": "Cancelar processo",
+            "process_detail.confirm.cancel.description":
+              "Isto cancela o processo ativo e marca a build em andamento como cancelada.",
+            "process_detail.confirm.cancel.message":
+              "Use isto quando você não quiser fechar a Unity agora. Para continuar esta execução, feche o Unity Editor e o HGP retomará a partir do gate de espera.",
+            "process_detail.confirm.cancel.title": "Cancelar processo?",
+            "process_detail.current_step.actions.cancel": "Cancelar processo",
+            "process_detail.current_step.on_hold.guidance":
+              "Feche o Unity Editor para continuar este processo. O HGP bloqueia esta etapa intencionalmente para manter a automação consistente, porque alterar arquivos enquanto um snapshot local está sendo preparado pode invalidar os insumos da build.",
             "process_detail.final_outcome.title": "Resultado Final",
             "process_detail.execution_report.title": "Relatório de Execução",
             "process_detail.execution_report.actions.view_json":
               "Ver relatório JSON",
+            "process_feed.status.on_hold": "Em espera",
             "process_detail.retained_logs.title": "Logs Retidos",
             "process_detail.runtime_metadata.title": "Metadados do Runtime",
           },
@@ -239,6 +287,59 @@ describe("ProcessDetailFocusScreen localization", () => {
     expect(screen.getByText("Metadados do Runtime")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Ver relatório JSON" }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders localized on-hold guidance and cancel confirmation flow", async () => {
+    const requestCancelMock = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <LocalizationProvider>
+        <OverlayProvider>
+          <ProcessDetailFocusScreen
+            onRequestCancel={requestCancelMock}
+            process={ON_HOLD_PROCESS}
+            usesLiveSnapshot
+          />
+        </OverlayProvider>
+      </LocalizationProvider>,
+    );
+
+    expect((await screen.findAllByText("Em espera")).length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(
+        "Feche o Unity Editor para continuar este processo. O HGP bloqueia esta etapa intencionalmente para manter a automação consistente, porque alterar arquivos enquanto um snapshot local está sendo preparado pode invalidar os insumos da build.",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancelar processo" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Cancelar processo?",
+    });
+
+    expect(
+      within(dialog).getByText(
+        "Isto cancela o processo ativo e marca a build em andamento como cancelada.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(
+        "Use isto quando você não quiser fechar a Unity agora. Para continuar esta execução, feche o Unity Editor e o HGP retomará a partir do gate de espera.",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Cancelar processo" }),
+    );
+
+    await waitFor(() => {
+      expect(requestCancelMock).toHaveBeenCalledWith(ON_HOLD_PROCESS);
+    });
+    expect(
+      await screen.findByText(
+        "Solicitação de cancelamento aceita. O feed de processos será atualizado assim que o snapshot do runtime avançar.",
+      ),
     ).toBeInTheDocument();
   });
 });

@@ -74,6 +74,20 @@ const COMPLETED_PROCESS: ProcessFeedRecord = {
   updated_at: "2026-05-19T00:12:00Z",
 };
 
+const ON_HOLD_PROCESS: ProcessFeedRecord = {
+  ...COMPLETED_PROCESS,
+  current_step_detail:
+    "Process on hold because Unity Editor appears to be open for the local workspace.",
+  current_step_label: "Awaiting Unity editor lock release",
+  current_step_status: "on_hold",
+  display_status: "on_hold",
+  finished_at: null,
+  running_build_runs: 1,
+  succeeded_build_runs: 0,
+  succeeded_publish_runs: 0,
+  updated_at: "2026-05-19T00:03:00Z",
+};
+
 afterEach(() => {
   cleanup();
   document.body.style.overflow = "";
@@ -320,6 +334,54 @@ describe("ProcessDetailFocusScreen", () => {
     await waitFor(() => {
       expect(requestRerunMock).toHaveBeenCalledWith(COMPLETED_PROCESS);
     });
+  });
+
+  it("renders on-hold guidance and requires confirmation before canceling", async () => {
+    const requestCancelMock = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <OverlayProvider>
+        <ProcessDetailFocusScreen
+          onRequestCancel={requestCancelMock}
+          process={ON_HOLD_PROCESS}
+          usesLiveSnapshot
+        />
+      </OverlayProvider>,
+    );
+
+    expect(
+      await screen.findByText(
+        "Close Unity Editor to continue this process. HGP blocks this step intentionally to keep automation consistent, because changing files while a local snapshot is being prepared can invalidate build inputs.",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel process" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Cancel process?",
+    });
+
+    expect(dialog).toBeInTheDocument();
+    expect(requestCancelMock).not.toHaveBeenCalled();
+    expect(
+      within(dialog).getByText(
+        "Use this when you do not want to close Unity right now. To continue this run, close Unity Editor and HGP will resume from the on-hold gate.",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Cancel process" }),
+    );
+
+    await waitFor(() => {
+      expect(requestCancelMock).toHaveBeenCalledWith(ON_HOLD_PROCESS);
+    });
+
+    expect(
+      await screen.findByText(
+        "Cancel request accepted. The process feed will refresh as soon as the runtime snapshot advances.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("uses shared panel summaries for the outcome and runtime metadata panels", async () => {

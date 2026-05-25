@@ -36,6 +36,38 @@ describe("ProcessFeedItem", () => {
 
     expect(onOpenDetail).toHaveBeenCalledWith(PROCESS_RECORD);
   });
+
+  it("shows on-hold reason and requests cancel directly from the card", () => {
+    const onOpenDetail = vi.fn();
+    const onRequestCancel = vi.fn();
+
+    render(
+      <ProcessFeedItem
+        onOpenDetail={onOpenDetail}
+        onRequestCancel={onRequestCancel}
+        process={{
+          ...PROCESS_RECORD,
+          current_step_detail:
+            "Process on hold because Unity Editor appears to be open for local workspace.",
+          current_step_status: "on_hold",
+          display_status: "on_hold",
+          finished_at: null,
+          running_build_runs: 1,
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        "Process on hold because Unity Editor appears to be open for local workspace.",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel process" }));
+
+    expect(onRequestCancel).toHaveBeenCalledTimes(1);
+    expect(onOpenDetail).not.toHaveBeenCalled();
+  });
 });
 
 const PROCESS_RECORD: ProcessFeedRecord = {
