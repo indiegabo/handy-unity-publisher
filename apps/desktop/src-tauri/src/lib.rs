@@ -46,6 +46,7 @@ use runtime_runner::{
 };
 use runtime_store::{
     ArtifactInspectionRecord, AutomationSnapshot, BuildHistoryRecord,
+    CancelReleaseRunInput,
     CredentialRecord,
     CreateRepositoryProjectBuildTargetInput,
     CreateRepositoryProjectPublishBindingInput as StoreCreateRepositoryProjectPublishBindingInput,
@@ -85,6 +86,7 @@ use tauri::{
     AppHandle, Manager, PhysicalPosition, PhysicalSize, RunEvent,
     WebviewWindow, WindowEvent,
 };
+use tauri_plugin_notification::NotificationExt;
 use zip::ZipArchive;
 
 const RUNTIME_PACKAGE_NAME: &str = "runtime-bin";
@@ -127,6 +129,7 @@ const SUPPORTED_REPOSITORY_ENGINE_KIND_UNITY: &str = "unity";
 const GITHUB_AUTH_PROVIDER_ID: &str = "github";
 const EVENT_TOPIC_AUTOMATION_MODE_CHANGED: &str = "automation.mode_changed";
 const EVENT_TOPIC_RELEASE_QUEUED: &str = "automation.release_queued";
+const EVENT_TOPIC_BUILD_RUN_FINISHED: &str = "build.run_finished";
 const GITHUB_AUTH_PROVIDER_LABEL: &str = "GitHub";
 const GITHUB_AUTH_INSTANCE_URL: &str = "https://github.com";
 const GITHUB_AUTH_CREDENTIAL_NAME: &str = "GitHub.com";
@@ -654,6 +657,14 @@ struct OnDemandReleaseProcessCommandInput {
     source_ref: Option<String>,
     local_path: Option<String>,
     unity_executable_path_override: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct OnHoldProcessNotificationInput {
+    release_run_id: i64,
+    repository_name: String,
+    git_tag: String,
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1281,6 +1292,8 @@ pub fn run() {
             set_runtime_automation_mode,
             dispatch_on_demand_release_process,
             rerun_release_process,
+            cancel_release_process,
+            notify_process_on_hold,
             read_project_settings_version,
             request_repository_instant_check,
             unity_adapter_settings,
@@ -1663,6 +1676,57 @@ fn rerun_release_process(
 }
 
 #[tauri::command]
+fn cancel_release_process(
+    app_handle: AppHandle,
+    release_run_id: i64,
+) -> Result<(), String> {
+    if release_run_id <= 0 {
+        return Err(String::from("release_run_id must be a positive integer"));
+    }
+
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    let storage = StorageLayout::from_directories(&config.directories);
+    if !storage.database_path.is_file() {
+        return Err(format!("release run {release_run_id} was not found"));
+    }
+
+    let coordinator = LocalCoordinator::new(&storage);
+    let release = coordinator
+        .get_release_run_record(release_run_id)
+        .map_err(|error| error.to_string())?;
+
+    let active_build = load_build_history(&config)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|record| {
+            record.release_run_id == release_run_id && record.status == "running"
+        })
+        .max_by_key(|record| record.build_run_id);
+
+    coordinator
+        .cancel_release_run(
+            release_run_id,
+            CancelReleaseRunInput {
+                error_message: String::from(
+                    "Canceled by operator. Entire release process was interrupted.",
+                ),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+    if let Some(active_build) = active_build {
+        let canceled = coordinator
+            .get_build_run_record(active_build.build_run_id)
+            .map_err(|error| error.to_string())?;
+        emit_shell_build_run_finished_event(&storage, &release, &active_build, &canceled)
+            .map_err(|error| error.to_string())?;
+    }
+
+    launch_runtime_process_handle(&app_handle).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn delete_build_log(build_run_id: i64) -> Result<BuildLogDeleteReport, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     delete_build_log_file(&config, build_run_id).map_err(|error| error.to_string())
@@ -1834,6 +1898,42 @@ fn request_repository_instant_check(
     .map_err(|error| error.to_string())?;
 
     launch_runtime_process_handle(&app_handle).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn notify_process_on_hold(
+    app_handle: AppHandle,
+    input: OnHoldProcessNotificationInput,
+) -> Result<(), String> {
+    if input.release_run_id <= 0 {
+        return Err(String::from(
+            "release_run_id must be a positive integer",
+        ));
+    }
+
+    let reason = input
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| String::from("Unity Editor is still open for this local workspace."));
+    let title = String::from("Process on hold");
+    let body = format!(
+        "#{} {} {}\n{}",
+        input.release_run_id,
+        input.repository_name,
+        input.git_tag,
+        reason,
+    );
+
+    app_handle
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -2696,6 +2796,61 @@ fn emit_shell_release_queued_event(
                 "local_path": source_metadata.local_path,
                 "requested_via": source_metadata.requested_via,
                 "status": "queued",
+            }),
+        },
+    )?;
+
+    Ok(())
+}
+
+fn emit_shell_build_run_finished_event(
+    storage: &StorageLayout,
+    release: &ReleaseRunRecord,
+    build_history: &BuildHistoryRecord,
+    record: &runtime_store::BuildRunRecord,
+) -> io::Result<()> {
+    let source_metadata = decode_shell_release_source_metadata(release);
+    let mode = shell_release_event_mode_label(
+        &release.trigger_source,
+        source_metadata.source_kind.as_deref(),
+    );
+
+    emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: String::from(EVENT_TOPIC_BUILD_RUN_FINISHED),
+            severity: String::from(if record.status == "failed" {
+                "error"
+            } else if record.status == "canceled" {
+                "warn"
+            } else {
+                "info"
+            }),
+            origin: String::from("desktop-shell"),
+            user_requested: true,
+            repository_id: Some(release.repository_id),
+            release_run_id: Some(release.id),
+            build_run_id: Some(record.id),
+            publish_run_id: None,
+            summary: format!(
+                "{mode} build {} for {} {} ({})",
+                &record.status,
+                &build_history.repository_name,
+                &release.git_tag,
+                &build_history.build_target_name,
+            ),
+            payload: serde_json::json!({
+                "repository_name": &build_history.repository_name,
+                "git_tag": &release.git_tag,
+                "target_name": &build_history.build_target_name,
+                "unity_target_platform": &build_history.unity_target_platform,
+                "trigger_source": &release.trigger_source,
+                "source_kind": &source_metadata.source_kind,
+                "source_ref": &source_metadata.source_ref,
+                "local_path": &source_metadata.local_path,
+                "requested_via": &source_metadata.requested_via,
+                "status": &record.status,
+                "error_message": &record.error_message,
             }),
         },
     )?;

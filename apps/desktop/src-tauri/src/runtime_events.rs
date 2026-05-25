@@ -13,7 +13,7 @@ use runtime_core::{read_runtime_event_batch, RuntimeEventRecord};
 use runtime_store::StorageLayout;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
-use tauri_plugin_notification::{NotificationExt, PermissionState};
+use tauri_plugin_notification::NotificationExt;
 
 use crate::MAIN_WINDOW_LABEL;
 
@@ -204,10 +204,6 @@ fn maybe_notify_native_runtime_event<R: Runtime>(
         return Ok(());
     }
 
-    if !ensure_notification_permission(app_handle)? {
-        return Ok(());
-    }
-
     let (title, body) = native_notification_content(event);
     app_handle
         .notification()
@@ -219,6 +215,10 @@ fn maybe_notify_native_runtime_event<R: Runtime>(
 }
 
 fn native_notification_policy(event: &RuntimeEventRecord) -> Option<NativeNotificationPolicy> {
+    if event.topic == "build.run_on_hold" {
+        return Some(NativeNotificationPolicy::Always);
+    }
+
     if event.user_requested {
         return None;
     }
@@ -263,6 +263,10 @@ fn native_notification_content(event: &RuntimeEventRecord) -> (String, String) {
                 notification_release_mode_label(event)
             ),
         },
+        "build.run_on_hold" => format!(
+            "{} build on hold",
+            notification_release_mode_label(event)
+        ),
         "publish.run_started" => format!(
             "{} publish started",
             notification_release_mode_label(event)
@@ -311,22 +315,6 @@ fn notification_release_mode_label(event: &RuntimeEventRecord) -> &'static str {
         Some("managed_tag") => "On-demand tag",
         _ if event.user_requested => "Manual",
         _ => "Automatic",
-    }
-}
-
-fn ensure_notification_permission<R: Runtime>(app_handle: &AppHandle<R>) -> io::Result<bool> {
-    let notification = app_handle.notification();
-    let permission = notification
-        .permission_state()
-        .map_err(|error| io::Error::other(error.to_string()))?;
-
-    match permission {
-        PermissionState::Granted => Ok(true),
-        PermissionState::Denied => Ok(false),
-        PermissionState::Prompt | PermissionState::PromptWithRationale => notification
-            .request_permission()
-            .map(|state| state == PermissionState::Granted)
-            .map_err(|error| io::Error::other(error.to_string())),
     }
 }
 
@@ -529,6 +517,10 @@ mod tests {
             Some(NativeNotificationPolicy::Always)
         );
         assert_eq!(
+            native_notification_policy(&test_event("build.run_on_hold", true, Some("on_hold"))),
+            Some(NativeNotificationPolicy::Always)
+        );
+        assert_eq!(
             native_notification_policy(&test_event("publish.run_started", false, None)),
             Some(NativeNotificationPolicy::Always)
         );
@@ -572,6 +564,10 @@ mod tests {
         assert_eq!(
             native_notification_content(&test_event("build.run_finished", false, Some("succeeded"))).0,
             "Automatic build finished"
+        );
+        assert_eq!(
+            native_notification_content(&test_event("build.run_on_hold", false, Some("on_hold"))).0,
+            "Automatic build on hold"
         );
         assert_eq!(
             native_notification_content(&test_event("publish.run_started", false, None)).0,
