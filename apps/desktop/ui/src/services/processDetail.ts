@@ -13,7 +13,7 @@ export type BuildHistoryRecord = {
     release_run_id: number;
     repository_id: number;
     repository_name: string;
-    repository_url: string;
+    repository_url: string | null;
     git_tag: string;
     git_commit: string | null;
     build_target_id: number;
@@ -42,7 +42,7 @@ export type ArtifactInspectionRecord = {
     release_run_id: number;
     repository_id: number;
     repository_name: string;
-    repository_url: string;
+    repository_url: string | null;
     git_tag: string;
     git_commit: string | null;
     build_target_id: number;

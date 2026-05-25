@@ -290,7 +290,8 @@ struct StoredRepository {
     id: i64,
     name: String,
     engine_kind: String,
-    repo_url: String,
+    // NULL for local-workspace-only projects that have no remote Git URL.
+    repo_url: Option<String>,
     credentials_id: Option<i64>,
     default_branch: Option<String>,
     polling_interval_seconds: i64,
@@ -1184,7 +1185,7 @@ fn disable_removed_repositories(
             existing.id,
             &existing.name,
             &existing.engine_kind,
-            &existing.repo_url,
+            existing.repo_url.as_deref().unwrap_or_default(),
             existing.credentials_id,
             existing.default_branch.as_deref().unwrap_or_default(),
             existing.polling_interval_seconds,

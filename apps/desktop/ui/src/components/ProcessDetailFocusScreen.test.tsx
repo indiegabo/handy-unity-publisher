@@ -347,10 +347,24 @@ describe("ProcessDetailFocusScreen", () => {
       (finalOutcomePanel as HTMLElement).querySelector(".ui-panel__summary"),
     ).not.toBeNull();
     expect(
-      (runtimeMetadataPanel as HTMLElement).querySelector(
-        ".ui-panel__summary",
-      ),
+      (runtimeMetadataPanel as HTMLElement).querySelector(".ui-panel__summary"),
     ).not.toBeNull();
+  });
+
+  it("shows local workspace when the release has no repository URL", async () => {
+    render(
+      <OverlayProvider>
+        <ProcessDetailFocusScreen
+          process={{
+            ...COMPLETED_PROCESS,
+            repository_url: null,
+          }}
+          usesLiveSnapshot
+        />
+      </OverlayProvider>,
+    );
+
+    expect(await screen.findByText("Local workspace")).toBeInTheDocument();
   });
 
   it("opens retained report JSON in the log viewer overlay", async () => {

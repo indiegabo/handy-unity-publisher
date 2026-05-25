@@ -1067,7 +1067,10 @@ export function ProcessDetailFocusScreen({
                   "Repository",
                 )}
               >
-                {process.repository_url}
+                {resolveProcessRepositoryLocationLabel(
+                  t,
+                  process.repository_url,
+                )}
               </MetaItem>
             </MetaRow>
           </>
@@ -1092,6 +1095,21 @@ function isTerminalProcessStatus(status: string) {
     normalizedStatus === "succeeded" ||
     normalizedStatus === "failed" ||
     normalizedStatus === "canceled"
+  );
+}
+
+function resolveProcessRepositoryLocationLabel(
+  translate: Translate,
+  repositoryUrl: string | null,
+) {
+  const normalizedUrl = repositoryUrl?.trim();
+  if (normalizedUrl) {
+    return normalizedUrl;
+  }
+
+  return translate(
+    "process_detail.runtime_metadata.local_workspace",
+    "Local workspace",
   );
 }
 

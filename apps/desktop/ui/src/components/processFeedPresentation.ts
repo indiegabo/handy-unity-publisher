@@ -10,7 +10,7 @@ export type ProcessFeedRecord = {
   release_run_id: number;
   repository_id: number;
   repository_name: string;
-  repository_url: string;
+  repository_url: string | null;
   repository_engine_kind: string;
   git_tag: string;
   git_commit: string | null;

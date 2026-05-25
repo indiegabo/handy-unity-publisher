@@ -8368,7 +8368,7 @@ pub fn list_publish_target_binding_runtime_settings(
 struct ProcessFeedReleaseRow {
     release: ReleaseRunRecord,
     repository_name: String,
-    repository_url: String,
+    repository_url: Option<String>,
     repository_engine_kind: String,
 }
 
@@ -8846,6 +8846,15 @@ fn detect_release_unity_engine_version_from_git_ref(
         git_auth,
     )?;
     parse_project_version_unity_version(&contents)
+}
+
+/// Reads the project version (`bundleVersion`) from a Unity local workspace.
+///
+/// Opens `ProjectSettings/ProjectSettings.asset` under `local_path` and returns
+/// the first non-empty `bundleVersion:` value found. Returns an `InvalidData`
+/// error if the file is unreadable or the field is absent.
+pub fn read_unity_local_workspace_version(local_path: &str) -> io::Result<String> {
+    detect_release_version_from_local_workspace(EngineKind::Unity, local_path)
 }
 
 fn detect_release_version_from_local_workspace(
@@ -10364,7 +10373,7 @@ fn scan_process_feed_release_row(
             updated_at: row.get(17)?,
         },
         repository_name: row.get(2)?,
-        repository_url: row.get::<_, String>(3)?.trim().to_owned(),
+        repository_url: normalize_optional_string(row.get(3)?),
         repository_engine_kind: row.get::<_, String>(4)?.trim().to_owned(),
     })
 }
@@ -10438,7 +10447,7 @@ fn scan_build_history_record(
         release_run_id: row.get(1)?,
         repository_id: row.get(2)?,
         repository_name: row.get(3)?,
-        repository_url: row.get::<_, String>(4)?.trim().to_owned(),
+        repository_url: normalize_optional_string(row.get(4)?),
         git_tag: row.get::<_, String>(5)?.trim().to_owned(),
         git_commit: normalize_optional_string(row.get(6)?),
         build_target_id: row.get(7)?,
@@ -10487,7 +10496,7 @@ fn scan_artifact_inspection_record(
         release_run_id: row.get(2)?,
         repository_id: row.get(3)?,
         repository_name: row.get::<_, String>(4)?.trim().to_owned(),
-        repository_url: row.get::<_, String>(5)?.trim().to_owned(),
+        repository_url: normalize_optional_string(row.get(5)?),
         git_tag: row.get::<_, String>(6)?.trim().to_owned(),
         git_commit: normalize_optional_string(row.get(7)?),
         build_target_id: row.get(8)?,
