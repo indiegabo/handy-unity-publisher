@@ -667,6 +667,12 @@ pub struct CancelBuildRunInput {
     pub error_message: String,
 }
 
+/// Defines the terminal reason stored when canceling one release process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelReleaseRunInput {
+    pub error_message: String,
+}
+
 /// Starts or restarts one durable stage under a running build run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartBuildRunStageInput {

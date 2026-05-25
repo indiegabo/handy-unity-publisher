@@ -47,7 +47,7 @@ use runtime_core::{
 };
 use runtime_runner::{
     discover_artifacts, ExecutionProgress, ExecutionProgressReporter,
-    PreparedWorkspace, RunnerFamily,
+    RunnerFamily,
     WorkspacePreparer,
     unity::{
         inspect_host_capability_profile,
@@ -121,6 +121,7 @@ const EVENT_TOPIC_POLL_AUTH_FAILED: &str = "automation.poll_auth_failed";
 const EVENT_TOPIC_BUILD_RUN_STARTED: &str = "build.run_started";
 const EVENT_TOPIC_BUILD_RUN_FINISHED: &str = "build.run_finished";
 const EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED: &str = "build.stage_updated";
+const EVENT_TOPIC_BUILD_RUN_ON_HOLD: &str = "build.run_on_hold";
 const EVENT_TOPIC_PUBLISH_RUN_STARTED: &str = "publish.run_started";
 const EVENT_TOPIC_PUBLISH_RUN_FINISHED: &str = "publish.run_finished";
 
@@ -522,6 +523,45 @@ fn emit_build_run_stage_updated_event(
                 "stage_label": stage_label,
                 "status": "running",
                 "message": message,
+            }),
+        },
+    )?;
+    Ok(())
+}
+
+fn emit_build_run_on_hold_event(
+    storage: &StorageLayout,
+    context: &BuildRunEventContext,
+    reason: &str,
+) -> io::Result<()> {
+    let mode = release_event_mode_label(&context.origin);
+    emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: String::from(EVENT_TOPIC_BUILD_RUN_ON_HOLD),
+            severity: String::from("warn"),
+            origin: String::from("runtime-bin"),
+            user_requested: context.origin.user_requested,
+            repository_id: Some(context.repository_id),
+            release_run_id: Some(context.release_run_id),
+            build_run_id: Some(context.build_run_id),
+            publish_run_id: None,
+            summary: format!(
+                "{mode} build on hold for {} {} ({})",
+                context.repository_name, context.git_tag, context.target_name
+            ),
+            payload: serde_json::json!({
+                "repository_name": &context.repository_name,
+                "git_tag": &context.git_tag,
+                "target_name": &context.target_name,
+                "unity_target_platform": &context.unity_target_platform,
+                "trigger_source": &context.origin.trigger_source,
+                "source_kind": &context.origin.source_kind,
+                "source_ref": &context.origin.source_ref,
+                "local_path": &context.origin.local_path,
+                "requested_via": &context.origin.requested_via,
+                "status": "on_hold",
+                "reason": reason,
             }),
         },
     )?;

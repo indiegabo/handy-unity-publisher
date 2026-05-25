@@ -5,6 +5,7 @@ use super::*;
 use runtime_contracts::BuildKind;
 use runtime_runner::{
     BuildExecutionAdapter, DiscoveredArtifact, EngineAdapterRegistry,
+    PreparedWorkspace,
     WorkspacePreparationInput, WorkspacePreparationSource,
     unity::{
         package_unity_build_output, resolve_final_unity_artifact_output_path,
@@ -14,7 +15,7 @@ use runtime_runner::{
 use runtime_store::{
     CreateArtifactRecordInput, LocalCoordinator, ReleaseSourceMetadata,
 };
-use runtime_store::lifecycle::ReleaseStatus;
+use runtime_store::lifecycle::{BuildStatus, ReleaseStatus};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -48,6 +49,11 @@ const RELEASE_SOURCE_KIND_MANAGED_TAG: &str = "managed_tag";
 const RELEASE_SOURCE_KIND_MANAGED_REF: &str = "managed_ref";
 const RELEASE_SOURCE_KIND_LOCAL_WORKSPACE: &str = "local_workspace";
 const REPOSITORY_SOURCE_MODE_LOCAL_WORKSPACE: &str = "local_workspace";
+const LOCAL_WORKSPACE_EDITOR_LOCKFILE_RELATIVE_PATH: &str = "Temp/UnityLockfile";
+const LOCAL_WORKSPACE_HOLD_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const LOCAL_WORKSPACE_HOLD_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const LOCAL_WORKSPACE_HOLD_MESSAGE_PREFIX: &str =
+    "[hgp-on-hold-local-workspace-editor-open]";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1882,6 +1888,20 @@ fn process_unity_build_run_with_retry(
             &unity_build_message,
         );
 
+        match wait_for_local_workspace_preflight(
+            coordinator,
+            storage,
+            event_context,
+            &tracker,
+            build_run_id,
+            &workspace,
+        )? {
+            LocalWorkspacePreflightOutcome::Continue => {}
+            LocalWorkspacePreflightOutcome::Canceled(record) => {
+                return Ok(record);
+            }
+        }
+
         let mut reporter = BuildStageHeartbeatReporter::new(
             &tracker,
             storage,
@@ -1977,6 +1997,95 @@ fn process_unity_build_run_with_retry(
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalWorkspacePreflightOutcome {
+    Continue,
+    Canceled(BuildRunRecord),
+}
+
+fn wait_for_local_workspace_preflight(
+    coordinator: &LocalCoordinator,
+    storage: &StorageLayout,
+    event_context: &BuildRunEventContext,
+    tracker: &BuildRunStageTracker<'_>,
+    build_run_id: i64,
+    workspace: &PreparedWorkspace,
+) -> io::Result<LocalWorkspacePreflightOutcome> {
+    if !workspace.source_is_local_workspace {
+        return Ok(LocalWorkspacePreflightOutcome::Continue);
+    }
+
+    let source_path = workspace.source_path.as_path();
+    let mut hold_event_emitted = false;
+    let mut last_hold_heartbeat_at: Option<std::time::Instant> = None;
+
+    while local_workspace_editor_lock_detected(source_path) {
+        let hold_message = local_workspace_hold_message(source_path);
+        let now = std::time::Instant::now();
+        let should_emit_heartbeat = last_hold_heartbeat_at.is_none_or(|last| {
+            now.duration_since(last) >= LOCAL_WORKSPACE_HOLD_HEARTBEAT_INTERVAL
+        });
+
+        if should_emit_heartbeat {
+            tracker.heartbeat_stage(BuildProcessStage::ExecuteBuild, &hold_message)?;
+            emit_build_stage_started_event(
+                storage,
+                event_context,
+                tracker,
+                BuildProcessStage::ExecuteBuild,
+                &hold_message,
+            );
+            last_hold_heartbeat_at = Some(now);
+        }
+
+        if !hold_event_emitted {
+            if let Err(error) = emit_build_run_on_hold_event(storage, event_context, &hold_message)
+            {
+                log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_ON_HOLD, &error);
+            }
+            hold_event_emitted = true;
+        }
+
+        let build_run = coordinator.get_build_run_record(build_run_id)?;
+        if build_run.status != BuildStatus::Running.as_str() {
+            return Ok(LocalWorkspacePreflightOutcome::Canceled(build_run));
+        }
+
+        std::thread::sleep(LOCAL_WORKSPACE_HOLD_POLL_INTERVAL);
+    }
+
+    if hold_event_emitted {
+        let resume_message = format!(
+            "{} Preflight cleared. Unity editor lock is no longer detected. Resuming build execution.",
+            LOCAL_WORKSPACE_HOLD_MESSAGE_PREFIX,
+        );
+        tracker.heartbeat_stage(BuildProcessStage::ExecuteBuild, &resume_message)?;
+        emit_build_stage_started_event(
+            storage,
+            event_context,
+            tracker,
+            BuildProcessStage::ExecuteBuild,
+            &resume_message,
+        );
+    }
+
+    Ok(LocalWorkspacePreflightOutcome::Continue)
+}
+
+fn local_workspace_editor_lock_detected(source_path: &Path) -> bool {
+    source_path
+        .join(LOCAL_WORKSPACE_EDITOR_LOCKFILE_RELATIVE_PATH)
+        .is_file()
+}
+
+fn local_workspace_hold_message(source_path: &Path) -> String {
+    format!(
+        "{} Process on hold because Unity Editor appears to be open for local workspace '{}'. Close the editor to continue, or cancel this process. HGP enforces this gate to keep automation consistent because modifying files while a snapshot is being prepared can invalidate build inputs.",
+        LOCAL_WORKSPACE_HOLD_MESSAGE_PREFIX,
+        source_path.display(),
+    )
 }
 
 fn should_retry_in_fresh_workspace(log_path: &Path) -> io::Result<bool> {
@@ -2450,8 +2559,9 @@ fn release_claimed_build_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtime_core::read_runtime_event_batch;
     use runtime_contracts::EngineKind;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     struct TestDir {
         path: PathBuf,
@@ -2697,6 +2807,184 @@ mod tests {
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].name, "revolutions.v1.1.12.linux.zip");
         assert_eq!(artifacts[0].path, "revolutions.v1.1.12.linux.zip");
+    }
+
+    #[test]
+    fn wait_for_local_workspace_preflight_holds_then_resumes_after_lock_release() {
+        let root =
+            TestDir::new("local-workspace-preflight-hold-resume")
+                .expect("temporary test directory should be created");
+        let directories = RuntimeDirectories::from_root(root.path());
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
+        let storage = StorageLayout::from_directories(&directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let local_workspace_path = root.path().join("local-workspace");
+        fs::create_dir_all(local_workspace_path.join("Temp"))
+            .expect("local workspace temp directory should create");
+        let lock_path = local_workspace_path
+            .join(LOCAL_WORKSPACE_EDITOR_LOCKFILE_RELATIVE_PATH);
+        fs::write(&lock_path, b"unity-lock")
+            .expect("unity lock file should be created");
+
+        let coordinator = LocalCoordinator::new(&storage);
+        let created = coordinator
+            .create_repository_project(CreateRepositoryProjectInput {
+                name: String::from("Revolutions"),
+                engine_kind: String::from("unity"),
+                source_mode: String::from("local_workspace"),
+                repo_url: None,
+                local_path: Some(local_workspace_path.display().to_string()),
+                credentials: None,
+                default_branch: Some(String::from("main")),
+                artifacts_root_override: None,
+                workspace_root_override: None,
+                polling_interval_seconds: 300,
+                enabled: true,
+                build_targets: vec![
+                    test_build_target_input("Windows", "StandaloneWindows64"),
+                ],
+                publish_targets: Vec::new(),
+            })
+            .expect("repository project should persist");
+
+        let connection = open_connection(&storage.database_path)
+            .expect("database connection should open");
+        connection
+            .execute(
+                "INSERT INTO release_runs (repository_id, git_tag, status) VALUES (?, ?, ?)",
+                rusqlite::params![
+                    created.repository_id,
+                    "v1.0.0",
+                    ReleaseStatus::Running.as_str(),
+                ],
+            )
+            .expect("release run should insert");
+        let release_run_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO build_runs (release_run_id, build_target_id, status) VALUES (?, ?, ?)",
+                rusqlite::params![
+                    release_run_id,
+                    created.build_target_ids[0],
+                    BuildStatus::Running.as_str(),
+                ],
+            )
+            .expect("build run should insert");
+        let build_run_id = connection.last_insert_rowid();
+        drop(connection);
+
+        let process_root_path = root.path().join("release-run-1");
+        let build_root_path = process_root_path.join("build-run-1");
+        let artifact_root_path = build_root_path.join("outputs");
+        fs::create_dir_all(&artifact_root_path)
+            .expect("artifact root path should create");
+
+        let stage_sequence = Rc::new(RefCell::new(BuildRunStageSequence::default()));
+        let tracker = BuildRunStageTracker::new(
+            &coordinator,
+            build_run_id,
+            process_root_path.clone(),
+            build_root_path.clone(),
+            artifact_root_path.clone(),
+            UnityBuildStageIdentity {
+                step_key: String::from("unity-build"),
+                step_label: String::from("Execute Unity Build"),
+                log_stem: String::from("03-unity-build-windows"),
+            },
+            stage_sequence,
+        )
+        .expect("stage tracker should initialize");
+        tracker
+            .start_stage(
+                BuildProcessStage::ExecuteBuild,
+                "Launching Unity build method 'Builder.PerformWindows' for target 'StandaloneWindows64'.",
+            )
+            .expect("execute build stage should start");
+
+        let workspace = PreparedWorkspace {
+            root_path: process_root_path.clone(),
+            build_root_path: build_root_path.clone(),
+            source_path: local_workspace_path.clone(),
+            source_is_local_workspace: true,
+            host_root_path: process_root_path,
+            host_build_root_path: build_root_path,
+            host_source_path: local_workspace_path.clone(),
+            log_path: local_workspace_path.join("Temp").join("Editor.log"),
+            artifact_root_path: artifact_root_path.clone(),
+            host_artifact_root_path: artifact_root_path,
+        };
+
+        let lock_path_for_thread = lock_path.clone();
+        let release_lock_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            fs::remove_file(&lock_path_for_thread)
+                .expect("unity lock file should be removable");
+        });
+
+        let event_context = BuildRunEventContext {
+            release_run_id,
+            build_run_id,
+            repository_id: created.repository_id,
+            repository_name: String::from("Revolutions"),
+            git_tag: String::from("v1.0.0"),
+            target_name: String::from("Windows"),
+            unity_target_platform: String::from("StandaloneWindows64"),
+            origin: ReleaseEventOriginContext {
+                user_requested: true,
+                trigger_source: String::from("manual"),
+                source_kind: Some(String::from(RELEASE_SOURCE_KIND_LOCAL_WORKSPACE)),
+                source_ref: None,
+                local_path: Some(local_workspace_path.display().to_string()),
+                requested_via: Some(String::from(POLL_OBSERVED_VIA)),
+            },
+        };
+
+        let outcome = wait_for_local_workspace_preflight(
+            &coordinator,
+            &storage,
+            &event_context,
+            &tracker,
+            build_run_id,
+            &workspace,
+        )
+        .expect("local workspace preflight should complete");
+        release_lock_thread
+            .join()
+            .expect("lock release thread should join");
+
+        assert_eq!(outcome, LocalWorkspacePreflightOutcome::Continue);
+        assert!(!lock_path.exists());
+
+        let build_run = coordinator
+            .get_build_run_record(build_run_id)
+            .expect("build run record should load");
+        let progress_message = build_run.last_progress_message.unwrap_or_default();
+        assert!(progress_message.contains(LOCAL_WORKSPACE_HOLD_MESSAGE_PREFIX));
+        assert!(progress_message.contains("Preflight cleared"));
+
+        let runtime_events = read_runtime_event_batch(&storage.runtime_events_path, 0)
+            .expect("runtime event stream should read");
+        assert!(
+            runtime_events.events.iter().any(|event| {
+                event.topic == EVENT_TOPIC_BUILD_RUN_ON_HOLD
+                    && event.build_run_id == Some(build_run_id)
+                    && event.payload["status"] == "on_hold"
+            }),
+            "expected build.run_on_hold runtime event for the preflight gate"
+        );
+        assert!(
+            runtime_events.events.iter().any(|event| {
+                event.topic == EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED
+                    && event.payload["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("Preflight cleared")
+            }),
+            "expected execute-build stage heartbeat after local workspace lock release"
+        );
     }
 
     fn test_stored_build_execution_plan(engine_kind: EngineKind) -> StoredBuildExecutionPlan {

@@ -2584,6 +2584,107 @@ impl LocalCoordinator {
         Ok(record)
     }
 
+    /// Cancels one release process and all queued or running child runs.
+    pub fn cancel_release_run(
+        &self,
+        release_run_id: i64,
+        input: CancelReleaseRunInput,
+    ) -> io::Result<ReleaseRunRecord> {
+        require_positive_identifier(release_run_id, "release run id")?;
+        let error_message = require_non_empty(&input.error_message, "error message")?;
+
+        let mut connection = open_connection(&self.database_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sqlite_error)?;
+
+        let release = self
+            .load_release_run_record_in_transaction(&transaction, release_run_id)?
+            .ok_or_else(|| {
+                not_found_error(format!("release run {release_run_id} was not found"))
+            })?;
+        if release.status == ReleaseStatus::Succeeded.as_str()
+            || release.status == ReleaseStatus::Failed.as_str()
+            || release.status == ReleaseStatus::Canceled.as_str()
+        {
+            transaction.commit().map_err(sqlite_error)?;
+            return self.get_release_run_record(release_run_id);
+        }
+
+        transaction
+            .execute(
+                "
+                UPDATE release_runs
+                SET status = ?,
+                    started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                    finished_at = CURRENT_TIMESTAMP,
+                    error_message = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                ",
+                params![
+                    ReleaseStatus::Canceled.as_str(),
+                    error_message,
+                    release_run_id,
+                ],
+            )
+            .map_err(sqlite_error)?;
+
+        transaction
+            .execute(
+                "
+                UPDATE build_runs
+                SET status = ?,
+                    started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                    finished_at = CURRENT_TIMESTAMP,
+                    error_message = CASE
+                        WHEN error_message IS NULL OR TRIM(error_message) = '' THEN ?
+                        ELSE error_message
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE release_run_id = ?
+                  AND status IN (?, ?)
+                ",
+                params![
+                    BuildStatus::Canceled.as_str(),
+                    error_message,
+                    release_run_id,
+                    BuildStatus::Queued.as_str(),
+                    BuildStatus::Running.as_str(),
+                ],
+            )
+            .map_err(sqlite_error)?;
+
+        transaction
+            .execute(
+                "
+                UPDATE publish_runs
+                SET status = ?,
+                    finished_at = CURRENT_TIMESTAMP,
+                    error_message = CASE
+                        WHEN error_message IS NULL OR TRIM(error_message) = '' THEN ?
+                        ELSE error_message
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE release_run_id = ?
+                  AND status IN (?, ?)
+                ",
+                params![
+                    PublishStatus::Canceled.as_str(),
+                    error_message,
+                    release_run_id,
+                    PublishStatus::Queued.as_str(),
+                    PublishStatus::Running.as_str(),
+                ],
+            )
+            .map_err(sqlite_error)?;
+
+        transaction.commit().map_err(sqlite_error)?;
+
+        self.reconcile_release_run_status(release_run_id)?;
+        self.get_release_run_record(release_run_id)
+    }
+
     /// Starts or refreshes one named stage under a running build run.
     pub fn start_build_run_stage(
         &self,
@@ -8394,6 +8495,10 @@ struct ProcessFeedPublishRunContext {
     artifact_name: Option<String>,
 }
 
+const PROCESS_FEED_ON_HOLD_STATUS: &str = "on_hold";
+const PROCESS_FEED_LOCAL_WORKSPACE_HOLD_PREFIX: &str =
+    "[hgp-on-hold-local-workspace-editor-open]";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DatabasePragmas {
     busy_timeout_millis: u64,
@@ -9513,8 +9618,6 @@ fn summarize_process_feed_record(
     let build_counts = count_run_statuses(build_runs.iter().map(|run| run.status.as_str()));
     let publish_counts =
         count_run_statuses(publish_runs.iter().map(|run| run.status.as_str()));
-    let display_status =
-        classify_process_feed_status(&release, build_counts, publish_counts).to_owned();
     let (current_step_label, current_step_status, current_step_detail) =
         summarize_process_feed_step(
             &release,
@@ -9525,6 +9628,11 @@ fn summarize_process_feed_record(
             build_counts,
             publish_counts,
         );
+    let display_status = if current_step_status == PROCESS_FEED_ON_HOLD_STATUS {
+        String::from(PROCESS_FEED_ON_HOLD_STATUS)
+    } else {
+        classify_process_feed_status(&release, build_counts, publish_counts).to_owned()
+    };
     let error_message = select_process_feed_error_message(&release, build_runs, publish_runs);
 
     ProcessFeedRecord {
@@ -9570,6 +9678,14 @@ fn summarize_process_feed_step(
     publish_counts: RunStatusCounts,
 ) -> (String, String, Option<String>) {
     if let Some(run) = latest_build_run_by_status(build_runs, BuildStatus::Running.as_str()) {
+        if let Some(hold_message) = process_feed_local_workspace_hold_message(run) {
+            return (
+                String::from("Process on hold"),
+                String::from(PROCESS_FEED_ON_HOLD_STATUS),
+                Some(hold_message),
+            );
+        }
+
         return (
             format_process_feed_running_build_label(
                 run,
@@ -9785,6 +9901,17 @@ fn summarize_process_feed_step(
             build_counts.succeeded
         )),
     )
+}
+
+fn process_feed_local_workspace_hold_message(run: &BuildRunRecord) -> Option<String> {
+    let message = run.last_progress_message.as_deref()?.trim();
+    let hold_message = message.strip_prefix(PROCESS_FEED_LOCAL_WORKSPACE_HOLD_PREFIX)?;
+    let normalized = hold_message.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    Some(normalized.to_owned())
 }
 
 fn format_process_feed_running_build_label(
@@ -12496,7 +12623,7 @@ mod tests {
         list_publish_target_runtime_settings, open_connection, recover_runtime_state,
         select_orphan_build_process_roots,
         BuildDispatchJob, BuildExecutionPlan, BuildRunRecord,
-        BuildTargetRuntimeSettingsRecord, CancelBuildRunInput,
+        BuildTargetRuntimeSettingsRecord, CancelBuildRunInput, CancelReleaseRunInput,
         CreatedRepositoryProjectRecord,
         CompleteBuildRunInput, CreateArtifactRecordInput, FailBuildRunInput,
         CompletePublishRunInput, CredentialRecord, LocalCoordinator,
@@ -13858,7 +13985,10 @@ mod tests {
         assert_eq!(record.release_run_id, release_run_id);
         assert_eq!(record.repository_id, fixture.repository_id);
         assert_eq!(record.repository_name, "build-history");
-        assert_eq!(record.repository_url, "https://example.com/build-history.git");
+        assert_eq!(
+            record.repository_url.as_deref(),
+            Some("https://example.com/build-history.git")
+        );
         assert_eq!(record.git_tag, "v4.0.0");
         assert_eq!(record.git_commit.as_deref(), Some("cafebabe"));
         assert_eq!(record.build_target_id, fixture.primary_build_target_id);
@@ -14190,7 +14320,10 @@ mod tests {
         assert_eq!(record.release_run_id, release_run_id);
         assert_eq!(record.repository_id, fixture.repository_id);
         assert_eq!(record.repository_name, "artifact-inspection");
-        assert_eq!(record.repository_url, "https://example.com/artifact-inspection.git");
+        assert_eq!(
+            record.repository_url.as_deref(),
+            Some("https://example.com/artifact-inspection.git")
+        );
         assert_eq!(record.git_tag, "v5.2.0");
         assert_eq!(record.git_commit.as_deref(), Some("facefeed"));
         assert_eq!(record.build_target_id, fixture.primary_build_target_id);
@@ -16671,6 +16804,82 @@ mod tests {
             Some("timeout: host-native unity runner exceeded 1s timeout")
         );
         assert!(canceled.finished_at.is_some());
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn cancel_release_run_cancels_running_and_queued_children_without_dispatching_next_build() {
+        let root = test_root("release-run-cancel-all");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repo = seed_repository_fixture(&connection, "release-cancel-all-repo");
+        let release_run_id =
+            insert_release_run(&connection, repo.repository_id, "v8.0.0", ReleaseStatus::Running.as_str());
+        let running_build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            repo.primary_build_target_id,
+            BuildStatus::Running.as_str(),
+        );
+        let queued_build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            repo.secondary_build_target_id,
+            BuildStatus::Queued.as_str(),
+        );
+        let artifact_id = insert_artifact(&connection, running_build_run_id, "release.zip");
+        let queued_publish_run_id = insert_publish_run(
+            &connection,
+            release_run_id,
+            running_build_run_id,
+            repo.publish_target_id,
+            artifact_id,
+            PublishStatus::Queued.as_str(),
+        );
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let canceled_release = coordinator
+            .cancel_release_run(
+                release_run_id,
+                CancelReleaseRunInput {
+                    error_message: String::from(
+                        "Canceled by operator while process was on hold.",
+                    ),
+                },
+            )
+            .expect("release run should cancel");
+
+        assert_eq!(canceled_release.status, ReleaseStatus::Canceled.as_str());
+        assert!(canceled_release.finished_at.is_some());
+        assert_eq!(
+            canceled_release.error_message.as_deref(),
+            Some("Canceled by operator while process was on hold."),
+        );
+
+        let running_build = coordinator
+            .get_build_run_record(running_build_run_id)
+            .expect("running build should load");
+        assert_eq!(running_build.status, BuildStatus::Canceled.as_str());
+        assert!(running_build.finished_at.is_some());
+
+        let queued_build = coordinator
+            .get_build_run_record(queued_build_run_id)
+            .expect("queued build should load");
+        assert_eq!(queued_build.status, BuildStatus::Canceled.as_str());
+        assert!(queued_build.finished_at.is_some());
+
+        let publish = coordinator
+            .get_publish_run_record(queued_publish_run_id)
+            .expect("queued publish should load");
+        assert_eq!(publish.status, PublishStatus::Canceled.as_str());
+        assert!(publish.finished_at.is_some());
+
+        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 0);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
