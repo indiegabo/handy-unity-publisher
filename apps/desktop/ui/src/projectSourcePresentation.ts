@@ -1,5 +1,3 @@
-import type { RepositoryInspectionEntry } from "./services/projects";
-
 export type ProjectSourceMode = "managed_repository" | "local_workspace";
 export type ProjectPresentationTranslate = (
     key: string,
@@ -14,6 +12,11 @@ type ProjectSourceInput = {
     repositoryUrl?: string | null;
     local_path?: string | null;
     localPath?: string | null;
+};
+
+type ProjectAutomationCadenceInput = ProjectSourceInput & {
+    polling_interval_seconds?: number;
+    pollingIntervalSeconds?: number;
 };
 
 export function resolveProjectSourceMode(
@@ -154,17 +157,27 @@ export function resolveLocalizedProjectSourceModeSummary(
 }
 
 export function resolveProjectAutomationCadenceLabel(
-    repository: RepositoryInspectionEntry,
+    repository: ProjectAutomationCadenceInput,
 ) {
+    const pollingIntervalSeconds =
+        repository.pollingIntervalSeconds ??
+        repository.polling_interval_seconds ??
+        0;
+
     return isLocalWorkspaceSource(repository)
         ? "No remote polling"
-        : `${repository.polling_interval_seconds}s cadence`;
+        : `${pollingIntervalSeconds}s cadence`;
 }
 
 export function resolveLocalizedProjectAutomationCadenceLabel(
     translate: ProjectPresentationTranslate,
-    repository: RepositoryInspectionEntry,
+    repository: ProjectAutomationCadenceInput,
 ) {
+    const pollingIntervalSeconds =
+        repository.pollingIntervalSeconds ??
+        repository.polling_interval_seconds ??
+        0;
+
     return isLocalWorkspaceSource(repository)
         ? translate(
             "projects.presentation.sync.no_remote_polling",
@@ -174,7 +187,7 @@ export function resolveLocalizedProjectAutomationCadenceLabel(
             "projects.presentation.sync.cadence",
             "{{seconds}}s cadence",
             {
-                seconds: repository.polling_interval_seconds,
+                seconds: pollingIntervalSeconds,
             },
         );
 }

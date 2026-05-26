@@ -1,6 +1,10 @@
 import { type ReactNode, useState } from "react";
 
 import { type Translate, useLocalization } from "../LocalizationProvider";
+import {
+  resolveLocalizedProjectAutomationCadenceLabel,
+  type ProjectSourceMode,
+} from "../projectSourcePresentation";
 import { Button } from "./Button";
 import ScreenScaffold from "./ScreenScaffold";
 import {
@@ -30,6 +34,7 @@ export type ProjectWorkerEntry = {
   pollingIntervalSeconds: number;
   repositoryId: number;
   repositoryName: string;
+  sourceMode: ProjectSourceMode;
   buildTargets: BuildTargetEntry[];
 };
 
@@ -514,7 +519,10 @@ function ProjectWorkerAccordion({
             <SummaryStrip className="project-workers-worker-accordion__summary">
               <MetaRow>
                 <MetaItem label={t("project_workers.worker.poll", "Poll")}>
-                  {`${projectWorker.pollingIntervalSeconds}s`}
+                  {resolveLocalizedProjectAutomationCadenceLabel(t, {
+                    pollingIntervalSeconds: projectWorker.pollingIntervalSeconds,
+                    sourceMode: projectWorker.sourceMode,
+                  })}
                 </MetaItem>
                 <MetaItem
                   label={t("project_workers.worker.targets", "Targets")}

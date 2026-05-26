@@ -3,6 +3,7 @@ import {
     subscribeToRuntimeEvents,
     type RuntimeEventRecord,
 } from "./runtimeEvents";
+import { type ProcessFeedRecord } from "../components/processFeedPresentation";
 
 const PROCESS_FEED_EVENT_TOPICS = new Set<string>([
     "automation.release_queued",
@@ -15,6 +16,50 @@ const PROCESS_FEED_EVENT_TOPICS = new Set<string>([
 ]);
 
 export type ProcessFeedRuntimeEvent = RuntimeEventRecord;
+
+export type ProcessFeedScope = "all" | "active";
+
+export type ProcessFeedStatusFilter =
+    | "all"
+    | "queued"
+    | "running"
+    | "on_hold"
+    | "succeeded"
+    | "failed"
+    | "canceled";
+
+export type ProcessFeedPage = {
+    generated_at: string;
+    page: number;
+    page_size: number;
+    total_items: number;
+    total_pages: number;
+    has_previous_page: boolean;
+    has_next_page: boolean;
+    items: ProcessFeedRecord[];
+};
+
+export type LoadProcessFeedInput = {
+    page?: number;
+    pageSize?: number;
+    query?: string;
+    scope?: ProcessFeedScope;
+    status?: ProcessFeedStatusFilter;
+};
+
+export async function loadProcessFeed(
+    input: LoadProcessFeedInput = {},
+): Promise<ProcessFeedPage> {
+    return invoke<ProcessFeedPage>("process_feed", {
+        input: {
+            page: input.page,
+            page_size: input.pageSize,
+            query: input.query,
+            scope: input.scope,
+            status: input.status,
+        },
+    });
+}
 
 export async function subscribeToProcessFeedEvents(
     listener: (event: ProcessFeedRuntimeEvent) => void,

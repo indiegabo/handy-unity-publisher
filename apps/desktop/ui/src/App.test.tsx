@@ -14,6 +14,7 @@ const {
   detectRepositoryProviderMock,
   getCurrentWindowMock,
   invokeMock,
+  loadProcessFeedMock,
   loadApplicationVersionMock,
   loadAuthProvidersMock,
   loadLocalizationSettingsMock,
@@ -46,6 +47,7 @@ const {
   detectRepositoryProviderMock: vi.fn(),
   getCurrentWindowMock: vi.fn(),
   invokeMock: vi.fn(),
+  loadProcessFeedMock: vi.fn(),
   loadApplicationVersionMock: vi.fn(),
   loadAuthProvidersMock: vi.fn(),
   loadLocalizationSettingsMock: vi.fn(),
@@ -99,6 +101,7 @@ vi.mock("./services/auth", () => ({
 }));
 
 vi.mock("./services/processFeed", () => ({
+  loadProcessFeed: loadProcessFeedMock,
   subscribeToProcessFeedEvents: subscribeToProcessFeedEventsMock,
 }));
 
@@ -233,6 +236,7 @@ beforeEach(() => {
     updated_at_unix: 1,
   });
   loadRuntimeHealthMock.mockResolvedValue(buildRuntimeHealth());
+  loadProcessFeedMock.mockResolvedValue(EMPTY_PROCESS_FEED_PAGE);
   openExternalUrlMock.mockResolvedValue(undefined);
   openHostPathMock.mockResolvedValue(undefined);
   readHostTextFileMock.mockImplementation(async (path: string) => {
@@ -447,6 +451,50 @@ describe("App shell overlays", () => {
         screen.getByRole("button", { name: "Resume polling" }),
       ).toBeInTheDocument();
     });
+  });
+
+  it("opens process history from the main action bar", async () => {
+    const requestAnimationFrameSpy = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback: FrameRequestCallback) => {
+        callback(0);
+        return 1;
+      });
+
+    loadProcessFeedMock.mockResolvedValue({
+      ...EMPTY_PROCESS_FEED_PAGE,
+      items: [COMPLETED_PROCESS],
+      total_items: 1,
+      total_pages: 1,
+    });
+
+    try {
+      render(
+        <OverlayProvider>
+          <App />
+        </OverlayProvider>,
+      );
+
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Process history" }),
+      );
+
+      expect(
+        await screen.findByRole("heading", { name: "Process History" }),
+      ).toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(loadProcessFeedMock).toHaveBeenCalledWith({
+          page: 1,
+          pageSize: 12,
+          query: "",
+          scope: "all",
+          status: "all",
+        });
+      });
+    } finally {
+      requestAnimationFrameSpy.mockRestore();
+    }
   });
 
   it("forces a GitHub browser relogin when a repository enters reauth required", async () => {

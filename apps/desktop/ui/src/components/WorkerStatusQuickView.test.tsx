@@ -66,6 +66,7 @@ describe("WorkerStatusQuickView", () => {
             pollingIntervalSeconds: 30,
             repositoryId: 1,
             repositoryName: "Worker Demo",
+            sourceMode: "managed_repository",
           },
         ]}
         runtimeStatus="healthy"
@@ -99,6 +100,7 @@ describe("WorkerStatusQuickView", () => {
             pollingIntervalSeconds: 30,
             repositoryId: 1,
             repositoryName: "Worker Demo",
+            sourceMode: "managed_repository",
           },
         ]}
         runtimeStatus="healthy"
@@ -110,5 +112,35 @@ describe("WorkerStatusQuickView", () => {
         ".worker-status-quick-view__summary-strip.ui-summary-strip",
       ),
     ).not.toBeNull();
+  });
+
+  it("shows local workspace workers without remote polling copy", () => {
+    render(
+      <WorkerStatusQuickView
+        automationMode="active"
+        inspectionAvailable
+        onResolve={() => undefined}
+        projectWorkers={[
+          {
+            buildTargets: [
+              {
+                buildTargetId: 7,
+                diagnosticMessage: "Ready",
+                diagnosticStatus: "ready",
+                name: "Windows",
+                unityTargetPlatform: "StandaloneWindows64",
+              },
+            ],
+            pollingIntervalSeconds: 0,
+            repositoryId: 1,
+            repositoryName: "Worker Demo",
+            sourceMode: "local_workspace",
+          },
+        ]}
+        runtimeStatus="healthy"
+      />,
+    );
+
+    expect(screen.getByText("No remote polling")).toBeInTheDocument();
   });
 });

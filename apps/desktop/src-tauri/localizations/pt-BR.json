@@ -16,7 +16,7 @@
         "app.main.automation_toggle.resuming": "Retomando...",
         "app.main.automation_toggle.status": "Status do polling...",
         "app.main.feed.empty.copy": "Novas execuções de build ou publicação aparecerão aqui assim que o runtime as criar.",
-        "app.main.feed.empty.title": "Nenhum processo registrado ainda.",
+        "app.main.feed.empty.title": "Nenhum processo rodando",
         "app.main.feed.loading.copy": "O shell está consultando o runtime por atividade recente de builds e publicações.",
         "app.main.feed.loading.title": "Carregando feed de processos...",
         "app.main.focus_actions": "Ações de foco",

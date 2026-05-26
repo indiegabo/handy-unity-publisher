@@ -28,7 +28,11 @@ import {
   WorkerStatusIndicator,
   type WorkerStatusTone,
 } from "./components/WorkerStatusIndicator";
-import { type ProcessFeedRecord } from "./components/processFeedPresentation";
+import {
+  normalizeProcessFeedDisplayStatus,
+  type ProcessFeedRecord,
+} from "./components/processFeedPresentation";
+import { resolveProjectSourceMode } from "./projectSourcePresentation";
 import { type CreateProjectWizardSnapshot } from "./components/CreateProjectWizard";
 import {
   type ProjectWorkerEntry,
@@ -79,6 +83,7 @@ type ProcessFeedPage = {
 type ProcessFeedInput = {
   page: number;
   page_size: number;
+  scope?: "active";
 };
 
 type WorkerStatusSummary = {
@@ -94,6 +99,12 @@ type WorkerStatusSnapshot = {
   inspectionError: string | null;
   inspectionStale: boolean;
   runtimeStatus: RuntimeHealthStatus | null;
+};
+
+type MainQuickReleaseNotice = {
+  gitTag: string;
+  message: string;
+  repositoryName: string;
 };
 
 type ShellNavigationAction = {
@@ -113,6 +124,7 @@ type AppScreen =
   | { kind: "settings" }
   | { kind: "project-list"; highlightedRepositoryId: number | null }
   | { kind: "project-workers" }
+  | { kind: "process-history" }
   | {
       kind: "project-detail";
       repositoryId: number;
@@ -178,6 +190,12 @@ const ProcessDetailFocusScreen = lazy(() =>
   })),
 );
 
+const ProcessHistoryFocusScreen = lazy(() =>
+  import("./components/ProcessHistoryFocusScreen").then((module) => ({
+    default: module.ProcessHistoryFocusScreen,
+  })),
+);
+
 const ProjectsFocusScreen = lazy(() =>
   import("./components/ProjectsFocusScreen").then((module) => ({
     default: module.ProjectsFocusScreen,
@@ -237,9 +255,8 @@ function App() {
   const [workerActionError, setWorkerActionError] = useState<string | null>(
     null,
   );
-  const [mainQuickReleaseMessage, setMainQuickReleaseMessage] = useState<
-    string | null
-  >(null);
+  const [mainQuickReleaseNotice, setMainQuickReleaseNotice] =
+    useState<MainQuickReleaseNotice | null>(null);
   const [workerActionMessage, setWorkerActionMessage] = useState<string | null>(
     null,
   );
@@ -336,6 +353,7 @@ function App() {
           input: {
             page: pageToLoad,
             page_size: PROCESS_FEED_PAGE_SIZE,
+            scope: "active",
           } satisfies ProcessFeedInput,
         });
 
@@ -359,6 +377,27 @@ function App() {
         }
 
         startTransition(() => {
+          setMainQuickReleaseNotice((current) => {
+            if (!current) {
+              return current;
+            }
+
+            const matchingProcess = response.items.find(
+              (process) =>
+                process.git_tag === current.gitTag &&
+                process.repository_name === current.repositoryName,
+            );
+
+            if (!matchingProcess) {
+              return current;
+            }
+
+            return normalizeProcessFeedDisplayStatus(
+              matchingProcess.display_status,
+            ) === "queued"
+              ? current
+              : null;
+          });
           setProcessPage(response);
           setFeedError(null);
           setIsLoadingFeed(false);
@@ -847,6 +886,10 @@ function App() {
     });
   });
 
+  const handleOpenProcessHistory = useEffectEvent(() => {
+    void transitionToScreen({ kind: "process-history" });
+  });
+
   const handleOpenMainQuickRelease = useEffectEvent(() => {
     void transitionToScreen({ kind: "start-release" });
   });
@@ -855,9 +898,11 @@ function App() {
     async (gitTag: string, repositoryName: string) => {
       await transitionToScreen({ kind: "main" });
       startTransition(() => {
-        setMainQuickReleaseMessage(
-          `Queued local release ${gitTag} for ${repositoryName}.`,
-        );
+        setMainQuickReleaseNotice({
+          gitTag,
+          message: `Queued local release ${gitTag} for ${repositoryName}.`,
+          repositoryName,
+        });
         setPage(1);
       });
       await loadWorkerStatus();
@@ -1152,15 +1197,19 @@ function App() {
     },
   );
 
-  const handleProjectCreated = useEffectEvent((repositoryId: number) => {
-    startTransition(() => {
-      setCreateProjectWizardSnapshot(null);
-      setIsCreateProjectWizardDirty(false);
-      setActiveScreen({
-        kind: "project-list",
-        highlightedRepositoryId: repositoryId,
+  const handleProjectCreated = useEffectEvent(async (repositoryId: number) => {
+    try {
+      await loadWorkerRepositories();
+    } finally {
+      startTransition(() => {
+        setCreateProjectWizardSnapshot(null);
+        setIsCreateProjectWizardDirty(false);
+        setActiveScreen({
+          kind: "project-list",
+          highlightedRepositoryId: repositoryId,
+        });
       });
-    });
+    }
   });
 
   const handleReturnFromFocus = useEffectEvent(() => {
@@ -1247,6 +1296,12 @@ function App() {
       icon: "layout",
       label: t("app.main.navigation.projects", "Projects"),
       onClick: handleOpenProjects,
+      variant: "secondary" as const,
+    },
+    {
+      icon: "terminal",
+      label: t("app.main.navigation.process_history", "Process history"),
+      onClick: handleOpenProcessHistory,
       variant: "secondary" as const,
     },
     {
@@ -1425,8 +1480,8 @@ function App() {
               </div>
             </section>
 
-            {mainQuickReleaseMessage ? (
-              <p className="notice-banner">{mainQuickReleaseMessage}</p>
+            {mainQuickReleaseNotice ? (
+              <p className="notice-banner">{mainQuickReleaseNotice.message}</p>
             ) : null}
 
             <section
@@ -1448,13 +1503,13 @@ function App() {
                   <p className="feed-state__title">
                     {t(
                       "app.main.feed.loading.title",
-                      "Loading process feed...",
+                      "Loading current processes...",
                     )}
                   </p>
                   <p className="feed-state__copy">
                     {t(
                       "app.main.feed.loading.copy",
-                      "The shell is querying the runtime for recent build and publishing activity.",
+                      "The shell is querying the runtime for queued, running, or on-hold work.",
                     )}
                   </p>
                 </div>
@@ -1463,15 +1518,12 @@ function App() {
               {!isLoadingFeed && processPage.items.length === 0 ? (
                 <div className="feed-state">
                   <p className="feed-state__title">
-                    {t(
-                      "app.main.feed.empty.title",
-                      "No processes recorded yet.",
-                    )}
+                    {t("app.main.feed.empty.title", "No running processes")}
                   </p>
                   <p className="feed-state__copy">
                     {t(
                       "app.main.feed.empty.copy",
-                      "New build or publishing runs will appear here as soon as the runtime creates them.",
+                      "Queued, running, and on-hold releases will appear here as soon as the runtime creates them.",
                     )}
                   </p>
                 </div>
@@ -1628,6 +1680,13 @@ function App() {
                     pendingRuntimeAction={pendingRuntimeAction}
                     projectWorkers={projectWorkers}
                     runtimeStatus={workerSnapshot.runtimeStatus}
+                  />
+                ) : null}
+
+                {activeScreen.kind === "process-history" ? (
+                  <ProcessHistoryFocusScreen
+                    onOpenDetail={handleOpenProcessDetail}
+                    onRequestCancel={handleCancelProcess}
                   />
                 ) : null}
 
@@ -2039,6 +2098,7 @@ function collectProjectWorkers(
       pollingIntervalSeconds: repository.polling_interval_seconds,
       repositoryId: repository.repository_id,
       repositoryName: repository.repository_name,
+      sourceMode: resolveProjectSourceMode(repository),
       buildTargets: repository.build_targets
         .filter((target) => target.enabled)
         .map((target) => ({
@@ -2215,6 +2275,8 @@ function resolveWindowTitle(
       return `${productName} · ${t("app.window.title.projects", "Projects")}`;
     case "project-workers":
       return `${productName} · ${t("app.window.title.project_workers", "Project Workers")}`;
+    case "process-history":
+      return `${productName} · ${t("app.window.title.process_history", "Process history")}`;
     case "project-detail":
       return activeProjectTitle?.trim()
         ? `${productName} · ${activeProjectTitle.trim()}`
@@ -2259,6 +2321,8 @@ function resolveFocusScreenShellClassName(activeScreen: AppScreen) {
       return "focus-screen-shell focus-screen-shell--auth-providers";
     case "project-workers":
       return "focus-screen-shell focus-screen-shell--project-workers";
+    case "process-history":
+      return "focus-screen-shell focus-screen-shell--process-history";
     case "project-list":
       return "focus-screen-shell focus-screen-shell--project-list";
     case "project-detail":

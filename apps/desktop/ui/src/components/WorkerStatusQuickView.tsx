@@ -1,4 +1,5 @@
 import { useLocalization } from "../LocalizationProvider";
+import { resolveLocalizedProjectAutomationCadenceLabel } from "../projectSourcePresentation";
 import { Button } from "./Button";
 import FullScreenModal from "./FullScreenModal";
 import { MetaItem, MetaRow, SummaryStrip } from "./Surface";
@@ -133,11 +134,11 @@ export function WorkerStatusQuickView({
                     </div>
 
                     <p className="worker-status-tooltip__project-meta">
-                      {t(
-                        "app.worker_quick_view.polling_interval",
-                        "Polling every {{seconds}}s.",
-                        { seconds: projectWorker.pollingIntervalSeconds },
-                      )}
+                      {resolveLocalizedProjectAutomationCadenceLabel(t, {
+                        pollingIntervalSeconds:
+                          projectWorker.pollingIntervalSeconds,
+                        sourceMode: projectWorker.sourceMode,
+                      })}
                     </p>
 
                     <div className="worker-status-tooltip__worker-list">

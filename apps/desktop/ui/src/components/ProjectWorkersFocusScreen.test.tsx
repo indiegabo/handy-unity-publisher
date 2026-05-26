@@ -135,6 +135,7 @@ describe("ProjectWorkersFocusScreen", () => {
             pollingIntervalSeconds: 30,
             repositoryId: 1,
             repositoryName: "Revolutions",
+            sourceMode: "managed_repository",
             buildTargets: [
               {
                 buildTargetId: 1,
@@ -194,6 +195,7 @@ describe("ProjectWorkersFocusScreen", () => {
             pollingIntervalSeconds: 30,
             repositoryId: 1,
             repositoryName: "Revolutions",
+            sourceMode: "managed_repository",
             buildTargets: [
               {
                 buildTargetId: 1,
@@ -228,5 +230,47 @@ describe("ProjectWorkersFocusScreen", () => {
         ".project-workers-worker-accordion__summary.ui-summary-strip",
       ),
     ).not.toBeNull();
+  });
+
+  it("shows local workspace workers with no remote polling cadence", () => {
+    render(
+      <ProjectWorkersFocusScreen
+        actionError={null}
+        actionMessage={null}
+        automationMode="active"
+        inspectionAvailable
+        inspectionError={null}
+        inspectionStale={false}
+        onBulkInstantCheck={() => undefined}
+        onInstantCheck={() => undefined}
+        onRestartRuntime={() => undefined}
+        onRetryInventory={() => undefined}
+        onStartRuntime={() => undefined}
+        onStopRuntime={() => undefined}
+        pendingBulkInstantCheck={false}
+        pendingInstantCheckRepositoryId={null}
+        pendingRuntimeAction={null}
+        projectWorkers={[
+          {
+            pollingIntervalSeconds: 0,
+            repositoryId: 1,
+            repositoryName: "Revolutions",
+            sourceMode: "local_workspace",
+            buildTargets: [
+              {
+                buildTargetId: 1,
+                diagnosticMessage: "Ready",
+                diagnosticStatus: "ready",
+                name: "Windows",
+                unityTargetPlatform: "StandaloneWindows64",
+              },
+            ],
+          },
+        ]}
+        runtimeStatus="healthy"
+      />,
+    );
+
+    expect(screen.getByText("No remote polling")).toBeInTheDocument();
   });
 });

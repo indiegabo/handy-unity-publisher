@@ -37,7 +37,7 @@ beforeEach(() => {
         JSON.stringify({
           messages: {
             "app.main.navigation.projects": "Projects",
-            "app.main.feed.empty.title": "No processes recorded yet.",
+            "app.main.feed.empty.title": "No running processes",
           },
         }),
       );
@@ -67,9 +67,7 @@ describe("LocalizationProvider", () => {
     );
 
     expect(await screen.findByText("Projetos")).toBeInTheDocument();
-    expect(
-      await screen.findByText("No processes recorded yet."),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("No running processes")).toBeInTheDocument();
   });
 
   it("reloads messages when the UI broadcasts updated localization settings", async () => {
@@ -88,7 +86,7 @@ describe("LocalizationProvider", () => {
           JSON.stringify({
             messages: {
               "app.main.navigation.projects": "Projects",
-              "app.main.feed.empty.title": "No processes recorded yet.",
+              "app.main.feed.empty.title": "No running processes",
             },
           }),
         );
@@ -125,7 +123,7 @@ function LocalizationHarness() {
   return (
     <div>
       <p>{t("app.main.navigation.projects", "Projects")}</p>
-      <p>{t("app.main.feed.empty.title", "No processes recorded yet.")}</p>
+      <p>{t("app.main.feed.empty.title", "No running processes")}</p>
     </div>
   );
 }
