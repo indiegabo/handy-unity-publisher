@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Storage and Data | HGP Operator Docs</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="site-shell">
+      <header class="site-header">
+        <a class="site-brand" href="index.html">
+          <span class="site-brand__mark">H</span>
+          HGP Beta Docs
+        </a>
+        <nav class="site-nav">
+          <a href="index.html">Overview</a>
+          <a href="getting-started.html">Getting Started</a>
+          <a href="repository-projects.html">Repository Projects</a>
+          <a href="local-workspaces.html">Local Workspaces</a>
+          <a href="publish-destinations.html">Publishing</a>
+          <a href="troubleshooting.html">Troubleshooting</a>
+        </nav>
+      </header>
+
+      <section class="page-intro">
+        <span class="eyebrow">Storage Contract</span>
+        <h1>Know exactly where HGP writes runtime data on each host.</h1>
+        <p>
+          HGP keeps durable runtime data under one host-owned application data
+          root per user. Production builds use
+          <code>HandyGamesPublisher</code> and development builds suffix that
+          directory with <code>_DEV</code>
+          to keep sandbox data isolated.
+        </p>
+      </section>
+
+      <section class="page-section">
+        <h2>Host roots</h2>
+        <div class="panel-grid">
+          <article class="callout">
+            <strong>Windows</strong>
+            <p>
+              Production:
+              <code>%LOCALAPPDATA%/HandyGamesPublisher/runtime</code>
+            </p>
+            <p>
+              Development:
+              <code>%LOCALAPPDATA%/HandyGamesPublisher_DEV/runtime</code>
+            </p>
+          </article>
+          <article class="callout">
+            <strong>macOS</strong>
+            <p>
+              Production:
+              <code
+                >~/Library/Application Support/HandyGamesPublisher/runtime</code
+              >
+            </p>
+            <p>
+              Development:
+              <code
+                >~/Library/Application
+                Support/HandyGamesPublisher_DEV/runtime</code
+              >
+            </p>
+          </article>
+          <article class="callout">
+            <strong>Linux</strong>
+            <p>
+              Production:
+              <code>$XDG_DATA_HOME/HandyGamesPublisher/runtime</code> or
+              <code>~/.local/share/HandyGamesPublisher/runtime</code>
+            </p>
+            <p>
+              Development:
+              <code>$XDG_DATA_HOME/HandyGamesPublisher_DEV/runtime</code> or
+              <code>~/.local/share/HandyGamesPublisher_DEV/runtime</code>
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="page-section">
+        <h2>What lives in the runtime tree</h2>
+        <div class="panel">
+          <ul class="checklist">
+            <li>
+              <code>state/runtime.db</code> stores durable workflow metadata and
+              queue state.
+            </li>
+            <li>
+              <code>state/*.json</code> files store health, supervision, and
+              recovery snapshots.
+            </li>
+            <li>
+              <code>logs/runtime.jsonl</code> stores operator-facing runtime
+              traces.
+            </li>
+            <li>
+              <code>artifacts/</code> stores produced build and publish outputs.
+            </li>
+            <li>
+              <code>runs/</code> stores execution-local scratch data and run
+              workspaces.
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="page-section">
+        <h2>What does not belong there</h2>
+        <div class="panel">
+          <ul class="checklist">
+            <li>
+              Installer binaries live under the host application location, not
+              inside the runtime state tree.
+            </li>
+            <li>Large blob payloads do not belong in SQLite.</li>
+            <li>
+              Roaming preferences stay small and user-centric; the runtime root
+              stays operational and host-local.
+            </li>
+            <li>
+              LocalLow is not part of the default storage contract for HGP.
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span>Need the dev sandbox contract instead?</span>
+        <a href="getting-started.html">Getting started</a>
+      </footer>
+    </div>
+  </body>
+</html>

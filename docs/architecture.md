@@ -143,6 +143,25 @@ than a single release event or isolated build invocation.
 The runtime uses explicit status transitions so release, build, and publish
 flows remain recoverable after restart.
 
+## Storage Map
+
+HGP uses one host-owned application data root per user and keeps the runtime
+data tree under that root. The exact base path depends on the host platform,
+but the product directory name is stable for production and suffixed with
+`_DEV` for development builds.
+
+The current mapping is:
+
+| Host    | Production root                                                                              | Development root                                                                                     |
+| ------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Windows | `%LOCALAPPDATA%/HandyGamesPublisher/runtime`                                                 | `%LOCALAPPDATA%/HandyGamesPublisher_DEV/runtime`                                                     |
+| macOS   | `~/Library/Application Support/HandyGamesPublisher/runtime`                                  | `~/Library/Application Support/HandyGamesPublisher_DEV/runtime`                                      |
+| Linux   | `$XDG_DATA_HOME/HandyGamesPublisher/runtime` or `~/.local/share/HandyGamesPublisher/runtime` | `$XDG_DATA_HOME/HandyGamesPublisher_DEV/runtime` or `~/.local/share/HandyGamesPublisher_DEV/runtime` |
+
+The runtime tree contains only operational state. The installer may place the
+shell binaries elsewhere under the host app location, but the durable runtime
+root always follows the mapping above.
+
 ## Filesystem Layout
 
 The runtime resolves an app-managed data directory and stores mutable runtime

@@ -83,6 +83,15 @@ The bundled runtime manages one data root with this structure:
 `bootstrap` ensures those directories exist, initializes SQLite state, and
 prepares the runtime health snapshot files used by the shell.
 
+Development builds intentionally suffix the persistent product directory with
+`_DEV` so the sandbox stays isolated from production data on every supported
+platform:
+
+- Windows: `%LOCALAPPDATA%/HandyGamesPublisher_DEV/runtime`
+- macOS: `~/Library/Application Support/HandyGamesPublisher_DEV/runtime`
+- Linux: `$XDG_DATA_HOME/HandyGamesPublisher_DEV/runtime` or
+  `~/.local/share/HandyGamesPublisher_DEV/runtime`
+
 Use `HANDY_GAMES_PUBLISHER_RUNTIME_ROOT` when you need an isolated development
 sandbox. Normal operation still expects one runtime root owned by the
 application, while per-run workspaces live under `runs/` or repository-specific

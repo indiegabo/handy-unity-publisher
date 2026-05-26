@@ -15,6 +15,7 @@
         </a>
         <nav class="site-nav">
           <a href="index.html">Overview</a>
+          <a href="storage-and-data.html">Storage and Data</a>
           <a href="repository-projects.html">Repository Projects</a>
           <a href="local-workspaces.html">Local Workspaces</a>
           <a href="publish-destinations.html">Publishing</a>
@@ -130,6 +131,22 @@
               directory.
             </li>
           </ul>
+        </div>
+      </section>
+
+      <section class="page-section">
+        <h2>Storage roots during development</h2>
+        <div class="panel">
+          <p>
+            Development builds keep their persistent runtime data under the same
+            host-specific root, but the product directory name is suffixed with
+            <code>_DEV</code> so sandbox state does not collide with production.
+          </p>
+          <div class="button-row">
+            <a class="button-link" href="storage-and-data.html">
+              Open the storage map
+            </a>
+          </div>
         </div>
       </section>
 
