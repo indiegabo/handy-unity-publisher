@@ -502,7 +502,52 @@ pub struct ProcessFeedRecord {
     pub updated_at: String,
 }
 
-/// Defines one paginated release-level process feed page for the desktop home view.
+/// Selects which persisted release runs should back a process feed query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessFeedScope {
+    #[default]
+    All,
+    Active,
+}
+
+/// Restricts a process feed query to one normalized operator-facing status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessFeedStatusFilter {
+    #[default]
+    All,
+    Queued,
+    Running,
+    OnHold,
+    Succeeded,
+    Failed,
+    Canceled,
+}
+
+/// Describes one paginated operator-facing process feed query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessFeedPageQuery {
+    pub page: u32,
+    pub page_size: u32,
+    pub scope: ProcessFeedScope,
+    pub status: ProcessFeedStatusFilter,
+    pub query: Option<String>,
+}
+
+impl Default for ProcessFeedPageQuery {
+    fn default() -> Self {
+        Self {
+            page: 1,
+            page_size: 6,
+            scope: ProcessFeedScope::All,
+            status: ProcessFeedStatusFilter::All,
+            query: None,
+        }
+    }
+}
+
+/// Defines one paginated release-level process feed page for operator-facing surfaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessFeedPage {
     pub generated_at: String,

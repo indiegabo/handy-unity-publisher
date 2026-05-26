@@ -176,6 +176,11 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0014_release_source_identity.sql"),
         transactional: true,
     },
+    Migration {
+        name: "0015_local_workspace_polling_invariant.sql",
+        sql: include_str!("../migrations/0015_local_workspace_polling_invariant.sql"),
+        transactional: false,
+    },
 ];
 
 const MIGRATION_NO_OP_SQL: &str = "SELECT 1;\n";
@@ -1742,10 +1747,13 @@ impl LocalCoordinator {
             .map_err(sqlite_error)?;
         let rows = statement
             .query_map([], |row| {
+                let source_mode = row.get::<_, String>(2)?;
+                let polling_interval_seconds = row.get::<_, i64>(16)?;
+
                 Ok(RepositoryProjectRecord {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    source_mode: row.get(2)?,
+                    source_mode: source_mode.clone(),
                     workspace_strategy: row.get(3)?,
                     repo_url: normalize_optional_string(row.get(4)?),
                     local_path: normalize_optional_string(row.get(5)?),
@@ -1759,7 +1767,11 @@ impl LocalCoordinator {
                     auth_status_message: row.get(13)?,
                     auth_last_verified_at: normalize_optional_string(row.get(14)?),
                     enabled: row.get::<_, i64>(15)? != 0,
-                    polling_interval_seconds: row.get(16)?,
+                    polling_interval_seconds:
+                        project_polling_interval_seconds_for_read_model(
+                            source_mode.as_str(),
+                            polling_interval_seconds,
+                        ),
                     last_seen_tag: normalize_optional_string(row.get(17)?),
                     default_branch: normalize_optional_string(row.get(18)?),
                     artifacts_root_override: normalize_optional_string(row.get(19)?),
@@ -7954,17 +7966,35 @@ pub fn open_connection(database_path: &Path) -> io::Result<Connection> {
     Ok(connection)
 }
 
-/// Lists one operator-facing page from the process feed.
+/// Lists one operator-facing page from the process feed using the default
+/// archive scope without additional filters.
 pub fn list_process_feed_page(
     storage: &StorageLayout,
     page: u32,
     page_size: u32,
 ) -> io::Result<ProcessFeedPage> {
+    list_process_feed_page_filtered(
+        storage,
+        &ProcessFeedPageQuery {
+            page,
+            page_size,
+            ..ProcessFeedPageQuery::default()
+        },
+    )
+}
+
+/// Lists one operator-facing page from the process feed using explicit scope,
+/// status, and text filters.
+pub fn list_process_feed_page_filtered(
+    storage: &StorageLayout,
+    query: &ProcessFeedPageQuery,
+) -> io::Result<ProcessFeedPage> {
     let coordinator = LocalCoordinator::new(storage);
     coordinator.reconcile_release_run_statuses()?;
 
-    let requested_page = page.max(1);
-    let normalized_page_size = page_size.clamp(1, 50);
+    let requested_page = query.page.max(1);
+    let normalized_page_size = query.page_size.clamp(1, 50);
+    let normalized_query = normalize_process_feed_search_query(query.query.as_deref());
     let mut connection = open_connection(&storage.database_path)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -7976,11 +8006,40 @@ pub fn list_process_feed_page(
             |row| row.get::<_, String>(0),
         )
         .map_err(sqlite_error)?;
-    let total_items = transaction
-        .query_row("SELECT COUNT(1) FROM release_runs", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map_err(sqlite_error)?;
+    let page_rows = list_process_feed_release_rows(
+        &transaction,
+        query.scope,
+        normalized_query.as_deref(),
+    )?;
+    let mut matching_items = Vec::with_capacity(page_rows.len());
+
+    for row in page_rows {
+        let repository_engine_kind = row.repository_engine_kind.clone();
+        let build_runs = coordinator.list_build_runs_by_release(&transaction, row.release.id)?;
+        let publish_runs = coordinator.list_publish_runs_by_release(&transaction, row.release.id)?;
+        let build_run_contexts = coordinator.list_process_feed_build_run_contexts(
+            &transaction,
+            row.release.id,
+            repository_engine_kind.as_str(),
+        )?;
+        let publish_run_contexts = coordinator
+            .list_process_feed_publish_run_contexts(&transaction, row.release.id)?;
+        let record = summarize_process_feed_record(
+            row,
+            &build_runs,
+            &publish_runs,
+            &build_run_contexts,
+            &publish_run_contexts,
+        );
+
+        if !process_feed_record_matches_status(&record, query.status) {
+            continue;
+        }
+
+        matching_items.push(record);
+    }
+
+    let total_items = matching_items.len() as i64;
     let total_pages = if total_items == 0 {
         0
     } else {
@@ -7992,33 +8051,11 @@ pub fn list_process_feed_page(
         requested_page.min(total_pages)
     };
     let offset = i64::from(effective_page.saturating_sub(1)) * i64::from(normalized_page_size);
-    let page_rows = list_process_feed_release_rows(
-        &transaction,
-        i64::from(normalized_page_size),
-        offset,
-    )?;
-    let mut items = Vec::with_capacity(page_rows.len());
-
-    for row in page_rows {
-        let repository_engine_kind = row.repository_engine_kind.clone();
-        let build_runs = coordinator.list_build_runs_by_release(&transaction, row.release.id)?;
-        let publish_runs =
-            coordinator.list_publish_runs_by_release(&transaction, row.release.id)?;
-        let build_run_contexts = coordinator.list_process_feed_build_run_contexts(
-            &transaction,
-            row.release.id,
-            repository_engine_kind.as_str(),
-        )?;
-        let publish_run_contexts =
-            coordinator.list_process_feed_publish_run_contexts(&transaction, row.release.id)?;
-        items.push(summarize_process_feed_record(
-            row,
-            &build_runs,
-            &publish_runs,
-            &build_run_contexts,
-            &publish_run_contexts,
-        ));
-    }
+    let items = matching_items
+        .into_iter()
+        .skip(offset as usize)
+        .take(normalized_page_size as usize)
+        .collect();
 
     transaction.commit().map_err(sqlite_error)?;
 
@@ -9558,24 +9595,36 @@ fn nullable_string(value: &str) -> Option<&str> {
 
 fn list_process_feed_release_rows(
     transaction: &rusqlite::Transaction<'_>,
-    limit: i64,
-    offset: i64,
+    scope: ProcessFeedScope,
+    query: Option<&str>,
 ) -> io::Result<Vec<ProcessFeedReleaseRow>> {
-    let mut statement = transaction
-        .prepare(
-            "
+    let scope_clause = match scope {
+        ProcessFeedScope::All => None,
+        ProcessFeedScope::Active => {
+            Some("rr.status IN ('detected', 'queued', 'running')")
+        }
+    };
+    let search_clause = query.map(|_| {
+        "(CAST(rr.id AS TEXT) LIKE ?1
+            OR rr.git_tag LIKE ?1
+            OR COALESCE(rr.git_commit, '') LIKE ?1
+            OR r.name LIKE ?1
+            OR COALESCE(r.repo_url, '') LIKE ?1)"
+    });
+    let mut sql = String::from(
+        "
             SELECT rr.id,
                    rr.repository_id,
                    r.name,
                    r.repo_url,
-                     r.engine_kind,
+                   r.engine_kind,
                    rr.git_tag,
                    rr.git_commit,
                    rr.trigger_source,
                    rr.trigger_rule_id,
                    rr.source_metadata_json,
-                                     rr.source_identity,
-                     rr.engine_version,
+                   rr.source_identity,
+                   rr.engine_version,
                    rr.status,
                    rr.started_at,
                    rr.finished_at,
@@ -9584,15 +9633,42 @@ fn list_process_feed_release_rows(
                    rr.updated_at
             FROM release_runs rr
             JOIN repositories r ON r.id = rr.repository_id
+        ",
+    );
+
+    if scope_clause.is_some() || search_clause.is_some() {
+        sql.push_str(" WHERE ");
+        if let Some(scope_clause) = scope_clause {
+            sql.push_str(scope_clause);
+        }
+        if let Some(search_clause) = search_clause {
+            if scope_clause.is_some() {
+                sql.push_str(" AND ");
+            }
+            sql.push_str(search_clause);
+        }
+    }
+
+    sql.push_str(
+        "
             ORDER BY COALESCE(rr.started_at, rr.created_at) DESC,
                      rr.id DESC
-            LIMIT ? OFFSET ?
-            ",
-        )
+        ",
+    );
+
+    let mut statement = transaction
+        .prepare(&sql)
         .map_err(sqlite_error)?;
-    let rows = statement
-        .query_map(params![limit, offset], scan_process_feed_release_row)
-        .map_err(sqlite_error)?;
+    let rows = if let Some(query) = query {
+        let pattern = format!("%{query}%");
+        statement
+            .query_map(params![pattern], scan_process_feed_release_row)
+            .map_err(sqlite_error)?
+    } else {
+        statement
+            .query_map([], scan_process_feed_release_row)
+            .map_err(sqlite_error)?
+    };
 
     let mut releases = Vec::new();
     for row in rows {
@@ -9600,6 +9676,30 @@ fn list_process_feed_release_rows(
     }
 
     Ok(releases)
+}
+
+fn normalize_process_feed_search_query(query: Option<&str>) -> Option<String> {
+    let query = query?.trim();
+    if query.is_empty() {
+        None
+    } else {
+        Some(query.to_owned())
+    }
+}
+
+fn process_feed_record_matches_status(
+    record: &ProcessFeedRecord,
+    status: ProcessFeedStatusFilter,
+) -> bool {
+    match status {
+        ProcessFeedStatusFilter::All => true,
+        ProcessFeedStatusFilter::Queued => record.display_status == "queued",
+        ProcessFeedStatusFilter::Running => record.display_status == "running",
+        ProcessFeedStatusFilter::OnHold => record.display_status == "on_hold",
+        ProcessFeedStatusFilter::Succeeded => record.display_status == "succeeded",
+        ProcessFeedStatusFilter::Failed => record.display_status == "failed",
+        ProcessFeedStatusFilter::Canceled => record.display_status == "canceled",
+    }
 }
 
 fn summarize_process_feed_record(
@@ -11489,11 +11589,10 @@ fn normalize_create_repository_project_input(
     let default_branch = normalize_optional_input_string(input.default_branch);
     let artifacts_root_override = normalize_optional_input_string(input.artifacts_root_override);
     let workspace_root_override = normalize_optional_input_string(input.workspace_root_override);
-    if input.polling_interval_seconds <= 0 {
-        return Err(invalid_input_error(
-            "repository project polling_interval_seconds must be greater than zero",
-        ));
-    }
+    let polling_interval_seconds = normalize_repository_project_polling_interval_seconds(
+        source_mode.as_str(),
+        input.polling_interval_seconds,
+    )?;
     if input.build_targets.is_empty() {
         return Err(invalid_input_error(
             "repository project must include at least one build target",
@@ -11544,7 +11643,7 @@ fn normalize_create_repository_project_input(
         default_branch,
         artifacts_root_override,
         workspace_root_override,
-        polling_interval_seconds: input.polling_interval_seconds,
+        polling_interval_seconds,
         enabled: input.enabled,
         build_targets,
         publish_targets,
@@ -11590,11 +11689,10 @@ fn normalize_update_repository_project_input(
     let default_branch = normalize_optional_input_string(input.default_branch);
     let artifacts_root_override = normalize_optional_input_string(input.artifacts_root_override);
     let workspace_root_override = normalize_optional_input_string(input.workspace_root_override);
-    if input.polling_interval_seconds <= 0 {
-        return Err(invalid_input_error(
-            "repository project polling_interval_seconds must be greater than zero",
-        ));
-    }
+    let polling_interval_seconds = normalize_repository_project_polling_interval_seconds(
+        source_mode.as_str(),
+        input.polling_interval_seconds,
+    )?;
 
     if input.build_targets.is_empty() {
         return Err(invalid_input_error(
@@ -11663,11 +11761,39 @@ fn normalize_update_repository_project_input(
         default_branch,
         artifacts_root_override,
         workspace_root_override,
-        polling_interval_seconds: input.polling_interval_seconds,
+        polling_interval_seconds,
         enabled: input.enabled,
         build_targets,
         publish_targets,
     })
+}
+
+fn normalize_repository_project_polling_interval_seconds(
+    source_mode: &str,
+    polling_interval_seconds: i64,
+) -> io::Result<i64> {
+    if source_mode == SOURCE_MODE_LOCAL_WORKSPACE {
+        return Ok(0);
+    }
+
+    if polling_interval_seconds <= 0 {
+        return Err(invalid_input_error(
+            "repository project polling_interval_seconds must be greater than zero",
+        ));
+    }
+
+    Ok(polling_interval_seconds)
+}
+
+fn project_polling_interval_seconds_for_read_model(
+    source_mode: &str,
+    polling_interval_seconds: i64,
+) -> i64 {
+    if source_mode == SOURCE_MODE_LOCAL_WORKSPACE {
+        0
+    } else {
+        polling_interval_seconds
+    }
 }
 
 fn normalize_create_repository_project_credentials_input(
@@ -12609,13 +12735,14 @@ mod tests {
         apply_pragmas, decode_release_dispatch_job,
         ensure_migration_ledger, initialize_database,
         list_artifact_inspection_records, list_build_history_records,
-        list_process_feed_page,
+        list_process_feed_page, list_process_feed_page_filtered,
         list_publish_target_binding_runtime_settings,
         list_build_target_runtime_settings,
         resolve_build_target_read_model_projection,
         CreateRepositoryProjectBuildTargetInput,
         CreateRepositoryProjectCredentialInput,
         CreateRepositoryProjectInput,
+        ProcessFeedPageQuery, ProcessFeedScope, ProcessFeedStatusFilter,
         UpdateRepositoryAuthStateInput,
         UpdateRepositoryProjectBuildTargetInput,
         UpdateRepositoryProjectInput,
@@ -12768,6 +12895,7 @@ mod tests {
                 "0012_repository_auth_state.sql",
                 "0013_publish_destination_execution_contract.sql",
                 "0014_release_source_identity.sql",
+                "0015_local_workspace_polling_invariant.sql",
             ]
         );
 
@@ -14186,6 +14314,135 @@ mod tests {
     }
 
     #[test]
+    fn list_process_feed_page_filtered_supports_active_scope_and_archive_filters() {
+        let root = test_root("list-process-feed-page-filtered");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let fixture = seed_repository_fixture(&connection, "process-feed-filtered");
+
+        let succeeded_release_run_id = insert_release_run(
+            &connection,
+            fixture.repository_id,
+            "v1.0.0",
+            ReleaseStatus::Succeeded.as_str(),
+        );
+        let succeeded_build_run_id = insert_build_run(
+            &connection,
+            succeeded_release_run_id,
+            fixture.primary_build_target_id,
+            BuildStatus::Succeeded.as_str(),
+        );
+        update_build_run_plan(
+            &connection,
+            succeeded_build_run_id,
+            "2022.3.18f1",
+            DEFAULT_HOST_NATIVE_RUNNER_TYPE,
+        );
+
+        let queued_release_run_id = insert_release_run(
+            &connection,
+            fixture.repository_id,
+            "v1.1.0",
+            ReleaseStatus::Queued.as_str(),
+        );
+        let queued_build_run_id = insert_build_run(
+            &connection,
+            queued_release_run_id,
+            fixture.primary_build_target_id,
+            BuildStatus::Queued.as_str(),
+        );
+        update_build_run_plan(
+            &connection,
+            queued_build_run_id,
+            "2022.3.18f1",
+            DEFAULT_HOST_NATIVE_RUNNER_TYPE,
+        );
+
+        let running_release_run_id = insert_release_run(
+            &connection,
+            fixture.repository_id,
+            "v1.2.0",
+            ReleaseStatus::Queued.as_str(),
+        );
+        let running_build_run_id = insert_build_run(
+            &connection,
+            running_release_run_id,
+            fixture.secondary_build_target_id,
+            BuildStatus::Running.as_str(),
+        );
+        update_build_run_plan(
+            &connection,
+            running_build_run_id,
+            "2022.3.20f1",
+            DEFAULT_HOST_NATIVE_RUNNER_TYPE,
+        );
+
+        let failed_release_run_id = insert_release_run(
+            &connection,
+            fixture.repository_id,
+            "blocked-v1.3.0",
+            ReleaseStatus::Failed.as_str(),
+        );
+        let failed_build_run_id = insert_build_run(
+            &connection,
+            failed_release_run_id,
+            fixture.primary_build_target_id,
+            BuildStatus::Failed.as_str(),
+        );
+        update_build_run_plan(
+            &connection,
+            failed_build_run_id,
+            "2022.3.20f1",
+            DEFAULT_HOST_NATIVE_RUNNER_TYPE,
+        );
+        drop(connection);
+
+        let active_page = list_process_feed_page_filtered(
+            &layout,
+            &ProcessFeedPageQuery {
+                page: 1,
+                page_size: 10,
+                query: None,
+                scope: ProcessFeedScope::Active,
+                status: ProcessFeedStatusFilter::All,
+            },
+        )
+        .expect("active process feed page should load");
+
+        assert_eq!(active_page.total_items, 2);
+        assert_eq!(active_page.items.len(), 2);
+        assert_eq!(active_page.items[0].release_run_id, running_release_run_id);
+        assert_eq!(active_page.items[0].display_status, "running");
+        assert_eq!(active_page.items[1].release_run_id, queued_release_run_id);
+        assert_eq!(active_page.items[1].display_status, "queued");
+
+        let failed_archive_page = list_process_feed_page_filtered(
+            &layout,
+            &ProcessFeedPageQuery {
+                page: 1,
+                page_size: 10,
+                query: Some(String::from("blocked")),
+                scope: ProcessFeedScope::All,
+                status: ProcessFeedStatusFilter::Failed,
+            },
+        )
+        .expect("filtered archive process feed page should load");
+
+        assert_eq!(failed_archive_page.total_items, 1);
+        assert_eq!(failed_archive_page.items.len(), 1);
+        assert_eq!(
+            failed_archive_page.items[0].release_run_id,
+            failed_release_run_id,
+        );
+        assert_eq!(failed_archive_page.items[0].display_status, "failed");
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
     fn list_artifact_inspection_records_returns_joined_artifact_activity() {
         let root = test_root("list-artifact-inspection-records");
         let directories = RuntimeDirectories::from_root(&root);
@@ -14768,7 +15025,8 @@ mod tests {
                 "0011_runtime_engine_version.sql",
                 "0012_repository_auth_state.sql",
                 "0013_publish_destination_execution_contract.sql",
-                "0014_release_source_identity.sql"
+                "0014_release_source_identity.sql",
+                "0015_local_workspace_polling_invariant.sql"
             ]
         );
 
@@ -16289,7 +16547,7 @@ mod tests {
                     "direct",
                     Option::<String>::None,
                     String::from("C:/Users/gabao/projects/Games/revolutions"),
-                    300,
+                    0,
                     1,
                 ],
             )
@@ -16339,7 +16597,7 @@ mod tests {
                     "direct",
                     Option::<String>::None,
                     String::from("C:/Users/gabao/projects/Games/revolutions"),
-                    300,
+                    0,
                     1,
                     "unity",
                 ],
@@ -16378,6 +16636,7 @@ mod tests {
             local_record.local_path.as_deref(),
             Some("C:/Users/gabao/projects/Games/revolutions")
         );
+        assert_eq!(local_record.polling_interval_seconds, 0);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }

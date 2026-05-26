@@ -18,6 +18,8 @@ use runtime_store::{
 use runtime_store::lifecycle::{BuildStatus, ReleaseStatus};
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 
 #[cfg(test)]
 use runtime_config::RuntimeDirectories;
@@ -2075,9 +2077,39 @@ fn wait_for_local_workspace_preflight(
 }
 
 fn local_workspace_editor_lock_detected(source_path: &Path) -> bool {
-    source_path
-        .join(LOCAL_WORKSPACE_EDITOR_LOCKFILE_RELATIVE_PATH)
-        .is_file()
+    let lock_path = source_path.join(LOCAL_WORKSPACE_EDITOR_LOCKFILE_RELATIVE_PATH);
+    local_workspace_editor_lock_detected_at_path(lock_path.as_path())
+}
+
+fn local_workspace_editor_lock_detected_at_path(lock_path: &Path) -> bool {
+    if !lock_path.is_file() {
+        return false;
+    }
+
+    local_workspace_editor_lock_probe(lock_path)
+}
+
+#[cfg(windows)]
+fn local_workspace_editor_lock_probe(lock_path: &Path) -> bool {
+    // Unity keeps this lockfile open while the editor owns the workspace.
+    // If HGP can reopen it with share_mode(0), the file is stale and should
+    // not block local workspace automation.
+    match fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(lock_path)
+    {
+        Ok(_) => false,
+        Err(error) => {
+            matches!(error.raw_os_error(), Some(32 | 33))
+                || error.kind() == ErrorKind::PermissionDenied
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn local_workspace_editor_lock_probe(lock_path: &Path) -> bool {
+    lock_path.is_file()
 }
 
 fn local_workspace_hold_message(source_path: &Path) -> String {
@@ -2918,6 +2950,22 @@ mod tests {
         };
 
         let lock_path_for_thread = lock_path.clone();
+        #[cfg(windows)]
+        let held_lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&lock_path)
+            .expect("unity lock file should be reopenable with exclusive sharing");
+
+        #[cfg(windows)]
+        let release_lock_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            drop(held_lock);
+            fs::remove_file(&lock_path_for_thread)
+                .expect("unity lock file should be removable");
+        });
+
+        #[cfg(not(windows))]
         let release_lock_thread = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(250));
             fs::remove_file(&lock_path_for_thread)
@@ -2985,6 +3033,26 @@ mod tests {
             }),
             "expected execute-build stage heartbeat after local workspace lock release"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_workspace_editor_lock_detected_ignores_stale_windows_lockfile() {
+        let root =
+            TestDir::new("local-workspace-stale-lockfile")
+                .expect("temporary test directory should be created");
+        let local_workspace_path = root.path().join("local-workspace");
+        fs::create_dir_all(local_workspace_path.join("Temp"))
+            .expect("local workspace temp directory should create");
+        let lock_path = local_workspace_path
+            .join(LOCAL_WORKSPACE_EDITOR_LOCKFILE_RELATIVE_PATH);
+        fs::write(&lock_path, b"unity-lock")
+            .expect("unity lock file should be created");
+
+        assert!(lock_path.is_file());
+        assert!(!local_workspace_editor_lock_detected(
+            local_workspace_path.as_path()
+        ));
     }
 
     fn test_stored_build_execution_plan(engine_kind: EngineKind) -> StoredBuildExecutionPlan {
