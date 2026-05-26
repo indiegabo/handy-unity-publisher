@@ -508,6 +508,52 @@ mod tests {
     }
 
     #[test]
+    fn macos_development_root_uses_dev_application_support_directory() {
+        let environment = HostEnvironment {
+            local_app_data: None,
+            app_data: None,
+            xdg_data_home: None,
+            home_dir: Some(PathBuf::from("/Users/test")),
+        };
+
+        let root = resolve_default_root(
+            HostPlatform::MacOS,
+            &environment,
+            RuntimeEnvironment::Development,
+        )
+        .expect("macOS development root should resolve");
+
+        assert_eq!(
+            root,
+            PathBuf::from(
+                "/Users/test/Library/Application Support/HandyGamesPublisher_DEV/runtime"
+            )
+        );
+    }
+
+    #[test]
+    fn linux_development_root_uses_dev_xdg_directory() {
+        let environment = HostEnvironment {
+            local_app_data: None,
+            app_data: None,
+            xdg_data_home: Some(PathBuf::from("/home/test/.data")),
+            home_dir: Some(PathBuf::from("/home/test")),
+        };
+
+        let root = resolve_default_root(
+            HostPlatform::Linux,
+            &environment,
+            RuntimeEnvironment::Development,
+        )
+        .expect("linux development root should resolve");
+
+        assert_eq!(
+            root,
+            PathBuf::from("/home/test/.data/HandyGamesPublisher_DEV/runtime")
+        );
+    }
+
+    #[test]
     fn macos_default_root_uses_application_support() {
         let environment = HostEnvironment {
             local_app_data: None,

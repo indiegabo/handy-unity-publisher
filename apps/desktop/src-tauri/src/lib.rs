@@ -67,10 +67,12 @@ use runtime_store::{
     UpdateRepositoryProjectPublishTargetInput as StoreUpdateRepositoryProjectPublishTargetInput,
     UpdateRepositoryProjectInput as StoreUpdateRepositoryProjectInput,
     RuntimeControlRequest,
-    ProcessFeedPage, ReleaseAutomationStatus, UpsertCredentialRecordInput,
+    ProcessFeedPage, ProcessFeedPageQuery, ProcessFeedScope,
+    ProcessFeedStatusFilter, ReleaseAutomationStatus,
+    UpsertCredentialRecordInput,
     enqueue_runtime_control_request,
     initialize_database, list_artifact_inspection_records,
-    list_build_history_records, list_process_feed_page,
+    list_build_history_records, list_process_feed_page_filtered,
     list_build_target_runtime_settings, list_credential_records,
     list_publish_target_binding_runtime_settings,
     list_publish_target_runtime_settings, LocalCoordinator, StorageLayout,
@@ -144,6 +146,10 @@ const LOCALIZATION_SETTINGS_FILE_NAME: &str = "localization-settings.json";
 const DEFAULT_PRIMARY_LOCALE_CODE: &str = "en";
 const DEFAULT_FALLBACK_LOCALE_CODE: &str = "pt-BR";
 const OFFICIAL_LOCALE_CODES: &[&str] = &["en", "pt-BR"];
+const EMBEDDED_LOCALIZATION_FILES: &[(&str, &str)] = &[
+    ("en.json", include_str!("../localizations/en.json")),
+    ("pt-BR.json", include_str!("../localizations/pt-BR.json")),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WindowLayoutPreset {
@@ -759,16 +765,23 @@ struct NormalizedUpdateRepositoryProjectCommandInput {
 struct ProcessFeedInput {
     page: Option<u32>,
     page_size: Option<u32>,
+    query: Option<String>,
+    scope: Option<ProcessFeedScope>,
+    status: Option<ProcessFeedStatusFilter>,
 }
 
 impl ProcessFeedInput {
-    fn normalized(&self) -> (u32, u32) {
-        (
-            self.page.unwrap_or(1).max(1),
-            self.page_size
+    fn normalized(&self) -> ProcessFeedPageQuery {
+        ProcessFeedPageQuery {
+            page: self.page.unwrap_or(1).max(1),
+            page_size: self
+                .page_size
                 .unwrap_or(DEFAULT_PROCESS_FEED_PAGE_SIZE)
                 .clamp(1, MAX_PROCESS_FEED_PAGE_SIZE),
-        )
+            query: self.query.clone(),
+            scope: self.scope.unwrap_or(ProcessFeedScope::All),
+            status: self.status.unwrap_or(ProcessFeedStatusFilter::All),
+        }
     }
 }
 
@@ -983,6 +996,7 @@ fn set_main_window_pinned_state(app_handle: &AppHandle, pinned: bool) -> Result<
     Ok(*is_pinned)
 }
 
+#[allow(dead_code)]
 fn has_active_system_dialogs(lifecycle: &ShellLifecycleState) -> bool {
     lifecycle
         .active_system_dialogs
@@ -1000,6 +1014,7 @@ fn suppress_main_window_focus_loss(
     }
 }
 
+#[allow(dead_code)]
 fn is_main_window_focus_loss_suppressed(lifecycle: &ShellLifecycleState) -> bool {
     let now = Instant::now();
 
@@ -1017,6 +1032,7 @@ fn is_main_window_focus_loss_suppressed(lifecycle: &ShellLifecycleState) -> bool
         .unwrap_or(true)
 }
 
+#[allow(dead_code)]
 fn should_hide_main_window_on_focus_loss_state(
     should_keep_running: bool,
     is_pinned: bool,
@@ -1031,6 +1047,7 @@ fn should_hide_main_window_on_focus_loss_state(
         && !is_focus_screen_active
 }
 
+#[allow(dead_code)]
 fn should_hide_main_window_on_focus_loss(app_handle: &AppHandle) -> bool {
     if !should_keep_running(app_handle) {
         return false;
@@ -1334,11 +1351,9 @@ pub fn run() {
                 if label == MAIN_WINDOW_LABEL
                     && matches!(event, WindowEvent::Focused(false)) =>
             {
-                if should_hide_main_window_on_focus_loss(app_handle) {
-                    if let Err(error) = hide_main_window(app_handle) {
-                        eprintln!("failed to hide main window after focus loss: {error}");
-                    }
-                }
+                // Keep the main window visible on blur. Some host/IME interactions
+                // can emit transient focus-loss events while the operator is typing,
+                // which may blank the WebView surface when auto-hide is enabled.
             }
             RunEvent::MenuEvent(event) if event.id() == TRAY_MENU_OPEN_ID => {
                 show_main_window(app_handle);
@@ -2110,11 +2125,24 @@ fn resolve_localization_resource_root<R: tauri::Runtime>(
         return Ok(workspace_localization_resource_root());
     }
 
-    app_handle
+    let resource_root = app_handle
         .path()
         .resource_dir()
         .map(|path| path.join(LOCALIZATION_RESOURCE_DIR_NAME))
-        .map_err(|error| io::Error::other(error.to_string()))
+        .map_err(|error| io::Error::other(error.to_string()))?;
+
+    if resource_root.is_dir() && localization_packs_exist(&resource_root) {
+        return Ok(resource_root);
+    }
+
+    let fallback_root = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .join(LOCALIZATION_RESOURCE_DIR_NAME);
+
+    seed_embedded_localization_files(&fallback_root)?;
+    Ok(fallback_root)
 }
 
 fn resolve_localization_settings_dir<R: tauri::Runtime>(
@@ -2132,6 +2160,22 @@ fn workspace_localization_resource_root() -> PathBuf {
         .join("desktop")
         .join("src-tauri")
         .join(LOCALIZATION_RESOURCE_DIR_NAME)
+}
+
+fn localization_packs_exist(root: &Path) -> bool {
+    EMBEDDED_LOCALIZATION_FILES
+        .iter()
+        .all(|(file_name, _)| root.join(file_name).is_file())
+}
+
+fn seed_embedded_localization_files(root: &Path) -> io::Result<()> {
+    fs::create_dir_all(root)?;
+
+    for (file_name, file_contents) in EMBEDDED_LOCALIZATION_FILES {
+        fs::write(root.join(file_name), file_contents)?;
+    }
+
+    Ok(())
 }
 
 fn localization_preferences_path(settings_dir: &Path) -> PathBuf {
@@ -2704,12 +2748,12 @@ fn load_process_feed(
 ) -> io::Result<ProcessFeedPage> {
     config.directories.ensure_exists()?;
     let storage = StorageLayout::from_directories(&config.directories);
-    let (page, page_size) = input.normalized();
+    let query = input.normalized();
     if !storage.database_path.is_file() {
-        return Ok(empty_process_feed_page(page, page_size));
+        return Ok(empty_process_feed_page(query.page, query.page_size));
     }
 
-    list_process_feed_page(&storage, page, page_size)
+    list_process_feed_page_filtered(&storage, &query)
 }
 
 fn request_release_process_rerun(
@@ -3263,8 +3307,7 @@ fn open_path_in_host(path: &Path) -> io::Result<()> {
 
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd")
-            .args(["/C", "start", ""])
+        Command::new("explorer")
             .arg(&normalized_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -3307,8 +3350,7 @@ fn open_url_in_host(url: &str) -> io::Result<()> {
 
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd")
-            .args(["/C", "start", ""])
+        Command::new("explorer")
             .arg(normalized_url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -4377,14 +4419,10 @@ fn normalize_create_repository_project_command_input(
             ));
         }
     }
-    if input.polling_interval_seconds < MIN_REPOSITORY_POLL_INTERVAL_SECONDS {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "repository polling interval must be at least {MIN_REPOSITORY_POLL_INTERVAL_SECONDS} seconds"
-            ),
-        ));
-    }
+    let polling_interval_seconds = normalize_repository_project_polling_interval_seconds(
+        source_mode.as_str(),
+        input.polling_interval_seconds,
+    )?;
     if input.build_targets.is_empty() {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -4447,7 +4485,7 @@ fn normalize_create_repository_project_command_input(
         default_branch: normalize_optional_shell_string(input.default_branch),
         artifacts_root_override: normalize_optional_shell_string(input.artifacts_root_override),
         workspace_root_override: normalize_optional_shell_string(input.workspace_root_override),
-        polling_interval_seconds: input.polling_interval_seconds,
+        polling_interval_seconds,
         build_targets,
         publish_targets,
     })
@@ -4510,14 +4548,10 @@ fn normalize_update_repository_project_command_input(
         }
     }
 
-    if input.polling_interval_seconds < MIN_REPOSITORY_POLL_INTERVAL_SECONDS {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "repository polling interval must be at least {MIN_REPOSITORY_POLL_INTERVAL_SECONDS} seconds"
-            ),
-        ));
-    }
+    let polling_interval_seconds = normalize_repository_project_polling_interval_seconds(
+        source_mode.as_str(),
+        input.polling_interval_seconds,
+    )?;
 
     if input.build_targets.is_empty() {
         return Err(io::Error::new(
@@ -4591,11 +4625,31 @@ fn normalize_update_repository_project_command_input(
         default_branch: normalize_optional_shell_string(input.default_branch),
         artifacts_root_override: normalize_optional_shell_string(input.artifacts_root_override),
         workspace_root_override: normalize_optional_shell_string(input.workspace_root_override),
-        polling_interval_seconds: input.polling_interval_seconds,
+        polling_interval_seconds,
         enabled: input.enabled,
         build_targets,
         publish_targets,
     })
+}
+
+fn normalize_repository_project_polling_interval_seconds(
+    source_mode: &str,
+    polling_interval_seconds: i64,
+) -> io::Result<i64> {
+    if source_mode == "local_workspace" {
+        return Ok(0);
+    }
+
+    if polling_interval_seconds < MIN_REPOSITORY_POLL_INTERVAL_SECONDS {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "repository polling interval must be at least {MIN_REPOSITORY_POLL_INTERVAL_SECONDS} seconds"
+            ),
+        ));
+    }
+
+    Ok(polling_interval_seconds)
 }
 
 fn normalize_create_repository_project_build_target_command_input(
@@ -8076,7 +8130,7 @@ mod tests {
             local_workspace_path.replace('\\', "/")
         );
         assert_eq!(inspection.repositories[0].engine_kind, "unity");
-        assert_eq!(inspection.repositories[0].polling_interval_seconds, 300);
+        assert_eq!(inspection.repositories[0].polling_interval_seconds, 0);
         assert_eq!(inspection.repositories[0].build_targets.len(), 1);
         assert_eq!(inspection.repositories[0].build_targets[0].target_name, "Windows");
         assert_eq!(inspection.repositories[0].build_targets[0].diagnostic_status, "ready");

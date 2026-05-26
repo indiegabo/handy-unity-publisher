@@ -1,6 +1,8 @@
 //! Runs the local runtime binary, including supervision, polling, build
 //! execution, publish execution, and recovery-oriented cleanup flows.
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod builds;
 mod cli;
 mod workers;
