@@ -125,8 +125,9 @@ export const OverlayProvider: React.FC<
 
   const overlays = (
     <>
-      {stack.map((entry) => {
+      {stack.map((entry, index) => {
         const { id, Component, props } = entry;
+        const isTopEntry = index === stack.length - 1;
         const overlayNode = (
           <div
             aria-hidden={false}
@@ -134,7 +135,7 @@ export const OverlayProvider: React.FC<
             key={id}
             style={{ zIndex: 6000 + id }}
           >
-            <div className="overlay-manager__backdrop" />
+            {isTopEntry ? <div className="overlay-manager__backdrop" /> : null}
             <div className="overlay-manager__content">
               <Component
                 {...props}

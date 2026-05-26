@@ -96,6 +96,9 @@ describe("OverlayManager", () => {
     expect(
       await screen.findByRole("dialog", { name: "Second overlay" }),
     ).toBeInTheDocument();
+    expect(
+      document.querySelectorAll(".overlay-manager__backdrop"),
+    ).toHaveLength(1);
 
     fireEvent.click(
       screen.getByRole("button", { name: "Dismiss top overlay" }),

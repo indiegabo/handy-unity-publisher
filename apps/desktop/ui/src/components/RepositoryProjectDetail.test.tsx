@@ -476,7 +476,7 @@ describe("RepositoryProjectDetail", () => {
         enabled_build_target_count: 2,
         publish_targets: [
           buildItchPublishTarget({
-            channel: "windows-stable",
+            channel: "windows",
             gameSlug: "red-horizon",
           }),
         ],
@@ -650,7 +650,7 @@ describe("RepositoryProjectDetail", () => {
         enabled_build_target_count: 2,
         publish_targets: [
           buildItchPublishTarget({
-            channel: "windows-stable",
+            channel: "windows",
             gameSlug: "red-horizon",
           }),
         ],
@@ -708,7 +708,6 @@ describe("RepositoryProjectDetail", () => {
       within(panel).getByRole("button", { name: "Add target" }),
       within(panel).getByRole("button", { name: "Remove binding for Windows" }),
       bindingStatusSelect,
-      within(panel).getByRole("textbox", { name: "Itch channel" }),
       within(panel).getByRole("textbox", {
         name: "Itch userversion template",
       }),
@@ -722,7 +721,7 @@ describe("RepositoryProjectDetail", () => {
         buildRepositoryDetail({
           publish_targets: [
             buildItchPublishTarget({
-              channel: "windows-stable",
+              channel: "windows",
               gameSlug: "red-horizon",
             }),
           ],
@@ -732,7 +731,7 @@ describe("RepositoryProjectDetail", () => {
         buildRepositoryDetail({
           publish_targets: [
             buildItchPublishTarget({
-              channel: "windows-stable",
+              channel: "windows",
               gameSlug: "red-horizon-redux",
             }),
           ],
@@ -796,7 +795,7 @@ describe("RepositoryProjectDetail", () => {
                   build_target_name: "Windows",
                   enabled: true,
                   options_json: JSON.stringify({
-                    channel: "windows-stable",
+                    channel: "windows",
                     userversion_template: "{{git_tag}}",
                   }),
                 }),
@@ -832,7 +831,7 @@ describe("RepositoryProjectDetail", () => {
         publish_targets: [
           {
             ...buildItchPublishTarget({
-              channel: "windows-stable",
+              channel: "windows",
               gameSlug: "red-horizon",
             }),
             credentials: {
@@ -906,7 +905,7 @@ describe("RepositoryProjectDetail", () => {
       buildRepositoryDetail({
         publish_targets: [
           buildItchPublishTarget({
-            channel: "windows-stable",
+            channel: "windows",
             gameSlug: "red-horizon",
           }),
         ],

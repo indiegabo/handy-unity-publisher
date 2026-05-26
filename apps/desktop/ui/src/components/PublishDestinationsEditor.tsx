@@ -90,6 +90,11 @@ export type PublishDestinationReviewSummary = {
 export type PublishDestinationEditingMode = "inline" | "overlay";
 export type PublishCredentialSaveResult = number | null | void;
 
+type PublishCredentialSelection = {
+  credentialId: number;
+  credentialName: string;
+};
+
 type PublishDestinationsEditorProps = {
   buildTargets: ProjectBuildTargetReference[];
   credentials: SecretCredentialSetting[];
@@ -98,6 +103,7 @@ type PublishDestinationsEditorProps = {
   editingMode?: PublishDestinationEditingMode;
   errors?: PublishDestinationValidationErrors;
   onChange: (next: PublishDestinationDraft[]) => void;
+  showItchUserversionTemplate?: boolean;
   onSaveCredential?: (
     destinationId: string,
     input: SaveSecretCredentialInput,
@@ -114,6 +120,7 @@ const BINDING_STATUS_OPTIONS = [
   { label: "Disabled", value: "disabled" },
 ] as const;
 const BINDING_SELECTOR_OVERLAY_THRESHOLD = 8;
+const ITCH_CHANNEL_EXAMPLE_PLACEHOLDER = "WebGL, Windows, Linux";
 
 export function PublishDestinationsEditor({
   buildTargets,
@@ -123,6 +130,7 @@ export function PublishDestinationsEditor({
   editingMode = "inline",
   errors,
   onChange,
+  showItchUserversionTemplate = true,
   onSaveCredential,
 }: PublishDestinationsEditorProps) {
   const { t } = useLocalization();
@@ -223,10 +231,13 @@ export function PublishDestinationsEditor({
       return;
     }
 
-    await openOverlay<number>(PublishCredentialComposerOverlay, {
-      destinationId,
-      onSubmit: onSaveCredential,
-    });
+    await openOverlay<PublishCredentialSelection>(
+      PublishCredentialComposerOverlay,
+      {
+        destinationId,
+        onSubmit: onSaveCredential,
+      },
+    );
   };
 
   const handleOpenDestinationCreateOverlay = async (
@@ -246,6 +257,7 @@ export function PublishDestinationsEditor({
         existingDestinations: destinations,
         initialDestination: createEmptyPublishDestinationDraft(kind),
         mode: "create",
+        showItchUserversionTemplate,
         onSaveCredential,
       },
     );
@@ -279,6 +291,7 @@ export function PublishDestinationsEditor({
         ),
         initialDestination: clonePublishDestinationDraft(currentDestination),
         mode: "edit",
+        showItchUserversionTemplate,
         onSaveCredential,
       },
     );
@@ -778,6 +791,7 @@ export function PublishDestinationsEditor({
                 handleRemoveBinding(destination.id, bindingId)
               }
               pendingBindingTargetId={pendingBindingTargetId}
+              showItchUserversionTemplate={showItchUserversionTemplate}
               showDestinationStatus
             />
           </VerticalAccordion>
@@ -796,6 +810,7 @@ type PublishDestinationEditorOverlayProps = {
   initialDestination: PublishDestinationDraft;
   mode: PublishDestinationEditorMode;
   onResolve?: (value?: PublishDestinationDraft | null) => void;
+  showItchUserversionTemplate?: boolean;
   onSaveCredential?: (
     destinationId: string,
     input: SaveSecretCredentialInput,
@@ -809,6 +824,7 @@ function PublishDestinationEditorOverlay({
   initialDestination,
   mode,
   onResolve,
+  showItchUserversionTemplate = true,
   onSaveCredential,
 }: PublishDestinationEditorOverlayProps) {
   const { t } = useLocalization();
@@ -913,7 +929,7 @@ function PublishDestinationEditorOverlay({
       return;
     }
 
-    const createdCredentialId = await openOverlay<number>(
+    const createdCredential = await openOverlay<PublishCredentialSelection>(
       PublishCredentialComposerOverlay,
       {
         destinationId: draft.id,
@@ -921,14 +937,15 @@ function PublishDestinationEditorOverlay({
       },
     );
 
-    if (typeof createdCredentialId === "number") {
+    if (createdCredential) {
       setDraft((current) => ({
         ...current,
-        credentialsId: createdCredentialId,
-        credentialsName: resolveCredentialNameById(
-          credentials,
-          createdCredentialId,
-        ),
+        credentialsId: createdCredential.credentialId,
+        credentialsName:
+          resolveCredentialNameById(
+            credentials,
+            createdCredential.credentialId,
+          ) || createdCredential.credentialName,
       }));
     }
   };
@@ -1011,6 +1028,7 @@ function PublishDestinationEditorOverlay({
           onPendingBindingTargetChange={setPendingBindingTargetSelection}
           onRemoveBinding={handleRemoveBinding}
           pendingBindingTargetId={pendingBindingTargetId}
+          showItchUserversionTemplate={showItchUserversionTemplate}
           showDestinationStatus={!isCreateMode}
         />
       </div>
@@ -1020,7 +1038,7 @@ function PublishDestinationEditorOverlay({
 
 type PublishCredentialComposerOverlayProps = {
   destinationId: string;
-  onResolve?: (value?: number | null) => void;
+  onResolve?: (value?: PublishCredentialSelection | null) => void;
   onSubmit?: (
     destinationId: string,
     input: SaveSecretCredentialInput,
@@ -1043,7 +1061,12 @@ function PublishCredentialComposerOverlay({
     try {
       const createdCredentialId = await onSubmit?.(destinationId, input);
       onResolve?.(
-        typeof createdCredentialId === "number" ? createdCredentialId : null,
+        typeof createdCredentialId === "number"
+          ? {
+              credentialId: createdCredentialId,
+              credentialName: input.name.trim(),
+            }
+          : null,
       );
     } catch (error) {
       setSaveError(buildPublishCredentialComposerErrorMessage(error));
@@ -1100,6 +1123,7 @@ type PublishDestinationAdapterComponentProps = {
   onPendingBindingTargetChange: (nextTargetId: string) => void;
   onRemoveBinding: (bindingId: string) => void;
   pendingBindingTargetId: string;
+  showItchUserversionTemplate: boolean;
   showDestinationStatus: boolean;
 };
 
@@ -1137,6 +1161,7 @@ type PublishDestinationBindingsSectionProps = {
   renderBindingFields: (
     props: PublishDestinationBindingFieldRendererProps,
   ) => ReactElement;
+  showItchUserversionTemplate?: boolean;
   showBindingStatus?: boolean;
   title?: string;
 };
@@ -1157,6 +1182,7 @@ type PublishDestinationBindingEditorOverlayProps = {
   onResolve?: (
     value?: PublishDestinationBindingEditorOverlayResult | null,
   ) => void;
+  showItchUserversionTemplate?: boolean;
   showBindingStatus?: boolean;
 };
 
@@ -1167,12 +1193,17 @@ function PublishDestinationBindingEditorOverlay({
   initialTargetDraftId,
   mode,
   onResolve,
+  showItchUserversionTemplate = true,
   showBindingStatus = true,
 }: PublishDestinationBindingEditorOverlayProps) {
   const { t } = useLocalization();
   const isCreateMode = mode === "create";
-  const [targetDraftId, setTargetDraftId] = useState(initialTargetDraftId);
-  const [draft, setDraft] = useState(() => ({ ...initialBinding }));
+  const [targetDraftId, setTargetDraftId] =
+    useState<string>(initialTargetDraftId);
+  const [draft, setDraft] = useState<PublishDestinationBindingDraft>({
+    ...initialBinding,
+    itchChannel: initialBinding.itchChannel,
+  });
   const [attemptedSave, setAttemptedSave] = useState(false);
 
   const targetError =
@@ -1181,20 +1212,6 @@ function PublishDestinationBindingEditorOverlay({
           "publish_destinations.editor.bindings.target_required",
           "Build target is required.",
         )
-      : undefined;
-  const channelError =
-    attemptedSave && destinationKind === "itch"
-      ? !draft.itchChannel.trim()
-        ? t(
-            "publish_destinations.editor.itch.channel_required",
-            "Itch channel is required.",
-          )
-        : draft.itchChannel.includes(":")
-          ? t(
-              "publish_destinations.editor.itch.channel_invalid",
-              "Itch channel must not contain ':'.",
-            )
-          : undefined
       : undefined;
   const directoryError =
     attemptedSave && destinationKind === "filesystem"
@@ -1210,21 +1227,32 @@ function PublishDestinationBindingEditorOverlay({
             )
           : undefined
       : undefined;
+  const itchChannelError =
+    attemptedSave && destinationKind === "itch"
+      ? !draft.itchChannel.trim()
+        ? t(
+            "publish_destinations.editor.itch.channel_required",
+            "Itch channel is required.",
+          )
+        : undefined
+      : undefined;
 
   const handleSave = () => {
     setAttemptedSave(true);
 
-    if (targetError || channelError || directoryError) {
+    if (targetError || directoryError || itchChannelError) {
       return;
     }
 
+    const patch: Partial<PublishDestinationBindingDraft> = {
+      enabled: draft.enabled,
+      filesystemDirectoryPath: draft.filesystemDirectoryPath,
+      itchChannel: draft.itchChannel.trim(),
+      itchUserversionTemplate: draft.itchUserversionTemplate,
+    };
+
     onResolve?.({
-      patch: {
-        enabled: draft.enabled,
-        filesystemDirectoryPath: draft.filesystemDirectoryPath,
-        itchChannel: draft.itchChannel,
-        itchUserversionTemplate: draft.itchUserversionTemplate,
-      },
+      patch,
       targetDraftId,
     });
   };
@@ -1291,12 +1319,14 @@ function PublishDestinationBindingEditorOverlay({
           <SelectField
             data-overlay-autofocus={!isCreateMode}
             label={t("publish_destinations.editor.meta.status", "Status")}
-            onChange={(event) =>
+            onChange={(event) => {
+              const nextStatus = event.currentTarget.value;
+
               setDraft((current) => ({
                 ...current,
-                enabled: event.currentTarget.value === "enabled",
-              }))
-            }
+                enabled: nextStatus === "enabled",
+              }));
+            }}
             options={BINDING_STATUS_OPTIONS}
             value={draft.enabled ? "enabled" : "disabled"}
           />
@@ -1337,34 +1367,45 @@ function PublishDestinationBindingEditorOverlay({
         ) : (
           <>
             <TextField
-              error={channelError}
+              error={itchChannelError}
+              hint={t(
+                "publish_destinations.editor.itch.channel_hint",
+                "Use the Itch channel that should receive this build target artifact.",
+              )}
               label={t(
                 "publish_destinations.editor.itch.channel",
                 "Itch channel",
               )}
-              onChange={(event) =>
+              onChange={(event) => {
+                const nextChannel = event.currentTarget.value;
+
                 setDraft((current) => ({
                   ...current,
-                  itchChannel: event.currentTarget.value,
-                }))
-              }
+                  itchChannel: nextChannel,
+                }));
+              }}
+              placeholder={ITCH_CHANNEL_EXAMPLE_PLACEHOLDER}
               value={draft.itchChannel}
             />
 
-            <TextField
-              label={t(
-                "publish_destinations.editor.itch.userversion_template",
-                "Itch userversion template",
-              )}
-              onChange={(event) =>
-                setDraft((current) => ({
-                  ...current,
-                  itchUserversionTemplate: event.currentTarget.value,
-                }))
-              }
-              placeholder="{{git_tag}}"
-              value={draft.itchUserversionTemplate}
-            />
+            {showItchUserversionTemplate ? (
+              <TextField
+                label={t(
+                  "publish_destinations.editor.itch.userversion_template",
+                  "Itch userversion template",
+                )}
+                onChange={(event) => {
+                  const nextTemplate = event.currentTarget.value;
+
+                  setDraft((current) => ({
+                    ...current,
+                    itchUserversionTemplate: nextTemplate,
+                  }));
+                }}
+                placeholder="{{git_tag}}"
+                value={draft.itchUserversionTemplate}
+              />
+            ) : null}
           </>
         )}
       </div>
@@ -1485,6 +1526,7 @@ function ItchPublishDestinationAdapter({
   onPendingBindingTargetChange,
   onRemoveBinding,
   pendingBindingTargetId,
+  showItchUserversionTemplate,
   showDestinationStatus,
 }: PublishDestinationAdapterComponentProps) {
   const { t } = useLocalization();
@@ -1545,7 +1587,7 @@ function ItchPublishDestinationAdapter({
               itchAccountName: event.currentTarget.value,
             })
           }
-          placeholder="indiegabo"
+          placeholder="your-itch-username"
           value={destination.itchAccountName}
         />
 
@@ -1560,7 +1602,7 @@ function ItchPublishDestinationAdapter({
               itchGameSlug: event.currentTarget.value,
             })
           }
-          placeholder="revolutions"
+          placeholder="your-game-slug"
           value={destination.itchGameSlug}
         />
       </SurfacePanel>
@@ -1641,6 +1683,7 @@ function ItchPublishDestinationAdapter({
         onPendingBindingTargetChange={onPendingBindingTargetChange}
         onRemoveBinding={onRemoveBinding}
         pendingBindingTargetId={pendingBindingTargetId}
+        showItchUserversionTemplate={showItchUserversionTemplate}
         renderBindingFields={({
           binding,
           bindingErrors,
@@ -1666,30 +1709,33 @@ function ItchPublishDestinationAdapter({
                   itchChannel: event.currentTarget.value,
                 })
               }
+              placeholder="windows"
               value={binding.itchChannel}
             />
 
-            <TextField
-              hint={
-                showExpandedCopy
-                  ? t(
-                      "publish_destinations.editor.itch.userversion_hint",
-                      "Optional template. Leave empty to use the git tag as the userversion.",
-                    )
-                  : undefined
-              }
-              label={t(
-                "publish_destinations.editor.itch.userversion_template",
-                "Itch userversion template",
-              )}
-              onChange={(event) =>
-                handleBindingFieldChange({
-                  itchUserversionTemplate: event.currentTarget.value,
-                })
-              }
-              placeholder="{{git_tag}}"
-              value={binding.itchUserversionTemplate}
-            />
+            {showItchUserversionTemplate ? (
+              <TextField
+                hint={
+                  showExpandedCopy
+                    ? t(
+                        "publish_destinations.editor.itch.userversion_hint",
+                        "Optional template. Leave empty to use the git tag as the userversion.",
+                      )
+                    : undefined
+                }
+                label={t(
+                  "publish_destinations.editor.itch.userversion_template",
+                  "Itch userversion template",
+                )}
+                onChange={(event) =>
+                  handleBindingFieldChange({
+                    itchUserversionTemplate: event.currentTarget.value,
+                  })
+                }
+                placeholder="{{git_tag}}"
+                value={binding.itchUserversionTemplate}
+              />
+            ) : null}
           </>
         )}
         showBindingStatus={showDestinationStatus}
@@ -1711,6 +1757,7 @@ function PublishDestinationBindingsSection({
   onRemoveBinding,
   pendingBindingTargetId,
   renderBindingFields,
+  showItchUserversionTemplate = true,
   showBindingStatus = true,
   title = "Target bindings",
 }: PublishDestinationBindingsSectionProps) {
@@ -1785,6 +1832,7 @@ function PublishDestinationBindingsSection({
             createEmptyPublishDestinationBindingDraft(initialTarget),
           initialTargetDraftId: initialTarget.id,
           mode: "create",
+          showItchUserversionTemplate,
           showBindingStatus,
         },
       );
@@ -1812,6 +1860,7 @@ function PublishDestinationBindingsSection({
           initialBinding: binding,
           initialTargetDraftId: binding.buildTargetDraftId,
           mode: "edit",
+          showItchUserversionTemplate,
           showBindingStatus,
         },
       );
@@ -1911,16 +1960,18 @@ function PublishDestinationBindingsSection({
                           "publish_destinations.editor.filesystem.directory_required",
                           "Destination directory is required.",
                         )
-                    : binding.itchChannel
-                      ? t(
-                          "publish_destinations.editor.bindings.summary.itch_channel",
-                          "Channel: {{channel}}",
-                          { channel: binding.itchChannel },
-                        )
-                      : t(
-                          "publish_destinations.editor.itch.channel_required",
-                          "Itch channel is required.",
-                        );
+                    : t(
+                        "publish_destinations.editor.bindings.summary.itch_channel",
+                        "Channel: {{channel}}",
+                        {
+                          channel:
+                            binding.itchChannel ||
+                            t(
+                              "publish_destinations.editor.meta.missing",
+                              "Missing",
+                            ),
+                        },
+                      );
                 const firstBindingError =
                   bindingErrors.buildTarget ||
                   bindingErrors.filesystemDirectoryPath ||
@@ -2297,14 +2348,8 @@ export function validatePublishDestinationDrafts(
           bindingErrors.filesystemDirectoryPath =
             "Destination directory must be an absolute path.";
         }
-      }
-
-      if (destination.kind === "itch") {
-        if (!binding.itchChannel.trim()) {
-          bindingErrors.itchChannel = "Itch channel is required.";
-        } else if (binding.itchChannel.includes(":")) {
-          bindingErrors.itchChannel = "Itch channel must not contain ':'.";
-        }
+      } else if (!binding.itchChannel.trim()) {
+        bindingErrors.itchChannel = "Itch channel is required.";
       }
 
       if (binding.enabled && buildTarget && destination.kind === "filesystem") {
@@ -2908,7 +2953,6 @@ function collectPublishDestinationErrorMessages(
     for (const candidate of [
       bindingErrors.buildTarget,
       bindingErrors.filesystemDirectoryPath,
-      bindingErrors.itchChannel,
     ]) {
       if (candidate) {
         messages.push(candidate);
@@ -2981,9 +3025,7 @@ function hasPublishDestinationDraftErrors(
 function hasPublishDestinationBindingErrors(
   errors: PublishDestinationBindingErrors,
 ) {
-  return Boolean(
-    errors.buildTarget || errors.filesystemDirectoryPath || errors.itchChannel,
-  );
+  return Boolean(errors.buildTarget || errors.filesystemDirectoryPath);
 }
 
 function resolveCredentialNameById(

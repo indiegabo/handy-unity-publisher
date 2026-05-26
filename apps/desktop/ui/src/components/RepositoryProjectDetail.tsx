@@ -8,7 +8,10 @@ import {
 } from "react";
 
 import { Button, IconButton } from "./Button";
-import { BuildTargetRemovalCallout } from "./BuildTargetRemovalCallout";
+import {
+  BuildTargetEditorOverlay,
+  type BuildTargetEditorOverlayResult,
+} from "./BuildTargetEditorOverlay";
 import FullScreenModal from "./FullScreenModal";
 import { type IconName } from "./Icon";
 import FormSection from "./forms/FormSection";
@@ -36,6 +39,7 @@ import {
   SummaryStrip,
   SurfacePanel,
 } from "./Surface";
+import { useOverlay } from "./OverlayManager";
 import {
   connectRepositoryAuth,
   dispatchOnDemandReleaseProcess,
@@ -173,14 +177,6 @@ const REPOSITORY_VISIBILITY_OPTIONS = [
   { label: "Public", value: "public" },
   { label: "Private", value: "private" },
 ] as const;
-const PLATFORM_OPTIONS = [
-  { label: "Select a Unity target", value: "" },
-  { label: "Windows", value: "StandaloneWindows64" },
-  { label: "Linux", value: "StandaloneLinux64" },
-  { label: "macOS", value: "StandaloneOSX" },
-  { label: "WebGL", value: "WebGL" },
-  { label: "Android", value: "Android" },
-] as const;
 const DEFAULT_PROJECT_DETAIL_SECTION: ProjectDetailSectionKey = "project";
 const LOCAL_RELEASE_VERSION_SOURCE_OPTIONS: SelectOption[] = [
   {
@@ -277,19 +273,11 @@ export function RepositoryProjectDetail({
   const [validatingTargets, setValidatingTargets] = useState<
     Record<string, boolean>
   >({});
-  const [expandedTargetIds, setExpandedTargetIds] = useState<
-    Record<string, boolean>
-  >({});
+  const [, setExpandedTargetIds] = useState<Record<string, boolean>>({});
   const [sectionOpenState, setSectionOpenState] = useState(() =>
     buildProjectDetailSectionState(DEFAULT_PROJECT_DETAIL_SECTION),
   );
-  const [pendingBuildTargetRemovalId, setPendingBuildTargetRemovalId] =
-    useState<string | null>(null);
-  const [isProjectRemovalOpen, setIsProjectRemovalOpen] = useState(false);
   const [isRemovingProject, setIsRemovingProject] = useState(false);
-  const [projectRemovalError, setProjectRemovalError] = useState<string | null>(
-    null,
-  );
   const [localReleaseDraft, setLocalReleaseDraft] =
     useState<LocalReleaseDispatchDraft>(createLocalReleaseDispatchDraft);
   const [localReleaseValidationErrors, setLocalReleaseValidationErrors] =
@@ -309,6 +297,7 @@ export function RepositoryProjectDetail({
   const accessAssessmentTimerRef = useRef<number | undefined>(undefined);
   const accessAssessmentTokenRef = useRef(0);
   const activeSection = resolveActiveProjectDetailSection(sectionOpenState);
+  const { openOverlay } = useOverlay();
 
   const resolveRepositoryDetail = useEffectEvent(async () => {
     return loadRepositoryProjectDetail(repositoryId);
@@ -377,10 +366,7 @@ export function RepositoryProjectDetail({
       setSectionOpenState(
         buildProjectDetailSectionState(DEFAULT_PROJECT_DETAIL_SECTION),
       );
-      setPendingBuildTargetRemovalId(null);
-      setIsProjectRemovalOpen(false);
       setIsRemovingProject(false);
-      setProjectRemovalError(null);
       setHasLoadedAuthProviders(false);
       setHasLoadedCredentials(false);
       setLocalReleaseDraft(createLocalReleaseDispatchDraft());
@@ -693,25 +679,6 @@ export function RepositoryProjectDetail({
     },
   );
 
-  const updateBuildTarget = useEffectEvent(
-    (targetId: string, patch: Partial<RepositoryProjectBuildTargetDraft>) => {
-      startTransition(() => {
-        setDraft((currentDraft) => {
-          if (!currentDraft) {
-            return currentDraft;
-          }
-
-          return {
-            ...currentDraft,
-            buildTargets: currentDraft.buildTargets.map((target) =>
-              target.id === targetId ? { ...target, ...patch } : target,
-            ),
-          };
-        });
-      });
-    },
-  );
-
   const scheduleUnityExecutableValidation = useEffectEvent(
     (targetId: string, path: string, delayMillis = 250) => {
       const existingTimerId = validationTimersRef.current[targetId];
@@ -791,17 +758,29 @@ export function RepositoryProjectDetail({
     },
   );
 
-  const handlePickUnityExecutablePath = useEffectEvent(
-    (targetId: string, selectedPath: string) => {
-      updateBuildTarget(targetId, { unityExecutablePath: selectedPath });
-      scheduleUnityExecutableValidation(targetId, selectedPath, 0);
-    },
-  );
-
-  const handleAddBuildTarget = useEffectEvent(() => {
-    const nextTarget = createEmptyBuildTargetDraft(
-      nextBuildTargetIdRef.current,
+  const handleAddBuildTarget = useEffectEvent(async () => {
+    const inheritedUnityExecutablePath =
+      resolveSharedBuildTargetUnityExecutableState(
+        draft?.buildTargets ?? [],
+      ).value;
+    const nextTarget = {
+      ...createEmptyBuildTargetDraft(nextBuildTargetIdRef.current),
+      unityExecutablePath: inheritedUnityExecutablePath,
+    };
+    const created = await openOverlay<BuildTargetEditorOverlayResult>(
+      BuildTargetEditorOverlay,
+      {
+        initialErrors: {},
+        initialTarget: nextTarget,
+        mode: "create",
+        targetId: nextTarget.id,
+      },
     );
+
+    if (!created) {
+      return;
+    }
+
     nextBuildTargetIdRef.current += 1;
 
     startTransition(() => {
@@ -812,15 +791,34 @@ export function RepositoryProjectDetail({
 
         return {
           ...currentDraft,
-          buildTargets: [...currentDraft.buildTargets, nextTarget],
+          buildTargets: [
+            ...currentDraft.buildTargets,
+            {
+              ...created.target,
+              buildTargetId: null,
+              unityExecutablePath: nextTarget.unityExecutablePath,
+            },
+          ],
         };
       });
+      setPathDiagnostics((current) => ({
+        ...current,
+        [created.target.id]: null,
+      }));
       setExpandedTargetIds((current) => ({
         ...current,
-        [nextTarget.id]: true,
+        [created.target.id]: true,
       }));
       setSectionOpenState(buildProjectDetailSectionState("targets"));
     });
+
+    if (inheritedUnityExecutablePath.trim()) {
+      scheduleUnityExecutableValidation(
+        nextTarget.id,
+        inheritedUnityExecutablePath,
+        0,
+      );
+    }
   });
 
   const finalizeBuildTargetRemoval = useEffectEvent((targetId: string) => {
@@ -864,37 +862,82 @@ export function RepositoryProjectDetail({
     });
   });
 
-  const handleRemoveBuildTarget = useEffectEvent((targetId: string) => {
+  const handleRemoveBuildTarget = useEffectEvent(async (targetId: string) => {
     if (!draft) {
       return;
     }
 
-    if (
-      collectBuildTargetBindingImpact(draft.publishDestinations, targetId)
-        .length > 0
-    ) {
-      startTransition(() => {
-        setPendingBuildTargetRemovalId(targetId);
-      });
+    const target = draft.buildTargets.find((entry) => entry.id === targetId);
+    if (!target) {
+      return;
+    }
+
+    const bindingImpact = collectBuildTargetBindingImpact(
+      draft.publishDestinations,
+      targetId,
+    );
+    const confirmed = await openOverlay<boolean>(BuildTargetRemovalOverlay, {
+      bindingImpact,
+      targetName: target.name,
+    });
+
+    if (!confirmed) {
       return;
     }
 
     finalizeBuildTargetRemoval(targetId);
   });
 
-  const handleConfirmBuildTargetRemoval = useEffectEvent(() => {
-    if (!pendingBuildTargetRemovalId) {
-      return;
-    }
-
-    finalizeBuildTargetRemoval(pendingBuildTargetRemovalId);
-    startTransition(() => {
-      setPendingBuildTargetRemovalId(null);
-    });
-  });
-
   const handleTargetAccordionChange = useEffectEvent(
     (targetId: string, nextOpen: boolean) => {
+      if (nextOpen) {
+        const target = draft?.buildTargets.find(
+          (entry) => entry.id === targetId,
+        );
+        if (!target) {
+          return;
+        }
+
+        void (async () => {
+          const updated = await openOverlay<BuildTargetEditorOverlayResult>(
+            BuildTargetEditorOverlay,
+            {
+              initialErrors: validationErrors.buildTargets[targetId] ?? {},
+              initialTarget: target,
+              mode: "edit",
+              targetId: target.id,
+            },
+          );
+
+          if (!updated) {
+            return;
+          }
+
+          startTransition(() => {
+            setDraft((currentDraft) => {
+              if (!currentDraft) {
+                return currentDraft;
+              }
+
+              return {
+                ...currentDraft,
+                buildTargets: currentDraft.buildTargets.map((entry) =>
+                  entry.id === targetId
+                    ? {
+                        ...updated.target,
+                        buildTargetId: entry.buildTargetId,
+                        unityExecutablePath: entry.unityExecutablePath,
+                      }
+                    : entry,
+                ),
+              };
+            });
+          });
+        })();
+
+        return;
+      }
+
       startTransition(() => {
         setExpandedTargetIds((current) => ({
           ...current,
@@ -1003,11 +1046,7 @@ export function RepositoryProjectDetail({
         const createdCredential = credentials.find(
           (credential) => credential.credential_id === createdCredentialId,
         );
-        if (!createdCredential) {
-          throw new Error(
-            "The saved publish credential could not be reloaded.",
-          );
-        }
+        const credentialName = createdCredential?.name || input.name.trim();
 
         startTransition(() => {
           setRepositoryCredentials(
@@ -1030,7 +1069,8 @@ export function RepositoryProjectDetail({
                   destination.id === destinationId
                     ? {
                         ...destination,
-                        credentialsId: createdCredential.credential_id,
+                        credentialsId: createdCredentialId,
+                        credentialsName: credentialName,
                       }
                     : destination,
               ),
@@ -1038,7 +1078,7 @@ export function RepositoryProjectDetail({
           });
         });
 
-        return createdCredential.credential_id;
+        return createdCredentialId;
       } catch (error) {
         throw new Error(buildProjectSaveErrorMessage(error));
       }
@@ -1262,62 +1302,43 @@ export function RepositoryProjectDetail({
     void loadRepositoryDetail(true);
   });
 
-  const handleOpenProjectRemoval = useEffectEvent(() => {
+  const handleOpenProjectRemoval = useEffectEvent(async () => {
     if (!repository || isSaving || isRemovingProject || isEditingLocked) {
       return;
     }
 
-    startTransition(() => {
-      setProjectRemovalError(null);
-      setIsProjectRemovalOpen(true);
-    });
-  });
+    const strategy = await openOverlay<RemoveRepositoryProjectStrategy | null>(
+      ProjectRemovalOverlay,
+      {
+        hasPendingChanges,
+        projectName: draft?.name.trim() || repository.repository_name,
+      },
+    );
 
-  const handleCloseProjectRemoval = useEffectEvent(() => {
-    if (isRemovingProject) {
+    if (!strategy) {
       return;
     }
 
-    startTransition(() => {
-      setProjectRemovalError(null);
-      setIsProjectRemovalOpen(false);
-    });
+    setIsRemovingProject(true);
+    setSaveError(null);
+
+    try {
+      const report = await removeRepositoryProject({
+        repository_id: repository.repository_id,
+        strategy,
+      });
+
+      onProjectRemoved?.(report);
+    } catch (removeProjectError) {
+      startTransition(() => {
+        setSaveError(buildProjectRemoveErrorMessage(removeProjectError));
+      });
+    } finally {
+      startTransition(() => {
+        setIsRemovingProject(false);
+      });
+    }
   });
-
-  const handleRemoveProject = useEffectEvent(
-    async (strategy: RemoveRepositoryProjectStrategy) => {
-      if (!repository || isRemovingProject) {
-        return;
-      }
-
-      setIsRemovingProject(true);
-      setProjectRemovalError(null);
-
-      try {
-        const report = await removeRepositoryProject({
-          repository_id: repository.repository_id,
-          strategy,
-        });
-
-        startTransition(() => {
-          setProjectRemovalError(null);
-          setIsProjectRemovalOpen(false);
-        });
-
-        onProjectRemoved?.(report);
-      } catch (removeProjectError) {
-        startTransition(() => {
-          setProjectRemovalError(
-            buildProjectRemoveErrorMessage(removeProjectError),
-          );
-        });
-      } finally {
-        startTransition(() => {
-          setIsRemovingProject(false);
-        });
-      }
-    },
-  );
 
   if (isLoading) {
     return (
@@ -1438,11 +1459,29 @@ export function RepositoryProjectDetail({
       buildTargetId: target.buildTargetId,
       name: target.name.trim() || "Unnamed target",
     })) ?? [];
+  const sharedBuildTargetUnityExecutable =
+    resolveSharedBuildTargetUnityExecutableState(draft?.buildTargets ?? []);
+  const sharedUnityExecutablePath = sharedBuildTargetUnityExecutable.value;
+  const hasMixedUnityExecutablePaths =
+    sharedBuildTargetUnityExecutable.hasMixedValues;
+  const sharedUnityExecutableError = resolveSharedUnityExecutableError(
+    draft?.buildTargets ?? [],
+    validationErrors.buildTargets,
+  );
+  const sharedUnityExecutableDiagnostics =
+    resolveSharedUnityExecutableDiagnostics(
+      draft?.buildTargets ?? [],
+      pathDiagnostics,
+    );
+  const isSharedUnityExecutableValidating =
+    draft?.buildTargets.some((target) =>
+      Boolean(validatingTargets[target.id]),
+    ) ?? false;
   const targetAttentionCount = draft
     ? draft.buildTargets.filter((target) => {
         const diagnostics = pathDiagnostics[target.id];
 
-        return diagnostics !== null && diagnostics.status !== "ready";
+        return diagnostics != null && diagnostics.status !== "ready";
       }).length
     : 0;
   const publishDestinationCount = draft?.publishDestinations.length ?? 0;
@@ -1458,17 +1497,6 @@ export function RepositoryProjectDetail({
         "consuming",
       )
     : 0;
-  const pendingBuildTargetRemoval = pendingBuildTargetRemovalId
-    ? (draft?.buildTargets.find(
-        (target) => target.id === pendingBuildTargetRemovalId,
-      ) ?? null)
-    : null;
-  const pendingBuildTargetBindingImpact = pendingBuildTargetRemoval
-    ? collectBuildTargetBindingImpact(
-        draft?.publishDestinations ?? [],
-        pendingBuildTargetRemoval.id,
-      )
-    : [];
   const pollingIntervalLabel =
     draft?.pollingIntervalSeconds.trim() ||
     String(repository.polling_interval_seconds);
@@ -1924,7 +1952,7 @@ export function RepositoryProjectDetail({
                                 handleDraftFieldChange("localPath", path)
                               }
                               pickerKind="directory"
-                              placeholder="C:/projects/revolutions"
+                              placeholder="C:/projects/your-project"
                               value={draft.localPath}
                             />
                           </div>
@@ -2080,15 +2108,132 @@ export function RepositoryProjectDetail({
                   </p>
                 ) : null}
 
-                {pendingBuildTargetRemoval ? (
-                  <BuildTargetRemovalCallout
-                    bindingImpact={pendingBuildTargetBindingImpact}
-                    cancelDisabled={isSaving}
-                    confirmDisabled={isSaving}
-                    onCancel={() => setPendingBuildTargetRemovalId(null)}
-                    onConfirm={handleConfirmBuildTargetRemoval}
-                    targetName={pendingBuildTargetRemoval.name}
-                  />
+                {draft && draft.buildTargets.length > 0 ? (
+                  <>
+                    {hasMixedUnityExecutablePaths ? (
+                      <p className="feed-banner">
+                        Multiple Unity executable paths are configured across
+                        build targets. Choose one path below to standardize all
+                        targets.
+                      </p>
+                    ) : null}
+
+                    <PathPickerField
+                      buttonLabel="Choose Unity executable"
+                      clearLabel="Reset"
+                      clearable
+                      dialogTitle="Select Unity Editor executable"
+                      disabled={isSaving}
+                      error={sharedUnityExecutableError}
+                      filters={[
+                        {
+                          name: "Unity Editor",
+                          extensions: ["exe", "app"],
+                        },
+                      ]}
+                      hint="This Unity executable path is shared by all build targets in this project."
+                      label="Unity executable"
+                      onClear={() => {
+                        const targetIds = draft.buildTargets.map(
+                          (target) => target.id,
+                        );
+
+                        startTransition(() => {
+                          setDraft((currentDraft) => {
+                            if (!currentDraft) {
+                              return currentDraft;
+                            }
+
+                            return {
+                              ...currentDraft,
+                              buildTargets: currentDraft.buildTargets.map(
+                                (target) => ({
+                                  ...target,
+                                  unityExecutablePath: "",
+                                }),
+                              ),
+                            };
+                          });
+                          setPathDiagnostics((current) => {
+                            const next = { ...current };
+                            for (const targetId of targetIds) {
+                              next[targetId] = null;
+                            }
+                            return next;
+                          });
+                          setValidatingTargets((current) => {
+                            const next = { ...current };
+                            for (const targetId of targetIds) {
+                              next[targetId] = false;
+                            }
+                            return next;
+                          });
+                        });
+                      }}
+                      onError={(pickError) => {
+                        setSaveError(buildProjectSaveErrorMessage(pickError));
+                      }}
+                      onPathPicked={(selectedPath) => {
+                        const targetIds = draft.buildTargets.map(
+                          (target) => target.id,
+                        );
+
+                        startTransition(() => {
+                          setDraft((currentDraft) => {
+                            if (!currentDraft) {
+                              return currentDraft;
+                            }
+
+                            return {
+                              ...currentDraft,
+                              buildTargets: currentDraft.buildTargets.map(
+                                (target) => ({
+                                  ...target,
+                                  unityExecutablePath: selectedPath,
+                                }),
+                              ),
+                            };
+                          });
+                          setPathDiagnostics((current) => {
+                            const next = { ...current };
+                            for (const targetId of targetIds) {
+                              next[targetId] = null;
+                            }
+                            return next;
+                          });
+                        });
+
+                        for (const targetId of targetIds) {
+                          scheduleUnityExecutableValidation(
+                            targetId,
+                            selectedPath,
+                            0,
+                          );
+                        }
+                      }}
+                      pickerKind="file"
+                      placeholder="C:/Program Files/Unity/Hub/Editor/.../Unity.exe"
+                      value={sharedUnityExecutablePath}
+                    />
+
+                    {sharedUnityExecutableDiagnostics ? (
+                      <p
+                        className={joinClassNames(
+                          "wizard-target-card__diagnostic",
+                          sharedUnityExecutableDiagnostics.status !== "ready" &&
+                            "wizard-target-card__diagnostic--error",
+                        )}
+                      >
+                        {sharedUnityExecutableDiagnostics.message}
+                      </p>
+                    ) : null}
+
+                    {isSharedUnityExecutableValidating ? (
+                      <p className="wizard-target-card__diagnostic">
+                        Validating Unity executable path...
+                      </p>
+                    ) : null}
+                  </>
                 ) : null}
 
                 {draft && draft.buildTargets.length === 0 ? (
@@ -2112,7 +2257,6 @@ export function RepositoryProjectDetail({
                           draft.publishDestinations,
                           target.id,
                         );
-                      const isOpen = Boolean(expandedTargetIds[target.id]);
 
                       return (
                         <FormSection
@@ -2145,121 +2289,33 @@ export function RepositoryProjectDetail({
                               />
                               <Button
                                 onClick={() =>
-                                  handleTargetAccordionChange(
-                                    target.id,
-                                    !isOpen,
-                                  )
+                                  handleTargetAccordionChange(target.id, true)
                                 }
                                 size="sm"
                                 variant="ghost"
                               >
-                                {isOpen ? "Collapse" : "Edit"}
+                                Edit
                               </Button>
                             </div>
                           }
                           summary={
-                            isOpen ? null : (
-                              <ProjectDetailBuildTargetSummary
-                                bindingDestinations={bindingDestinations}
-                                diagnostics={diagnostics}
-                                isValidating={Boolean(
-                                  validatingTargets[target.id],
-                                )}
-                                target={target}
-                              />
-                            )
+                            <ProjectDetailBuildTargetSummary
+                              bindingDestinations={bindingDestinations}
+                              diagnostics={diagnostics}
+                              isValidating={Boolean(
+                                validatingTargets[target.id],
+                              )}
+                              target={target}
+                            />
                           }
                         >
-                          {isOpen ? (
-                            <div className="wizard-form-grid wizard-form-grid--targets">
-                              <TextField
-                                error={fieldErrors.name}
-                                hint="Keep the target name stable. It becomes part of the artifact file name."
-                                label="Target name"
-                                onChange={(event) => {
-                                  updateBuildTarget(target.id, {
-                                    name: event.currentTarget.value,
-                                  });
-                                }}
-                                placeholder="Windows"
-                                value={target.name}
-                              />
-                              <SelectField
-                                error={fieldErrors.targetPlatform}
-                                hint="This writes the Unity targetPlatform contract field directly."
-                                label="Unity target platform"
-                                onChange={(event) => {
-                                  updateBuildTarget(target.id, {
-                                    targetPlatform:
-                                      normalizeUnityTargetPlatformValue(
-                                        event.currentTarget.value,
-                                      ),
-                                  });
-                                }}
-                                options={PLATFORM_OPTIONS}
-                                value={normalizeUnityTargetPlatformValue(
-                                  target.targetPlatform,
-                                )}
-                              />
-                              <TextField
-                                error={fieldErrors.buildMethod}
-                                hint="Point this at a real static Unity method, for example Builder.PerformWindows."
-                                label="Unity build method"
-                                onChange={(event) => {
-                                  updateBuildTarget(target.id, {
-                                    buildMethod: event.currentTarget.value,
-                                  });
-                                }}
-                                placeholder="Builder.PerformWindows"
-                                value={target.buildMethod}
-                              />
-                              <PathPickerField
-                                buttonLabel="Choose Unity executable"
-                                disabled={isSaving}
-                                dialogTitle="Select Unity Editor executable"
-                                error={fieldErrors.unityExecutablePath}
-                                filters={[
-                                  {
-                                    name: "Unity Editor",
-                                    extensions: ["exe", "app"],
-                                  },
-                                ]}
-                                hint="Select the host-local Unity Editor executable that should run this target."
-                                label="Unity executable"
-                                onError={(pickError) => {
-                                  setSaveError(
-                                    buildProjectSaveErrorMessage(pickError),
-                                  );
-                                }}
-                                onPathPicked={(selectedPath) =>
-                                  handlePickUnityExecutablePath(
-                                    target.id,
-                                    selectedPath,
-                                  )
-                                }
-                                pickerKind="file"
-                                placeholder="C:/Program Files/Unity/Hub/Editor/.../Unity.exe"
-                                value={target.unityExecutablePath}
-                              />
-
-                              {diagnostics ? (
-                                <p
-                                  className={joinClassNames(
-                                    "wizard-target-card__diagnostic",
-                                    diagnostics.status !== "ready" &&
-                                      "wizard-target-card__diagnostic--error",
-                                  )}
-                                >
-                                  {diagnostics.message}
-                                </p>
-                              ) : null}
-
-                              {validatingTargets[target.id] ? (
-                                <p className="wizard-target-card__diagnostic">
-                                  Validating Unity executable path...
-                                </p>
-                              ) : null}
-                            </div>
+                          {fieldErrors.name ||
+                          fieldErrors.targetPlatform ||
+                          fieldErrors.buildMethod ? (
+                            <p className="wizard-target-card__diagnostic wizard-target-card__diagnostic--error">
+                              This target has draft issues. Open Edit to review
+                              the fields.
+                            </p>
                           ) : null}
                         </FormSection>
                       );
@@ -2294,6 +2350,7 @@ export function RepositoryProjectDetail({
                     credentials={publishCredentials}
                     destinations={draft.publishDestinations}
                     disabled={isSaving}
+                    editingMode="overlay"
                     errors={validationErrors.publishDestinations}
                     onChange={(nextPublishDestinations) => {
                       startTransition(() => {
@@ -2309,6 +2366,7 @@ export function RepositoryProjectDetail({
                         });
                       });
                     }}
+                    showItchUserversionTemplate={isManagedSource}
                     onSaveCredential={handleSavePublishCredential}
                   />
                 </div>
@@ -2447,16 +2505,6 @@ export function RepositoryProjectDetail({
             </div>
           </fieldset>
         </div>
-        {isProjectRemovalOpen ? (
-          <ProjectRemovalDialog
-            hasPendingChanges={hasPendingChanges}
-            isRemoving={isRemovingProject}
-            onCancel={handleCloseProjectRemoval}
-            onRemove={handleRemoveProject}
-            projectName={draft?.name.trim() || repository.repository_name}
-            removalError={projectRemovalError}
-          />
-        ) : null}
       </FocusPageFrame>
     </div>
   );
@@ -2752,6 +2800,61 @@ function formatCollapsedBuildTargetBindingSummary(
   }
 
   return `${bindingDestinations.slice(0, 2).join(", ")} +${bindingDestinations.length - 2} more`;
+}
+
+function resolveSharedBuildTargetUnityExecutableState(
+  buildTargets: RepositoryProjectBuildTargetDraft[],
+) {
+  if (buildTargets.length === 0) {
+    return {
+      value: "",
+      hasMixedValues: false,
+    };
+  }
+
+  const normalizedValues = buildTargets.map((target) =>
+    target.unityExecutablePath.trim(),
+  );
+  const firstValue = normalizedValues[0] ?? "";
+  const hasMixedValues = normalizedValues.some((value) => value !== firstValue);
+  const preferredValue =
+    normalizedValues.find((value) => value.length > 0) ?? firstValue;
+
+  return {
+    value: preferredValue,
+    hasMixedValues,
+  };
+}
+
+function resolveSharedUnityExecutableError(
+  buildTargets: RepositoryProjectBuildTargetDraft[],
+  buildTargetErrors: Record<
+    string,
+    RepositoryProjectBuildTargetValidationErrors
+  >,
+) {
+  for (const target of buildTargets) {
+    const message = buildTargetErrors[target.id]?.unityExecutablePath;
+    if (message) {
+      return message;
+    }
+  }
+
+  return undefined;
+}
+
+function resolveSharedUnityExecutableDiagnostics(
+  buildTargets: RepositoryProjectBuildTargetDraft[],
+  diagnosticsByTarget: Record<string, UnityExecutableValidation | null>,
+) {
+  for (const target of buildTargets) {
+    const diagnostics = diagnosticsByTarget[target.id];
+    if (diagnostics) {
+      return diagnostics;
+    }
+  }
+
+  return null;
 }
 
 function countEnabledPublishDestinationBindings(
@@ -3161,31 +3264,69 @@ function buildProjectRemoveErrorMessage(error: unknown): string {
   return "The desktop shell could not remove the project.";
 }
 
-type ProjectRemovalDialogProps = {
+type ProjectRemovalOverlayProps = {
   hasPendingChanges: boolean;
-  isRemoving: boolean;
-  onCancel: () => void;
-  onRemove: (strategy: RemoveRepositoryProjectStrategy) => void;
+  onResolve?: (value?: RemoveRepositoryProjectStrategy | null) => void;
   projectName: string;
-  removalError: string | null;
 };
 
-function ProjectRemovalDialog({
+type BuildTargetRemovalOverlayProps = {
+  bindingImpact: string[];
+  onResolve?: (value?: boolean | null) => void;
+  targetName: string;
+};
+
+function BuildTargetRemovalOverlay({
+  bindingImpact,
+  onResolve,
+  targetName,
+}: BuildTargetRemovalOverlayProps) {
+  const resolvedTargetName = targetName.trim() || "this build target";
+
+  return (
+    <FullScreenModal
+      className="project-removal-dialog__modal"
+      description="Removing a build target also removes every publish binding that points to it."
+      onResolve={onResolve}
+      title={`Remove ${resolvedTargetName}?`}
+    >
+      <div className="project-removal-dialog">
+        <p className="project-removal-dialog__copy">
+          {bindingImpact.length > 0
+            ? `This target is bound to: ${bindingImpact.join(", ")}. These bindings will be removed together with the target.`
+            : "This target has no publish bindings. The removal only affects this target definition."}
+        </p>
+
+        <div className="confirm-dialog__actions">
+          <Button
+            leadingIcon="trash"
+            onClick={() => onResolve?.(true)}
+            size="sm"
+            variant="primary"
+          >
+            Remove target
+          </Button>
+          <Button onClick={() => onResolve?.(false)} size="sm" variant="ghost">
+            Cancel
+          </Button>
+        </div>
+      </div>
+    </FullScreenModal>
+  );
+}
+
+function ProjectRemovalOverlay({
   hasPendingChanges,
-  isRemoving,
-  onCancel,
-  onRemove,
+  onResolve,
   projectName,
-  removalError,
-}: ProjectRemovalDialogProps) {
+}: ProjectRemovalOverlayProps) {
   const resolvedProjectName = projectName.trim() || "this project";
 
   return (
     <FullScreenModal
       className="project-removal-dialog__modal"
       description="Choose whether HGP should only remove the project from SQLite or also purge runtime-owned files from disk."
-      dismissible={!isRemoving}
-      onResolve={() => onCancel()}
+      onResolve={onResolve}
       title={`Remove ${resolvedProjectName}?`}
     >
       <div className="project-removal-dialog">
@@ -3194,10 +3335,6 @@ function ProjectRemovalDialog({
             ? "Unsaved edits will be discarded when the project is removed."
             : "Select how thoroughly HGP should remove this project from the app."}
         </p>
-
-        {removalError ? (
-          <p className="feed-banner feed-banner--error">{removalError}</p>
-        ) : null}
 
         <div className="project-removal-dialog__options">
           <section className="project-removal-dialog__option">
@@ -3213,8 +3350,7 @@ function ProjectRemovalDialog({
 
             <div className="project-removal-dialog__option-actions">
               <Button
-                disabled={isRemoving}
-                onClick={() => onRemove("detach")}
+                onClick={() => onResolve?.("detach")}
                 size="sm"
                 variant="primary"
               >
@@ -3238,8 +3374,7 @@ function ProjectRemovalDialog({
             <div className="project-removal-dialog__option-actions">
               <Button
                 className="project-removal-dialog__action--purge"
-                disabled={isRemoving}
-                onClick={() => onRemove("purge")}
+                onClick={() => onResolve?.("purge")}
                 size="sm"
                 variant="secondary"
               >
@@ -3252,8 +3387,7 @@ function ProjectRemovalDialog({
         <div className="confirm-dialog__actions">
           <Button
             data-overlay-autofocus
-            disabled={isRemoving}
-            onClick={onCancel}
+            onClick={() => onResolve?.(null)}
             size="sm"
             variant="ghost"
           >
@@ -3338,7 +3472,10 @@ function buildRepositoryProjectDraft(
     defaultBranch: repository.default_branch ?? "",
     artifactsRootOverride: repository.artifacts_root_override ?? "",
     workspaceRootOverride: repository.workspace_root_override ?? "",
-    pollingIntervalSeconds: String(repository.polling_interval_seconds),
+    pollingIntervalSeconds:
+      sourceMode === "managed_repository"
+        ? String(repository.polling_interval_seconds)
+        : "0",
     enabled: repository.enabled ? "enabled" : "disabled",
     buildTargets,
     publishDestinations: buildPublishDestinationDrafts(
@@ -3549,12 +3686,14 @@ function validateRepositoryProjectDraft(
     }
   }
 
-  const pollingIntervalSeconds = Number(draft.pollingIntervalSeconds);
-  if (!Number.isInteger(pollingIntervalSeconds)) {
-    errors.pollingIntervalSeconds = "Polling interval must be an integer.";
-  } else if (pollingIntervalSeconds < MIN_PROJECT_POLL_INTERVAL_SECONDS) {
-    errors.pollingIntervalSeconds =
-      "Polling interval must be at least 5 seconds.";
+  if (draft.sourceMode === "managed_repository") {
+    const pollingIntervalSeconds = Number(draft.pollingIntervalSeconds);
+    if (!Number.isInteger(pollingIntervalSeconds)) {
+      errors.pollingIntervalSeconds = "Polling interval must be an integer.";
+    } else if (pollingIntervalSeconds < MIN_PROJECT_POLL_INTERVAL_SECONDS) {
+      errors.pollingIntervalSeconds =
+        "Polling interval must be at least 5 seconds.";
+    }
   }
 
   if (draft.buildTargets.length === 0) {
@@ -3776,7 +3915,10 @@ function buildRepositoryProjectUpdateInput(
     workspace_root_override: normalizeOptionalDraftValue(
       draft.workspaceRootOverride,
     ),
-    polling_interval_seconds: Number(draft.pollingIntervalSeconds),
+    polling_interval_seconds:
+      sourceMode === "managed_repository"
+        ? Number(draft.pollingIntervalSeconds)
+        : 0,
     enabled: draft.enabled === "enabled",
     build_targets: draft.buildTargets.map((target) => ({
       build_target_id: target.buildTargetId,

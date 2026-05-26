@@ -54,7 +54,7 @@ const FullScreenModal = ({
     const nextFocusTarget =
       preferredFocusTarget ?? focusableNodes[0] ?? container;
 
-    nextFocusTarget.focus();
+    nextFocusTarget.focus({ preventScroll: true });
   }, []);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {

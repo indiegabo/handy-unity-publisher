@@ -94,22 +94,18 @@ describe("PublishDestinationsEditor interactions", () => {
       within(bindingDialog).queryByLabelText("Status"),
     ).not.toBeInTheDocument();
     expect(
-      within(bindingDialog).queryByText(
+      within(bindingDialog).getByText(
         "Use the Itch channel that should receive this build target artifact.",
       ),
-    ).not.toBeInTheDocument();
+    ).toBeInTheDocument();
     expect(
-      within(bindingDialog).queryByText(
-        "Optional template. Leave empty to use the git tag as the userversion.",
-      ),
-    ).not.toBeInTheDocument();
+      within(bindingDialog).getByLabelText("Itch channel"),
+    ).toBeInTheDocument();
 
-    fireEvent.change(
-      await within(bindingDialog).findByLabelText("Itch channel"),
-      {
-        target: { value: "windows" },
-      },
-    );
+    fireEvent.change(within(bindingDialog).getByLabelText("Itch channel"), {
+      target: { value: "windows" },
+    });
+
     fireEvent.click(
       within(bindingDialog).getByRole("button", { name: "Confirm" }),
     );
@@ -133,6 +129,43 @@ describe("PublishDestinationsEditor interactions", () => {
     expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
     expect(
       screen.queryByLabelText("Itch account name"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides the Itch userversion template for local project flows", async () => {
+    render(
+      <Harness
+        editingMode="overlay"
+        initialDestinations={[]}
+        showItchUserversionTemplate={false}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Add destination" }));
+    fireEvent.click(screen.getByRole("button", { name: "Itch" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Add Itch destination",
+    });
+
+    fireEvent.change(within(dialog).getByLabelText("Itch account name"), {
+      target: { value: "local-user" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Itch game slug"), {
+      target: { value: "local-build" },
+    });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add target" }));
+
+    const bindingDialog = await screen.findByRole("dialog", {
+      name: "Add target binding",
+    });
+
+    expect(
+      within(bindingDialog).getByLabelText("Itch channel"),
+    ).toBeInTheDocument();
+    expect(
+      within(bindingDialog).queryByLabelText("Itch userversion template"),
     ).not.toBeInTheDocument();
   });
 
@@ -765,6 +798,7 @@ function Harness({
   editingMode = "inline",
   initialDestinations,
   onSaveCredential,
+  showItchUserversionTemplate = true,
 }: {
   buildTargets?: ProjectBuildTargetReference[];
   credentials?: SecretCredentialSetting[];
@@ -774,6 +808,7 @@ function Harness({
     destinationId: string,
     input: Record<string, unknown>,
   ) => Promise<void> | void;
+  showItchUserversionTemplate?: boolean;
 }) {
   const [destinations, setDestinations] = useState(initialDestinations);
 
@@ -786,6 +821,7 @@ function Harness({
         editingMode={editingMode}
         onChange={setDestinations}
         onSaveCredential={onSaveCredential}
+        showItchUserversionTemplate={showItchUserversionTemplate}
       />
     </OverlayProvider>
   );

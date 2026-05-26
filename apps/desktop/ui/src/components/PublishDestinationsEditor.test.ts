@@ -99,6 +99,7 @@ describe("PublishDestinationsEditor helpers", () => {
         expect(drafts[0]?.name).toBe("Itch");
         expect(drafts[0]?.itchAccountName).toBe("indiegabo");
         expect(drafts[0]?.bindings[0]?.buildTargetDraftId).toBe("target-windows");
+        expect(drafts[0]?.bindings[0]?.itchChannel).toBe("windows-stable");
 
         const payload = buildUpdateProjectPublishTargetsInput(drafts, BUILD_TARGETS);
 

@@ -193,9 +193,7 @@ describe("CreateProjectWizard", () => {
       ).not.toBeInTheDocument();
     });
 
-    expect(
-      screen.getByRole("heading", { name: "Windows" }),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Windows")).toBeInTheDocument();
     expect(
       screen.getAllByText(/Builder\.PerformWindows/).length,
     ).toBeGreaterThan(0);

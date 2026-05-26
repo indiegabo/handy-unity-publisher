@@ -7,8 +7,12 @@ import {
 } from "react";
 
 import { Button } from "./Button";
+import {
+  BuildTargetEditorOverlay,
+  type BuildTargetEditorOverlayResult,
+  type SharedBuildTargetDraft,
+} from "./BuildTargetEditorOverlay";
 import { BuildTargetRemovalCallout } from "./BuildTargetRemovalCallout";
-import FullScreenModal from "./FullScreenModal";
 import {
   PublishDestinationsEditor,
   buildCreateProjectPublishTargetsInput,
@@ -102,10 +106,6 @@ type TargetStepErrors = {
   targets: Record<string, TargetFieldErrors>;
 };
 
-type BuildTargetEditorOverlayResult = {
-  target: BuildTargetDraft;
-};
-
 type PathStepErrors = {
   artifactsRootOverride?: string;
   workspaceRootOverride?: string;
@@ -183,15 +183,6 @@ const REPOSITORY_VISIBILITY_OPTIONS = [
   { label: "Private", value: "private" },
 ] as const;
 
-const PLATFORM_OPTIONS = [
-  { label: "Select a Unity target", value: "" },
-  { label: "Windows", value: "StandaloneWindows64" },
-  { label: "Linux", value: "StandaloneLinux64" },
-  { label: "macOS", value: "StandaloneOSX" },
-  { label: "WebGL", value: "WebGL" },
-  { label: "Android", value: "Android" },
-] as const;
-
 const EMPTY_VALIDATION_ATTEMPTS: Record<WizardStepKey, boolean> = {
   identity: false,
   access: false,
@@ -200,8 +191,6 @@ const EMPTY_VALIDATION_ATTEMPTS: Record<WizardStepKey, boolean> = {
   paths: false,
   review: false,
 };
-
-const DEFAULT_CUSTOM_TARGET_PLATFORM = "StandaloneWindows64";
 
 const INITIAL_PROJECT_DRAFT = createInitialProjectDraft();
 const INITIAL_PROJECT_DRAFT_DIRTY_KEY = buildProjectDraftDirtyKey(
@@ -649,12 +638,7 @@ export function CreateProjectWizard({
         const createdCredential = credentials.find(
           (credential) => credential.credential_id === createdCredentialId,
         );
-
-        if (!createdCredential) {
-          throw new Error(
-            "The saved publish credential could not be reloaded.",
-          );
-        }
+        const credentialName = createdCredential?.name || input.name.trim();
 
         startTransition(() => {
           setRepositoryCredentials(
@@ -672,14 +656,15 @@ export function CreateProjectWizard({
                 destination.id === destinationId
                   ? {
                       ...destination,
-                      credentialsId: createdCredential.credential_id,
+                      credentialsId: createdCredentialId,
+                      credentialsName: credentialName,
                     }
                   : destination,
             ),
           }));
         });
 
-        return createdCredential.credential_id;
+        return createdCredentialId;
       } catch (error) {
         throw new Error(buildProjectErrorMessage(error));
       }
@@ -1008,7 +993,10 @@ export function CreateProjectWizard({
     startTransition(() => {
       setDraft((current) => ({
         ...current,
-        buildTargets: [...current.buildTargets, created.target],
+        buildTargets: [
+          ...current.buildTargets,
+          toWizardBuildTargetDraft(created.target),
+        ],
       }));
     });
   });
@@ -1036,7 +1024,9 @@ export function CreateProjectWizard({
       setDraft((current) => ({
         ...current,
         buildTargets: current.buildTargets.map((entry) =>
-          entry.id === targetId ? updated.target : entry,
+          entry.id === targetId
+            ? toWizardBuildTargetDraft(updated.target)
+            : entry,
         ),
       }));
     });
@@ -1936,6 +1926,9 @@ export function CreateProjectWizard({
                       }));
                     });
                   }}
+                  showItchUserversionTemplate={
+                    draft.projectKind === "repository"
+                  }
                   onSaveCredential={handleSavePublishCredential}
                 />
               ) : null}
@@ -2018,9 +2011,13 @@ export function CreateProjectWizard({
                         <MetaItem label="Engine">
                           {formatRepositoryEngineKindLabel(draft.engineKind)}
                         </MetaItem>
-                        <MetaItem label="Poll">
-                          {`${draft.pollingIntervalSeconds.trim() || "0"}s`}
-                        </MetaItem>
+                        {draft.projectKind === "repository" ? (
+                          <MetaItem label="Poll">
+                            {`${draft.pollingIntervalSeconds.trim() || "0"}s`}
+                          </MetaItem>
+                        ) : (
+                          <MetaItem label="Source">No remote polling</MetaItem>
+                        )}
                         <MetaItem
                           label={
                             draft.projectKind === "repository"
@@ -2275,250 +2272,6 @@ export function CreateProjectWizard({
   );
 }
 
-type BuildTargetEditorOverlayProps = {
-  initialTarget: BuildTargetDraft;
-  mode: "create" | "edit";
-  onResolve?: (value?: BuildTargetEditorOverlayResult | null) => void;
-  targetId: string;
-};
-
-function BuildTargetEditorOverlay({
-  initialTarget,
-  mode,
-  onResolve,
-  targetId,
-}: BuildTargetEditorOverlayProps) {
-  const isCreateMode = mode === "create";
-  const initialNormalizedPlatform = normalizeUnityTargetPlatformValue(
-    initialTarget.targetPlatform,
-  );
-  const initialSuggestedMethod = resolveSuggestedUnityBuildMethod(
-    initialNormalizedPlatform,
-  );
-  const initialSuggestedName = resolveUnityBuildTargetName(
-    initialNormalizedPlatform,
-  );
-  const [draft, setDraft] = useState<BuildTargetDraft>(() => ({
-    ...initialTarget,
-    id: targetId,
-  }));
-  const [isCustomConfigurationEnabled, setIsCustomConfigurationEnabled] =
-    useState(() => {
-      if (isCreateMode) {
-        return false;
-      }
-
-      const normalizedCurrentMethod = initialTarget.buildMethod.trim();
-      const normalizedCurrentName = initialTarget.name.trim();
-
-      return (
-        normalizedCurrentMethod !== (initialSuggestedMethod ?? "") ||
-        normalizedCurrentName !== initialSuggestedName
-      );
-    });
-  const [attemptedSave, setAttemptedSave] = useState(false);
-
-  const normalizedTargetPlatform = normalizeUnityTargetPlatformValue(
-    draft.targetPlatform,
-  );
-  const suggestedBuildMethod = resolveSuggestedUnityBuildMethod(
-    normalizedTargetPlatform,
-  );
-
-  const fieldErrors = attemptedSave
-    ? validateBuildTargetDraftForOverlay(
-        draft,
-        isCustomConfigurationEnabled,
-        suggestedBuildMethod,
-      )
-    : {};
-
-  const enableCustomConfiguration = () => {
-    setIsCustomConfigurationEnabled(true);
-    setDraft((current) => {
-      const fallbackPlatform = current.targetPlatform.trim()
-        ? normalizeUnityTargetPlatformValue(current.targetPlatform)
-        : DEFAULT_CUSTOM_TARGET_PLATFORM;
-
-      return {
-        ...current,
-        targetPlatform: fallbackPlatform,
-        buildMethod:
-          current.buildMethod.trim() ||
-          resolveSuggestedUnityBuildMethod(fallbackPlatform) ||
-          "",
-        name:
-          current.name.trim() || resolveUnityBuildTargetName(fallbackPlatform),
-      };
-    });
-  };
-
-  const disableCustomConfiguration = () => {
-    setIsCustomConfigurationEnabled(false);
-    setDraft((current) => {
-      const normalizedPlatform = normalizeUnityTargetPlatformValue(
-        current.targetPlatform,
-      );
-
-      return {
-        ...current,
-        buildMethod: resolveSuggestedUnityBuildMethod(normalizedPlatform) ?? "",
-        name: resolveUnityBuildTargetName(normalizedPlatform),
-      };
-    });
-  };
-
-  const handleSave = () => {
-    setAttemptedSave(true);
-
-    const errors = validateBuildTargetDraftForOverlay(
-      draft,
-      isCustomConfigurationEnabled,
-      suggestedBuildMethod,
-    );
-
-    if (firstBuildTargetFieldError(errors)) {
-      return;
-    }
-
-    onResolve?.({
-      target: {
-        ...draft,
-        buildMethod: isCustomConfigurationEnabled
-          ? draft.buildMethod.trim()
-          : (suggestedBuildMethod ?? ""),
-        name: isCustomConfigurationEnabled
-          ? draft.name.trim()
-          : resolveUnityBuildTargetName(normalizedTargetPlatform),
-        targetPlatform: normalizedTargetPlatform,
-      },
-    });
-  };
-
-  return (
-    <FullScreenModal
-      description={
-        isCreateMode
-          ? "Configure one build target and return to the wizard with a compact summary card."
-          : "Update this build target and return to the wizard once the target contract is ready."
-      }
-      footer={
-        <div className="publish-destination-editor-modal__footer">
-          <Button onClick={() => onResolve?.(null)} size="sm" variant="ghost">
-            Cancel
-          </Button>
-          <Button
-            leadingIcon="plus"
-            onClick={handleSave}
-            size="sm"
-            variant="primary"
-          >
-            {isCreateMode ? "Confirm" : "Save target"}
-          </Button>
-        </div>
-      }
-      onResolve={onResolve}
-      title={isCreateMode ? "Add build target" : "Edit build target"}
-    >
-      <div className="project-detail-form-grid publish-destination-editor-modal__content">
-        <div className="build-target-editor__mode-actions">
-          <Button
-            onClick={() => {
-              if (isCustomConfigurationEnabled) {
-                disableCustomConfiguration();
-                return;
-              }
-
-              enableCustomConfiguration();
-            }}
-            size="sm"
-            variant={isCustomConfigurationEnabled ? "ghost" : "secondary"}
-          >
-            {isCustomConfigurationEnabled
-              ? "Default configuration"
-              : "Custom configuration"}
-          </Button>
-        </div>
-
-        {!isCustomConfigurationEnabled ? (
-          <>
-            <SelectField
-              data-overlay-autofocus
-              error={fieldErrors.targetPlatform}
-              hint="This writes the Unity targetPlatform contract field directly."
-              label="Unity target platform"
-              onChange={(event) => {
-                const nextTargetPlatform = normalizeUnityTargetPlatformValue(
-                  event.currentTarget.value,
-                );
-                setDraft((current) => ({
-                  ...current,
-                  targetPlatform: nextTargetPlatform,
-                  buildMethod:
-                    resolveSuggestedUnityBuildMethod(nextTargetPlatform) ?? "",
-                  name: resolveUnityBuildTargetName(nextTargetPlatform),
-                }));
-              }}
-              options={PLATFORM_OPTIONS}
-              value={normalizedTargetPlatform}
-            />
-
-            <div className="wizard-callout wizard-callout--compact">
-              <p className="wizard-callout__title">Platform defaults</p>
-              <p className="wizard-callout__copy">
-                HGP derives the target name and Unity build method from the
-                selected target platform by default. You still need to implement
-                the static method in your Unity project.
-              </p>
-              <p className="wizard-callout__copy wizard-summary-list__copy--muted">
-                Default target name:{" "}
-                {resolveUnityBuildTargetName(normalizedTargetPlatform)}
-              </p>
-              <p className="wizard-callout__copy wizard-summary-list__copy--muted">
-                Default build method:{" "}
-                {suggestedBuildMethod ?? "Select a platform first"}
-              </p>
-            </div>
-          </>
-        ) : null}
-
-        {isCustomConfigurationEnabled ? (
-          <>
-            <TextField
-              data-overlay-autofocus
-              error={fieldErrors.name}
-              hint="Keep the custom target name stable. It becomes part of the artifact file name."
-              label="Custom target name"
-              onChange={(event) => {
-                const nextName = event.currentTarget.value;
-                setDraft((current) => ({ ...current, name: nextName }));
-              }}
-              placeholder={resolveUnityBuildTargetName(
-                normalizedTargetPlatform,
-              )}
-              value={draft.name}
-            />
-            <TextField
-              error={fieldErrors.buildMethod}
-              hint="Use this only when your Unity project requires a non-standard method path for this custom target."
-              label="Custom build method"
-              onChange={(event) => {
-                const nextBuildMethod = event.currentTarget.value;
-                setDraft((current) => ({
-                  ...current,
-                  buildMethod: nextBuildMethod,
-                }));
-              }}
-              placeholder={suggestedBuildMethod ?? "Builder.PerformWindows"}
-              value={draft.buildMethod}
-            />
-          </>
-        ) : null}
-      </div>
-    </FullScreenModal>
-  );
-}
-
 function formatProjectKindLabel(projectKind: ProjectDraft["projectKind"]) {
   return projectKind === "repository"
     ? "Repository project"
@@ -2708,6 +2461,17 @@ function createEmptyBuildTargetDraft(index: number): BuildTargetDraft {
   };
 }
 
+function toWizardBuildTargetDraft(
+  target: SharedBuildTargetDraft,
+): BuildTargetDraft {
+  return {
+    id: target.id,
+    name: target.name,
+    targetPlatform: target.targetPlatform,
+    buildMethod: target.buildMethod,
+  };
+}
+
 function validateIdentityStep(
   draft: ProjectDraft,
   repositoryInventory: RepositoryInspectionEntry[],
@@ -2799,12 +2563,15 @@ function validateAccessStep(
     errors.repositoryUrl = "This remote is already registered in HGP.";
   }
 
-  const pollingInterval = Number(draft.pollingIntervalSeconds.trim());
-  if (!Number.isInteger(pollingInterval)) {
-    errors.pollingIntervalSeconds = "Polling interval must be a whole number.";
-  } else if (pollingInterval < 5) {
-    errors.pollingIntervalSeconds =
-      "Polling interval must be at least 5 seconds.";
+  if (draft.projectKind === "repository") {
+    const pollingInterval = Number(draft.pollingIntervalSeconds.trim());
+    if (!Number.isInteger(pollingInterval)) {
+      errors.pollingIntervalSeconds =
+        "Polling interval must be a whole number.";
+    } else if (pollingInterval < 5) {
+      errors.pollingIntervalSeconds =
+        "Polling interval must be at least 5 seconds.";
+    }
   }
 
   if (
@@ -2997,36 +2764,6 @@ function firstBuildTargetFieldError(errors: TargetFieldErrors) {
   return errors.name || errors.targetPlatform || errors.buildMethod || null;
 }
 
-function validateBuildTargetDraftForOverlay(
-  target: BuildTargetDraft,
-  isCustomConfigurationEnabled: boolean,
-  suggestedBuildMethod: string | null,
-): TargetFieldErrors {
-  const errors: TargetFieldErrors = {};
-
-  if (!target.targetPlatform.trim()) {
-    errors.targetPlatform = "Unity target platform is required.";
-  }
-
-  if (isCustomConfigurationEnabled) {
-    if (!target.name.trim()) {
-      errors.name = "Custom target name is required.";
-    }
-
-    if (!target.buildMethod.trim()) {
-      errors.buildMethod = "Custom build method is required.";
-    } else if (!target.buildMethod.includes(".")) {
-      errors.buildMethod =
-        "Use a full static method path such as Builder.PerformWindows.";
-    }
-  } else if (!suggestedBuildMethod) {
-    errors.buildMethod =
-      "Select a supported Unity target platform or enable method override.";
-  }
-
-  return errors;
-}
-
 function formatBuildTargetExecutableSummary(
   diagnostics: UnityExecutableValidation | null,
   isValidating: boolean,
@@ -3141,7 +2878,9 @@ function buildCreateProjectInput(
       : null,
     artifacts_root_override: optionalTrimmedString(draft.artifactsRootOverride),
     workspace_root_override: optionalTrimmedString(draft.workspaceRootOverride),
-    polling_interval_seconds: Number(draft.pollingIntervalSeconds.trim()),
+    polling_interval_seconds: isRepositoryProject
+      ? Number(draft.pollingIntervalSeconds.trim())
+      : 0,
     build_targets: draft.buildTargets.map((target) =>
       buildCreateProjectBuildTargetInput(
         draft.engineKind,
@@ -3214,33 +2953,6 @@ function normalizeUnityTargetPlatformValue(value: string) {
     default:
       return value.trim();
   }
-}
-
-function resolveSuggestedUnityBuildMethod(targetPlatform: string) {
-  switch (targetPlatform.trim()) {
-    case "StandaloneWindows64":
-      return "Builder.PerformWindows";
-    case "StandaloneLinux64":
-      return "Builder.PerformLinux";
-    case "StandaloneOSX":
-      return "Builder.PerformMacOS";
-    case "WebGL":
-      return "Builder.PerformWebGL";
-    case "Android":
-      return "Builder.PerformAndroid";
-    default:
-      return null;
-  }
-}
-
-function resolveUnityBuildTargetName(targetPlatform: string) {
-  const normalizedTargetPlatform =
-    normalizeUnityTargetPlatformValue(targetPlatform);
-  const option = PLATFORM_OPTIONS.find(
-    (entry) => entry.value === normalizedTargetPlatform,
-  );
-
-  return option?.label || normalizedTargetPlatform || "";
 }
 
 function listSelectableUnityEditors(
