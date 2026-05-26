@@ -1,16 +1,23 @@
 {
+    "productName": "HandyGamesPublisher",
     "bundle": {
         "active": true,
         "targets": [
             "msi",
             "nsis"
         ],
+        "windows": {
+            "wix": {
+                "template": "./windows/wix/main.wxs"
+            },
+            "nsis": {
+                "installMode": "currentUser"
+            }
+        },
         "externalBin": [
             "bin/hgp-runtime",
             "bin/hgp-butler"
         ],
-        "resources": [
-            "localizations/"
-        ]
+        "resources": []
     }
 }

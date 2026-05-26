@@ -31,6 +31,7 @@ if (existingServerState === "expected") {
         cwd: desktopUiDirectory,
         env: process.env,
         shell: process.platform === "win32",
+        windowsHide: process.platform === "win32",
         stdio: "inherit",
     });
 

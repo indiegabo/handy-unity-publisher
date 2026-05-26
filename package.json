@@ -9,6 +9,7 @@
         "version:check": "node ./scripts/sync-app-version.mjs --check",
         "identity:check": "node ./scripts/validate-hgp-identity.mjs",
         "smoke:runtime": "node ./scripts/runtime-smoke.mjs",
+        "release": "node ./scripts/release-installer.mjs",
         "start": "node ./scripts/start-desktop-dev.mjs",
         "start:desktop": "node ./scripts/start-desktop-dev.mjs"
     },

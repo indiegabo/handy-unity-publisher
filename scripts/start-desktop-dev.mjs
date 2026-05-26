@@ -98,6 +98,7 @@ function spawnWindowsTauriProcess() {
             cwd: desktopApplicationDirectory,
             env: buildWindowsCommandEnvironment(process.env),
             shell: "cmd.exe",
+            windowsHide: true,
             stdio: "inherit",
         });
     }
@@ -106,6 +107,7 @@ function spawnWindowsTauriProcess() {
         cwd: desktopApplicationDirectory,
         env: buildWindowsCommandEnvironment(process.env),
         shell: true,
+        windowsHide: true,
         stdio: "inherit",
     });
 }
