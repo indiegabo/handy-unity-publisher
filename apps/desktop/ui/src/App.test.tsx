@@ -999,34 +999,6 @@ describe("App shell overlays", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("returns to the settings screen after managing auth providers from settings", async () => {
-    render(
-      <OverlayProvider>
-        <App />
-      </OverlayProvider>,
-    );
-
-    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-
-    expect(
-      await screen.findByRole("heading", { name: "Settings" }),
-    ).toBeInTheDocument();
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "Manage auth providers" }),
-    );
-
-    expect(
-      await screen.findByRole("button", { name: "Back to settings" }),
-    ).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Back to settings" }));
-
-    expect(
-      await screen.findByRole("heading", { name: "Settings" }),
-    ).toBeInTheDocument();
-  });
-
   it("closes the top-most overlay on Back before leaving the current focus screen", async () => {
     const requestAnimationFrameSpy = vi
       .spyOn(window, "requestAnimationFrame")

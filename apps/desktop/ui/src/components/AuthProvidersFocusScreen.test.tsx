@@ -11,14 +11,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvidersFocusScreen } from "./AuthProvidersFocusScreen";
 import OverlayProvider from "./OverlayManager";
 
-const { loadAuthProvidersMock, loginWithGithubAuthMock } = vi.hoisted(() => ({
+const {
+  loadAuthProvidersMock,
+  loadSecretSettingsMock,
+  loginWithGithubAuthMock,
+  saveSecretCredentialMock,
+} = vi.hoisted(() => ({
   loadAuthProvidersMock: vi.fn(),
+  loadSecretSettingsMock: vi.fn(),
   loginWithGithubAuthMock: vi.fn(),
+  saveSecretCredentialMock: vi.fn(),
 }));
 
 vi.mock("../services/auth", () => ({
   loadAuthProviders: loadAuthProvidersMock,
   loginWithGithubAuth: loginWithGithubAuthMock,
+}));
+
+vi.mock("../services/projects", () => ({
+  loadSecretSettings: loadSecretSettingsMock,
+  saveSecretCredential: saveSecretCredentialMock,
 }));
 
 afterEach(() => {
@@ -28,7 +40,9 @@ afterEach(() => {
 
 beforeEach(() => {
   loadAuthProvidersMock.mockResolvedValue([buildAuthProviderStatus()]);
+  loadSecretSettingsMock.mockResolvedValue(buildSecretSettings());
   loginWithGithubAuthMock.mockResolvedValue(buildAuthProviderStatus());
+  saveSecretCredentialMock.mockResolvedValue(33);
 });
 
 describe("AuthProvidersFocusScreen", () => {
@@ -48,8 +62,6 @@ describe("AuthProvidersFocusScreen", () => {
     expect(
       screen.getByRole("button", { name: "Refresh providers" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Providers")).toBeInTheDocument();
-    expect(screen.getByText("Connected projects")).toBeInTheDocument();
   });
 
   it("uses shared summary strips for provider cards and the connection overlay", async () => {
@@ -59,17 +71,7 @@ describe("AuthProvidersFocusScreen", () => {
       </OverlayProvider>,
     );
 
-    const providerHeading = await screen.findByRole("heading", {
-      name: "GitHub",
-    });
-    const providerCard = providerHeading.closest("section");
-
-    expect(providerCard).not.toBeNull();
-    expect(
-      (providerCard as HTMLElement).querySelector(
-        ".auth-provider-card__summary-strip",
-      ),
-    ).not.toBeNull();
+    await screen.findByRole("heading", { name: "GitHub" });
 
     fireEvent.click(
       screen.getByRole("button", {
@@ -96,11 +98,7 @@ describe("AuthProvidersFocusScreen", () => {
     );
 
     expect(
-      await screen.findByText("Login provider inventory is unavailable."),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Provider offline")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Retry provider load" }),
+      await screen.findByRole("button", { name: "Retry provider load" }),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("No login providers are available."),
@@ -131,11 +129,6 @@ describe("AuthProvidersFocusScreen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh providers" }));
 
     expect(await screen.findByText("Provider offline")).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "Showing the last known provider inventory while the shell retries host-backed authentication discovery.",
-      ),
-    ).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "GitHub" })).toBeInTheDocument();
   });
 
@@ -185,22 +178,6 @@ describe("AuthProvidersFocusScreen", () => {
       .closest("section");
 
     expect(githubCard).not.toBeNull();
-    expect(
-      within(githubCard as HTMLElement).getByText(
-        "Browser reconnect completed in this session",
-      ),
-    ).toBeInTheDocument();
-    expect(
-      within(githubCard as HTMLElement).getByText("2026-05-19 00:00 UTC"),
-    ).toBeInTheDocument();
-    expect(
-      within(githubCard as HTMLElement).getByText("2026-05-19 00:12 UTC"),
-    ).toBeInTheDocument();
-    expect(
-      within(githubCard as HTMLElement).getByText(
-        "Reuse the host credential until repository access fails again",
-      ),
-    ).toBeInTheDocument();
     expect(
       within(githubCard as HTMLElement).getByRole("button", {
         name: "Review recent reconnect",
@@ -389,5 +366,33 @@ function buildAuthProviderStatusShape() {
     provider_id: "github.com",
     status: "connected",
     status_message: "GitHub access is connected and ready.",
+  };
+}
+
+function buildSecretSettings() {
+  return {
+    credentials: [
+      {
+        config_summary: {
+          message: "Stored GitHub login metadata is valid.",
+          missing_required_keys: [],
+          status: "ready",
+          top_level_keys: ["provider", "instance_url"],
+        },
+        created_at: "2026-05-19T00:00:00Z",
+        credential_id: 7,
+        kind: "git-http-github-host-login",
+        name: "GitHub.com",
+        storage_model: "sqlite-config-json-and-keyring-references",
+        updated_at: "2026-05-19T00:00:00Z",
+      },
+    ],
+    storage_model: "sqlite-config-json-and-keyring-references",
+    supported_credential_kinds: [
+      "git-http-basic",
+      "git-http-github-host-login",
+      "itch-api-key",
+    ],
+    warnings: [],
   };
 }

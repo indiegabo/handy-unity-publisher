@@ -5,26 +5,32 @@ import AuthProviderConnectionModal from "./AuthProviderConnectionModal";
 import {
   type AuthProviderConnectionResult,
   buildAuthProviderActionLabel,
-  buildAuthProviderLifecycleSnapshot,
-  buildAuthProviderSummaryRows,
   formatAuthProviderStatus,
   resolveAuthProviderTone,
 } from "./authProviderPresentation";
-import {
-  Badge,
-  MetaItem,
-  MetaRow,
-  SummaryStrip,
-  SurfacePanel,
-} from "./Surface";
+import { Badge, SurfacePanel } from "./Surface";
 import { useOverlay } from "./OverlayManager";
 import ScreenScaffold from "./ScreenScaffold";
+import CredentialComposerModal from "./forms/CredentialComposerModal";
 import { useLocalization } from "../LocalizationProvider";
 import { loadAuthProviders, type AuthProviderStatus } from "../services/auth";
+import {
+  loadSecretSettings,
+  saveSecretCredential,
+  type SaveSecretCredentialInput,
+  type SecretCredentialKind,
+  type SecretCredentialSetting,
+  type SecretSettings,
+} from "../services/projects";
 
 type AuthProvidersFocusScreenProps = {
   onResult?: (result: AuthProviderConnectionResult) => void;
 };
+
+type EditableSecretCredentialKind = Exclude<
+  SecretCredentialKind,
+  "git-http-github-host-login"
+>;
 
 export function AuthProvidersFocusScreen({
   onResult,
@@ -41,8 +47,14 @@ export function AuthProvidersFocusScreen({
   const [inventoryStale, setInventoryStale] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [secretSettings, setSecretSettings] = useState<SecretSettings | null>(
+    null,
+  );
+  const [secretSettingsError, setSecretSettingsError] = useState<string | null>(
+    null,
+  );
 
-  const loadProviders = useEffectEvent(
+  const loadInventory = useEffectEvent(
     async (reason: "initial" | "refresh") => {
       if (reason === "refresh" && inventoryAvailable) {
         setIsRefreshing(true);
@@ -52,29 +64,39 @@ export function AuthProvidersFocusScreen({
         setIsLoading(true);
       }
 
-      try {
-        const nextProviders = await loadAuthProviders();
-        startTransition(() => {
-          setProviders(nextProviders);
+      const [providerResult, secretSettingsResult] = await Promise.allSettled([
+        loadAuthProviders(),
+        loadSecretSettings(),
+      ]);
+
+      startTransition(() => {
+        if (providerResult.status === "fulfilled") {
+          setProviders(providerResult.value);
           setInventoryAvailable(true);
           setInventoryStale(false);
           setError(null);
-          setIsLoading(false);
-          setIsRefreshing(false);
-        });
-      } catch (loadError) {
-        startTransition(() => {
-          setError(buildAuthProviderErrorMessage(t, loadError));
-          setIsLoading(false);
-          setIsRefreshing(false);
+        } else {
+          setError(buildAuthProviderErrorMessage(t, providerResult.reason));
           setInventoryStale(inventoryAvailable);
-        });
-      }
+        }
+
+        if (secretSettingsResult.status === "fulfilled") {
+          setSecretSettings(secretSettingsResult.value);
+          setSecretSettingsError(null);
+        } else {
+          setSecretSettingsError(
+            buildInventoryErrorMessage(secretSettingsResult.reason),
+          );
+        }
+
+        setIsLoading(false);
+        setIsRefreshing(false);
+      });
     },
   );
 
   useEffect(() => {
-    void loadProviders("initial");
+    void loadInventory("initial");
   }, []);
 
   const handleOpenConnectionFlow = useEffectEvent(
@@ -108,13 +130,71 @@ export function AuthProvidersFocusScreen({
     },
   );
 
-  const connectedProviderCount = providers.filter(
-    (provider) => provider.status === "connected",
-  ).length;
-  const totalBoundRepositoryCount = providers.reduce(
-    (total, provider) => total + provider.bound_repository_count,
-    0,
+  const handleCreateCredential = useEffectEvent(
+    async (scope: "repository" | "publish") => {
+      const providerLabel = scope === "publish" ? "Itch.io" : "Git host";
+      const created = await openOverlay(CredentialComposerModal, {
+        onSubmit: async (input: SaveSecretCredentialInput) => {
+          await saveSecretCredential(input);
+        },
+        providerLabel,
+        scope,
+      });
+
+      if (!created) {
+        return;
+      }
+
+      startTransition(() => {
+        setActionMessage(
+          scope === "publish"
+            ? "Reusable Itch credential saved. It can now be selected from publish destinations."
+            : "Reusable repository credential saved. It can now be selected from project repository access settings.",
+        );
+      });
+
+      await loadInventory("refresh");
+    },
   );
+
+  const handleEditCredential = useEffectEvent(
+    async (credential: SecretCredentialSetting) => {
+      const editableKind = toEditableSecretCredentialKind(credential.kind);
+      if (!editableKind) {
+        return;
+      }
+
+      const scope = editableKind === "itch-api-key" ? "publish" : "repository";
+      const providerLabel = scope === "publish" ? "Itch.io" : "Git host";
+      const updated = await openOverlay(CredentialComposerModal, {
+        initialCredential: {
+          credentialId: credential.credential_id,
+          kind: editableKind,
+          name: credential.name,
+        },
+        onSubmit: async (input: SaveSecretCredentialInput) => {
+          await saveSecretCredential(input);
+        },
+        providerLabel,
+        scope,
+      });
+
+      if (!updated) {
+        return;
+      }
+
+      startTransition(() => {
+        setActionMessage(
+          scope === "publish"
+            ? "Reusable Itch credential updated. Publish destinations will use the refreshed secret on the next run."
+            : "Reusable repository credential updated. Connected project access will use the refreshed secret on the next check.",
+        );
+      });
+
+      await loadInventory("refresh");
+    },
+  );
+
   const showsProviderLoading = isLoading && !inventoryAvailable;
   const showsProviderUnavailable =
     !isLoading && !inventoryAvailable && error !== null;
@@ -125,7 +205,7 @@ export function AuthProvidersFocusScreen({
         <Button
           disabled={isLoading || isRefreshing}
           leadingIcon="refresh"
-          onClick={() => void loadProviders("refresh")}
+          onClick={() => void loadInventory("refresh")}
           size="sm"
           variant="secondary"
         >
@@ -135,52 +215,10 @@ export function AuthProvidersFocusScreen({
         </Button>
       }
       className="auth-providers-shell"
-      eyebrow={t("auth_providers.eyebrow", "Accounts")}
-      subtitle={t(
-        "auth_providers.subtitle",
-        "GitHub login is delegated to Git Credential Manager and reused by repository polling and checkout flows.",
-      )}
-      summary={
-        <MetaRow>
-          <MetaItem label={t("auth_providers.summary.providers", "Providers")}>
-            {showsProviderLoading
-              ? t("auth_providers.summary.loading", "Loading...")
-              : providers.length}
-          </MetaItem>
-          {!showsProviderLoading ? (
-            <MetaItem
-              label={t("auth_providers.summary.connected", "Connected")}
-            >
-              {connectedProviderCount}
-            </MetaItem>
-          ) : null}
-          {!showsProviderLoading ? (
-            <MetaItem
-              label={t(
-                "auth_providers.summary.connected_projects",
-                "Connected projects",
-              )}
-            >
-              {totalBoundRepositoryCount}
-            </MetaItem>
-          ) : null}
-        </MetaRow>
-      }
       title={t("auth_providers.title", "Login Providers")}
     >
-      {inventoryStale && error ? (
-        <>
-          <p className="feed-banner feed-banner--error">{error}</p>
-          <p className="feed-state__copy">
-            {t(
-              "auth_providers.stale_copy",
-              "Showing the last known provider inventory while the shell retries host-backed authentication discovery.",
-            )}
-          </p>
-        </>
-      ) : null}
-
-      {!inventoryStale && error && inventoryAvailable ? (
+      {(inventoryStale && error) ||
+      (!inventoryStale && error && inventoryAvailable) ? (
         <p className="feed-banner feed-banner--error">{error}</p>
       ) : null}
       {actionMessage ? (
@@ -188,31 +226,16 @@ export function AuthProvidersFocusScreen({
       ) : null}
 
       {showsProviderLoading ? (
-        <div className="feed-state">
-          <p className="feed-state__title">
-            {t("auth_providers.loading.title", "Loading login providers...")}
-          </p>
-          <p className="feed-state__copy">
-            {t(
-              "auth_providers.loading.copy",
-              "The shell is checking which host-backed authentication providers are ready on this machine.",
-            )}
-          </p>
-        </div>
+        <p className="settings-focus-copy">
+          {t("auth_providers.loading.title", "Loading login providers...")}
+        </p>
       ) : null}
 
       {showsProviderUnavailable ? (
-        <div className="feed-state">
-          <p className="feed-state__title">
-            {t(
-              "auth_providers.unavailable.title",
-              "Login provider inventory is unavailable.",
-            )}
-          </p>
-          <p className="feed-state__copy">{error}</p>
+        <div className="settings-focus-action-row">
           <Button
             leadingIcon="refresh"
-            onClick={() => void loadProviders("refresh")}
+            onClick={() => void loadInventory("refresh")}
             size="sm"
             variant="secondary"
           >
@@ -222,109 +245,142 @@ export function AuthProvidersFocusScreen({
       ) : null}
 
       {!showsProviderLoading && inventoryAvailable && providers.length === 0 ? (
-        <div className="feed-state">
-          <p className="feed-state__title">
-            {t(
-              "auth_providers.empty.title",
-              "No login providers are available.",
-            )}
-          </p>
-          <p className="feed-state__copy">
-            {t(
-              "auth_providers.empty.copy",
-              "Install the required host tooling to enable repository authentication flows.",
-            )}
-          </p>
-        </div>
+        <p className="settings-focus-copy">
+          {t("auth_providers.empty.title", "No login providers are available.")}
+        </p>
       ) : null}
 
       {inventoryAvailable && providers.length > 0 ? (
         <SurfacePanel
-          className="auth-provider-section"
-          description={t(
-            "auth_providers.inventory.description",
-            "Host-backed login providers available to the desktop shell. Open the guided connection overlay only when one provider needs to be created, rebound, or refreshed.",
-          )}
-          eyebrow={t("auth_providers.inventory.eyebrow", "Provider Inventory")}
-          headerSeparated
           title={t("auth_providers.inventory.title", "Available Accounts")}
-          tone="section"
         >
           <div className="auth-provider-grid">
-            {providers.map((provider) => {
-              const lifecycleSnapshot = buildAuthProviderLifecycleSnapshot(
-                t,
-                provider,
-                lastConnectionResults[provider.provider_id],
-              );
+            {providers.map((provider) => (
+              <section
+                className="auth-provider-card"
+                key={provider.provider_id}
+              >
+                <header className="auth-provider-card__header">
+                  <div className="auth-provider-card__title-block">
+                    <h3 className="auth-provider-card__title">
+                      {provider.label}
+                    </h3>
+                    <p className="auth-provider-card__copy">
+                      {provider.instance_url}
+                    </p>
+                  </div>
+                  <Badge tone={resolveAuthProviderTone(provider.status)}>
+                    {formatAuthProviderStatus(t, provider.status)}
+                  </Badge>
+                </header>
 
-              return (
-                <section
-                  className="auth-provider-card"
-                  key={provider.provider_id}
-                >
-                  <header className="auth-provider-card__header">
-                    <div className="auth-provider-card__title-block">
-                      <h3 className="auth-provider-card__title">
-                        {provider.label}
-                      </h3>
-                      <p className="auth-provider-card__copy">
-                        {provider.instance_url}
-                      </p>
-                    </div>
-                    <Badge tone={resolveAuthProviderTone(provider.status)}>
-                      {formatAuthProviderStatus(t, provider.status)}
-                    </Badge>
-                  </header>
-
-                  <p className="auth-provider-card__copy">
-                    {provider.status_message}
-                  </p>
-
-                  <SummaryStrip className="auth-provider-card__summary-strip">
-                    {buildAuthProviderSummaryRows(
+                <div className="auth-provider-card__actions">
+                  <Button
+                    onClick={() => {
+                      void handleOpenConnectionFlow(provider);
+                    }}
+                    size="sm"
+                    variant={
+                      provider.status === "connected" ? "secondary" : "primary"
+                    }
+                  >
+                    {buildAuthProviderActionLabel(
                       t,
                       provider,
-                      lifecycleSnapshot,
-                    ).map((summaryRow, summaryRowIndex) => (
-                      <MetaRow
-                        className="auth-provider-card__summary"
-                        key={`${provider.provider_id}-summary-${summaryRowIndex}`}
-                      >
-                        {summaryRow.map((item) => (
-                          <MetaItem key={item.label} label={item.label}>
-                            {item.value}
-                          </MetaItem>
-                        ))}
-                      </MetaRow>
-                    ))}
-                  </SummaryStrip>
-
-                  <div className="auth-provider-card__actions">
-                    <Button
-                      onClick={() => {
-                        void handleOpenConnectionFlow(provider);
-                      }}
-                      size="sm"
-                      variant={
-                        provider.status === "connected"
-                          ? "secondary"
-                          : "primary"
-                      }
-                    >
-                      {buildAuthProviderActionLabel(
-                        t,
-                        provider,
-                        lastConnectionResults[provider.provider_id],
-                      )}
-                    </Button>
-                  </div>
-                </section>
-              );
-            })}
+                      lastConnectionResults[provider.provider_id],
+                    )}
+                  </Button>
+                </div>
+              </section>
+            ))}
           </div>
         </SurfacePanel>
       ) : null}
+
+      <SurfacePanel
+        actions={
+          <div className="settings-focus-action-row">
+            <Button
+              leadingIcon="plus"
+              onClick={() => void handleCreateCredential("publish")}
+              size="sm"
+              variant="primary"
+            >
+              New Itch credential
+            </Button>
+            <Button
+              leadingIcon="plus"
+              onClick={() => void handleCreateCredential("repository")}
+              size="sm"
+              variant="secondary"
+            >
+              New repository credential
+            </Button>
+          </div>
+        }
+        title="Credential Inventory"
+      >
+        {secretSettingsError ? (
+          <p className="feed-banner feed-banner--error">
+            {secretSettingsError}
+          </p>
+        ) : null}
+
+        {secretSettings ? (
+          <div className="settings-focus-panel-stack">
+            {secretSettings.credentials.length > 0 ? (
+              <div className="settings-focus-entry-list">
+                {secretSettings.credentials.map((credential) => (
+                  <article
+                    className="settings-focus-entry"
+                    key={credential.credential_id}
+                  >
+                    <div className="settings-focus-entry__header">
+                      <div>
+                        <p className="settings-focus-entry__title">
+                          {credential.name}
+                        </p>
+                        <p className="settings-focus-entry__meta">
+                          {credential.kind}
+                        </p>
+                      </div>
+                      <div className="settings-focus-entry__controls">
+                        {toEditableSecretCredentialKind(credential.kind) ? (
+                          <Button
+                            aria-label={`Edit ${credential.name}`}
+                            onClick={() =>
+                              void handleEditCredential(credential)
+                            }
+                            size="sm"
+                            variant="ghost"
+                          >
+                            Edit
+                          </Button>
+                        ) : null}
+                        <Badge
+                          tone={
+                            credential.config_summary.status === "ready"
+                              ? "strong"
+                              : "muted"
+                          }
+                        >
+                          {credential.config_summary.status.replace(/_/g, " ")}
+                        </Badge>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="settings-focus-copy">
+                No shared credentials are stored yet.
+              </p>
+            )}
+          </div>
+        ) : (
+          <p className="settings-focus-copy">Loading credential inventory...</p>
+        )}
+      </SurfacePanel>
     </ScreenScaffold>
   );
 }
@@ -346,6 +402,19 @@ function mergeAuthProviderInventory(
   );
 }
 
+function toEditableSecretCredentialKind(
+  kind: string,
+): EditableSecretCredentialKind | null {
+  switch (kind) {
+    case "git-http-basic":
+    case "git-http-bearer":
+    case "itch-api-key":
+      return kind;
+    default:
+      return null;
+  }
+}
+
 function buildAuthProviderErrorMessage(
   t: ReturnType<typeof useLocalization>["t"],
   error: unknown,
@@ -362,4 +431,16 @@ function buildAuthProviderErrorMessage(
     "auth_providers.error.fallback",
     "The desktop shell could not resolve the authentication provider state.",
   );
+}
+
+function buildInventoryErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim();
+  }
+
+  if (typeof error === "string" && error.trim()) {
+    return error.trim();
+  }
+
+  return "The desktop shell could not resolve the shared credential inventory.";
 }

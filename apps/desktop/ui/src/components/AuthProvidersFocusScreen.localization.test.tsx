@@ -5,17 +5,26 @@ const {
   loadAuthProvidersMock,
   loadLocalizationSettingsMock,
   loginWithGithubAuthMock,
+  loadSecretSettingsMock,
   readHostTextFileMock,
+  saveSecretCredentialMock,
 } = vi.hoisted(() => ({
   loadAuthProvidersMock: vi.fn(),
   loadLocalizationSettingsMock: vi.fn(),
   loginWithGithubAuthMock: vi.fn(),
+  loadSecretSettingsMock: vi.fn(),
   readHostTextFileMock: vi.fn(),
+  saveSecretCredentialMock: vi.fn(),
 }));
 
 vi.mock("../services/auth", () => ({
   loadAuthProviders: loadAuthProvidersMock,
   loginWithGithubAuth: loginWithGithubAuthMock,
+}));
+
+vi.mock("../services/projects", () => ({
+  loadSecretSettings: loadSecretSettingsMock,
+  saveSecretCredential: saveSecretCredentialMock,
 }));
 
 vi.mock("../services/runtime", () => ({
@@ -38,6 +47,17 @@ afterEach(() => {
 beforeEach(() => {
   loadAuthProvidersMock.mockResolvedValue([buildAuthProviderStatus()]);
   loginWithGithubAuthMock.mockResolvedValue(buildAuthProviderStatus());
+  loadSecretSettingsMock.mockResolvedValue({
+    credentials: [],
+    storage_model: "sqlite-config-json-and-keyring-references",
+    supported_credential_kinds: [
+      "git-http-basic",
+      "git-http-github-host-login",
+      "itch-api-key",
+    ],
+    warnings: [],
+  });
+  saveSecretCredentialMock.mockResolvedValue(33);
   loadLocalizationSettingsMock.mockResolvedValue({
     available_locales: [
       {

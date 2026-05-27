@@ -119,7 +119,7 @@ type AppScreen =
   | { kind: "create-project" }
   | {
       kind: "auth-providers";
-      returnTo: "main" | "create-project" | "settings";
+      returnTo: "main" | "create-project";
     }
   | { kind: "settings" }
   | { kind: "project-list"; highlightedRepositoryId: number | null }
@@ -842,13 +842,6 @@ function App() {
     });
   });
 
-  const handleOpenAuthProvidersFromSettings = useEffectEvent(() => {
-    void transitionToScreen({
-      kind: "auth-providers",
-      returnTo: "settings",
-    });
-  });
-
   const handleOpenAuthProvidersFromWizard = useEffectEvent(() => {
     startTransition(() => {
       setCreateProjectAuthProviderResult(null);
@@ -1234,9 +1227,9 @@ function App() {
 
     if (
       activeScreen.kind === "auth-providers" &&
-      activeScreen.returnTo === "settings"
+      activeScreen.returnTo === "main"
     ) {
-      void transitionToScreen({ kind: "settings" });
+      void transitionToScreen({ kind: "main" });
       return;
     }
 
@@ -1642,12 +1635,7 @@ function App() {
                 ) : null}
 
                 {activeScreen.kind === "settings" ? (
-                  <SettingsFocusScreen
-                    automationMode={workerSnapshot.automationMode}
-                    onManageAuthProviders={handleOpenAuthProvidersFromSettings}
-                    onOpenProjectWorkers={handleOpenProjectWorkers}
-                    onOpenProjects={handleOpenProjects}
-                  />
+                  <SettingsFocusScreen />
                 ) : null}
 
                 {activeScreen.kind === "project-list" ? (
@@ -2305,9 +2293,9 @@ function resolveFocusBackLabel(t: Translate, activeScreen: AppScreen) {
 
   if (
     activeScreen.kind === "auth-providers" &&
-    activeScreen.returnTo === "settings"
+    activeScreen.returnTo === "main"
   ) {
-    return t("app.back.settings", "Back to settings");
+    return t("app.back.main", "Back to main screen");
   }
 
   return t("app.back.main", "Back to main screen");
