@@ -50,6 +50,20 @@ The current visible UI is a compact React + TypeScript + Vite desktop shell
 built from reusable dark-theme components. It now uses a dispatch-board main
 feed plus focus-screen working views, managed overlays, and staged flows.
 
+## Desktop Icons
+
+The desktop shell supports separate icon sources for the bundled app and the
+tray surface.
+
+- `apps/desktop/src-tauri/icons/app-icon-source.png` is the source image used
+  to regenerate the packaged app icons declared in the Tauri bundle config.
+- `apps/desktop/src-tauri/icons/tray-icon-source.png` is an optional dedicated
+  PNG used by the runtime tray icon. When it is absent, the tray falls back to
+  the default app icon.
+
+Regenerate the bundled app icon set with `npm run icons:generate`. Tauri dev
+and build commands now run that step automatically before launching the shell.
+
 ## Repository Layout
 
 ```text

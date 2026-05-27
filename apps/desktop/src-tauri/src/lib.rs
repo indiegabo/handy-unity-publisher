@@ -109,6 +109,7 @@ const BUILD_EXECUTION_REPORT_FILE_NAME: &str = "execution-report.json";
 const BUILD_EXECUTION_LOG_ARCHIVE_FILE_NAME: &str = "execution-logs.zip";
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ICON_ID: &str = "hgp-tray";
+const TRAY_ICON_SOURCE_FILE_NAME: &str = "tray-icon-source.png";
 const TRAY_MENU_OPEN_ID: &str = "tray-open";
 const TRAY_MENU_QUIT_ID: &str = "tray-quit";
 const POPUP_WINDOW_WIDTH: u32 = 480;
@@ -1083,14 +1084,25 @@ fn initialize_tray(app: &tauri::App) -> Result<(), String> {
         .text(TRAY_MENU_QUIT_ID, "Quit")
         .build()
         .map_err(|error| error.to_string())?;
-    let icon = app
-        .default_window_icon()
-        .cloned()
-        .ok_or_else(|| "default tray icon is unavailable".to_string())?;
+    let tray_icon_source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("icons")
+        .join(TRAY_ICON_SOURCE_FILE_NAME);
+    let icon = if tray_icon_source_path.is_file() {
+        tauri::image::Image::from_path(&tray_icon_source_path).map_err(|error| {
+            format!(
+                "failed to load tray icon from {}: {error}",
+                tray_icon_source_path.display()
+            )
+        })?
+    } else {
+        app.default_window_icon()
+            .cloned()
+            .ok_or_else(|| "default tray icon is unavailable".to_string())?
+    };
 
     TrayIconBuilder::with_id(TRAY_ICON_ID)
         .icon(icon)
-        .tooltip("HGP")
+        .tooltip("Handy Games Publisher")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .build(app)

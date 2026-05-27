@@ -5,6 +5,7 @@
         "apps/desktop/ui"
     ],
     "scripts": {
+        "icons:generate": "node ./scripts/generate-desktop-icons.mjs",
         "version:sync": "node ./scripts/sync-app-version.mjs",
         "version:check": "node ./scripts/sync-app-version.mjs --check",
         "identity:check": "node ./scripts/validate-hgp-identity.mjs",
