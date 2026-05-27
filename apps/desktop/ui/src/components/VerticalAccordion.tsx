@@ -7,6 +7,7 @@ import {
 } from "react";
 
 import { Icon } from "./Icon";
+import { useLocalization } from "../LocalizationProvider";
 
 export type AccordionTriggerMode = "both" | "button" | "header";
 export type AccordionTone = "default" | "section";
@@ -46,12 +47,19 @@ export function VerticalAccordion({
   tone = "default",
   triggerMode = "both",
 }: VerticalAccordionProps) {
+  const { t } = useLocalization();
   const [uncontrolledIsOpen, setUncontrolledIsOpen] = useState(defaultOpen);
   const bodyId = useId();
   const headerIsInteractive =
     triggerMode === "both" || triggerMode === "header";
   const isControlled = open !== undefined;
   const isOpen = isControlled ? open : uncontrolledIsOpen;
+  const resolvedCollapsedToggleLabel =
+    collapsedToggleLabel ||
+    t("vertical_accordion.actions.expand", "Expand section");
+  const resolvedExpandedToggleLabel =
+    expandedToggleLabel ||
+    t("vertical_accordion.actions.collapse", "Collapse section");
 
   const toggle = () => {
     const nextOpen = !isOpen;
@@ -118,10 +126,14 @@ export function VerticalAccordion({
         <button
           aria-controls={bodyId}
           aria-expanded={isOpen}
-          aria-label={isOpen ? expandedToggleLabel : collapsedToggleLabel}
+          aria-label={
+            isOpen ? resolvedExpandedToggleLabel : resolvedCollapsedToggleLabel
+          }
           className="vertical-accordion__toggle"
           onClick={handleToggleClick}
-          title={isOpen ? expandedToggleLabel : collapsedToggleLabel}
+          title={
+            isOpen ? resolvedExpandedToggleLabel : resolvedCollapsedToggleLabel
+          }
           type="button"
         >
           <Icon

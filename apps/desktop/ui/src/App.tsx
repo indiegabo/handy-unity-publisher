@@ -521,7 +521,7 @@ function App() {
         inspectionError:
           inspectionResult.status === "fulfilled"
             ? null
-            : buildWorkerInspectionErrorMessage(inspectionResult.reason),
+            : buildWorkerInspectionErrorMessage(t, inspectionResult.reason),
         inspectionStale:
           inspectionResult.status === "fulfilled"
             ? false
@@ -649,7 +649,8 @@ function App() {
       }
 
       const repositoryName =
-        input.repositoryName?.trim() || "Unknown repository";
+        input.repositoryName?.trim() ||
+        t("app.notifications.unknown_repository", "Unknown repository");
       const gitTag = input.gitTag?.trim() || "";
 
       try {
@@ -893,7 +894,11 @@ function App() {
       startTransition(() => {
         setMainQuickReleaseNotice({
           gitTag,
-          message: `Queued local release ${gitTag} for ${repositoryName}.`,
+          message: t(
+            "app.main.quick_release.queued",
+            "Queued local release {{gitTag}} for {{repositoryName}}.",
+            { gitTag, repositoryName },
+          ),
           repositoryName,
         });
         setPage(1);
@@ -975,18 +980,38 @@ function App() {
     async (action: Extract<RuntimeControlAction, "stop" | "restart">) => {
       const shouldContinue = await openOverlay<boolean>(ConfirmDialog, {
         cancelLabel:
-          action === "stop" ? "Keep runtime online" : "Keep current state",
-        confirmLabel: action === "stop" ? "Stop runtime" : "Restart runtime",
+          action === "stop"
+            ? t("app.runtime.actions.keep_online", "Keep runtime online")
+            : t("app.runtime.actions.keep_state", "Keep current state"),
+        confirmLabel:
+          action === "stop"
+            ? t("app.runtime.actions.stop", "Stop runtime")
+            : t("app.runtime.actions.restart", "Restart runtime"),
         confirmVariant: "secondary",
         description:
           action === "stop"
-            ? "Stopping the runtime pauses project workers until the local host is started again."
-            : "Restarting the runtime interrupts active worker supervision while the local host comes back up.",
+            ? t(
+                "app.runtime.confirm.stop.description",
+                "Stopping the runtime pauses project workers until the local host is started again.",
+              )
+            : t(
+                "app.runtime.confirm.restart.description",
+                "Restarting the runtime interrupts active worker supervision while the local host comes back up.",
+              ),
         message:
           action === "stop"
-            ? "Project workers will remain unavailable until the runtime is started again."
-            : "Project workers will briefly disconnect while the runtime restarts.",
-        title: action === "stop" ? "Stop runtime?" : "Restart runtime?",
+            ? t(
+                "app.runtime.confirm.stop.message",
+                "Project workers will remain unavailable until the runtime is started again.",
+              )
+            : t(
+                "app.runtime.confirm.restart.message",
+                "Project workers will briefly disconnect while the runtime restarts.",
+              ),
+        title:
+          action === "stop"
+            ? t("app.runtime.confirm.stop.title", "Stop runtime?")
+            : t("app.runtime.confirm.restart.title", "Restart runtime?"),
       });
 
       if (!shouldContinue) {
@@ -1018,11 +1043,11 @@ function App() {
 
         await loadWorkerStatus();
         startTransition(() => {
-          setWorkerActionMessage(buildRuntimeActionMessage(action));
+          setWorkerActionMessage(buildRuntimeActionMessage(t, action));
         });
       } catch (error) {
         startTransition(() => {
-          setWorkerActionError(buildRuntimeActionErrorMessage(error, action));
+          setWorkerActionError(buildRuntimeActionErrorMessage(t, error, action));
         });
       } finally {
         startTransition(() => {
@@ -1060,12 +1085,12 @@ function App() {
           ...current,
           automationMode: snapshot.mode,
         }));
-        setWorkerActionMessage(buildRuntimeAutomationMessage(snapshot.mode));
+        setWorkerActionMessage(buildRuntimeAutomationMessage(t, snapshot.mode));
       });
     } catch (error) {
       startTransition(() => {
         setWorkerActionError(
-          buildRuntimeAutomationErrorMessage(error, nextMode),
+          buildRuntimeAutomationErrorMessage(t, error, nextMode),
         );
       });
     } finally {
@@ -1087,16 +1112,26 @@ function App() {
     const selectedRepositoryIds = await openOverlay<string[]>(
       SelectListFullScreen,
       {
-        description:
+        description: t(
+          "app.instant_checks.select.description",
           "Select one or more project workers and queue an immediate repository check for each of them.",
-        emptyStateCopy:
+        ),
+        emptyStateCopy: t(
+          "app.instant_checks.select.empty.copy",
           "Refresh the worker inventory if the expected repositories are still missing.",
-        emptyStateTitle: "No project workers matched the current filter.",
-        items: buildProjectWorkerSelectionItems(projectWorkers),
-        selectionLabel: "Selected",
+        ),
+        emptyStateTitle: t(
+          "app.instant_checks.select.empty.title",
+          "No project workers matched the current filter.",
+        ),
+        items: buildProjectWorkerSelectionItems(t, projectWorkers),
+        selectionLabel: t("app.instant_checks.select.selected", "Selected"),
         selectionMode: "multiple",
-        submitLabel: "Review queued checks",
-        title: "Queue instant checks",
+        submitLabel: t(
+          "app.instant_checks.select.submit",
+          "Review queued checks",
+        ),
+        title: t("app.instant_checks.select.title", "Queue instant checks"),
       },
     );
 
@@ -1113,14 +1148,21 @@ function App() {
     }
 
     const shouldQueue = await openOverlay<boolean>(ConfirmDialog, {
-      cancelLabel: "Back to selection",
+      cancelLabel: t(
+        "app.instant_checks.confirm.cancel",
+        "Back to selection",
+      ),
       confirmLabel:
-        selectedWorkers.length === 1 ? "Queue check" : "Queue checks",
+        selectedWorkers.length === 1
+          ? t("app.instant_checks.confirm.one", "Queue check")
+          : t("app.instant_checks.confirm.many", "Queue checks"),
       confirmVariant: "primary",
-      description:
+      description: t(
+        "app.instant_checks.confirm.description",
         "Queue an immediate repository check for each selected worker in sequence.",
-      message: buildBulkInstantCheckConfirmationMessage(selectedWorkers),
-      title: "Queue instant checks?",
+      ),
+      message: buildBulkInstantCheckConfirmationMessage(t, selectedWorkers),
+      title: t("app.instant_checks.confirm.title", "Queue instant checks?"),
     });
 
     if (!shouldQueue) {
@@ -1144,12 +1186,13 @@ function App() {
 
       await loadWorkerStatus();
       startTransition(() => {
-        setWorkerActionMessage(buildBulkInstantCheckMessage(queuedWorkers));
+        setWorkerActionMessage(buildBulkInstantCheckMessage(t, queuedWorkers));
       });
     } catch (error) {
       startTransition(() => {
         setWorkerActionError(
           buildBulkRepositoryInstantCheckErrorMessage(
+            t,
             error,
             activeWorker?.repositoryName ?? null,
             queuedWorkers.length,
@@ -1174,12 +1217,18 @@ function App() {
         await requestRepositoryInstantCheck(repositoryId);
         await loadWorkerStatus();
         startTransition(() => {
-          setWorkerActionMessage(`Instant check queued for ${repositoryName}.`);
+          setWorkerActionMessage(
+            t(
+              "app.instant_checks.message.single",
+              "Instant check queued for {{repositoryName}}.",
+              { repositoryName },
+            ),
+          );
         });
       } catch (error) {
         startTransition(() => {
           setWorkerActionError(
-            buildRepositoryInstantCheckErrorMessage(error, repositoryName),
+            buildRepositoryInstantCheckErrorMessage(t, error, repositoryName),
           );
         });
       } finally {
@@ -1244,14 +1293,27 @@ function App() {
 
     if (isCreateProjectWizardDirty) {
       const shouldDiscard = await openOverlay<boolean>(ConfirmDialog, {
-        cancelLabel: "Continue editing",
-        confirmLabel: "Discard draft",
+        cancelLabel: t(
+          "app.create_project.discard.cancel",
+          "Continue editing",
+        ),
+        confirmLabel: t(
+          "app.create_project.discard.confirm",
+          "Discard draft",
+        ),
         confirmVariant: "secondary",
-        description:
+        description: t(
+          "app.create_project.discard.description",
           "This leaves project creation and clears the current unsaved wizard draft.",
-        message:
+        ),
+        message: t(
+          "app.create_project.discard.message",
           "HGP will discard the repository, target, publish, and path changes that have not been saved yet.",
-        title: "Discard project draft?",
+        ),
+        title: t(
+          "app.create_project.discard.title",
+          "Discard project draft?",
+        ),
       });
 
       if (!shouldDiscard) {
@@ -1783,44 +1845,75 @@ function stringPayloadValue(value: unknown): string | null {
   return normalized ? normalized : null;
 }
 
-function buildWorkerInspectionErrorMessage(error: unknown): string {
+function buildWorkerInspectionErrorMessage(
+  t: Translate,
+  error: unknown,
+): string {
   const message = readErrorMessage(error);
 
   if (message) {
     return message;
   }
 
-  return "The desktop shell could not refresh the project worker inventory.";
+  return t(
+    "app.worker_inventory.error.refresh_failed",
+    "The desktop shell could not refresh the project worker inventory.",
+  );
 }
 
-function buildRuntimeActionMessage(action: RuntimeControlAction): string {
+function buildRuntimeActionMessage(
+  t: Translate,
+  action: RuntimeControlAction,
+): string {
   switch (action) {
     case "start":
-      return "Runtime start requested.";
+      return t("app.runtime.messages.start_requested", "Runtime start requested.");
     case "stop":
-      return "Runtime stop requested.";
+      return t("app.runtime.messages.stop_requested", "Runtime stop requested.");
     case "restart":
-      return "Runtime restart requested.";
+      return t(
+        "app.runtime.messages.restart_requested",
+        "Runtime restart requested.",
+      );
   }
 }
 
-function buildRuntimeAutomationMessage(mode: RuntimeAutomationMode): string {
+function buildRuntimeAutomationMessage(
+  t: Translate,
+  mode: RuntimeAutomationMode,
+): string {
   return mode === "idle"
-    ? "Automatic polling paused for the local host."
-    : "Automatic polling resumed for the local host.";
+    ? t(
+        "app.runtime.automation.paused",
+        "Automatic polling paused for the local host.",
+      )
+    : t(
+        "app.runtime.automation.resumed",
+        "Automatic polling resumed for the local host.",
+      );
 }
 
 function buildBulkInstantCheckMessage(
+  t: Translate,
   queuedWorkers: ProjectWorkerEntry[],
 ): string {
   if (queuedWorkers.length === 1) {
-    return `Instant check queued for ${queuedWorkers[0].repositoryName}.`;
+    return t(
+      "app.instant_checks.message.single",
+      "Instant check queued for {{repositoryName}}.",
+      { repositoryName: queuedWorkers[0].repositoryName },
+    );
   }
 
-  return `Instant checks queued for ${queuedWorkers.length} projects.`;
+  return t(
+    "app.instant_checks.message.many",
+    "Instant checks queued for {{count}} projects.",
+    { count: queuedWorkers.length },
+  );
 }
 
 function buildRuntimeActionErrorMessage(
+  t: Translate,
   error: unknown,
   action: RuntimeControlAction,
 ): string {
@@ -1830,10 +1923,15 @@ function buildRuntimeActionErrorMessage(
     return message;
   }
 
-  return `The desktop shell could not ${action} the runtime.`;
+  return t(
+    "app.runtime.error.action_failed",
+    "The desktop shell could not {{action}} the runtime.",
+    { action },
+  );
 }
 
 function buildRuntimeAutomationErrorMessage(
+  t: Translate,
   error: unknown,
   mode: RuntimeAutomationMode,
 ): string {
@@ -1844,11 +1942,18 @@ function buildRuntimeAutomationErrorMessage(
   }
 
   return mode === "idle"
-    ? "The desktop shell could not pause automatic polling."
-    : "The desktop shell could not resume automatic polling.";
+    ? t(
+        "app.runtime.automation.error.pause_failed",
+        "The desktop shell could not pause automatic polling.",
+      )
+    : t(
+        "app.runtime.automation.error.resume_failed",
+        "The desktop shell could not resume automatic polling.",
+      );
 }
 
 function buildRepositoryInstantCheckErrorMessage(
+  t: Translate,
   error: unknown,
   repositoryName: string,
 ): string {
@@ -1858,10 +1963,15 @@ function buildRepositoryInstantCheckErrorMessage(
     return message;
   }
 
-  return `The desktop shell could not queue an instant check for ${repositoryName}.`;
+  return t(
+    "app.instant_checks.error.single",
+    "The desktop shell could not queue an instant check for {{repositoryName}}.",
+    { repositoryName },
+  );
 }
 
 function buildBulkRepositoryInstantCheckErrorMessage(
+  t: Translate,
   error: unknown,
   repositoryName: string | null,
   queuedProjectCount: number,
@@ -1873,27 +1983,58 @@ function buildBulkRepositoryInstantCheckErrorMessage(
   }
 
   if (repositoryName && queuedProjectCount > 0) {
-    return `The desktop shell could not continue the bulk instant check while queueing ${repositoryName} after ${queuedProjectCount} ${queuedProjectCount === 1 ? "project" : "projects"}.`;
+    return t(
+      "app.instant_checks.error.bulk_partial",
+      "The desktop shell could not continue the bulk instant check while queueing {{repositoryName}} after {{count}} {{projectLabel}}.",
+      {
+        count: queuedProjectCount,
+        projectLabel:
+          queuedProjectCount === 1
+            ? t("app.instant_checks.project.one", "project")
+            : t("app.instant_checks.project.other", "projects"),
+        repositoryName,
+      },
+    );
   }
 
   if (repositoryName) {
-    return `The desktop shell could not queue a bulk instant check for ${repositoryName}.`;
+    return t(
+      "app.instant_checks.error.bulk_single",
+      "The desktop shell could not queue a bulk instant check for {{repositoryName}}.",
+      { repositoryName },
+    );
   }
 
-  return "The desktop shell could not queue the selected bulk instant checks.";
+  return t(
+    "app.instant_checks.error.bulk_selected",
+    "The desktop shell could not queue the selected bulk instant checks.",
+  );
 }
 
 function buildProjectWorkerSelectionItems(
+  t: Translate,
   projectWorkers: ProjectWorkerEntry[],
 ): SelectListItem[] {
   return projectWorkers.map((projectWorker) => ({
     id: String(projectWorker.repositoryId),
     label: projectWorker.repositoryName,
-    subtitle: `${projectWorker.buildTargets.length} ${projectWorker.buildTargets.length === 1 ? "target" : "targets"} • poll ${projectWorker.pollingIntervalSeconds}s`,
+    subtitle: t(
+      "app.instant_checks.worker.subtitle",
+      "{{targetCount}} {{targetLabel}} • poll {{pollingIntervalSeconds}}s",
+      {
+        pollingIntervalSeconds: projectWorker.pollingIntervalSeconds,
+        targetCount: projectWorker.buildTargets.length,
+        targetLabel:
+          projectWorker.buildTargets.length === 1
+            ? t("app.instant_checks.target.one", "target")
+            : t("app.instant_checks.target.other", "targets"),
+      },
+    ),
   }));
 }
 
 function buildBulkInstantCheckConfirmationMessage(
+  t: Translate,
   projectWorkers: ProjectWorkerEntry[],
 ) {
   const workerNames = projectWorkers.map(
@@ -1901,10 +2042,18 @@ function buildBulkInstantCheckConfirmationMessage(
   );
 
   if (workerNames.length === 1) {
-    return `Queue an immediate repository check for ${workerNames[0]}.`;
+    return t(
+      "app.instant_checks.confirm.message.one",
+      "Queue an immediate repository check for {{repositoryName}}.",
+      { repositoryName: workerNames[0] },
+    );
   }
 
-  return `Queue immediate repository checks for ${workerNames.join(", ")}.`;
+  return t(
+    "app.instant_checks.confirm.message.many",
+    "Queue immediate repository checks for {{repositories}}.",
+    { repositories: workerNames.join(", ") },
+  );
 }
 
 function readErrorMessage(error: unknown): string | null {

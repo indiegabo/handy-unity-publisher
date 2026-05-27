@@ -8,6 +8,7 @@ import {
   SummaryStrip,
   SurfacePanel,
 } from "./Surface";
+import { useLocalization, type Translate } from "../LocalizationProvider";
 import type { ArtifactInspectionRecord } from "../services/processDetail";
 
 type ArtifactViewerProps = {
@@ -34,19 +35,32 @@ export function ArtifactViewer({
   onOpenFolder,
   onResolve,
   openArtifactDisabled = false,
-  openArtifactLabel = "Open artifact",
+  openArtifactLabel,
   openFolderDisabled = false,
-  openFolderLabel = "Open folder",
+  openFolderLabel,
   resolvePublishTargetKindTone,
 }: ArtifactViewerProps) {
+  const { t } = useLocalization();
   const canOpenArtifact =
     !openArtifactDisabled && Boolean(artifactAbsolutePath);
   const canOpenFolder = !openFolderDisabled && Boolean(artifactFolderPath);
+  const resolvedOpenArtifactLabel =
+    openArtifactLabel ??
+    t("artifact_viewer.actions.open_artifact", "Open artifact");
+  const resolvedOpenFolderLabel =
+    openFolderLabel ?? t("artifact_viewer.actions.open_folder", "Open folder");
+  const unavailableLabel = t(
+    "artifact_viewer.paths.unavailable",
+    "not available",
+  );
 
   return (
     <FullScreenModal
       className="artifact-viewer__modal"
-      description="Inspect artifact metadata and host-local paths without bloating the process detail surface."
+      description={t(
+        "artifact_viewer.description",
+        "Inspect artifact metadata and host-local paths without bloating the process detail surface.",
+      )}
       onResolve={onResolve}
       title={artifact.artifact_name}
     >
@@ -63,16 +77,18 @@ export function ArtifactViewer({
                   artifact.publish_run_count,
                 )}
               >
-                {formatPublishCount(artifact.publish_run_count)}
+                {formatPublishCount(t, artifact.publish_run_count)}
               </Badge>
             </div>
 
             <MetaRow>
-              <MetaItem label="Active location">
+              <MetaItem
+                label={t("artifact_viewer.summary.active_location", "Active location")}
+              >
                 {artifactLocationSummary}
               </MetaItem>
-              <MetaItem label="Size">
-                {formatByteSize(artifact.size_bytes)}
+              <MetaItem label={t("artifact_viewer.summary.size", "Size")}>
+                {formatByteSize(t, artifact.size_bytes)}
               </MetaItem>
             </MetaRow>
           </SummaryStrip>
@@ -89,7 +105,7 @@ export function ArtifactViewer({
                 size="sm"
                 variant="ghost"
               >
-                {openArtifactLabel}
+                {resolvedOpenArtifactLabel}
               </Button>
               <Button
                 data-overlay-autofocus={!canOpenArtifact && canOpenFolder}
@@ -99,36 +115,49 @@ export function ArtifactViewer({
                 size="sm"
                 variant="ghost"
               >
-                {openFolderLabel}
+                {resolvedOpenFolderLabel}
               </Button>
             </div>
           }
-          description="Host-local paths resolved for this artifact from the current runtime snapshot."
-          title="Artifact Paths"
+          description={t(
+            "artifact_viewer.paths.description",
+            "Host-local paths resolved for this artifact from the current runtime snapshot.",
+          )}
+          title={t("artifact_viewer.paths.title", "Artifact Paths")}
           tone="inset"
         >
           <MetaRow>
-            <MetaItem label="Absolute path">
-              {artifactAbsolutePath || "not available"}
+            <MetaItem
+              label={t("artifact_viewer.paths.absolute", "Absolute path")}
+            >
+              {artifactAbsolutePath || unavailableLabel}
             </MetaItem>
-            <MetaItem label="Folder path">
-              {artifactFolderPath || "not available"}
+            <MetaItem label={t("artifact_viewer.paths.folder", "Folder path")}>
+              {artifactFolderPath || unavailableLabel}
             </MetaItem>
           </MetaRow>
           <p className="artifact-viewer__copy">
-            In-shell preview is not available for host-native artifact payloads
-            yet. Use the host actions above to inspect the artifact directly.
+            {t(
+              "artifact_viewer.paths.preview_unavailable",
+              "In-shell preview is not available for host-native artifact payloads yet. Use the host actions above to inspect the artifact directly.",
+            )}
           </p>
         </SurfacePanel>
 
         <SurfacePanel
-          description="Publication records currently attached to this artifact."
-          title="Publish History"
+          description={t(
+            "artifact_viewer.publish_history.description",
+            "Publication records currently attached to this artifact.",
+          )}
+          title={t("artifact_viewer.publish_history.title", "Publish History")}
           tone="inset"
         >
           {artifact.publish_runs.length === 0 ? (
             <p className="artifact-viewer__copy">
-              No publish runs are currently attached to this artifact.
+              {t(
+                "artifact_viewer.publish_history.empty",
+                "No publish runs are currently attached to this artifact.",
+              )}
             </p>
           ) : (
             <div className="artifact-viewer__publish-list">
@@ -142,7 +171,10 @@ export function ArtifactViewer({
                   </p>
                   <p className="artifact-viewer__copy">
                     {publishRun.destination_ref ||
-                      "Destination reference pending."}
+                      t(
+                        "artifact_viewer.publish_history.pending_destination",
+                        "Destination reference pending.",
+                      )}
                   </p>
                   <div className="artifact-viewer__badges">
                     <Badge tone={resolvePublishRunTone(publishRun.status)}>
@@ -153,9 +185,7 @@ export function ArtifactViewer({
                         publishRun.publish_target_kind,
                       )}
                     >
-                      {formatPublishTargetKindLabel(
-                        publishRun.publish_target_kind,
-                      )}
+                      {formatPublishTargetKindLabel(t, publishRun.publish_target_kind)}
                     </Badge>
                   </div>
                 </div>
@@ -168,8 +198,12 @@ export function ArtifactViewer({
   );
 }
 
-function formatPublishCount(count: number) {
-  return `${count} publish${count === 1 ? "" : "es"}`;
+function formatPublishCount(t: Translate, count: number) {
+  return count === 1
+    ? t("artifact_viewer.publish_count.one", "1 publish")
+    : t("artifact_viewer.publish_count.other", "{{count}} publishes", {
+        count,
+      });
 }
 
 function resolveArtifactPublishCountTone(count: number): BadgeTone {
@@ -188,20 +222,26 @@ function resolvePublishRunTone(status: string): "strong" | "neutral" | "muted" {
   }
 }
 
-function formatPublishTargetKindLabel(kind: string) {
+function formatPublishTargetKindLabel(t: Translate, kind: string) {
   switch (kind.trim().toLocaleLowerCase()) {
     case "filesystem":
-      return "Move To Folder";
+      return t(
+        "artifact_viewer.publish_target_kind.filesystem",
+        "Move To Folder",
+      );
     case "itch":
-      return "Itch.io Upload";
+      return t(
+        "artifact_viewer.publish_target_kind.itch",
+        "Itch.io Upload",
+      );
     default:
       return kind;
   }
 }
 
-function formatByteSize(sizeBytes: number | null) {
+function formatByteSize(t: Translate, sizeBytes: number | null) {
   if (sizeBytes === null || sizeBytes < 0) {
-    return "unknown";
+    return t("artifact_viewer.size.unknown", "unknown");
   }
 
   if (sizeBytes < 1024) {

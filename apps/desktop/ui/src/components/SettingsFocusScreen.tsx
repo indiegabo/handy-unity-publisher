@@ -77,7 +77,7 @@ export function SettingsFocusScreen() {
         setSnapshot((current) => ({
           ...current,
           isLoading: false,
-          localizationSettingsError: buildErrorMessage(error),
+          localizationSettingsError: buildErrorMessage(t, error),
         }));
       });
     }
@@ -104,12 +104,20 @@ export function SettingsFocusScreen() {
             localizationSettings,
             localizationSettingsError: null,
           }));
-          setActionMessage("Idioma salvo.");
+          setActionMessage(
+            t("settings.localization.messages.saved", "Language saved."),
+          );
         });
       } catch (error) {
         startTransition(() => {
           setActionError(
-            `Nao foi possivel salvar idioma: ${buildErrorMessage(error)}`,
+            t(
+              "settings.localization.messages.save_failed",
+              "Could not save language: {{message}}",
+              {
+                message: buildErrorMessage(t, error),
+              },
+            ),
           );
         });
       } finally {
@@ -161,10 +169,12 @@ export function SettingsFocusScreen() {
             size="sm"
             variant="secondary"
           >
-            {snapshot.isLoading ? "Atualizando..." : "Atualizar"}
+            {snapshot.isLoading
+              ? t("settings.actions.refreshing", "Refreshing settings...")
+              : t("settings.actions.refresh", "Refresh settings")}
           </Button>
         }
-        title="Settings"
+        title={t("settings.title", "Settings")}
       >
         {actionMessage ? (
           <p className="notice-banner">{actionMessage}</p>
@@ -173,7 +183,9 @@ export function SettingsFocusScreen() {
           <p className="feed-banner feed-banner--error">{actionError}</p>
         ) : null}
 
-        <SurfacePanel title={t("settings.localization.title", "Idioma")}> 
+        <SurfacePanel
+          title={t("settings.localization.title", "Localization")}
+        >
           {snapshot.localizationSettingsError ? (
             <p className="feed-banner feed-banner--error">
               {snapshot.localizationSettingsError}
@@ -187,7 +199,7 @@ export function SettingsFocusScreen() {
                   disabled={isSavingLocalization}
                   label={t(
                     "settings.localization.primary_label",
-                    "Idioma",
+                    "Primary language",
                   )}
                   onChange={(event) =>
                     void handlePrimaryLocaleChange(event.currentTarget.value)
@@ -199,7 +211,7 @@ export function SettingsFocusScreen() {
                   disabled={isSavingLocalization}
                   label={t(
                     "settings.localization.fallback_label",
-                    "Fallback",
+                    "Fallback language",
                   )}
                   onChange={(event) =>
                     void handleFallbackLocaleChange(event.currentTarget.value)
@@ -211,7 +223,7 @@ export function SettingsFocusScreen() {
             </div>
           ) : (
             <p className="settings-focus-copy">
-              Carregando idiomas...
+              {t("settings.localization.loading", "Loading locales...")}
             </p>
           )}
         </SurfacePanel>
@@ -234,7 +246,10 @@ function buildLocalizationOptions(
   }));
 }
 
-function buildErrorMessage(error: unknown) {
+function buildErrorMessage(
+  t: ReturnType<typeof useLocalization>["t"],
+  error: unknown,
+) {
   if (error instanceof Error && error.message.trim()) {
     return error.message.trim();
   }
@@ -243,5 +258,5 @@ function buildErrorMessage(error: unknown) {
     return error.trim();
   }
 
-  return "Unknown shell error.";
+  return t("settings.error.unknown", "Unknown shell error.");
 }

@@ -1,5 +1,6 @@
 import { Button } from "./Button";
 import FullScreenModal from "./FullScreenModal";
+import { useLocalization } from "../LocalizationProvider";
 
 export type ConfirmDialogProps = {
   cancelLabel?: string;
@@ -12,14 +13,20 @@ export type ConfirmDialogProps = {
 };
 
 export function ConfirmDialog({
-  cancelLabel = "Stay in shell",
-  confirmLabel = "Confirm",
+  cancelLabel,
+  confirmLabel,
   confirmVariant = "primary",
   description,
   message,
   onResolve,
   title,
 }: ConfirmDialogProps) {
+  const { t } = useLocalization();
+  const resolvedCancelLabel =
+    cancelLabel ?? t("confirm_dialog.actions.cancel", "Stay in shell");
+  const resolvedConfirmLabel =
+    confirmLabel ?? t("confirm_dialog.actions.confirm", "Confirm");
+
   return (
     <FullScreenModal
       className="confirm-dialog__modal"
@@ -37,14 +44,14 @@ export function ConfirmDialog({
             size="sm"
             variant="ghost"
           >
-            {cancelLabel}
+            {resolvedCancelLabel}
           </Button>
           <Button
             onClick={() => onResolve?.(true)}
             size="sm"
             variant={confirmVariant}
           >
-            {confirmLabel}
+            {resolvedConfirmLabel}
           </Button>
         </div>
       </div>

@@ -18,12 +18,16 @@ import {
   type DiscoveredUnityEditor,
   type RepositoryAccessAssessment,
   type RepositoryEngineKind,
-  type RepositoryInspectionEntry,
   type RepositoryProviderDetection,
   type SaveSecretCredentialInput,
   type SecretCredentialSetting,
   type UnityExecutableValidation,
 } from "../../services/projects";
+import {
+  useLocalization,
+  type LocalizationVariables,
+  type Translate,
+} from "../../LocalizationProvider";
 
 export type BuildTargetDraft = {
   id: string;
@@ -109,32 +113,127 @@ export const WIZARD_STEP_ORDER: readonly WizardStepKey[] = [
   "review",
 ];
 
-export const PROJECT_KIND_OPTIONS = [
-  { label: "Repository project", value: "repository" },
-  { label: "Local workspace project", value: "local" },
-] as const;
+function translateMessage(
+  t: Translate | undefined,
+  key: string,
+  fallbackText: string,
+  variables?: LocalizationVariables,
+) {
+  if (t) {
+    return t(key, fallbackText, variables);
+  }
 
-export const REPOSITORY_VISIBILITY_OPTIONS = [
-  { label: "Public", value: "public" },
-  { label: "Private", value: "private" },
-] as const;
+  if (!variables) {
+    return fallbackText;
+  }
 
-export function formatProjectKindLabel(projectKind: ProjectDraft["projectKind"]) {
+  return fallbackText.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (match, name) => {
+    const value = variables[name];
+    return value === undefined ? match : String(value);
+  });
+}
+
+function buildProjectKindOptions(t: Translate): ReadonlyArray<SelectOption> {
+  return [
+    {
+      label: translateMessage(
+        t,
+        "project_shared.kind.repository",
+        "Repository project",
+      ),
+      value: "repository",
+    },
+    {
+      label: translateMessage(
+        t,
+        "project_shared.kind.local_workspace",
+        "Local workspace project",
+      ),
+      value: "local",
+    },
+  ];
+}
+
+function buildRepositoryVisibilityOptions(
+  t: Translate,
+): ReadonlyArray<SelectOption> {
+  return [
+    {
+      label: translateMessage(
+        t,
+        "project_shared.visibility.public",
+        "Public",
+      ),
+      value: "public",
+    },
+    {
+      label: translateMessage(
+        t,
+        "project_shared.visibility.private",
+        "Private",
+      ),
+      value: "private",
+    },
+  ];
+}
+
+export function formatProjectKindLabel(
+  projectKind: ProjectDraft["projectKind"],
+  t?: Translate,
+) {
   return projectKind === "repository"
-    ? "Repository project"
-    : "Local workspace project";
+    ? translateMessage(
+        t,
+        "project_shared.kind.repository",
+        "Repository project",
+      )
+    : translateMessage(
+        t,
+        "project_shared.kind.local_workspace",
+        "Local workspace project",
+      );
 }
 
 export function formatRepositoryEngineKindLabel(
   engineKind: RepositoryEngineKind,
+  t?: Translate,
 ) {
-  if (engineKind === "unity") {
-    return "Unity";
+  switch (engineKind) {
+    case "unity":
+      return translateMessage(t, "project_shared.engine.option.unity", "Unity");
+    case "unreal":
+      return translateMessage(
+        t,
+        "project_shared.engine.option.unreal",
+        "Unreal",
+      );
+    case "godot":
+      return translateMessage(t, "project_shared.engine.option.godot", "Godot");
+    case "gamemaker":
+      return translateMessage(
+        t,
+        "project_shared.engine.option.gamemaker",
+        "GameMaker",
+      );
+    case "defold":
+      return translateMessage(
+        t,
+        "project_shared.engine.option.defold",
+        "Defold",
+      );
+    case "cocos-creator":
+      return translateMessage(
+        t,
+        "project_shared.engine.option.cocos_creator",
+        "Cocos Creator",
+      );
   }
 
-  return engineKind
+  const fallbackLabel = String(engineKind);
+
+  return fallbackLabel
     .split("-")
-    .map((segment) =>
+    .map((segment: string) =>
       segment.length > 0
         ? `${segment[0].toUpperCase()}${segment.slice(1)}`
         : segment,
@@ -142,46 +241,97 @@ export function formatRepositoryEngineKindLabel(
     .join(" ");
 }
 
-export function formatWizardTargetCount(targetCount: number) {
-  return `${targetCount} target${targetCount === 1 ? "" : "s"}`;
+export function formatWizardTargetCount(targetCount: number, t?: Translate) {
+  return targetCount === 1
+    ? translateMessage(t, "project_shared.count.target.one", "1 target")
+    : translateMessage(
+        t,
+        "project_shared.count.target.other",
+        "{{count}} targets",
+        { count: targetCount },
+      );
 }
 
 export function formatProjectSourceAdapterStatus(
   adapter: ProjectSourceWizardAdapter,
+  t?: Translate,
 ) {
   return adapter.kind === "repository" || adapter.kind === "local"
-    ? "Available"
-    : "Unavailable";
+    ? translateMessage(
+        t,
+        "project_shared.source_adapter.available",
+        "Available",
+      )
+    : translateMessage(
+        t,
+        "project_shared.source_adapter.unavailable",
+        "Unavailable",
+      );
 }
 
 export function resolveProjectSourceWizardAdapter(
   projectKind: ProjectDraft["projectKind"],
+  t?: Translate,
 ): ProjectSourceWizardAdapter {
   if (projectKind === "repository") {
     return {
       kind: "repository",
-      stepLabel: "Repository",
-      stepDescription:
+      stepLabel: translateMessage(
+        t,
+        "project_shared.source.repository.step_label",
+        "Repository",
+      ),
+      stepDescription: translateMessage(
+        t,
+        "project_shared.source.repository.step_description",
         "Declare where HGP should sync this project, authenticate, and watch for changes.",
-      supportTitle: "Repository source",
-      supportDescription:
+      ),
+      supportTitle: translateMessage(
+        t,
+        "project_shared.source.repository.support_title",
+        "Repository source",
+      ),
+      supportDescription: translateMessage(
+        t,
+        "project_shared.source.repository.support_description",
         "Repository-backed projects rely on the source adapter to detect providers, credentials, and polling posture.",
-      supportCopy:
+      ),
+      supportCopy: translateMessage(
+        t,
+        "project_shared.source.repository.support_copy",
         "This source adapter lets the runtime poll a remote repository, assess access, and queue automation from new releases.",
+      ),
       unsupportedMessage: null,
     };
   }
 
   return {
     kind: "local",
-    stepLabel: "Workspace",
-    stepDescription:
+    stepLabel: translateMessage(
+      t,
+      "project_shared.source.local.step_label",
+      "Workspace",
+    ),
+    stepDescription: translateMessage(
+      t,
+      "project_shared.source.local.step_description",
       "Declare the local workspace source that HGP should manage for this project.",
-    supportTitle: "Local workspace source",
-    supportDescription:
+    ),
+    supportTitle: translateMessage(
+      t,
+      "project_shared.source.local.support_title",
+      "Local workspace source",
+    ),
+    supportDescription: translateMessage(
+      t,
+      "project_shared.source.local.support_description",
       "Local workspace projects point HGP at one host path that should be released without a managed repository checkout.",
-    supportCopy:
+    ),
+    supportCopy: translateMessage(
+      t,
+      "project_shared.source.local.support_copy",
       "Choose the Unity workspace path that HGP should inspect for versioning and build from this host directly.",
+    ),
     unsupportedMessage: null,
   };
 }
@@ -189,50 +339,114 @@ export function resolveProjectSourceWizardAdapter(
 export function resolveBuildTargetWizardAdapter(
   engineKind: RepositoryEngineKind,
   projectKind: ProjectDraft["projectKind"],
+  t?: Translate,
 ): BuildTargetWizardAdapter {
-  const engineLabel = formatRepositoryEngineKindLabel(engineKind);
-  const projectLabel = formatProjectKindLabel(projectKind).toLocaleLowerCase();
+  const engineLabel = formatRepositoryEngineKindLabel(engineKind, t);
+  const projectLabel = formatProjectKindLabel(projectKind, t).toLocaleLowerCase();
 
   if (engineKind === "unity") {
     return {
       kind: "unity",
-      stepLabel: "Build Targets",
-      stepDescription: `Configure the ${engineLabel}-specific build targets HGP should execute for this ${projectLabel}.`,
-      supportTitle: "Unity target adapter",
-      supportDescription:
+      stepLabel: translateMessage(
+        t,
+        "project_shared.build_target.unity.step_label",
+        "Build Targets",
+      ),
+      stepDescription: translateMessage(
+        t,
+        "project_shared.build_target.unity.step_description",
+        "Configure the {{engineLabel}}-specific build targets HGP should execute for this {{projectLabel}}.",
+        {
+          engineLabel,
+          projectLabel,
+        },
+      ),
+      supportTitle: translateMessage(
+        t,
+        "project_shared.build_target.unity.support_title",
+        "Unity target adapter",
+      ),
+      supportDescription: translateMessage(
+        t,
+        "project_shared.build_target.unity.support_description",
         "This step is currently being driven by the Unity build target adapter.",
-      supportCopy:
+      ),
+      supportCopy: translateMessage(
+        t,
+        "project_shared.build_target.unity.support_copy",
         "Unity projects define the target platform, build method, and editor executable that HGP should launch for each build target.",
-      reviewDescription:
+      ),
+      reviewDescription: translateMessage(
+        t,
+        "project_shared.build_target.unity.review_description",
         "Engine-specific target configuration that HGP will execute for this project.",
+      ),
       unsupportedMessage: null,
     };
   }
 
   return {
     kind: "engine-unsupported",
-    stepLabel: "Build Targets",
-    stepDescription:
+    stepLabel: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.step_label",
+      "Build Targets",
+    ),
+    stepDescription: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.step_description",
       "Configure the engine-specific build targets HGP should execute for this project.",
-    supportTitle: `${engineLabel} target adapter`,
-    supportDescription:
+    ),
+    supportTitle: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.support_title",
+      "{{engineLabel}} target adapter",
+      { engineLabel },
+    ),
+    supportDescription: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.support_description",
       "This step must switch to the adapter owned by the selected engine.",
-    supportCopy: `${engineLabel} projects need a specialized build target adapter before project creation can collect engine-specific fields.`,
-    reviewDescription: `Engine-specific target configuration for ${engineLabel} is not available in project creation yet.`,
-    unsupportedMessage: `${engineLabel} build target setup does not have a create-project adapter yet.`,
+    ),
+    supportCopy: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.support_copy",
+      "{{engineLabel}} projects need a specialized build target adapter before project creation can collect engine-specific fields.",
+      { engineLabel },
+    ),
+    reviewDescription: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.review_description",
+      "Engine-specific target configuration for {{engineLabel}} is not available in project creation yet.",
+      { engineLabel },
+    ),
+    unsupportedMessage: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.message",
+      "{{engineLabel}} build target setup does not have a create-project adapter yet.",
+      { engineLabel },
+    ),
   };
 }
 
 export function buildWizardSteps(
   sourceAdapter: ProjectSourceWizardAdapter,
   buildTargetAdapter: BuildTargetWizardAdapter,
+  t?: Translate,
 ): WizardStepDefinition[] {
   const definitions: Record<WizardStepKey, WizardStepDefinition> = {
     identity: {
       key: "identity",
-      label: "Identity",
-      description:
+      label: translateMessage(
+        t,
+        "project_shared.step.identity.label",
+        "Identity",
+      ),
+      description: translateMessage(
+        t,
+        "project_shared.step.identity.description",
         "Name the project and choose the source and engine adapters HGP should use.",
+      ),
     },
     access: {
       key: "access",
@@ -246,21 +460,38 @@ export function buildWizardSteps(
     },
     publish: {
       key: "publish",
-      label: "Publish Destinations",
-      description:
+      label: translateMessage(
+        t,
+        "project_shared.step.publish.label",
+        "Publish Destinations",
+      ),
+      description: translateMessage(
+        t,
+        "project_shared.step.publish.description",
         "Bind build outputs to publish destinations and validate destination-specific delivery rules before save.",
+      ),
     },
     paths: {
       key: "paths",
-      label: "Paths",
-      description:
+      label: translateMessage(t, "project_shared.step.paths.label", "Paths"),
+      description: translateMessage(
+        t,
+        "project_shared.step.paths.description",
         "Choose optional artifact and workspace paths for this project.",
+      ),
     },
     review: {
       key: "review",
-      label: "Review",
-      description:
+      label: translateMessage(
+        t,
+        "project_shared.step.review.label",
+        "Review",
+      ),
+      description: translateMessage(
+        t,
+        "project_shared.step.review.description",
         "Review the project definition produced by the selected source and engine adapters before registration.",
+      ),
     },
   };
 
@@ -348,16 +579,32 @@ export function normalizePathForComparison(value: string) {
   return normalized.replace(/\/+$/, "").toLocaleLowerCase();
 }
 
-export function formatDiagnosticStatus(status: string) {
+export function formatDiagnosticStatus(status: string, t?: Translate) {
   switch (status) {
     case "ready":
-      return "ready";
+      return translateMessage(
+        t,
+        "project_shared.diagnostic.ready",
+        "ready",
+      );
     case "missing_executable":
-      return "missing";
+      return translateMessage(
+        t,
+        "project_shared.diagnostic.missing",
+        "missing",
+      );
     case "invalid_path":
-      return "invalid";
+      return translateMessage(
+        t,
+        "project_shared.diagnostic.invalid",
+        "invalid",
+      );
     case "validation_failed":
-      return "failed";
+      return translateMessage(
+        t,
+        "project_shared.diagnostic.failed",
+        "failed",
+      );
     default:
       return status.replace(/_/g, " ");
   }
@@ -366,24 +613,45 @@ export function formatDiagnosticStatus(status: string) {
 export function formatGithubAuthProviderStatus(
   provider: AuthProviderStatus | null,
   isLoadingAuthProviders: boolean,
+  t?: Translate,
 ) {
   if (isLoadingAuthProviders) {
-    return "loading";
+    return translateMessage(
+      t,
+      "project_shared.github_auth_status.loading",
+      "loading",
+    );
   }
 
   if (!provider) {
-    return "unavailable";
+    return translateMessage(
+      t,
+      "project_shared.github_auth_status.unavailable",
+      "unavailable",
+    );
   }
 
   if (provider.status === "connected") {
-    return "connected";
+    return translateMessage(
+      t,
+      "project_shared.github_auth_status.connected",
+      "connected",
+    );
   }
 
   if (provider.status === "disconnected") {
-    return "ready to connect";
+    return translateMessage(
+      t,
+      "project_shared.github_auth_status.disconnected",
+      "ready to connect",
+    );
   }
 
-  return "unavailable";
+  return translateMessage(
+    t,
+    "project_shared.github_auth_status.unavailable",
+    "unavailable",
+  );
 }
 
 export function resolveRepositoryAccessBadgeTone(
@@ -423,34 +691,71 @@ export function formatRepositoryAccessStatus(
   assessment: RepositoryAccessAssessment | null,
   isAssessingRepositoryAccess: boolean,
   repositoryAccessError: string | null,
+  t?: Translate,
 ) {
   if (!repositoryUrl.trim()) {
-    return "pending";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.status.pending",
+      "pending",
+    );
   }
 
   if (isAssessingRepositoryAccess) {
-    return "checking";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.status.checking",
+      "checking",
+    );
   }
 
   if (repositoryAccessError) {
-    return "check failed";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.status.check_failed",
+      "check failed",
+    );
   }
 
   if (!assessment) {
-    return "pending";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.status.pending",
+      "pending",
+    );
   }
 
   switch (assessment.visibility) {
     case "public":
-      return "public";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.status.public",
+        "public",
+      );
     case "private":
       return assessment.supports_interactive_login
-        ? "login required"
-        : "unsupported";
+        ? translateMessage(
+            t,
+            "project_shared.repository_access.status.login_required",
+            "login required",
+          )
+        : translateMessage(
+            t,
+            "project_shared.repository_access.status.unsupported",
+            "unsupported",
+          );
     case "invalid":
-      return "invalid";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.status.invalid",
+        "invalid",
+      );
     default:
-      return "unknown";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.status.unknown",
+        "unknown",
+      );
   }
 }
 
@@ -459,13 +764,22 @@ export function resolveRepositoryAccessCopy(
   assessment: RepositoryAccessAssessment | null,
   isAssessingRepositoryAccess: boolean,
   repositoryAccessError: string | null,
+  t?: Translate,
 ) {
   if (!repositoryUrl.trim()) {
-    return "Paste a repository URL, choose whether the repository is public or private, and HGP will detect which platform owns the host.";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.copy.empty",
+      "Paste a repository URL, choose whether the repository is public or private, and HGP will detect which platform owns the host.",
+    );
   }
 
   if (isAssessingRepositoryAccess) {
-    return "HGP is identifying which platform owns this repository URL and whether private login is supported for the selected visibility.";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.copy.checking",
+      "HGP is identifying which platform owns this repository URL and whether private login is supported for the selected visibility.",
+    );
   }
 
   if (repositoryAccessError) {
@@ -476,7 +790,11 @@ export function resolveRepositoryAccessCopy(
     return assessment.message;
   }
 
-  return "Repository access has not been checked yet.";
+  return translateMessage(
+    t,
+    "project_shared.repository_access.copy.pending",
+    "Repository access has not been checked yet.",
+  );
 }
 
 export function formatRepositoryAccessSummary(
@@ -484,32 +802,65 @@ export function formatRepositoryAccessSummary(
   assessment: RepositoryAccessAssessment | null,
   isAssessingRepositoryAccess: boolean,
   repositoryAccessError: string | null,
+  t?: Translate,
 ) {
   if (!repositoryUrl.trim()) {
-    return "Pending";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.summary.pending",
+      "Pending",
+    );
   }
 
   if (isAssessingRepositoryAccess) {
-    return "Checking";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.summary.checking",
+      "Checking",
+    );
   }
 
   if (repositoryAccessError) {
-    return "Check failed";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.summary.check_failed",
+      "Check failed",
+    );
   }
 
   if (!assessment) {
-    return "Pending";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.summary.pending",
+      "Pending",
+    );
   }
 
   switch (assessment.visibility) {
     case "public":
-      return "Public";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.summary.public",
+        "Public",
+      );
     case "private":
-      return "Private";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.summary.private",
+        "Private",
+      );
     case "invalid":
-      return "Invalid";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.summary.invalid",
+        "Invalid",
+      );
     default:
-      return "Unknown";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.summary.unknown",
+        "Unknown",
+      );
   }
 }
 
@@ -517,13 +868,22 @@ export function formatRepositoryAccessProviderLabel(
   assessment: RepositoryAccessAssessment | null,
   isAssessingRepositoryAccess: boolean,
   repositoryAccessError: string | null,
+  t?: Translate,
 ) {
   if (isAssessingRepositoryAccess) {
-    return "Detecting";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.provider.detecting",
+      "Detecting",
+    );
   }
 
   if (repositoryAccessError || !assessment) {
-    return "Pending";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.provider.pending",
+      "Pending",
+    );
   }
 
   return assessment.provider_label;
@@ -533,28 +893,57 @@ export function formatRepositoryVisibilityLabel(
   assessment: RepositoryAccessAssessment | null,
   isAssessingRepositoryAccess: boolean,
   repositoryAccessError: string | null,
+  t?: Translate,
 ) {
   if (isAssessingRepositoryAccess) {
-    return "Checking";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.visibility.checking",
+      "Checking",
+    );
   }
 
   if (repositoryAccessError) {
-    return "Needs review";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.visibility.needs_review",
+      "Needs review",
+    );
   }
 
   if (!assessment) {
-    return "Pending";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.visibility.pending",
+      "Pending",
+    );
   }
 
   switch (assessment.visibility) {
     case "public":
-      return "Public";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.visibility.public",
+        "Public",
+      );
     case "private":
-      return "Private";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.visibility.private",
+        "Private",
+      );
     case "invalid":
-      return "Invalid";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.visibility.invalid",
+        "Invalid",
+      );
     default:
-      return "Unknown";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.visibility.unknown",
+        "Unknown",
+      );
   }
 }
 
@@ -562,75 +951,145 @@ export function formatRepositoryLoginStatus(
   assessment: RepositoryAccessAssessment | null,
   githubAuthProvider: AuthProviderStatus | null,
   isLoadingAuthProviders: boolean,
+  t?: Translate,
 ) {
   if (!assessment) {
-    return "Pending";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.login.pending",
+      "Pending",
+    );
   }
 
   if (assessment.auth_requirement === "none") {
-    return "Not required";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.login.not_required",
+      "Not required",
+    );
   }
 
   if (!assessment.supports_interactive_login) {
-    return "Not available";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.login.not_available",
+      "Not available",
+    );
   }
 
   if (assessment.provider_id === "github") {
     return formatGithubAuthProviderStatus(
       githubAuthProvider,
       isLoadingAuthProviders,
+      t,
     );
   }
 
-  return "Required";
+  return translateMessage(
+    t,
+    "project_shared.repository_access.login.required",
+    "Required",
+  );
 }
 
 export function formatRepositoryBindingStatus(
   assessment: RepositoryAccessAssessment | null,
   repositoryCredentialId: number | null,
   pendingRepositoryAccessAction: boolean,
+  t?: Translate,
 ) {
   if (!assessment) {
-    return "Pending";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.binding.pending",
+      "Pending",
+    );
   }
 
   if (pendingRepositoryAccessAction) {
-    return "Connecting";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.binding.connecting",
+      "Connecting",
+    );
   }
 
   if (assessment.auth_requirement === "none") {
-    return "Not required";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.binding.not_required",
+      "Not required",
+    );
   }
 
   if (!supportsShellRepositoryLoginAction(assessment)) {
-    return "Unavailable";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.binding.unavailable",
+      "Unavailable",
+    );
   }
 
-  return repositoryCredentialId ? "Selected" : "Pending";
+  return repositoryCredentialId
+    ? translateMessage(
+        t,
+        "project_shared.repository_access.binding.selected",
+        "Selected",
+      )
+    : translateMessage(
+        t,
+        "project_shared.repository_access.binding.pending",
+        "Pending",
+      );
 }
 
 export function formatRepositoryBindingActionLabel(
   assessment: RepositoryAccessAssessment | null,
   githubAuthProvider: AuthProviderStatus | null,
   repositoryCredentialId: number | null,
+  t?: Translate,
 ) {
   if (!assessment) {
-    return "Connect credential";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.binding_action.connect_credential",
+      "Connect credential",
+    );
   }
 
   if (repositoryCredentialId) {
     return assessment.provider_id === "github"
-      ? "Reconnect GitHub login"
-      : "Change credential";
+      ? translateMessage(
+          t,
+          "project_shared.repository_access.binding_action.reconnect_github",
+          "Reconnect GitHub login",
+        )
+      : translateMessage(
+          t,
+          "project_shared.repository_access.binding_action.change_credential",
+          "Change credential",
+        );
   }
 
   if (assessment.provider_id === "github") {
     return githubAuthProvider?.status === "connected"
-      ? "Connect GitHub login"
-      : "Log in and connect";
+      ? translateMessage(
+          t,
+          "project_shared.repository_access.binding_action.connect_github",
+          "Connect GitHub login",
+        )
+      : translateMessage(
+          t,
+          "project_shared.repository_access.binding_action.login_and_connect",
+          "Log in and connect",
+        );
   }
 
-  return "Select credential";
+  return translateMessage(
+    t,
+    "project_shared.repository_access.binding_action.select_credential",
+    "Select credential",
+  );
 }
 
 export function shouldShowRepositoryLoginAction(
@@ -644,29 +1103,43 @@ export function supportsShellRepositoryLoginAction(
 ) {
   return Boolean(
     assessment?.auth_requirement === "required" &&
-      assessment.supports_interactive_login &&
-      assessment.provider_id === "github",
+    assessment.supports_interactive_login &&
+    assessment.provider_id === "github",
   );
 }
 
 export function formatRepositoryCredentialFieldHint(
   assessment: RepositoryAccessAssessment | null,
   isLoadingRepositoryCredentials: boolean,
+  t?: Translate,
 ) {
   if (isLoadingRepositoryCredentials) {
-    return "Loading stored repository credentials...";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.credentials.loading",
+      "Loading stored repository credentials...",
+    );
   }
 
   if (!assessment || assessment.auth_requirement !== "required") {
-    return "Public repositories can keep this empty.";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.credentials.hint_public",
+      "Public repositories can keep this empty.",
+    );
   }
 
-  return "Choose a stored GitHub credential or use the login action below.";
+  return translateMessage(
+    t,
+    "project_shared.repository_access.credentials.hint_private",
+    "Choose a stored GitHub credential or use the login action below.",
+  );
 }
 
 export function buildRepositoryAccessAssessmentFromDetection(
   detection: RepositoryProviderDetection,
   repositoryVisibility: ProjectDraft["repositoryVisibility"],
+  t?: Translate,
 ): RepositoryAccessAssessment {
   if (repositoryVisibility === "public") {
     return {
@@ -678,8 +1151,11 @@ export function buildRepositoryAccessAssessmentFromDetection(
       auth_requirement: "none",
       auth_status: "not_required",
       supports_interactive_login: detection.supports_interactive_login,
-      message:
+      message: translateMessage(
+        t,
+        "project_shared.repository_access.assessment.public",
         "Public repository selected. HGP will poll and clone this remote without repository authentication.",
+      ),
     };
   }
 
@@ -696,8 +1172,11 @@ export function buildRepositoryAccessAssessmentFromDetection(
       auth_requirement: "required",
       auth_status: "required_unbound",
       supports_interactive_login: detection.supports_interactive_login,
-      message:
+      message: translateMessage(
+        t,
+        "project_shared.repository_access.assessment.private_github",
         "Private GitHub repository selected. Log in and connect this project before saving.",
+      ),
     };
   }
 
@@ -711,8 +1190,11 @@ export function buildRepositoryAccessAssessmentFromDetection(
       auth_requirement: "required",
       auth_status: "unsupported",
       supports_interactive_login: detection.supports_interactive_login,
-      message:
+      message: translateMessage(
+        t,
+        "project_shared.repository_access.assessment.private_unknown",
         "Private repository selected, but HGP could not identify a supported login platform from this URL. Only public repositories are supported for this host right now.",
+      ),
     };
   }
 
@@ -725,7 +1207,14 @@ export function buildRepositoryAccessAssessmentFromDetection(
     auth_requirement: "required",
     auth_status: "unsupported",
     supports_interactive_login: detection.supports_interactive_login,
-    message: `Private ${detection.provider_label} repositories are not supported yet. Only public repositories are available for this platform right now.`,
+    message: translateMessage(
+      t,
+      "project_shared.repository_access.assessment.private_provider",
+      "Private {{providerLabel}} repositories are not supported yet. Only public repositories are available for this platform right now.",
+      {
+        providerLabel: detection.provider_label,
+      },
+    ),
   };
 }
 
@@ -733,11 +1222,16 @@ export function buildDetectedUnityEditorOptions(
   editors: DiscoveredUnityEditor[],
   isLoadingUnityAdapterSettings: boolean,
   unityAdapterSettingsError: string | null,
+  t?: Translate,
 ): SelectOption[] {
   if (isLoadingUnityAdapterSettings) {
     return [
       {
-        label: "Scanning installed Unity editors...",
+        label: translateMessage(
+          t,
+          "project_shared.unity_editor.option.scanning",
+          "Scanning installed Unity editors...",
+        ),
         value: "",
       },
     ];
@@ -746,7 +1240,11 @@ export function buildDetectedUnityEditorOptions(
   if (unityAdapterSettingsError) {
     return [
       {
-        label: "Unable to load installed Unity editors",
+        label: translateMessage(
+          t,
+          "project_shared.unity_editor.option.load_failed",
+          "Unable to load installed Unity editors",
+        ),
         value: "",
       },
     ];
@@ -755,7 +1253,11 @@ export function buildDetectedUnityEditorOptions(
   if (editors.length === 0) {
     return [
       {
-        label: "No installed Unity editors detected",
+        label: translateMessage(
+          t,
+          "project_shared.unity_editor.option.none_detected",
+          "No installed Unity editors detected",
+        ),
         value: "",
       },
     ];
@@ -763,8 +1265,16 @@ export function buildDetectedUnityEditorOptions(
 
   return [
     {
-      label: "Choose a detected Unity editor",
-      title: "Choose a detected Unity editor",
+      label: translateMessage(
+        t,
+        "project_shared.unity_editor.option.select_detected",
+        "Choose a detected Unity editor",
+      ),
+      title: translateMessage(
+        t,
+        "project_shared.unity_editor.option.select_detected",
+        "Choose a detected Unity editor",
+      ),
       value: "",
     },
     ...editors.map((editor) => ({
@@ -778,16 +1288,32 @@ export function buildDetectedUnityEditorOptions(
 export function buildDetectedUnityEditorHint(
   unityAdapterSettingsError: string | null,
   editorCount: number,
+  t?: Translate,
 ) {
   if (unityAdapterSettingsError) {
-    return `${unityAdapterSettingsError} Use the manual path field below to continue.`;
+    return translateMessage(
+      t,
+      "project_shared.unity_editor.hint.load_failed",
+      "{{error}} Use the manual path field below to continue.",
+      {
+        error: unityAdapterSettingsError,
+      },
+    );
   }
 
   if (editorCount === 0) {
-    return "Choose a detected editor when available, or keep using the manual executable path field below.";
+    return translateMessage(
+      t,
+      "project_shared.unity_editor.hint.none_detected",
+      "Choose a detected editor when available, or keep using the manual executable path field below.",
+    );
   }
 
-  return "Select a detected Unity install to fill the executable path below, or keep using the manual picker.";
+  return translateMessage(
+    t,
+    "project_shared.unity_editor.hint.detected",
+    "Select a detected Unity install to fill the executable path below, or keep using the manual picker.",
+  );
 }
 
 export function resolveDetectedUnityEditorValue(
@@ -806,40 +1332,75 @@ export function resolveDetectedUnityEditorValue(
 export function formatBuildTargetExecutableSummary(
   diagnostics: UnityExecutableValidation | null,
   isValidating: boolean,
+  t?: Translate,
 ) {
   if (isValidating) {
-    return "checking";
+    return translateMessage(
+      t,
+      "project_shared.build_target.executable_summary.checking",
+      "checking",
+    );
   }
 
   if (!diagnostics) {
-    return "pending";
+    return translateMessage(
+      t,
+      "project_shared.build_target.executable_summary.pending",
+      "pending",
+    );
   }
 
-  return formatDiagnosticStatus(diagnostics.status);
+  return formatDiagnosticStatus(diagnostics.status, t);
 }
 
 export function buildBuildTargetQuickViewCopy(
   target: BuildTargetDraft,
   diagnostics: UnityExecutableValidation | null,
   unityExecutablePath: string,
+  t?: Translate,
 ) {
   if (diagnostics && diagnostics.status !== "ready") {
     return diagnostics.message;
   }
 
   if (!unityExecutablePath.trim()) {
-    return "Unity executable path is still pending.";
+    return translateMessage(
+      t,
+      "project_shared.build_target.quick_view.executable_pending",
+      "Unity executable path is still pending.",
+    );
   }
 
-  return `${target.buildMethod.trim() || "Build method pending"} • ${unityExecutablePath.trim()}`;
+  return `${target.buildMethod.trim() || translateMessage(
+    t,
+    "project_shared.build_target.quick_view.build_method_pending",
+    "Build method pending",
+  )} • ${unityExecutablePath.trim()}`;
 }
 
-export function formatProjectSourceReviewDescription(draft: ProjectDraft) {
+export function formatProjectSourceReviewDescription(
+  draft: ProjectDraft,
+  t?: Translate,
+) {
   if (draft.projectKind === "repository") {
-    return draft.repositoryUrl.trim() || "Repository source not set yet.";
+    return (
+      draft.repositoryUrl.trim() ||
+      translateMessage(
+        t,
+        "project_shared.source_review.repository_pending",
+        "Repository source not set yet.",
+      )
+    );
   }
 
-  return draft.localPath.trim() || "Local workspace source not set yet.";
+  return (
+    draft.localPath.trim() ||
+    translateMessage(
+      t,
+      "project_shared.source_review.local_pending",
+      "Local workspace source not set yet.",
+    )
+  );
 }
 
 type RepositoryAccessPanelProps = {
@@ -889,6 +1450,8 @@ export function ProjectRepositoryAccessPanel({
   onRetryRepositoryCredentials,
   onManageAuth,
 }: RepositoryAccessPanelProps) {
+  const { t } = useLocalization();
+
   return (
     <SurfacePanel
       actions={
@@ -904,6 +1467,7 @@ export function ProjectRepositoryAccessPanel({
             repositoryAccessAssessment,
             isAssessingRepositoryAccess,
             repositoryAccessError,
+            t,
           )}
         </Badge>
       }
@@ -913,8 +1477,9 @@ export function ProjectRepositoryAccessPanel({
         repositoryAccessAssessment,
         isAssessingRepositoryAccess,
         repositoryAccessError,
+        t,
       )}
-      eyebrow="Repository"
+      eyebrow={t("project_shared.repository_access.panel.eyebrow", "Repository")}
       headerSeparated
       summary={
         repositoryUrl.trim() ||
@@ -922,38 +1487,54 @@ export function ProjectRepositoryAccessPanel({
         repositoryAccessAssessment ||
         repositoryAccessError ? (
           <MetaRow className="wizard-callout__meta">
-            <MetaItem label="Provider">
+            <MetaItem
+              label={t("project_shared.repository_access.meta.provider", "Provider")}
+            >
               {formatRepositoryAccessProviderLabel(
                 repositoryAccessAssessment,
                 isAssessingRepositoryAccess,
                 repositoryAccessError,
+                t,
               )}
             </MetaItem>
-            <MetaItem label="Visibility">
+            <MetaItem
+              label={t(
+                "project_shared.repository_access.meta.visibility",
+                "Visibility",
+              )}
+            >
               {formatRepositoryVisibilityLabel(
                 repositoryAccessAssessment,
                 isAssessingRepositoryAccess,
                 repositoryAccessError,
+                t,
               )}
             </MetaItem>
-            <MetaItem label="Login">
+            <MetaItem label={t("project_shared.repository_access.meta.login", "Login")}>
               {formatRepositoryLoginStatus(
                 repositoryAccessAssessment,
                 githubAuthProvider,
                 isLoadingAuthProviders,
+                t,
               )}
             </MetaItem>
-            <MetaItem label="Connection">
+            <MetaItem
+              label={t(
+                "project_shared.repository_access.meta.connection",
+                "Connection",
+              )}
+            >
               {formatRepositoryBindingStatus(
                 repositoryAccessAssessment,
                 repositoryCredentialId,
                 pendingRepositoryAccessAction,
+                t,
               )}
             </MetaItem>
           </MetaRow>
         ) : undefined
       }
-      title="Repository access"
+      title={t("project_shared.repository_access.panel.title", "Repository access")}
       tone="inset"
     >
       {repositoryAccessActionMessage ? (
@@ -962,9 +1543,13 @@ export function ProjectRepositoryAccessPanel({
         </p>
       ) : null}
 
-      {validationError ? <p className="ui-field__error">{validationError}</p> : null}
+      {validationError ? (
+        <p className="ui-field__error">{validationError}</p>
+      ) : null}
 
-      {repositoryAccessError || authProviderError || repositoryCredentialsError ? (
+      {repositoryAccessError ||
+      authProviderError ||
+      repositoryCredentialsError ? (
         <div className="wizard-callout__actions">
           {repositoryAccessError && onRetryRepositoryAccessCheck ? (
             <Button
@@ -975,8 +1560,14 @@ export function ProjectRepositoryAccessPanel({
               variant="secondary"
             >
               {isAssessingRepositoryAccess
-                ? "Retrying access check..."
-                : "Retry access check"}
+                ? t(
+                    "project_shared.repository_access.actions.retrying_check",
+                    "Retrying access check...",
+                  )
+                : t(
+                    "project_shared.repository_access.actions.retry_check",
+                    "Retry access check",
+                  )}
             </Button>
           ) : null}
 
@@ -989,8 +1580,14 @@ export function ProjectRepositoryAccessPanel({
               variant="secondary"
             >
               {isLoadingAuthProviders
-                ? "Retrying accounts..."
-                : "Retry accounts"}
+                ? t(
+                    "project_shared.repository_access.actions.retrying_accounts",
+                    "Retrying accounts...",
+                  )
+                : t(
+                    "project_shared.repository_access.actions.retry_accounts",
+                    "Retry accounts",
+                  )}
             </Button>
           ) : null}
 
@@ -1003,8 +1600,14 @@ export function ProjectRepositoryAccessPanel({
               variant="secondary"
             >
               {isLoadingRepositoryCredentials
-                ? "Retrying credentials..."
-                : "Retry credentials"}
+                ? t(
+                    "project_shared.repository_access.actions.retrying_credentials",
+                    "Retrying credentials...",
+                  )
+                : t(
+                    "project_shared.repository_access.actions.retry_credentials",
+                    "Retry credentials",
+                  )}
             </Button>
           ) : null}
         </div>
@@ -1019,8 +1622,12 @@ export function ProjectRepositoryAccessPanel({
             hint={formatRepositoryCredentialFieldHint(
               repositoryAccessAssessment,
               isLoadingRepositoryCredentials,
+              t,
             )}
-            label="Repository credential"
+            label={t(
+              "project_shared.repository_access.credentials.label",
+              "Repository credential",
+            )}
             onChange={(event) =>
               onRepositoryCredentialChange(event.currentTarget.value)
             }
@@ -1040,29 +1647,34 @@ export function ProjectRepositoryAccessPanel({
                 }
               >
                 {pendingRepositoryAccessAction
-                  ? "Connecting login..."
+                  ? t(
+                      "project_shared.repository_access.actions.connecting_login",
+                      "Connecting login...",
+                    )
                   : formatRepositoryBindingActionLabel(
                       repositoryAccessAssessment,
                       githubAuthProvider,
                       repositoryCredentialId,
+                      t,
                     )}
               </Button>
             ) : null}
 
-            {repositoryCredentialId !== null && onClearRepositoryAccessBinding ? (
+            {repositoryCredentialId !== null &&
+            onClearRepositoryAccessBinding ? (
               <Button
                 onClick={onClearRepositoryAccessBinding}
                 size="sm"
                 variant="ghost"
               >
-                Disconnect
+                {t("project_shared.repository_access.actions.disconnect", "Disconnect")}
               </Button>
             ) : null}
 
             {onManageAuth &&
             supportsShellRepositoryLoginAction(repositoryAccessAssessment) ? (
               <Button onClick={onManageAuth} size="sm" variant="ghost">
-                Open accounts
+                {t("project_shared.repository_access.actions.open_accounts", "Open accounts")}
               </Button>
             ) : null}
           </div>
@@ -1093,37 +1705,38 @@ export function ProjectIdentityStep({
   onEngineKindChange,
   onFieldBlur,
 }: ProjectIdentityStepProps) {
+  const { t } = useLocalization();
+
   return (
     <div className="wizard-form-grid">
       <TextField
         error={errors?.name}
-        label="Project name"
+        label={t("project_shared.identity.name.label", "Project name")}
         onBlur={() => onFieldBlur?.("name")}
         onChange={(event) => onNameChange(event.currentTarget.value)}
-        placeholder="Red Horizon"
+        placeholder={t("project_shared.identity.name.placeholder", "Red Horizon")}
         value={draft.name}
       />
 
       <SelectField
         error={errors?.projectKind}
-        label="Project kind"
+        label={t("project_shared.identity.kind.label", "Project kind")}
         onBlur={() => onFieldBlur?.("projectKind")}
         onChange={(event) =>
           onProjectKindChange(
             event.currentTarget.value as ProjectDraft["projectKind"],
           )
         }
-        options={PROJECT_KIND_OPTIONS}
+        options={buildProjectKindOptions(t)}
         value={draft.projectKind}
       />
 
       <RepositoryEngineField
         error={errors?.engineKind}
+        label={t("project_shared.identity.engine.label", "Engine")}
         onBlur={() => onFieldBlur?.("engineKind")}
         onChange={(event) =>
-          onEngineKindChange(
-            event.currentTarget.value as RepositoryEngineKind,
-          )
+          onEngineKindChange(event.currentTarget.value as RepositoryEngineKind)
         }
         value={draft.engineKind}
       />
@@ -1162,37 +1775,60 @@ export function ProjectRepositoryAccessStep({
   onPollingIntervalSecondsBlur,
   repositoryAccessPanel,
 }: ProjectRepositoryAccessStepProps) {
+  const { t } = useLocalization();
+
   return (
     <>
       <div className="wizard-form-grid">
         <TextField
           error={repositoryUrlError}
-          hint="Use the HTTPS remote that HGP will poll and clone."
-          label="Repository URL"
+          hint={t(
+            "project_shared.access.repository_url.hint",
+            "Use the HTTPS remote that HGP will poll and clone.",
+          )}
+          label={t(
+            "project_shared.access.repository_url.label",
+            "Repository URL",
+          )}
           leadingIcon="server"
           onBlur={onRepositoryUrlBlur}
           onChange={(event) => onRepositoryUrlChange(event.currentTarget.value)}
-          placeholder="https://github.com/org/project.git"
+          placeholder={t(
+            "project_shared.access.repository_url.placeholder",
+            "https://github.com/org/project.git",
+          )}
           value={repositoryUrl}
         />
 
         <SelectField
-          hint="Tell HGP whether this remote should be treated as public or private."
-          label="Repository visibility"
+          hint={t(
+            "project_shared.access.repository_visibility.hint",
+            "Tell HGP whether this remote should be treated as public or private.",
+          )}
+          label={t(
+            "project_shared.access.repository_visibility.label",
+            "Repository visibility",
+          )}
           onBlur={onRepositoryVisibilityBlur}
           onChange={(event) =>
             onRepositoryVisibilityChange(
               event.currentTarget.value as ProjectDraft["repositoryVisibility"],
             )
           }
-          options={REPOSITORY_VISIBILITY_OPTIONS}
+          options={buildRepositoryVisibilityOptions(t)}
           value={repositoryVisibility}
         />
 
         <TextField
           error={pollingIntervalSecondsError}
-          hint="Polling stays operator-visible. The runtime requires at least 5 seconds."
-          label="Polling interval (seconds)"
+          hint={t(
+            "project_shared.access.polling_interval.hint",
+            "Polling stays operator-visible. The runtime requires at least 5 seconds.",
+          )}
+          label={t(
+            "project_shared.access.polling_interval.label",
+            "Polling interval (seconds)",
+          )}
           min={5}
           onBlur={onPollingIntervalSecondsBlur}
           onChange={(event) =>
@@ -1226,21 +1862,32 @@ export function ProjectLocalAccessStep({
   onPathPickError,
   onPathPicked,
 }: ProjectLocalAccessStepProps) {
+  const { t } = useLocalization();
+
   return (
     <div className="wizard-form-grid">
       <PathPickerField
-        buttonLabel="Choose workspace"
+        buttonLabel={t("project_shared.local_path.button", "Choose workspace")}
         clearable
         disabled={disabled}
-        dialogTitle="Select local workspace directory"
+        dialogTitle={t(
+          "project_shared.local_path.dialog_title",
+          "Select local workspace directory",
+        )}
         error={localPathError}
-        hint="Choose the host-local Unity workspace that HGP should build directly."
-        label="Local workspace path"
+        hint={t(
+          "project_shared.local_path.hint",
+          "Choose the host-local Unity workspace that HGP should build directly.",
+        )}
+        label={t("project_shared.local_path.label", "Local workspace path")}
         onClear={onClearLocalPath}
         onError={onPathPickError}
         onPathPicked={onPathPicked}
         pickerKind="directory"
-        placeholder="C:/projects/red-horizon"
+        placeholder={t(
+          "project_shared.local_path.placeholder",
+          "C:/projects/red-horizon",
+        )}
         value={localPath}
       />
     </div>
@@ -1292,6 +1939,8 @@ export function ProjectTargetsStep({
   onRemoveTarget,
   onAddTarget,
 }: ProjectTargetsStepProps) {
+  const { t } = useLocalization();
+
   if (buildTargetAdapter.kind !== "unity") {
     return (
       <div className="wizard-form-grid">
@@ -1301,7 +1950,8 @@ export function ProjectTargetsStep({
 
         <div className="wizard-callout wizard-callout--compact">
           <p className="wizard-callout__copy">
-            {buildTargetAdapter.unsupportedMessage ?? buildTargetAdapter.supportCopy}
+            {buildTargetAdapter.unsupportedMessage ??
+              buildTargetAdapter.supportCopy}
           </p>
         </div>
       </div>
@@ -1310,13 +1960,18 @@ export function ProjectTargetsStep({
 
   return (
     <div className="wizard-targets-shell">
-      {rootError ? <p className="feed-banner feed-banner--error">{rootError}</p> : null}
+      {rootError ? (
+        <p className="feed-banner feed-banner--error">{rootError}</p>
+      ) : null}
       {removalCallout}
 
       <SelectField
         disabled={detectedEditorDisabled}
         hint={detectedEditorHint}
-        label="Installed Unity editors"
+        label={t(
+          "project_shared.targets.detected_editors.label",
+          "Installed Unity editors",
+        )}
         onChange={(event) => {
           const selectedPath = event.currentTarget.value.trim();
           if (!selectedPath) {
@@ -1330,21 +1985,39 @@ export function ProjectTargetsStep({
       />
 
       <PathPickerField
-        buttonLabel="Choose Unity executable"
-        dialogTitle="Select Unity Editor executable"
+        buttonLabel={t(
+          "project_shared.targets.unity_executable.button",
+          "Choose Unity executable",
+        )}
+        dialogTitle={t(
+          "project_shared.targets.unity_executable.dialog_title",
+          "Select Unity Editor executable",
+        )}
         error={unityExecutableError}
         filters={[
           {
             extensions: ["exe", "app"],
-            name: "Unity Editor",
+            name: t(
+              "project_shared.targets.unity_executable.filter_name",
+              "Unity Editor",
+            ),
           },
         ]}
-        hint="Select the host-local Unity Editor executable that should run every build target in this project."
-        label="Unity executable"
+        hint={t(
+          "project_shared.targets.unity_executable.hint",
+          "Select the host-local Unity Editor executable that should run every build target in this project.",
+        )}
+        label={t(
+          "project_shared.targets.unity_executable.label",
+          "Unity executable",
+        )}
         onError={onUnityExecutablePickError}
         onPathPicked={onUnityExecutablePicked}
         pickerKind="file"
-        placeholder="C:/Program Files/Unity/Hub/Editor/.../Unity.exe"
+        placeholder={t(
+          "project_shared.targets.unity_executable.placeholder",
+          "C:/Program Files/Unity/Hub/Editor/.../Unity.exe",
+        )}
         value={unityExecutablePath}
       />
 
@@ -1362,13 +2035,21 @@ export function ProjectTargetsStep({
 
       {isValidatingUnityExecutable ? (
         <p className="wizard-target-card__diagnostic">
-          Validating Unity executable path...
+          {t(
+            "project_shared.targets.unity_executable.validating",
+            "Validating Unity executable path...",
+          )}
         </p>
       ) : null}
 
       {buildTargets.length === 0 ? (
         <div className="feed-state">
-          <p className="feed-state__title">No build targets configured.</p>
+          <p className="feed-state__title">
+            {t(
+              "project_shared.targets.empty.title",
+              "No build targets configured.",
+            )}
+          </p>
         </div>
       ) : null}
 
@@ -1390,7 +2071,7 @@ export function ProjectTargetsStep({
                   size="sm"
                   variant="ghost"
                 >
-                  Edit
+                  {t("project_shared.targets.actions.edit", "Edit")}
                 </Button>
                 <Button
                   disabled={isBusy}
@@ -1399,7 +2080,7 @@ export function ProjectTargetsStep({
                   size="sm"
                   variant="ghost"
                 >
-                  Remove
+                  {t("project_shared.targets.actions.remove", "Remove")}
                 </Button>
               </div>
             }
@@ -1407,21 +2088,41 @@ export function ProjectTargetsStep({
             key={target.id}
             summary={
               <MetaRow className="wizard-target-card__summary">
-                <MetaItem label="Platform">
-                  {target.targetPlatform.trim() || "pending"}
+                <MetaItem label={t("project_shared.targets.summary.platform", "Platform")}>
+                  {target.targetPlatform.trim() ||
+                    t("project_shared.targets.summary.pending", "pending")}
                 </MetaItem>
-                <MetaItem label="Build method">
-                  {target.buildMethod.trim() || "pending"}
+                <MetaItem
+                  label={t(
+                    "project_shared.targets.summary.build_method",
+                    "Build method",
+                  )}
+                >
+                  {target.buildMethod.trim() ||
+                    t("project_shared.targets.summary.pending", "pending")}
                 </MetaItem>
-                <MetaItem label="Unity executable">
+                <MetaItem
+                  label={t(
+                    "project_shared.targets.summary.unity_executable",
+                    "Unity executable",
+                  )}
+                >
                   {formatBuildTargetExecutableSummary(
                     unityExecutableDiagnostics,
                     isValidatingUnityExecutable,
+                    t,
                   )}
                 </MetaItem>
               </MetaRow>
             }
-            title={target.name.trim() || `Build target ${index + 1}`}
+            title={
+              target.name.trim() ||
+              t(
+                "project_shared.targets.card.default_name",
+                "Build target {{index}}",
+                { index: index + 1 },
+              )
+            }
             tone="inset"
           >
             {errorPreview ? (
@@ -1432,6 +2133,7 @@ export function ProjectTargetsStep({
                   target,
                   unityExecutableDiagnostics,
                   unityExecutablePath,
+                  t,
                 )}
               </p>
             )}
@@ -1446,7 +2148,7 @@ export function ProjectTargetsStep({
           size="sm"
           variant="secondary"
         >
-          Add target
+          {t("project_shared.targets.actions.add", "Add target")}
         </Button>
       </div>
     </div>
@@ -1517,37 +2219,69 @@ export function ProjectPathsStep({
   onArtifactsRootPicked,
   onWorkspaceRootPicked,
 }: ProjectPathsStepProps) {
+  const { t } = useLocalization();
+
   return (
     <div className="wizard-form-grid">
       <PathPickerField
-        buttonLabel="Choose artifacts root"
+        buttonLabel={t(
+          "project_shared.paths.artifacts.button",
+          "Choose artifacts root",
+        )}
         clearable
         disabled={disabled}
-        dialogTitle="Select artifacts root directory"
+        dialogTitle={t(
+          "project_shared.paths.artifacts.dialog_title",
+          "Select artifacts root directory",
+        )}
         error={artifactsRootOverrideError}
-        hint="Optional. Override the artifact root for this repository only."
-        label="Artifacts root override"
+        hint={t(
+          "project_shared.paths.artifacts.hint",
+          "Optional. Override the artifact root for this repository only.",
+        )}
+        label={t(
+          "project_shared.paths.artifacts.label",
+          "Artifacts root override",
+        )}
         onClear={onArtifactsRootClear}
         onError={onPathPickError}
         onPathPicked={onArtifactsRootPicked}
         pickerKind="directory"
-        placeholder="C:/builds/red-horizon"
+        placeholder={t(
+          "project_shared.paths.artifacts.placeholder",
+          "C:/builds/red-horizon",
+        )}
         value={artifactsRootOverride}
       />
 
       <PathPickerField
-        buttonLabel="Choose workspace root"
+        buttonLabel={t(
+          "project_shared.paths.workspace.button",
+          "Choose workspace root",
+        )}
         clearable
         disabled={disabled}
-        dialogTitle="Select managed workspace root directory"
+        dialogTitle={t(
+          "project_shared.paths.workspace.dialog_title",
+          "Select managed workspace root directory",
+        )}
         error={workspaceRootOverrideError}
-        hint="Optional. Override the managed checkout root for this repository only."
-        label="Workspace root override"
+        hint={t(
+          "project_shared.paths.workspace.hint",
+          "Optional. Override the managed checkout root for this repository only.",
+        )}
+        label={t(
+          "project_shared.paths.workspace.label",
+          "Workspace root override",
+        )}
         onClear={onWorkspaceRootClear}
         onError={onPathPickError}
         onPathPicked={onWorkspaceRootPicked}
         pickerKind="directory"
-        placeholder="C:/workspaces/red-horizon"
+        placeholder={t(
+          "project_shared.paths.workspace.placeholder",
+          "C:/workspaces/red-horizon",
+        )}
         value={workspaceRootOverride}
       />
     </div>
@@ -1571,66 +2305,98 @@ export function ProjectReviewStep({
   unityExecutableDiagnostics,
   isValidatingUnityExecutable,
 }: ProjectReviewStepProps) {
+  const { t } = useLocalization();
+  const reviewBuildTargets = draft.buildTargets.map((target) => ({
+    id: target.id,
+    buildTargetId: target.buildTargetId ?? null,
+    name:
+      target.name.trim() ||
+      t("project_shared.targets.review.unnamed_target", "Unnamed target"),
+  }));
   const publishDestinationReviewSummary = buildPublishDestinationReviewSummary(
     draft.publishDestinations,
-    draft.buildTargets.map((target) => ({
-      id: target.id,
-      buildTargetId: target.buildTargetId ?? null,
-      name: target.name.trim() || "Unnamed target",
-    })),
-  );
+    reviewBuildTargets,
+  ).map((destination) => {
+    const draftDestination = draft.publishDestinations.find(
+      (entry) => entry.id === destination.id,
+    );
+
+    return {
+      ...destination,
+      kindLabel:
+        draftDestination?.kind === "filesystem"
+          ? t("publish_destinations.editor.kind.folder", "Folder")
+          : draftDestination?.kind === "itch"
+            ? t("publish_destinations.editor.kind.itch", "Itch")
+            : destination.kindLabel,
+    };
+  });
   const unboundPublishTargetNames = listUnboundBuildTargetNames(
     draft.publishDestinations,
-    draft.buildTargets.map((target) => ({
-      id: target.id,
-      buildTargetId: target.buildTargetId ?? null,
-      name: target.name.trim() || "Unnamed target",
-    })),
+    reviewBuildTargets,
   );
 
   return (
     <div className="wizard-review-shell">
       <SurfacePanel
         className="wizard-review-panel"
-        description={formatProjectSourceReviewDescription(draft)}
-        eyebrow="Project"
+        description={formatProjectSourceReviewDescription(draft, t)}
+        eyebrow={t("project_shared.review.project.eyebrow", "Project")}
         headerSeparated
         summary={
           <MetaRow>
-            <MetaItem label="Engine">
-              {formatRepositoryEngineKindLabel(draft.engineKind)}
+            <MetaItem label={t("project_shared.review.project.engine", "Engine")}>
+              {formatRepositoryEngineKindLabel(draft.engineKind, t)}
             </MetaItem>
             {draft.projectKind === "repository" ? (
-              <MetaItem label="Poll">
+              <MetaItem label={t("project_shared.review.project.poll", "Poll")}>
                 {`${draft.pollingIntervalSeconds.trim() || "0"}s`}
               </MetaItem>
             ) : (
-              <MetaItem label="Source">No remote polling</MetaItem>
+              <MetaItem label={t("project_shared.review.project.source", "Source")}>
+                {t(
+                  "project_shared.review.project.no_remote_polling",
+                  "No remote polling",
+                )}
+              </MetaItem>
             )}
             <MetaItem
-              label={draft.projectKind === "repository" ? "Access" : "Source"}
+              label={
+                draft.projectKind === "repository"
+                  ? t("project_shared.review.project.access", "Access")
+                  : t("project_shared.review.project.source", "Source")
+              }
             >
               {draft.projectKind === "repository"
                 ? repositoryAccessSummary
-                : formatProjectSourceAdapterStatus(projectSourceStepAdapter)}
+                : formatProjectSourceAdapterStatus(projectSourceStepAdapter, t)}
             </MetaItem>
           </MetaRow>
         }
-        title={draft.name.trim() || "Unnamed project"}
+        title={
+          draft.name.trim() ||
+          t("project_shared.review.project.unnamed", "Unnamed project")
+        }
         tone="inset"
       >
         <p className="wizard-summary-panel__copy">
-          {formatProjectKindLabel(draft.projectKind)} with
-          {` ${formatWizardTargetCount(draft.buildTargets.length)} configured for registration.`}
+          {t(
+            "project_shared.review.project.copy",
+            "{{projectKind}} with {{targetCount}} configured for registration.",
+            {
+              projectKind: formatProjectKindLabel(draft.projectKind, t),
+              targetCount: formatWizardTargetCount(draft.buildTargets.length, t),
+            },
+          )}
         </p>
       </SurfacePanel>
 
       <SurfacePanel
         className="wizard-review-panel"
         description={buildTargetAdapter.reviewDescription}
-        eyebrow="Build Targets"
+        eyebrow={t("project_shared.review.targets.eyebrow", "Build Targets")}
         headerSeparated
-        title="Target Review"
+        title={t("project_shared.review.targets.title", "Target Review")}
         tone="inset"
       >
         {buildTargetAdapter.kind === "unity" ? (
@@ -1638,28 +2404,52 @@ export function ProjectReviewStep({
             {draft.buildTargets.map((target) => (
               <div className="wizard-summary-list__item" key={target.id}>
                 <div className="wizard-summary-list__title-row">
-                  <strong>{target.name.trim() || "Unnamed target"}</strong>
+                  <strong>
+                    {target.name.trim() ||
+                      t(
+                        "project_shared.targets.review.unnamed_target",
+                        "Unnamed target",
+                      )}
+                  </strong>
                   <Badge tone="neutral">
-                    {target.targetPlatform || "Unity target pending"}
+                    {target.targetPlatform ||
+                      t(
+                        "project_shared.review.targets.target_platform_pending",
+                        "Unity target pending",
+                      )}
                   </Badge>
                 </div>
                 <p className="wizard-summary-list__copy">
-                  {target.buildMethod.trim() || "Unity build method pending"}
+                  {target.buildMethod.trim() ||
+                    t(
+                      "project_shared.review.targets.build_method_pending",
+                      "Unity build method pending",
+                    )}
                 </p>
               </div>
             ))}
             <div className="wizard-summary-list__item">
               <div className="wizard-summary-list__title-row">
-                <strong>Shared Unity executable</strong>
+                <strong>
+                  {t(
+                    "project_shared.review.targets.shared_executable",
+                    "Shared Unity executable",
+                  )}
+                </strong>
                 <Badge tone="muted">
                   {formatBuildTargetExecutableSummary(
                     unityExecutableDiagnostics,
                     isValidatingUnityExecutable,
+                    t,
                   )}
                 </Badge>
               </div>
               <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
-                {draft.unityExecutablePath.trim() || "Unity executable pending"}
+                {draft.unityExecutablePath.trim() ||
+                  t(
+                    "project_shared.review.targets.executable_pending",
+                    "Unity executable pending",
+                  )}
               </p>
             </div>
           </div>
@@ -1668,10 +2458,16 @@ export function ProjectReviewStep({
             <div className="wizard-summary-list__item">
               <div className="wizard-summary-list__title-row">
                 <strong>{buildTargetAdapter.supportTitle}</strong>
-                <Badge tone="muted">unavailable</Badge>
+                <Badge tone="muted">
+                  {t(
+                    "project_shared.review.targets.unavailable",
+                    "unavailable",
+                  )}
+                </Badge>
               </div>
               <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
-                {buildTargetAdapter.unsupportedMessage ?? buildTargetAdapter.supportCopy}
+                {buildTargetAdapter.unsupportedMessage ??
+                  buildTargetAdapter.supportCopy}
               </p>
             </div>
           </div>
@@ -1680,21 +2476,34 @@ export function ProjectReviewStep({
 
       <SurfacePanel
         className="wizard-review-panel"
-        description="Destination-specific publish bindings and credential readiness."
-        eyebrow="Publish Destinations"
+        description={t(
+          "project_shared.review.publish.description",
+          "Destination-specific publish bindings and credential readiness.",
+        )}
+        eyebrow={t("project_shared.review.publish.eyebrow", "Publish Destinations")}
         headerSeparated
-        title="Destination Review"
+        title={t("project_shared.review.publish.title", "Destination Review")}
         tone="inset"
       >
         <div className="wizard-summary-list">
           {publishDestinationReviewSummary.length === 0 ? (
             <div className="wizard-summary-list__item">
               <div className="wizard-summary-list__title-row">
-                <strong>No publish destinations configured</strong>
-                <Badge tone="muted">valid</Badge>
+                <strong>
+                  {t(
+                    "project_shared.review.publish.empty.title",
+                    "No publish destinations configured",
+                  )}
+                </strong>
+                <Badge tone="muted">
+                  {t("project_shared.review.publish.empty.status", "valid")}
+                </Badge>
               </div>
               <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
-                Every build target will keep its artifact under the runtime-managed output root.
+                {t(
+                  "project_shared.review.publish.empty.copy",
+                  "Every build target will keep its artifact under the runtime-managed output root.",
+                )}
               </p>
             </div>
           ) : (
@@ -1709,12 +2518,21 @@ export function ProjectReviewStep({
                 <p className="wizard-summary-list__copy">
                   {destination.bindingTargetNames.length > 0
                     ? destination.bindingTargetNames.join(", ")
-                    : "No build targets bound yet."}
+                    : t(
+                        "project_shared.review.publish.destination.no_targets",
+                        "No build targets bound yet.",
+                      )}
                 </p>
                 <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
                   {destination.missingCredential
-                    ? "Credential still missing."
-                    : "Uploads are managed automatically by HGP for the selected channels."}
+                    ? t(
+                        "project_shared.review.publish.destination.credential_missing",
+                        "Credential still missing.",
+                      )
+                    : t(
+                        "project_shared.review.publish.destination.copy",
+                        "Uploads are managed automatically by HGP for the selected channels.",
+                      )}
                 </p>
               </div>
             ))
@@ -1722,15 +2540,28 @@ export function ProjectReviewStep({
 
           <div className="wizard-summary-list__item">
             <div className="wizard-summary-list__title-row">
-              <strong>Unbound build targets</strong>
+              <strong>
+                {t(
+                  "project_shared.review.publish.unbound.title",
+                  "Unbound build targets",
+                )}
+              </strong>
               <Badge tone="muted">
-                {unboundPublishTargetNames.length === 0 ? "none" : "kept local"}
+                {unboundPublishTargetNames.length === 0
+                  ? t("project_shared.review.publish.unbound.none", "none")
+                  : t(
+                      "project_shared.review.publish.unbound.kept_local",
+                      "kept local",
+                    )}
               </Badge>
             </div>
             <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
               {unboundPublishTargetNames.length > 0
                 ? unboundPublishTargetNames.join(", ")
-                : "Every configured build target is bound to at least one publish destination."}
+                : t(
+                    "project_shared.review.publish.unbound.copy",
+                    "Every configured build target is bound to at least one publish destination.",
+                  )}
             </p>
           </div>
         </div>
@@ -1738,36 +2569,53 @@ export function ProjectReviewStep({
 
       <SurfacePanel
         className="wizard-review-panel"
-        description="Project-specific overrides for artifacts and managed workspaces."
-        eyebrow="Paths"
+        description={t(
+          "project_shared.review.paths.description",
+          "Project-specific overrides for artifacts and managed workspaces.",
+        )}
+        eyebrow={t("project_shared.review.paths.eyebrow", "Paths")}
         headerSeparated
-        title="Path Review"
+        title={t("project_shared.review.paths.title", "Path Review")}
         tone="inset"
       >
         <div className="wizard-summary-list">
           <div className="wizard-summary-list__item">
             <div className="wizard-summary-list__title-row">
-              <strong>Artifacts root</strong>
+              <strong>
+                {t("project_shared.review.paths.artifacts.title", "Artifacts root")}
+              </strong>
               <Badge tone="muted">
-                {draft.artifactsRootOverride.trim() ? "override" : "default"}
+                {draft.artifactsRootOverride.trim()
+                  ? t("project_shared.review.paths.override", "override")
+                  : t("project_shared.review.paths.default", "default")}
               </Badge>
             </div>
             <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
               {draft.artifactsRootOverride.trim() ||
-                "Use the runtime default artifact root."}
+                t(
+                  "project_shared.review.paths.artifacts.default_copy",
+                  "Use the runtime default artifact root.",
+                )}
             </p>
           </div>
 
           <div className="wizard-summary-list__item">
             <div className="wizard-summary-list__title-row">
-              <strong>Workspace root</strong>
+              <strong>
+                {t("project_shared.review.paths.workspace.title", "Workspace root")}
+              </strong>
               <Badge tone="muted">
-                {draft.workspaceRootOverride.trim() ? "override" : "default"}
+                {draft.workspaceRootOverride.trim()
+                  ? t("project_shared.review.paths.override", "override")
+                  : t("project_shared.review.paths.default", "default")}
               </Badge>
             </div>
             <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
               {draft.workspaceRootOverride.trim() ||
-                "Use the runtime default managed checkout root."}
+                t(
+                  "project_shared.review.paths.workspace.default_copy",
+                  "Use the runtime default managed checkout root.",
+                )}
             </p>
           </div>
         </div>

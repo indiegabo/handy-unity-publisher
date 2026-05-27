@@ -8,6 +8,7 @@ import {
 import { Button } from "./Button";
 import { Icon, type IconName } from "./Icon";
 import { useOverlay } from "./OverlayManager";
+import { useLocalization } from "../LocalizationProvider";
 
 export type InputWithPickerProps = Omit<
   InputHTMLAttributes<HTMLInputElement>,
@@ -50,12 +51,15 @@ const InputWithPicker = ({
   pickerProps,
   ...inputProps
 }: InputWithPickerProps) => {
+  const { t } = useLocalization();
   const { openOverlay } = useOverlay();
   const inputId = useId();
   const labelId = `${inputId}-label`;
   const hintId = hint ? `${inputId}-hint` : undefined;
   const errorId = error ? `${inputId}-error` : undefined;
   const describedBy = [hintId, errorId].filter(Boolean).join(" ") || undefined;
+  const resolvedButtonLabel =
+    buttonLabel || t("input_with_picker.actions.browse", "Browse");
 
   const handlePick = async () => {
     if (disabled || !pickerComponent) {
@@ -133,7 +137,7 @@ const InputWithPicker = ({
             size="sm"
             variant="secondary"
           >
-            {buttonLabel}
+            {resolvedButtonLabel}
           </Button>
         </span>
       </span>

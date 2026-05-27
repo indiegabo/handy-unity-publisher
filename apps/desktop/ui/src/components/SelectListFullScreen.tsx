@@ -3,6 +3,8 @@ import { useDeferredValue, useMemo, useRef, useState } from "react";
 import { Button } from "./Button";
 import { TextField } from "./Field";
 import FullScreenModal from "./FullScreenModal";
+import { MetaItem, MetaRow, SummaryStrip } from "./Surface";
+import { useLocalization } from "../LocalizationProvider";
 
 export type SelectListItem = {
   id: string;
@@ -26,18 +28,20 @@ export type SelectListFullScreenProps = {
 };
 
 const SelectListFullScreen = ({
-  description = "Search the available inventory and select a single result to continue.",
-  emptyStateCopy = "Try a broader filter or close the overlay and adjust the source list.",
-  emptyStateTitle = "No results matched the current filter.",
+  description,
+  emptyStateCopy,
+  emptyStateTitle,
   initialQuery,
   initialValue,
   initialValues,
   items = [],
+  selectionLabel,
   selectionMode = "single",
-  submitLabel = "Apply selection",
-  title = "Select item",
+  submitLabel,
+  title,
   onResolve,
 }: SelectListFullScreenProps) => {
+  const { t } = useLocalization();
   const [query, setQuery] = useState(initialQuery ?? initialValue ?? "");
   const [selectedIds, setSelectedIds] = useState<string[]>(() => {
     if (selectionMode === "multiple") {
@@ -49,6 +53,31 @@ const SelectListFullScreen = ({
   const deferredQuery = useDeferredValue(query);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const resolvedDescription =
+    description ??
+    t(
+      "select_list.description",
+      "Search the available inventory and select a single result to continue.",
+    );
+  const resolvedEmptyStateCopy =
+    emptyStateCopy ??
+    t(
+      "select_list.empty.copy",
+      "Try a broader filter or close the overlay and adjust the source list.",
+    );
+  const resolvedEmptyStateTitle =
+    emptyStateTitle ??
+    t(
+      "select_list.empty.title",
+      "No results matched the current filter.",
+    );
+  const resolvedSelectionLabel =
+    selectionLabel ?? t("select_list.action.selected", "Selected");
+  const resolvedSelectLabel = t("select_list.action.select", "Select");
+  const resolvedSubmitLabel =
+    submitLabel ?? t("select_list.actions.submit", "Apply selection");
+  const resolvedTitle =
+    title ?? t("select_list.title", "Select item");
 
   const filtered = useMemo(() => {
     const normalizedQuery = deferredQuery.trim().toLowerCase();
@@ -64,6 +93,12 @@ const SelectListFullScreen = ({
       );
     });
   }, [deferredQuery, items]);
+  const resultCountHint =
+    filtered.length === 1
+      ? t("select_list.results.one", "1 result")
+      : t("select_list.results.other", "{{count}} results", {
+          count: filtered.length,
+        });
 
   const handleSelectItem = (itemId: string) => {
     if (selectionMode === "multiple") {
@@ -80,16 +115,16 @@ const SelectListFullScreen = ({
 
   return (
     <FullScreenModal
-      description={description}
+      description={resolvedDescription}
       onResolve={onResolve}
-      title={title}
+      title={resolvedTitle}
     >
       <div className="select-list-modal">
         <TextField
           autoComplete="off"
           data-overlay-autofocus
-          hint={`${filtered.length} result${filtered.length === 1 ? "" : "s"}`}
-          label="Filter inventory"
+          hint={resultCountHint}
+          label={t("select_list.filter.label", "Filter inventory")}
           leadingIcon="search"
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={(event) => {
@@ -98,19 +133,37 @@ const SelectListFullScreen = ({
               itemRefs.current[0]?.focus();
             }
           }}
-          placeholder="Search by name or secondary text"
+          placeholder={t(
+            "select_list.filter.placeholder",
+            "Search by name or secondary text",
+          )}
           value={query}
         />
 
+        {selectionMode === "multiple" ? (
+          <SummaryStrip className="select-list-modal__summary-strip">
+            <MetaRow className="select-list-modal__summary">
+              <MetaItem
+                label={t("select_list.summary.selected", "Selected")}
+              >
+                {selectedIds.length}
+              </MetaItem>
+              <MetaItem label={t("select_list.summary.results", "Results")}>
+                {filtered.length}
+              </MetaItem>
+            </MetaRow>
+          </SummaryStrip>
+        ) : null}
+
         <div
-          aria-label="Selectable results"
+          aria-label={t("select_list.results.aria_label", "Selectable results")}
           className="select-list-modal__list"
           role="list"
         >
           {filtered.length === 0 ? (
             <div className="feed-state select-list-modal__empty">
-              <p className="feed-state__title">{emptyStateTitle}</p>
-              <p className="feed-state__copy">{emptyStateCopy}</p>
+              <p className="feed-state__title">{resolvedEmptyStateTitle}</p>
+              <p className="feed-state__copy">{resolvedEmptyStateCopy}</p>
             </div>
           ) : (
             <>
@@ -184,9 +237,9 @@ const SelectListFullScreen = ({
                   <span className="select-list-modal__item-action">
                     {selectionMode === "multiple"
                       ? selectedIdSet.has(item.id)
-                        ? "Selected"
-                        : "Select"
-                      : "Select"}
+                        ? resolvedSelectionLabel
+                        : resolvedSelectLabel
+                      : resolvedSelectLabel}
                   </span>
                 </button>
               ))}
@@ -202,7 +255,7 @@ const SelectListFullScreen = ({
               size="sm"
               variant="ghost"
             >
-              Clear selection
+              {t("select_list.actions.clear", "Clear selection")}
             </Button>
             <Button
               disabled={selectedIds.length === 0}
@@ -210,7 +263,7 @@ const SelectListFullScreen = ({
               size="sm"
               variant="primary"
             >
-              {submitLabel}
+              {resolvedSubmitLabel}
             </Button>
           </div>
         ) : null}

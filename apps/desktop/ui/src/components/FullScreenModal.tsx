@@ -1,12 +1,14 @@
 import { useEffect, useId, useRef } from "react";
 
 import { IconButton } from "./Button";
+import { useLocalization } from "../LocalizationProvider";
 
 export type FullScreenModalProps = {
   title?: string;
   description?: string;
   children?: React.ReactNode;
   footer?: React.ReactNode;
+  closeLabel?: string;
   dismissible?: boolean;
   className?: string;
   onResolve?: (value?: any) => void;
@@ -31,13 +33,17 @@ const FullScreenModal = ({
   description,
   children,
   footer,
+  closeLabel,
   dismissible = true,
   className,
   onResolve,
 }: FullScreenModalProps) => {
+  const { t } = useLocalization();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const titleId = useId();
   const descriptionId = useId();
+  const resolvedCloseLabel =
+    closeLabel ?? t("overlay.actions.close", "Close overlay");
 
   useEffect(() => {
     const container = containerRef.current;
@@ -128,7 +134,7 @@ const FullScreenModal = ({
           <IconButton
             className="full-screen-modal__close"
             icon="close"
-            label="Close overlay"
+            label={resolvedCloseLabel}
             onClick={() => onResolve?.(null)}
             size="sm"
             variant="ghost"

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Button } from "./Button";
 import { SelectField, TextField } from "./Field";
 import { SurfacePanel } from "./Surface";
+import { useLocalization, type Translate } from "../LocalizationProvider";
 import type {
   SaveSecretCredentialInput,
   SecretCredentialKind,
@@ -48,15 +49,6 @@ type RepositoryCredentialDraftErrors = {
   username?: string;
 };
 
-const REPOSITORY_CREDENTIAL_KIND_OPTIONS = [
-  { label: "HTTP basic", value: "git-http-basic" },
-  { label: "Bearer token", value: "git-http-bearer" },
-] as const;
-
-const PUBLISH_CREDENTIAL_KIND_OPTIONS = [
-  { label: "Itch API key", value: "itch-api-key" },
-] as const;
-
 export function RepositoryCredentialComposer({
   initialCredential = null,
   isSaving,
@@ -67,6 +59,7 @@ export function RepositoryCredentialComposer({
   saveError,
   scope = "repository",
 }: RepositoryCredentialComposerProps) {
+  const { t } = useLocalization();
   const isEditing = initialCredential?.credentialId != null;
   const [draft, setDraft] = useState<RepositoryCredentialDraft>(() => ({
     credentialId: initialCredential?.credentialId ?? null,
@@ -82,28 +75,64 @@ export function RepositoryCredentialComposer({
   const [errors, setErrors] = useState<RepositoryCredentialDraftErrors>({});
   const credentialKindOptions =
     scope === "publish"
-      ? PUBLISH_CREDENTIAL_KIND_OPTIONS
-      : REPOSITORY_CREDENTIAL_KIND_OPTIONS;
+      ? buildPublishCredentialKindOptions(t)
+      : buildRepositoryCredentialKindOptions(t);
   const panelTitle =
     scope === "publish"
       ? isEditing
-        ? "Edit publish credential"
-        : "New publish credential"
+        ? t(
+            "credential_composer.publish.edit.title",
+            "Edit publish credential",
+          )
+        : t(
+            "credential_composer.publish.create.title",
+            "New publish credential",
+          )
       : isEditing
-        ? "Edit repository credential"
-        : "New repository credential";
+        ? t(
+            "credential_composer.repository.edit.title",
+            "Edit repository credential",
+          )
+        : t(
+            "credential_composer.repository.create.title",
+            "New repository credential",
+          );
   const panelDescription =
     scope === "publish"
       ? isEditing
-        ? `Update one reusable ${providerLabel} credential and replace the stored secret used by publish destinations.`
-        : `Create one reusable ${providerLabel} credential and bind it to this publish destination.`
+        ? t(
+            "credential_composer.publish.edit.description",
+            "Update one reusable {{providerLabel}} credential and replace the stored secret used by publish destinations.",
+            { providerLabel },
+          )
+        : t(
+            "credential_composer.publish.create.description",
+            "Create one reusable {{providerLabel}} credential and bind it to this publish destination.",
+            { providerLabel },
+          )
       : isEditing
-        ? `Update one reusable ${providerLabel} credential and replace the stored secret used by repository flows.`
-        : `Create one reusable ${providerLabel} credential and connect it to this project.`;
+        ? t(
+            "credential_composer.repository.edit.description",
+            "Update one reusable {{providerLabel}} credential and replace the stored secret used by repository flows.",
+            { providerLabel },
+          )
+        : t(
+            "credential_composer.repository.create.description",
+            "Create one reusable {{providerLabel}} credential and connect it to this project.",
+            { providerLabel },
+          );
   const credentialNamePlaceholder =
     scope === "publish"
-      ? `${providerLabel} publish credential`
-      : `${providerLabel} repository credential`;
+      ? t(
+          "credential_composer.publish.name_placeholder",
+          "{{providerLabel}} publish credential",
+          { providerLabel },
+        )
+      : t(
+          "credential_composer.repository.name_placeholder",
+          "{{providerLabel}} repository credential",
+          { providerLabel },
+        );
 
   const content = (
     <>
@@ -111,8 +140,11 @@ export function RepositoryCredentialComposer({
         autoComplete="off"
         data-overlay-autofocus
         error={errors.name}
-        hint="Use a unique reusable credential name."
-        label="Credential name"
+        hint={t(
+          "credential_composer.name.hint",
+          "Use a unique reusable credential name.",
+        )}
+        label={t("credential_composer.name.label", "Credential name")}
         onChange={(event) =>
           handleDraftFieldChange("name", event.currentTarget.value)
         }
@@ -121,7 +153,7 @@ export function RepositoryCredentialComposer({
       />
 
       <SelectField
-        label="Credential type"
+        label={t("credential_composer.kind.label", "Credential type")}
         onChange={(event) =>
           handleDraftFieldChange(
             "kind",
@@ -134,7 +166,10 @@ export function RepositoryCredentialComposer({
 
       {isEditing ? (
         <p className="wizard-callout__copy">
-          Re-enter the secret material to replace the stored credential value.
+          {t(
+            "credential_composer.edit.secret_hint",
+            "Re-enter the secret material to replace the stored credential value.",
+          )}
         </p>
       ) : null}
 
@@ -143,8 +178,11 @@ export function RepositoryCredentialComposer({
           <TextField
             autoComplete="username"
             error={errors.username}
-            hint="The Git host username or service account login."
-            label="Username"
+            hint={t(
+              "credential_composer.username.hint",
+              "The Git host username or service account login.",
+            )}
+            label={t("credential_composer.username.label", "Username")}
             onChange={(event) =>
               handleDraftFieldChange("username", event.currentTarget.value)
             }
@@ -153,8 +191,14 @@ export function RepositoryCredentialComposer({
           <TextField
             autoComplete="new-password"
             error={errors.password}
-            hint="Stored exactly as provided for HTTP basic authentication."
-            label="Password or token"
+            hint={t(
+              "credential_composer.password.hint",
+              "Stored exactly as provided for HTTP basic authentication.",
+            )}
+            label={t(
+              "credential_composer.password.label",
+              "Password or token",
+            )}
             onChange={(event) =>
               handleDraftFieldChange("password", event.currentTarget.value)
             }
@@ -166,8 +210,11 @@ export function RepositoryCredentialComposer({
         <TextField
           autoComplete="new-password"
           error={errors.token}
-          hint="Stored exactly as provided for bearer authorization."
-          label="Bearer token"
+          hint={t(
+            "credential_composer.token.hint",
+            "Stored exactly as provided for bearer authorization.",
+          )}
+          label={t("credential_composer.token.label", "Bearer token")}
           onChange={(event) =>
             handleDraftFieldChange("token", event.currentTarget.value)
           }
@@ -178,8 +225,11 @@ export function RepositoryCredentialComposer({
         <TextField
           autoComplete="new-password"
           error={errors.apiKey}
-          hint="Stored exactly as provided for the Itch butler API key."
-          label="API key"
+          hint={t(
+            "credential_composer.api_key.hint",
+            "Stored exactly as provided for the Itch butler API key.",
+          )}
+          label={t("credential_composer.api_key.label", "API key")}
           onChange={(event) =>
             handleDraftFieldChange("apiKey", event.currentTarget.value)
           }
@@ -200,11 +250,23 @@ export function RepositoryCredentialComposer({
         >
           {isSaving
             ? isEditing
-              ? "Saving changes..."
-              : "Saving credential..."
+              ? t(
+                  "credential_composer.actions.saving_changes",
+                  "Saving changes...",
+                )
+              : t(
+                  "credential_composer.actions.saving_credential",
+                  "Saving credential...",
+                )
             : isEditing
-              ? "Save changes"
-              : "Save credential"}
+              ? t(
+                  "credential_composer.actions.save_changes",
+                  "Save changes",
+                )
+              : t(
+                  "credential_composer.actions.save_credential",
+                  "Save credential",
+                )}
         </Button>
         <Button
           disabled={isSaving}
@@ -212,7 +274,7 @@ export function RepositoryCredentialComposer({
           size="sm"
           variant="ghost"
         >
-          Cancel
+          {t("credential_composer.actions.cancel", "Cancel")}
         </Button>
       </div>
     </>
@@ -233,7 +295,7 @@ export function RepositoryCredentialComposer({
   };
 
   const handleSave = async () => {
-    const nextErrors = validateRepositoryCredentialDraft(draft);
+    const nextErrors = validateRepositoryCredentialDraft(draft, t);
     if (hasRepositoryCredentialDraftErrors(nextErrors)) {
       setErrors(nextErrors);
       return;
@@ -259,29 +321,45 @@ export function RepositoryCredentialComposer({
 
 function validateRepositoryCredentialDraft(
   draft: RepositoryCredentialDraft,
+  t: Translate,
 ): RepositoryCredentialDraftErrors {
   const errors: RepositoryCredentialDraftErrors = {};
 
   if (!draft.name.trim()) {
-    errors.name = "Credential name is required.";
+    errors.name = t(
+      "credential_composer.validation.name_required",
+      "Credential name is required.",
+    );
   }
 
   if (draft.kind === "git-http-basic") {
     if (!draft.username.trim()) {
-      errors.username = "Username is required.";
+      errors.username = t(
+        "credential_composer.validation.username_required",
+        "Username is required.",
+      );
     }
 
     if (!draft.password.trim()) {
-      errors.password = "Password or token is required.";
+      errors.password = t(
+        "credential_composer.validation.password_required",
+        "Password or token is required.",
+      );
     }
   }
 
   if (draft.kind === "git-http-bearer" && !draft.token.trim()) {
-    errors.token = "Bearer token is required.";
+    errors.token = t(
+      "credential_composer.validation.token_required",
+      "Bearer token is required.",
+    );
   }
 
   if (draft.kind === "itch-api-key" && !draft.apiKey.trim()) {
-    errors.apiKey = "API key is required.";
+    errors.apiKey = t(
+      "credential_composer.validation.api_key_required",
+      "API key is required.",
+    );
   }
 
   return errors;
@@ -314,4 +392,26 @@ function buildSaveSecretCredentialInput(
     kind: draft.kind,
     name: draft.name.trim(),
   };
+}
+
+function buildRepositoryCredentialKindOptions(t: Translate) {
+  return [
+    {
+      label: t("credential_composer.kind.http_basic", "HTTP basic"),
+      value: "git-http-basic",
+    },
+    {
+      label: t("credential_composer.kind.bearer_token", "Bearer token"),
+      value: "git-http-bearer",
+    },
+  ] as const;
+}
+
+function buildPublishCredentialKindOptions(t: Translate) {
+  return [
+    {
+      label: t("credential_composer.kind.itch_api_key", "Itch API key"),
+      value: "itch-api-key",
+    },
+  ] as const;
 }

@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import { SurfacePanel } from "../Surface";
+import { useLocalization } from "../../LocalizationProvider";
 
 export type StepFlowStep<TStepKey extends string = string> = {
   description: string;
@@ -29,33 +30,56 @@ export function StepFlow<TStepKey extends string = string>({
   endActions,
   isStepSelectable,
   onStepSelect,
-  progressDescription = "Move across completed steps without losing the current draft.",
-  progressEyebrow = "Progress",
+  progressDescription,
+  progressEyebrow,
   progressSummary,
-  progressTitle = "Steps",
+  progressTitle,
   startActions,
   stepSummary,
   steps,
 }: StepFlowProps<TStepKey>) {
+  const { t } = useLocalization();
   const activeStepIndex = Math.max(
     0,
     steps.findIndex((step) => step.key === activeStepKey),
   );
   const activeStep = steps[activeStepIndex] ?? steps[0];
+  const resolvedProgressDescription =
+    progressDescription ??
+    t(
+      "wizard.step_flow.progress_description",
+      "Move across completed steps without losing the current draft.",
+    );
+  const resolvedProgressEyebrow =
+    progressEyebrow ?? t("wizard.step_flow.progress_eyebrow", "Progress");
+  const resolvedProgressTitle =
+    progressTitle ?? t("wizard.step_flow.progress_title", "Steps");
+  const progressAriaLabel = t(
+    "wizard.step_flow.progress_aria_label",
+    "Step flow progress",
+  );
+  const currentStepEyebrow = t(
+    "wizard.step_flow.current_step_eyebrow",
+    "Step {{current}} of {{total}}",
+    {
+      current: activeStepIndex + 1,
+      total: steps.length,
+    },
+  );
 
   return (
     <>
       <div className="wizard-stage-shell">
         <SurfacePanel
           className="wizard-progress-panel"
-          description={progressDescription}
-          eyebrow={progressEyebrow}
+          description={resolvedProgressDescription}
+          eyebrow={resolvedProgressEyebrow}
           headerSeparated
           summary={progressSummary}
-          title={progressTitle}
+          title={resolvedProgressTitle}
           tone="inset"
         >
-          <div className="wizard-stepper" aria-label="Step flow progress">
+          <div className="wizard-stepper" aria-label={progressAriaLabel}>
             {steps.map((step, index) => {
               const selectable = isStepSelectable
                 ? isStepSelectable(step, index)
@@ -87,7 +111,7 @@ export function StepFlow<TStepKey extends string = string>({
           <SurfacePanel
             className="wizard-stage-panel"
             description={activeStep.description}
-            eyebrow={`Step ${activeStepIndex + 1} of ${steps.length}`}
+            eyebrow={currentStepEyebrow}
             headerSeparated
             summary={stepSummary}
             title={activeStep.label}

@@ -85,7 +85,7 @@ export function AuthProvidersFocusScreen({
           setSecretSettingsError(null);
         } else {
           setSecretSettingsError(
-            buildInventoryErrorMessage(secretSettingsResult.reason),
+            buildInventoryErrorMessage(t, secretSettingsResult.reason),
           );
         }
 
@@ -132,7 +132,10 @@ export function AuthProvidersFocusScreen({
 
   const handleCreateCredential = useEffectEvent(
     async (scope: "repository" | "publish") => {
-      const providerLabel = scope === "publish" ? "Itch.io" : "Git host";
+      const providerLabel =
+        scope === "publish"
+          ? t("auth_providers.credentials.provider.publish", "Itch.io")
+          : t("auth_providers.credentials.provider.repository", "Git host");
       const created = await openOverlay(CredentialComposerModal, {
         onSubmit: async (input: SaveSecretCredentialInput) => {
           await saveSecretCredential(input);
@@ -148,8 +151,14 @@ export function AuthProvidersFocusScreen({
       startTransition(() => {
         setActionMessage(
           scope === "publish"
-            ? "Reusable Itch credential saved. It can now be selected from publish destinations."
-            : "Reusable repository credential saved. It can now be selected from project repository access settings.",
+            ? t(
+                "auth_providers.credentials.messages.publish_saved",
+                "Reusable Itch credential saved. It can now be selected from publish destinations.",
+              )
+            : t(
+                "auth_providers.credentials.messages.repository_saved",
+                "Reusable repository credential saved. It can now be selected from project repository access settings.",
+              ),
         );
       });
 
@@ -165,7 +174,10 @@ export function AuthProvidersFocusScreen({
       }
 
       const scope = editableKind === "itch-api-key" ? "publish" : "repository";
-      const providerLabel = scope === "publish" ? "Itch.io" : "Git host";
+      const providerLabel =
+        scope === "publish"
+          ? t("auth_providers.credentials.provider.publish", "Itch.io")
+          : t("auth_providers.credentials.provider.repository", "Git host");
       const updated = await openOverlay(CredentialComposerModal, {
         initialCredential: {
           credentialId: credential.credential_id,
@@ -186,8 +198,14 @@ export function AuthProvidersFocusScreen({
       startTransition(() => {
         setActionMessage(
           scope === "publish"
-            ? "Reusable Itch credential updated. Publish destinations will use the refreshed secret on the next run."
-            : "Reusable repository credential updated. Connected project access will use the refreshed secret on the next check.",
+            ? t(
+                "auth_providers.credentials.messages.publish_updated",
+                "Reusable Itch credential updated. Publish destinations will use the refreshed secret on the next run.",
+              )
+            : t(
+                "auth_providers.credentials.messages.repository_updated",
+                "Reusable repository credential updated. Connected project access will use the refreshed secret on the next check.",
+              ),
         );
       });
 
@@ -306,7 +324,10 @@ export function AuthProvidersFocusScreen({
               size="sm"
               variant="primary"
             >
-              New Itch credential
+              {t(
+                "auth_providers.credentials.actions.new_publish",
+                "New Itch credential",
+              )}
             </Button>
             <Button
               leadingIcon="plus"
@@ -314,11 +335,17 @@ export function AuthProvidersFocusScreen({
               size="sm"
               variant="secondary"
             >
-              New repository credential
+              {t(
+                "auth_providers.credentials.actions.new_repository",
+                "New repository credential",
+              )}
             </Button>
           </div>
         }
-        title="Credential Inventory"
+        title={t(
+          "auth_providers.credentials.inventory.title",
+          "Credential Inventory",
+        )}
       >
         {secretSettingsError ? (
           <p className="feed-banner feed-banner--error">
@@ -341,20 +368,27 @@ export function AuthProvidersFocusScreen({
                           {credential.name}
                         </p>
                         <p className="settings-focus-entry__meta">
-                          {credential.kind}
+                          {formatSecretCredentialKind(t, credential.kind)}
                         </p>
                       </div>
                       <div className="settings-focus-entry__controls">
                         {toEditableSecretCredentialKind(credential.kind) ? (
                           <Button
-                            aria-label={`Edit ${credential.name}`}
+                            aria-label={t(
+                              "auth_providers.credentials.actions.edit_aria",
+                              "Edit {{name}}",
+                              { name: credential.name },
+                            )}
                             onClick={() =>
                               void handleEditCredential(credential)
                             }
                             size="sm"
                             variant="ghost"
                           >
-                            Edit
+                            {t(
+                              "auth_providers.credentials.actions.edit",
+                              "Edit",
+                            )}
                           </Button>
                         ) : null}
                         <Badge
@@ -364,7 +398,10 @@ export function AuthProvidersFocusScreen({
                               : "muted"
                           }
                         >
-                          {credential.config_summary.status.replace(/_/g, " ")}
+                          {formatCredentialConfigStatus(
+                            t,
+                            credential.config_summary.status,
+                          )}
                         </Badge>
                       </div>
                     </div>
@@ -373,12 +410,20 @@ export function AuthProvidersFocusScreen({
               </div>
             ) : (
               <p className="settings-focus-copy">
-                No shared credentials are stored yet.
+                {t(
+                  "auth_providers.credentials.inventory.empty",
+                  "No shared credentials are stored yet.",
+                )}
               </p>
             )}
           </div>
         ) : (
-          <p className="settings-focus-copy">Loading credential inventory...</p>
+          <p className="settings-focus-copy">
+            {t(
+              "auth_providers.credentials.inventory.loading",
+              "Loading credential inventory...",
+            )}
+          </p>
         )}
       </SurfacePanel>
     </ScreenScaffold>
@@ -433,7 +478,10 @@ function buildAuthProviderErrorMessage(
   );
 }
 
-function buildInventoryErrorMessage(error: unknown): string {
+function buildInventoryErrorMessage(
+  t: ReturnType<typeof useLocalization>["t"],
+  error: unknown,
+): string {
   if (error instanceof Error && error.message.trim()) {
     return error.message.trim();
   }
@@ -442,5 +490,49 @@ function buildInventoryErrorMessage(error: unknown): string {
     return error.trim();
   }
 
-  return "The desktop shell could not resolve the shared credential inventory.";
+  return t(
+    "auth_providers.credentials.inventory.error",
+    "The desktop shell could not resolve the shared credential inventory.",
+  );
+}
+
+function formatSecretCredentialKind(
+  t: ReturnType<typeof useLocalization>["t"],
+  kind: string,
+) {
+  switch (kind) {
+    case "git-http-basic":
+      return t(
+        "auth_providers.credentials.kind.http_basic",
+        "HTTP basic",
+      );
+    case "git-http-bearer":
+      return t(
+        "auth_providers.credentials.kind.bearer_token",
+        "Bearer token",
+      );
+    case "itch-api-key":
+      return t(
+        "auth_providers.credentials.kind.itch_api_key",
+        "Itch API key",
+      );
+    default:
+      return kind;
+  }
+}
+
+function formatCredentialConfigStatus(
+  t: ReturnType<typeof useLocalization>["t"],
+  status: string,
+) {
+  switch (status) {
+    case "ready":
+      return t("auth_providers.credentials.status.ready", "ready");
+    case "missing":
+      return t("auth_providers.credentials.status.missing", "missing");
+    case "invalid":
+      return t("auth_providers.credentials.status.invalid", "invalid");
+    default:
+      return status.replace(/_/g, " ");
+  }
 }

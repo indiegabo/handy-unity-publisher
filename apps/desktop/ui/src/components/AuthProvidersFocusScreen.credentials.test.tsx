@@ -212,7 +212,7 @@ describe("AuthProvidersFocusScreen credential inventory", () => {
       ),
     ).toBeInTheDocument();
     expect(await screen.findByText("Itch global")).toBeInTheDocument();
-    expect(await screen.findByText("itch-api-key")).toBeInTheDocument();
+    expect(await screen.findByText("Itch API key")).toBeInTheDocument();
   });
 });
 

@@ -126,6 +126,13 @@ cargo check -p desktop-shell -j 1 -q
 cargo test -p runtime-store -q
 ```
 
+Localization work under `apps/desktop/src-tauri/localizations/` must treat
+`en.json` as the canonical message catalog. Update the English file first,
+run `npm run localization:sync` to mirror that key set into every non-English
+locale pack, translate the target locale values afterward, and finish with
+`npm run localization:check` to confirm no non-English file drifted from the
+English key inventory.
+
 When changing the desktop UI, follow
 `docs/focus-screen-development-guide.md`, validate the touched React +
 TypeScript slice with `npm run build --prefix apps/desktop/ui`, then rerun the
@@ -151,6 +158,9 @@ grammar, also run the relevant native Tauri close-out checks from the guide.
 - Treat the main feed as a dispatch board rather than another focus screen.
 - Use `ScreenScaffold`, managed overlays, and `StepFlow` before inventing new
   route or dialog patterns.
+- Treat `apps/desktop/src-tauri/localizations/en.json` as the canonical locale
+  schema: update it first, mirror its keys into non-English packs, and only
+  then translate localized values.
 - Keep desktop UI work compact, dark, and tool-oriented.
 - Do not invent alternate onboarding or packaging models in documentation.
 

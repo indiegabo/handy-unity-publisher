@@ -14,7 +14,6 @@ import {
 } from "./BuildTargetEditorOverlay";
 import { BuildTargetRemovalCallout } from "./BuildTargetRemovalCallout";
 import {
-  PublishDestinationsEditor,
   buildCreateProjectPublishTargetsInput,
   collectBuildTargetBindingImpact,
   hasPublishDestinationValidationErrors,
@@ -24,10 +23,14 @@ import {
   validatePublishDestinationDrafts,
 } from "./PublishDestinationsEditor";
 import { type SelectOption } from "./Field";
-import { REPOSITORY_ENGINE_OPTIONS } from "./RepositoryEngineField";
 import { FocusPageFrame, MetaItem, MetaRow, SurfacePanel } from "./Surface";
 import { useOverlay } from "./OverlayManager";
 import { type AuthProviderConnectionResult } from "./authProviderPresentation";
+import {
+  useLocalization,
+  type LocalizationVariables,
+  type Translate,
+} from "../LocalizationProvider";
 import {
   ProjectIdentityStep,
   ProjectLocalAccessStep,
@@ -171,16 +174,6 @@ const WIZARD_STEP_ORDER: readonly WizardStepKey[] = [
   "review",
 ];
 
-const PROJECT_KIND_OPTIONS = [
-  { label: "Repository project", value: "repository" },
-  { label: "Local workspace project", value: "local" },
-] as const;
-
-const REPOSITORY_VISIBILITY_OPTIONS = [
-  { label: "Public", value: "public" },
-  { label: "Private", value: "private" },
-] as const;
-
 const EMPTY_VALIDATION_ATTEMPTS: Record<WizardStepKey, boolean> = {
   identity: false,
   access: false,
@@ -195,6 +188,26 @@ const INITIAL_PROJECT_DRAFT_DIRTY_KEY = buildProjectDraftDirtyKey(
   INITIAL_PROJECT_DRAFT,
 );
 
+function translateMessage(
+  t: Translate | undefined,
+  key: string,
+  fallbackText: string,
+  variables?: LocalizationVariables,
+) {
+  if (t) {
+    return t(key, fallbackText, variables);
+  }
+
+  if (!variables) {
+    return fallbackText;
+  }
+
+  return fallbackText.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (match, name) => {
+    const value = variables[name];
+    return value === undefined ? match : String(value);
+  });
+}
+
 export function CreateProjectWizard({
   authProviderResult = null,
   initialSnapshot: initialSnapshotProp = null,
@@ -206,6 +219,7 @@ export function CreateProjectWizard({
 }: CreateProjectWizardProps) {
   const initialSnapshot =
     initialSnapshotProp ?? createInitialCreateProjectWizardSnapshot();
+  const { t } = useLocalization();
   const { openOverlay } = useOverlay();
   const [draft, setDraft] = useState<ProjectDraft>(() =>
     cloneProjectDraft(initialSnapshot.draft),
@@ -301,20 +315,23 @@ export function CreateProjectWizard({
 
   const projectSourceStepAdapter = resolveProjectSourceWizardAdapter(
     draft.projectKind,
+    t,
   );
   const buildTargetStepAdapter = resolveBuildTargetWizardAdapter(
     draft.engineKind,
     draft.projectKind,
+    t,
   );
   const wizardSteps = buildWizardSteps(
     projectSourceStepAdapter,
     buildTargetStepAdapter,
+    t,
   );
   const currentStep = wizardSteps[currentStepIndex];
   const currentStepNumber = currentStepIndex + 1;
   const showPreviousAction = currentStepIndex > 0;
   const showNextAction = currentStep.key !== "review";
-  const identityErrors = validateIdentityStep(draft, repositoryInventory);
+  const identityErrors = validateIdentityStep(draft, repositoryInventory, t);
   const accessErrors = validateAccessStep(
     draft,
     repositoryInventory,
@@ -331,18 +348,22 @@ export function CreateProjectWizard({
       repositoryCredentialCount: repositoryCredentials.length,
     },
     projectSourceStepAdapter,
+    t,
   );
   const targetErrors = validateTargetsStep(
     draft,
     unityExecutableDiagnostics,
     isValidatingUnityExecutable,
     buildTargetStepAdapter,
+    t,
   );
   const buildTargetReferences: ProjectBuildTargetReference[] =
     draft.buildTargets.map((target) => ({
       id: target.id,
       buildTargetId: null,
-      name: target.name.trim() || "Unnamed target",
+      name:
+        target.name.trim() ||
+        t("project_shared.targets.review.unnamed_target", "Unnamed target"),
     }));
   const publishDestinationErrors = validatePublishDestinationDrafts(
     draft.publishDestinations,
@@ -359,17 +380,19 @@ export function CreateProjectWizard({
         pendingBuildTargetRemoval.id,
       )
     : [];
-  const pathErrors = validatePathStep(draft);
+  const pathErrors = validatePathStep(draft, t);
   const repositoryAccessSummary = formatRepositoryAccessSummary(
     draft.repositoryUrl,
     repositoryAccessAssessment,
     isAssessingRepositoryAccess,
     repositoryAccessError,
+    t,
   );
   const repositoryCredentialOptions = buildRepositoryCredentialOptions(
     repositoryCredentials,
     repositoryCredentialId,
     isLoadingRepositoryCredentials,
+    t,
   );
   const discoveredUnityEditors =
     listSelectableUnityEditors(unityAdapterSettings);
@@ -431,7 +454,7 @@ export function CreateProjectWizard({
       });
     } catch (error) {
       startTransition(() => {
-        setInventoryError(buildProjectErrorMessage(error));
+        setInventoryError(buildProjectErrorMessage(error, t));
         setIsLoadingRepositoryInventory(false);
       });
     }
@@ -453,7 +476,7 @@ export function CreateProjectWizard({
       });
     } catch (error) {
       startTransition(() => {
-        setAuthProviderError(buildProjectErrorMessage(error));
+        setAuthProviderError(buildProjectErrorMessage(error, t));
         setIsLoadingAuthProviders(false);
       });
     }
@@ -479,7 +502,7 @@ export function CreateProjectWizard({
     } catch (error) {
       startTransition(() => {
         setUnityAdapterSettings(null);
-        setUnityAdapterSettingsError(buildProjectErrorMessage(error));
+        setUnityAdapterSettingsError(buildProjectErrorMessage(error, t));
         setIsLoadingUnityAdapterSettings(false);
       });
     }
@@ -508,7 +531,7 @@ export function CreateProjectWizard({
       startTransition(() => {
         setRepositoryCredentials([]);
         setPublishCredentials([]);
-        setRepositoryCredentialsError(buildProjectErrorMessage(error));
+        setRepositoryCredentialsError(buildProjectErrorMessage(error, t));
         setIsLoadingRepositoryCredentials(false);
       });
     }
@@ -543,7 +566,7 @@ export function CreateProjectWizard({
 
         startTransition(() => {
           setRepositoryAccessAssessment(null);
-          setRepositoryAccessError(buildProjectErrorMessage(error));
+          setRepositoryAccessError(buildProjectErrorMessage(error, t));
           setIsAssessingRepositoryAccess(false);
         });
       }
@@ -573,7 +596,10 @@ export function CreateProjectWizard({
 
       if (!provider.credential_id) {
         throw new Error(
-          "GitHub login completed without a reusable credential id.",
+          t(
+            "create_project.repository_access.error.missing_credential_id",
+            "GitHub login completed without a reusable credential id.",
+          ),
         );
       }
 
@@ -581,12 +607,15 @@ export function CreateProjectWizard({
         setGithubAuthProvider(provider);
         setRepositoryCredentialId(provider.credential_id);
         setRepositoryAccessActionMessage(
-          "GitHub login connected for this project. Creating the project will save the connection.",
+          t(
+            "create_project.repository_access.message.github_connected",
+            "GitHub login connected for this project. Creating the project will save the connection.",
+          ),
         );
       });
     } catch (error) {
       startTransition(() => {
-        setSubmitError(buildProjectErrorMessage(error));
+        setSubmitError(buildProjectErrorMessage(error, t));
       });
     } finally {
       startTransition(() => {
@@ -599,7 +628,10 @@ export function CreateProjectWizard({
     startTransition(() => {
       setRepositoryCredentialId(null);
       setRepositoryAccessActionMessage(
-        "Repository credential cleared from the draft.",
+        t(
+          "create_project.repository_access.message.cleared",
+          "Repository credential cleared from the draft.",
+        ),
       );
     });
   });
@@ -612,8 +644,14 @@ export function CreateProjectWizard({
         );
         setRepositoryAccessActionMessage(
           nextCredentialId
-            ? "Stored repository credential selected for this project. Creating the project will save the connection."
-            : "Repository credential cleared from the draft.",
+            ? t(
+                "create_project.repository_access.message.selected",
+                "Stored repository credential selected for this project. Creating the project will save the connection.",
+              )
+            : t(
+                "create_project.repository_access.message.cleared",
+                "Repository credential cleared from the draft.",
+              ),
         );
         setSubmitError(null);
       });
@@ -656,7 +694,7 @@ export function CreateProjectWizard({
 
         return createdCredentialId;
       } catch (error) {
-        throw new Error(buildProjectErrorMessage(error));
+        throw new Error(buildProjectErrorMessage(error, t));
       }
     },
   );
@@ -795,6 +833,7 @@ export function CreateProjectWizard({
           authProviderResult,
           repositoryCredentialId,
           githubAuthProvider?.credential_id ?? null,
+          t,
         ),
       );
 
@@ -920,7 +959,7 @@ export function CreateProjectWizard({
                 additional_argument_count: 0,
                 environment_variable_count: 0,
                 status: "validation_failed",
-                message: buildProjectErrorMessage(error),
+                message: buildProjectErrorMessage(error, t),
               });
               setIsValidatingUnityExecutable(false);
             });
@@ -933,7 +972,7 @@ export function CreateProjectWizard({
 
   const handlePathPickerError = useEffectEvent((error: unknown) => {
     startTransition(() => {
-      setSubmitError(buildProjectErrorMessage(error));
+      setSubmitError(buildProjectErrorMessage(error, t));
     });
   });
 
@@ -1206,13 +1245,14 @@ export function CreateProjectWizard({
     } catch (error) {
       startTransition(() => {
         setIsSubmitting(false);
-        setSubmitError(buildProjectErrorMessage(error));
+        setSubmitError(buildProjectErrorMessage(error, t));
       });
     }
   });
 
   const repositoryAccessPanel =
-    currentStep.key === "access" && projectSourceStepAdapter.kind === "repository" ? (
+    currentStep.key === "access" &&
+    projectSourceStepAdapter.kind === "repository" ? (
       <ProjectRepositoryAccessPanel
         authProviderError={authProviderError}
         githubAuthProvider={githubAuthProvider}
@@ -1259,17 +1299,17 @@ export function CreateProjectWizard({
     <FocusPageFrame
       bodyClassName="wizard-shell__body"
       className="wizard-shell"
-      eyebrow="Create Project"
+      eyebrow={t("create_project.title", "Create Project")}
       summary={
         <MetaRow>
-          <MetaItem label="Mode">
-            {formatProjectKindLabel(draft.projectKind)}
+          <MetaItem label={t("create_project.summary.mode", "Mode")}>
+            {formatProjectKindLabel(draft.projectKind, t)}
           </MetaItem>
-          <MetaItem label="Engine">
-            {formatRepositoryEngineKindLabel(draft.engineKind)}
+          <MetaItem label={t("create_project.summary.engine", "Engine")}>
+            {formatRepositoryEngineKindLabel(draft.engineKind, t)}
           </MetaItem>
-          <MetaItem label="Targets">
-            {formatWizardTargetCount(draft.buildTargets.length)}
+          <MetaItem label={t("create_project.summary.targets", "Targets")}>
+            {formatWizardTargetCount(draft.buildTargets.length, t)}
           </MetaItem>
         </MetaRow>
       }
@@ -1288,8 +1328,14 @@ export function CreateProjectWizard({
                   variant="secondary"
                 >
                   {isLoadingRepositoryInventory
-                    ? "Retrying inventory..."
-                    : "Retry inventory load"}
+                    ? t(
+                        "create_project.actions.retrying_inventory",
+                        "Retrying inventory...",
+                      )
+                    : t(
+                        "create_project.actions.retry_inventory",
+                        "Retry inventory load",
+                      )}
                 </Button>
               </div>
             </>
@@ -1302,7 +1348,10 @@ export function CreateProjectWizard({
       ) : null}
 
       <section className="wizard-layout">
-        <header aria-label="Wizard status" className="wizard-layout__header">
+        <header
+          aria-label={t("create_project.status.aria_label", "Wizard status")}
+          className="wizard-layout__header"
+        >
           <div className="wizard-layout__header-main">
             <p className="wizard-layout__step-label">
               {`${currentStepNumber}. ${currentStep.label}`}
@@ -1311,7 +1360,14 @@ export function CreateProjectWizard({
               |
             </span>
             <p className="wizard-layout__step-count">
-              {`${currentStepNumber} of ${wizardSteps.length}`}
+              {t(
+                "create_project.status.step_count",
+                "{{current}} of {{total}}",
+                {
+                  current: currentStepNumber,
+                  total: wizardSteps.length,
+                },
+              )}
             </p>
           </div>
         </header>
@@ -1453,7 +1509,9 @@ export function CreateProjectWizard({
                         ? accessErrors.localPath
                         : undefined
                     }
-                    onClearLocalPath={() => handleProjectPathCleared("localPath")}
+                    onClearLocalPath={() =>
+                      handleProjectPathCleared("localPath")
+                    }
                     onPathPickError={handlePathPickerError}
                     onPathPicked={(selectedPath) =>
                       handleProjectPathPicked("localPath", selectedPath)
@@ -1473,11 +1531,13 @@ export function CreateProjectWizard({
                   detectedEditorHint={buildDetectedUnityEditorHint(
                     unityAdapterSettingsError,
                     discoveredUnityEditors.length,
+                    t,
                   )}
                   detectedEditorOptions={buildDetectedUnityEditorOptions(
                     discoveredUnityEditors,
                     isLoadingUnityAdapterSettings,
                     unityAdapterSettingsError,
+                    t,
                   )}
                   detectedEditorValue={resolveDetectedUnityEditorValue(
                     draft.unityExecutablePath,
@@ -1550,7 +1610,9 @@ export function CreateProjectWizard({
                   destinations={draft.publishDestinations}
                   disabled={isSubmitting}
                   errors={
-                    attemptedSteps.publish ? publishDestinationErrors : undefined
+                    attemptedSteps.publish
+                      ? publishDestinationErrors
+                      : undefined
                   }
                   onChange={(nextPublishDestinations) => {
                     startTransition(() => {
@@ -1561,7 +1623,9 @@ export function CreateProjectWizard({
                     });
                   }}
                   onSaveCredential={handleSavePublishCredential}
-                  showItchUserversionTemplate={draft.projectKind === "repository"}
+                  showItchUserversionTemplate={
+                    draft.projectKind === "repository"
+                  }
                 />
               ) : null}
 
@@ -1582,14 +1646,20 @@ export function CreateProjectWizard({
                     handleProjectPathCleared("artifactsRootOverride")
                   }
                   onArtifactsRootPicked={(selectedPath) =>
-                    handleProjectPathPicked("artifactsRootOverride", selectedPath)
+                    handleProjectPathPicked(
+                      "artifactsRootOverride",
+                      selectedPath,
+                    )
                   }
                   onPathPickError={handlePathPickerError}
                   onWorkspaceRootClear={() =>
                     handleProjectPathCleared("workspaceRootOverride")
                   }
                   onWorkspaceRootPicked={(selectedPath) =>
-                    handleProjectPathPicked("workspaceRootOverride", selectedPath)
+                    handleProjectPathPicked(
+                      "workspaceRootOverride",
+                      selectedPath,
+                    )
                   }
                   workspaceRootOverride={draft.workspaceRootOverride}
                   workspaceRootOverrideError={
@@ -1627,7 +1697,7 @@ export function CreateProjectWizard({
                 size="sm"
                 variant="ghost"
               >
-                Cancel
+                {t("create_project.actions.cancel", "Cancel")}
               </Button>
             ) : null}
 
@@ -1638,7 +1708,7 @@ export function CreateProjectWizard({
                 size="sm"
                 variant="ghost"
               >
-                Previous
+                {t("create_project.actions.previous", "Previous")}
               </Button>
             ) : null}
           </div>
@@ -1651,7 +1721,12 @@ export function CreateProjectWizard({
                 size="sm"
                 variant="primary"
               >
-                {isSubmitting ? "Creating..." : "Create project"}
+                {isSubmitting
+                  ? t("create_project.actions.creating", "Creating...")
+                  : t(
+                      "create_project.actions.create_project",
+                      "Create project",
+                    )}
               </Button>
             ) : null}
 
@@ -1662,7 +1737,7 @@ export function CreateProjectWizard({
                 size="sm"
                 variant="primary"
               >
-                Next
+                {t("create_project.actions.next", "Next")}
               </Button>
             ) : null}
           </div>
@@ -1672,24 +1747,63 @@ export function CreateProjectWizard({
   );
 }
 
-function formatProjectKindLabel(projectKind: ProjectDraft["projectKind"]) {
+function formatProjectKindLabel(
+  projectKind: ProjectDraft["projectKind"],
+  t?: Translate,
+) {
   return projectKind === "repository"
-    ? "Repository project"
-    : "Local workspace project";
+    ? translateMessage(
+        t,
+        "project_shared.kind.repository",
+        "Repository project",
+      )
+    : translateMessage(
+        t,
+        "project_shared.kind.local_workspace",
+        "Local workspace project",
+      );
 }
 
-function formatRepositoryEngineKindLabel(engineKind: RepositoryEngineKind) {
-  const option = REPOSITORY_ENGINE_OPTIONS.find(
-    (entry) => entry.value === engineKind,
-  );
-
-  if (option) {
-    return option.label;
+function formatRepositoryEngineKindLabel(
+  engineKind: RepositoryEngineKind,
+  t?: Translate,
+) {
+  switch (engineKind) {
+    case "unity":
+      return translateMessage(t, "project_shared.engine.option.unity", "Unity");
+    case "unreal":
+      return translateMessage(
+        t,
+        "project_shared.engine.option.unreal",
+        "Unreal",
+      );
+    case "godot":
+      return translateMessage(t, "project_shared.engine.option.godot", "Godot");
+    case "gamemaker":
+      return translateMessage(
+        t,
+        "project_shared.engine.option.gamemaker",
+        "GameMaker",
+      );
+    case "defold":
+      return translateMessage(
+        t,
+        "project_shared.engine.option.defold",
+        "Defold",
+      );
+    case "cocos-creator":
+      return translateMessage(
+        t,
+        "project_shared.engine.option.cocos_creator",
+        "Cocos Creator",
+      );
   }
 
-  return engineKind
+  const fallbackLabel = String(engineKind);
+
+  return fallbackLabel
     .split("-")
-    .map((segment) =>
+    .map((segment: string) =>
       segment.length > 0
         ? `${segment[0].toUpperCase()}${segment.slice(1)}`
         : segment,
@@ -1697,44 +1811,80 @@ function formatRepositoryEngineKindLabel(engineKind: RepositoryEngineKind) {
     .join(" ");
 }
 
-function formatWizardTargetCount(targetCount: number) {
-  return `${targetCount} target${targetCount === 1 ? "" : "s"}`;
-}
-
-function formatProjectSourceAdapterStatus(adapter: ProjectSourceWizardAdapter) {
-  return adapter.kind === "repository" || adapter.kind === "local"
-    ? "Available"
-    : "Unavailable";
+function formatWizardTargetCount(targetCount: number, t?: Translate) {
+  return targetCount === 1
+    ? translateMessage(t, "project_shared.count.target.one", "1 target")
+    : translateMessage(
+        t,
+        "project_shared.count.target.other",
+        "{{count}} targets",
+        { count: targetCount },
+      );
 }
 
 function resolveProjectSourceWizardAdapter(
   projectKind: ProjectDraft["projectKind"],
+  t?: Translate,
 ): ProjectSourceWizardAdapter {
   if (projectKind === "repository") {
     return {
       kind: "repository",
-      stepLabel: "Repository",
-      stepDescription:
+      stepLabel: translateMessage(
+        t,
+        "project_shared.source.repository.step_label",
+        "Repository",
+      ),
+      stepDescription: translateMessage(
+        t,
+        "project_shared.source.repository.step_description",
         "Declare where HGP should sync this project, authenticate, and watch for changes.",
-      supportTitle: "Repository source",
-      supportDescription:
+      ),
+      supportTitle: translateMessage(
+        t,
+        "project_shared.source.repository.support_title",
+        "Repository source",
+      ),
+      supportDescription: translateMessage(
+        t,
+        "project_shared.source.repository.support_description",
         "Repository-backed projects rely on the source adapter to detect providers, credentials, and polling posture.",
-      supportCopy:
+      ),
+      supportCopy: translateMessage(
+        t,
+        "project_shared.source.repository.support_copy",
         "This source adapter lets the runtime poll a remote repository, assess access, and queue automation from new releases.",
+      ),
       unsupportedMessage: null,
     };
   }
 
   return {
     kind: "local",
-    stepLabel: "Workspace",
-    stepDescription:
+    stepLabel: translateMessage(
+      t,
+      "project_shared.source.local.step_label",
+      "Workspace",
+    ),
+    stepDescription: translateMessage(
+      t,
+      "project_shared.source.local.step_description",
       "Declare the local workspace source that HGP should manage for this project.",
-    supportTitle: "Local workspace source",
-    supportDescription:
+    ),
+    supportTitle: translateMessage(
+      t,
+      "project_shared.source.local.support_title",
+      "Local workspace source",
+    ),
+    supportDescription: translateMessage(
+      t,
+      "project_shared.source.local.support_description",
       "Local workspace projects point HGP at one host path that should be released without a managed repository checkout.",
-    supportCopy:
+    ),
+    supportCopy: translateMessage(
+      t,
+      "project_shared.source.local.support_copy",
       "Choose the Unity workspace path that HGP should inspect for versioning and build from this host directly.",
+    ),
     unsupportedMessage: null,
   };
 }
@@ -1742,50 +1892,107 @@ function resolveProjectSourceWizardAdapter(
 function resolveBuildTargetWizardAdapter(
   engineKind: RepositoryEngineKind,
   projectKind: ProjectDraft["projectKind"],
+  t?: Translate,
 ): BuildTargetWizardAdapter {
-  const engineLabel = formatRepositoryEngineKindLabel(engineKind);
-  const projectLabel = formatProjectKindLabel(projectKind).toLocaleLowerCase();
+  const engineLabel = formatRepositoryEngineKindLabel(engineKind, t);
+  const projectLabel = formatProjectKindLabel(projectKind, t).toLocaleLowerCase();
 
   if (engineKind === "unity") {
     return {
       kind: "unity",
-      stepLabel: "Build Targets",
-      stepDescription: `Configure the ${engineLabel}-specific build targets HGP should execute for this ${projectLabel}.`,
-      supportTitle: "Unity target adapter",
-      supportDescription:
+      stepLabel: translateMessage(
+        t,
+        "project_shared.build_target.unity.step_label",
+        "Build Targets",
+      ),
+      stepDescription: translateMessage(
+        t,
+        "project_shared.build_target.unity.step_description",
+        "Configure the {{engineLabel}}-specific build targets HGP should execute for this {{projectLabel}}.",
+        { engineLabel, projectLabel },
+      ),
+      supportTitle: translateMessage(
+        t,
+        "project_shared.build_target.unity.support_title",
+        "Unity target adapter",
+      ),
+      supportDescription: translateMessage(
+        t,
+        "project_shared.build_target.unity.support_description",
         "This step is currently being driven by the Unity build target adapter.",
-      supportCopy:
+      ),
+      supportCopy: translateMessage(
+        t,
+        "project_shared.build_target.unity.support_copy",
         "Unity projects define the target platform, build method, and editor executable that HGP should launch for each build target.",
-      reviewDescription:
+      ),
+      reviewDescription: translateMessage(
+        t,
+        "project_shared.build_target.unity.review_description",
         "Engine-specific target configuration that HGP will execute for this project.",
+      ),
       unsupportedMessage: null,
     };
   }
 
   return {
     kind: "engine-unsupported",
-    stepLabel: "Build Targets",
-    stepDescription:
+    stepLabel: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.step_label",
+      "Build Targets",
+    ),
+    stepDescription: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.step_description",
       "Configure the engine-specific build targets HGP should execute for this project.",
-    supportTitle: `${engineLabel} target adapter`,
-    supportDescription:
+    ),
+    supportTitle: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.support_title",
+      "{{engineLabel}} target adapter",
+      { engineLabel },
+    ),
+    supportDescription: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.support_description",
       "This step must switch to the adapter owned by the selected engine.",
-    supportCopy: `${engineLabel} projects need a specialized build target adapter before project creation can collect engine-specific fields.`,
-    reviewDescription: `Engine-specific target configuration for ${engineLabel} is not available in project creation yet.`,
-    unsupportedMessage: `${engineLabel} build target setup does not have a create-project adapter yet.`,
+    ),
+    supportCopy: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.support_copy",
+      "{{engineLabel}} projects need a specialized build target adapter before project creation can collect engine-specific fields.",
+      { engineLabel },
+    ),
+    reviewDescription: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.review_description",
+      "Engine-specific target configuration for {{engineLabel}} is not available in project creation yet.",
+      { engineLabel },
+    ),
+    unsupportedMessage: translateMessage(
+      t,
+      "project_shared.build_target.unsupported.message",
+      "{{engineLabel}} build target setup does not have a create-project adapter yet.",
+      { engineLabel },
+    ),
   };
 }
 
 function buildWizardSteps(
   sourceAdapter: ProjectSourceWizardAdapter,
   buildTargetAdapter: BuildTargetWizardAdapter,
+  t?: Translate,
 ): WizardStepDefinition[] {
   const definitions: Record<WizardStepKey, WizardStepDefinition> = {
     identity: {
       key: "identity",
-      label: "Identity",
-      description:
+      label: translateMessage(t, "project_shared.step.identity.label", "Identity"),
+      description: translateMessage(
+        t,
+        "project_shared.step.identity.description",
         "Name the project and choose the source and engine adapters HGP should use.",
+      ),
     },
     access: {
       key: "access",
@@ -1799,21 +2006,34 @@ function buildWizardSteps(
     },
     publish: {
       key: "publish",
-      label: "Publish Destinations",
-      description:
+      label: translateMessage(
+        t,
+        "project_shared.step.publish.label",
+        "Publish Destinations",
+      ),
+      description: translateMessage(
+        t,
+        "project_shared.step.publish.description",
         "Bind build outputs to publish destinations and validate destination-specific delivery rules before save.",
+      ),
     },
     paths: {
       key: "paths",
-      label: "Paths",
-      description:
+      label: translateMessage(t, "project_shared.step.paths.label", "Paths"),
+      description: translateMessage(
+        t,
+        "project_shared.step.paths.description",
         "Choose optional artifact and workspace paths for this project.",
+      ),
     },
     review: {
       key: "review",
-      label: "Review",
-      description:
+      label: translateMessage(t, "project_shared.step.review.label", "Review"),
+      description: translateMessage(
+        t,
+        "project_shared.step.review.description",
         "Review the project definition produced by the selected source and engine adapters before registration.",
+      ),
     },
   };
 
@@ -1875,12 +2095,17 @@ function toWizardBuildTargetDraft(
 function validateIdentityStep(
   draft: ProjectDraft,
   repositoryInventory: RepositoryInspectionEntry[],
+  t?: Translate,
 ) {
   const errors: { name?: string; projectKind?: string; engineKind?: string } =
     {};
   const normalizedName = draft.name.trim();
   if (!normalizedName) {
-    errors.name = "Project name is required.";
+    errors.name = translateMessage(
+      t,
+      "create_project.validation.identity.name_required",
+      "Project name is required.",
+    );
   } else if (
     draft.projectKind === "repository" &&
     repositoryInventory.some(
@@ -1889,11 +2114,22 @@ function validateIdentityStep(
         normalizedName.toLocaleLowerCase(),
     )
   ) {
-    errors.name = "Another repository project already uses this name.";
+    errors.name = translateMessage(
+      t,
+      "create_project.validation.identity.name_duplicate_repository",
+      "Another repository project already uses this name.",
+    );
   }
 
   if (draft.engineKind !== "unity") {
-    errors.engineKind = `${formatRepositoryEngineKindLabel(draft.engineKind)} does not have a create-project build target adapter yet.`;
+    errors.engineKind = translateMessage(
+      t,
+      "create_project.validation.identity.engine_unsupported",
+      "{{engineLabel}} does not have a create-project build target adapter yet.",
+      {
+        engineLabel: formatRepositoryEngineKindLabel(draft.engineKind, t),
+      },
+    );
   }
 
   return errors;
@@ -1915,6 +2151,7 @@ function validateAccessStep(
     repositoryCredentialCount: number;
   },
   sourceAdapter: ProjectSourceWizardAdapter,
+  t?: Translate,
 ) {
   const errors: {
     repositoryUrl?: string;
@@ -1927,9 +2164,17 @@ function validateAccessStep(
     const normalizedLocalPath = draft.localPath.trim();
 
     if (!normalizedLocalPath) {
-      errors.localPath = "Local workspace path is required.";
+      errors.localPath = translateMessage(
+        t,
+        "create_project.validation.access.local_path_required",
+        "Local workspace path is required.",
+      );
     } else if (!looksLikeAbsolutePath(normalizedLocalPath)) {
-      errors.localPath = "Local workspace path must be an absolute path.";
+      errors.localPath = translateMessage(
+        t,
+        "create_project.validation.access.local_path_absolute",
+        "Local workspace path must be an absolute path.",
+      );
     } else if (
       repositoryInventory.some(
         (repository) =>
@@ -1937,7 +2182,11 @@ function validateAccessStep(
           normalizePathForComparison(normalizedLocalPath),
       )
     ) {
-      errors.localPath = "This local workspace is already registered in HGP.";
+      errors.localPath = translateMessage(
+        t,
+        "create_project.validation.access.local_path_duplicate",
+        "This local workspace is already registered in HGP.",
+      );
     }
 
     return errors;
@@ -1945,14 +2194,22 @@ function validateAccessStep(
 
   const normalizedUrl = draft.repositoryUrl.trim();
   if (!normalizedUrl) {
-    errors.repositoryUrl = "Repository URL is required.";
+    errors.repositoryUrl = translateMessage(
+      t,
+      "create_project.validation.access.repository_url_required",
+      "Repository URL is required.",
+    );
   } else if (
     !(
       normalizedUrl.startsWith("https://") ||
       normalizedUrl.startsWith("http://")
     )
   ) {
-    errors.repositoryUrl = "Repository URL must use http:// or https://.";
+    errors.repositoryUrl = translateMessage(
+      t,
+      "create_project.validation.access.repository_url_protocol",
+      "Repository URL must use http:// or https://.",
+    );
   } else if (
     repositoryInventory.some(
       (repository) =>
@@ -1960,17 +2217,27 @@ function validateAccessStep(
         normalizedUrl.toLocaleLowerCase(),
     )
   ) {
-    errors.repositoryUrl = "This remote is already registered in HGP.";
+    errors.repositoryUrl = translateMessage(
+      t,
+      "create_project.validation.access.repository_url_duplicate",
+      "This remote is already registered in HGP.",
+    );
   }
 
   if (draft.projectKind === "repository") {
     const pollingInterval = Number(draft.pollingIntervalSeconds.trim());
     if (!Number.isInteger(pollingInterval)) {
-      errors.pollingIntervalSeconds =
-        "Polling interval must be a whole number.";
+      errors.pollingIntervalSeconds = translateMessage(
+        t,
+        "create_project.validation.access.polling_integer",
+        "Polling interval must be a whole number.",
+      );
     } else if (pollingInterval < 5) {
-      errors.pollingIntervalSeconds =
-        "Polling interval must be at least 5 seconds.";
+      errors.pollingIntervalSeconds = translateMessage(
+        t,
+        "create_project.validation.access.polling_minimum",
+        "Polling interval must be at least 5 seconds.",
+      );
     }
   }
 
@@ -1980,12 +2247,23 @@ function validateAccessStep(
       normalizedUrl.startsWith("http://"))
   ) {
     if (authState.isAssessingRepositoryAccess) {
-      errors.repositoryAccess = "Repository access is still being checked.";
+      errors.repositoryAccess = translateMessage(
+        t,
+        "create_project.validation.access.repository_checking",
+        "Repository access is still being checked.",
+      );
     } else if (authState.repositoryAccessError) {
-      errors.repositoryAccess =
-        "Repository access could not be checked from the desktop shell.";
+      errors.repositoryAccess = translateMessage(
+        t,
+        "create_project.validation.access.repository_check_failed",
+        "Repository access could not be checked from the desktop shell.",
+      );
     } else if (!authState.repositoryAccessAssessment) {
-      errors.repositoryAccess = "Repository access has not been checked yet.";
+      errors.repositoryAccess = translateMessage(
+        t,
+        "create_project.validation.access.repository_not_checked",
+        "Repository access has not been checked yet.",
+      );
     } else if (
       authState.repositoryAccessAssessment.visibility === "invalid" ||
       authState.repositoryAccessAssessment.visibility === "unknown"
@@ -2006,14 +2284,29 @@ function validateAccessStep(
               "this host";
         errors.repositoryAccess =
           authState.repositoryAccessAssessment.provider_id === "unknown"
-            ? "Private repositories are not supported for this host yet. Only public repositories can be added right now."
-            : `Private ${providerLabel} repositories are not supported yet. Only public repositories are available for this platform right now.`;
+            ? translateMessage(
+                t,
+                "create_project.validation.access.private_unsupported_host",
+                "Private repositories are not supported for this host yet. Only public repositories can be added right now.",
+              )
+            : translateMessage(
+                t,
+                "create_project.validation.access.private_unsupported_provider",
+                "Private {{providerLabel}} repositories are not supported yet. Only public repositories are available for this platform right now.",
+                { providerLabel },
+              );
       } else if (authState.isLoadingRepositoryCredentials) {
-        errors.repositoryAccess =
-          "Repository credentials are still loading from the desktop shell.";
+        errors.repositoryAccess = translateMessage(
+          t,
+          "create_project.validation.access.credentials_loading",
+          "Repository credentials are still loading from the desktop shell.",
+        );
       } else if (authState.repositoryCredentialsError) {
-        errors.repositoryAccess =
-          "Repository credentials could not be loaded from the desktop shell.";
+        errors.repositoryAccess = translateMessage(
+          t,
+          "create_project.validation.access.credentials_error",
+          "Repository credentials could not be loaded from the desktop shell.",
+        );
       } else if (!authState.repositoryCredentialId) {
         const providerLabel =
           authState.repositoryAccessAssessment.provider_label || "Repository";
@@ -2023,22 +2316,43 @@ function validateAccessStep(
           authState.repositoryAccessAssessment.supports_interactive_login
         ) {
           if (authState.isLoadingAuthProviders) {
-            errors.repositoryAccess = "GitHub login status is still loading.";
+            errors.repositoryAccess = translateMessage(
+              t,
+              "create_project.validation.access.github_loading",
+              "GitHub login status is still loading.",
+            );
           } else if (authState.authProviderError) {
-            errors.repositoryAccess =
-              "GitHub login status could not be loaded from the desktop shell.";
+            errors.repositoryAccess = translateMessage(
+              t,
+              "create_project.validation.access.github_error",
+              "GitHub login status could not be loaded from the desktop shell.",
+            );
           } else if (authState.githubAuthProvider?.status !== "connected") {
-            errors.repositoryAccess =
-              "Private GitHub repository detected. Log in and connect a GitHub credential, or select another stored repository credential, before setup can continue.";
+            errors.repositoryAccess = translateMessage(
+              t,
+              "create_project.validation.access.github_login_required",
+              "Private GitHub repository detected. Log in and connect a GitHub credential, or select another stored repository credential, before setup can continue.",
+            );
           } else {
-            errors.repositoryAccess =
-              "Private GitHub repository detected. Connect a credential to this project before setup can continue.";
+            errors.repositoryAccess = translateMessage(
+              t,
+              "create_project.validation.access.github_connect_required",
+              "Private GitHub repository detected. Connect a credential to this project before setup can continue.",
+            );
           }
         } else if (authState.repositoryCredentialCount <= 0) {
-          errors.repositoryAccess =
-            "No stored repository credentials are available yet. Save one before setup can continue.";
+          errors.repositoryAccess = translateMessage(
+            t,
+            "create_project.validation.access.credentials_missing",
+            "No stored repository credentials are available yet. Save one before setup can continue.",
+          );
         } else {
-          errors.repositoryAccess = `Private ${providerLabel} repository detected. Select a stored repository credential before setup can continue.`;
+          errors.repositoryAccess = translateMessage(
+            t,
+            "create_project.validation.access.private_select_credential",
+            "Private {{providerLabel}} repository detected. Select a stored repository credential before setup can continue.",
+            { providerLabel },
+          );
         }
       }
     }
@@ -2052,6 +2366,7 @@ function validateTargetsStep(
   unityExecutableDiagnostics: UnityExecutableValidation | null,
   isValidatingUnityExecutable: boolean,
   buildTargetAdapter: BuildTargetWizardAdapter,
+  t?: Translate,
 ): TargetStepErrors {
   const errors: TargetStepErrors = {
     targets: {},
@@ -2059,13 +2374,21 @@ function validateTargetsStep(
   if (buildTargetAdapter.kind !== "unity") {
     errors.root =
       buildTargetAdapter.unsupportedMessage ||
-      "The selected engine does not have a create-project build target adapter yet.";
+      translateMessage(
+        t,
+        "create_project.validation.targets.engine_unsupported",
+        "The selected engine does not have a create-project build target adapter yet.",
+      );
 
     return errors;
   }
 
   if (draft.buildTargets.length === 0) {
-    errors.root = "At least one build target is required.";
+    errors.root = translateMessage(
+      t,
+      "create_project.validation.targets.minimum_count",
+      "At least one build target is required.",
+    );
     return errors;
   }
 
@@ -2074,45 +2397,80 @@ function validateTargetsStep(
     const fieldErrors: TargetFieldErrors = {};
     const normalizedName = target.name.trim();
     if (!normalizedName) {
-      fieldErrors.name = "Target name is required.";
+      fieldErrors.name = translateMessage(
+        t,
+        "create_project.validation.targets.name_required",
+        "Target name is required.",
+      );
     } else {
       const duplicateKey = normalizedName.toLocaleLowerCase();
       if (seenNames.has(duplicateKey)) {
-        fieldErrors.name =
-          "Target names must remain unique within the project.";
+        fieldErrors.name = translateMessage(
+          t,
+          "create_project.validation.targets.name_unique",
+          "Target names must remain unique within the project.",
+        );
       }
       seenNames.add(duplicateKey);
     }
 
     if (!target.targetPlatform.trim()) {
-      fieldErrors.targetPlatform = "Unity target platform is required.";
+      fieldErrors.targetPlatform = translateMessage(
+        t,
+        "create_project.validation.targets.platform_required",
+        "Unity target platform is required.",
+      );
     }
 
     if (!target.buildMethod.trim()) {
-      fieldErrors.buildMethod = "Build method is required.";
+      fieldErrors.buildMethod = translateMessage(
+        t,
+        "create_project.validation.targets.build_method_required",
+        "Build method is required.",
+      );
     } else if (!target.buildMethod.includes(".")) {
-      fieldErrors.buildMethod =
-        "Use a full static method path such as Builder.PerformWindows.";
+      fieldErrors.buildMethod = translateMessage(
+        t,
+        "create_project.validation.targets.build_method_format",
+        "Use a full static method path such as Builder.PerformWindows.",
+      );
     }
 
     errors.targets[target.id] = fieldErrors;
   }
 
   if (!draft.unityExecutablePath.trim()) {
-    errors.root = "Unity executable path is required for all build targets.";
+    errors.root = translateMessage(
+      t,
+      "create_project.validation.targets.unity_path_required",
+      "Unity executable path is required for all build targets.",
+    );
   } else if (isValidatingUnityExecutable) {
-    errors.root = "Unity executable validation is still running.";
+    errors.root = translateMessage(
+      t,
+      "create_project.validation.targets.unity_path_validating",
+      "Unity executable validation is still running.",
+    );
   } else if (!unityExecutableDiagnostics) {
-    errors.root = "Unity executable path has not been validated yet.";
+    errors.root = translateMessage(
+      t,
+      "create_project.validation.targets.unity_path_pending",
+      "Unity executable path has not been validated yet.",
+    );
   } else if (unityExecutableDiagnostics.status !== "ready") {
     errors.root =
-      unityExecutableDiagnostics.message || "Unity executable path is invalid.";
+      unityExecutableDiagnostics.message ||
+      translateMessage(
+        t,
+        "create_project.validation.targets.unity_path_invalid",
+        "Unity executable path is invalid.",
+      );
   }
 
   return errors;
 }
 
-function validatePathStep(draft: ProjectDraft): PathStepErrors {
+function validatePathStep(draft: ProjectDraft, t?: Translate): PathStepErrors {
   const errors: PathStepErrors = {};
   const normalizedArtifactsRoot = draft.artifactsRootOverride.trim();
   const normalizedWorkspaceRoot = draft.workspaceRootOverride.trim();
@@ -2121,14 +2479,22 @@ function validatePathStep(draft: ProjectDraft): PathStepErrors {
     !looksLikeAbsolutePath(normalizedArtifactsRoot)
   ) {
     errors.artifactsRootOverride =
-      "Artifacts root override must be an absolute path.";
+      translateMessage(
+        t,
+        "create_project.validation.paths.artifacts_absolute",
+        "Artifacts root override must be an absolute path.",
+      );
   }
   if (
     normalizedWorkspaceRoot &&
     !looksLikeAbsolutePath(normalizedWorkspaceRoot)
   ) {
     errors.workspaceRootOverride =
-      "Workspace root override must be an absolute path.";
+      translateMessage(
+        t,
+        "create_project.validation.paths.workspace_absolute",
+        "Workspace root override must be an absolute path.",
+      );
   }
 
   return errors;
@@ -2158,41 +2524,6 @@ function hasTargetErrors(errors: TargetStepErrors) {
 
 function hasTargetFieldErrors(errors: TargetFieldErrors) {
   return Boolean(errors.name || errors.targetPlatform || errors.buildMethod);
-}
-
-function firstBuildTargetFieldError(errors: TargetFieldErrors) {
-  return errors.name || errors.targetPlatform || errors.buildMethod || null;
-}
-
-function formatBuildTargetExecutableSummary(
-  diagnostics: UnityExecutableValidation | null,
-  isValidating: boolean,
-) {
-  if (isValidating) {
-    return "checking";
-  }
-
-  if (!diagnostics) {
-    return "pending";
-  }
-
-  return formatDiagnosticStatus(diagnostics.status);
-}
-
-function buildBuildTargetQuickViewCopy(
-  target: BuildTargetDraft,
-  diagnostics: UnityExecutableValidation | null,
-  unityExecutablePath: string,
-) {
-  if (diagnostics && diagnostics.status !== "ready") {
-    return diagnostics.message;
-  }
-
-  if (!unityExecutablePath.trim()) {
-    return "Unity executable path is still pending.";
-  }
-
-  return `${target.buildMethod.trim() || "Build method pending"} • ${unityExecutablePath.trim()}`;
 }
 
 function collectInvalidTargetIds(errors: TargetStepErrors) {
@@ -2369,11 +2700,16 @@ function buildDetectedUnityEditorOptions(
   editors: DiscoveredUnityEditor[],
   isLoadingUnityAdapterSettings: boolean,
   unityAdapterSettingsError: string | null,
+  t?: Translate,
 ): SelectOption[] {
   if (isLoadingUnityAdapterSettings) {
     return [
       {
-        label: "Scanning installed Unity editors...",
+        label: translateMessage(
+          t,
+          "project_shared.unity_editor.option.scanning",
+          "Scanning installed Unity editors...",
+        ),
         value: "",
       },
     ];
@@ -2382,7 +2718,11 @@ function buildDetectedUnityEditorOptions(
   if (unityAdapterSettingsError) {
     return [
       {
-        label: "Unable to load installed Unity editors",
+        label: translateMessage(
+          t,
+          "project_shared.unity_editor.option.load_failed",
+          "Unable to load installed Unity editors",
+        ),
         value: "",
       },
     ];
@@ -2391,7 +2731,11 @@ function buildDetectedUnityEditorOptions(
   if (editors.length === 0) {
     return [
       {
-        label: "No installed Unity editors detected",
+        label: translateMessage(
+          t,
+          "project_shared.unity_editor.option.none_detected",
+          "No installed Unity editors detected",
+        ),
         value: "",
       },
     ];
@@ -2399,8 +2743,16 @@ function buildDetectedUnityEditorOptions(
 
   return [
     {
-      label: "Choose a detected Unity editor",
-      title: "Choose a detected Unity editor",
+      label: translateMessage(
+        t,
+        "project_shared.unity_editor.option.select_detected",
+        "Choose a detected Unity editor",
+      ),
+      title: translateMessage(
+        t,
+        "project_shared.unity_editor.option.select_detected",
+        "Choose a detected Unity editor",
+      ),
       value: "",
     },
     ...editors.map((editor) => ({
@@ -2414,16 +2766,30 @@ function buildDetectedUnityEditorOptions(
 function buildDetectedUnityEditorHint(
   unityAdapterSettingsError: string | null,
   editorCount: number,
+  t?: Translate,
 ) {
   if (unityAdapterSettingsError) {
-    return `${unityAdapterSettingsError} Use the manual path field below to continue.`;
+    return translateMessage(
+      t,
+      "project_shared.unity_editor.hint.load_failed",
+      "{{error}} Use the manual path field below to continue.",
+      { error: unityAdapterSettingsError },
+    );
   }
 
   if (editorCount === 0) {
-    return "Choose a detected editor when available, or keep using the manual executable path field below.";
+    return translateMessage(
+      t,
+      "project_shared.unity_editor.hint.none_detected",
+      "Choose a detected editor when available, or keep using the manual executable path field below.",
+    );
   }
 
-  return "Select a detected Unity install to fill the executable path below, or keep using the manual picker.";
+  return translateMessage(
+    t,
+    "project_shared.unity_editor.hint.detected",
+    "Select a detected Unity install to fill the executable path below, or keep using the manual picker.",
+  );
 }
 
 function resolveDetectedUnityEditorValue(
@@ -2490,22 +2856,6 @@ function indexOfWizardStep(stepKey: WizardStepKey) {
   return WIZARD_STEP_ORDER.findIndex((step) => step === stepKey);
 }
 
-function formatProjectSourceReviewDescription(draft: ProjectDraft) {
-  if (draft.projectKind === "repository") {
-    return draft.repositoryUrl.trim() || "Repository source not set yet.";
-  }
-
-  return draft.localPath.trim() || "Local workspace source not set yet.";
-}
-
-function renderWizardAdapterUnavailableState(message: string) {
-  return (
-    <div className="wizard-callout wizard-callout--compact">
-      <p className="wizard-callout__copy">{message}</p>
-    </div>
-  );
-}
-
 function optionalTrimmedString(value: string) {
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
@@ -2529,294 +2879,71 @@ function normalizePathForComparison(value: string) {
   return normalized.replace(/\/+$/, "").toLocaleLowerCase();
 }
 
-function formatDiagnosticStatus(status: string) {
-  switch (status) {
-    case "ready":
-      return "ready";
-    case "missing_executable":
-      return "missing";
-    case "invalid_path":
-      return "invalid";
-    case "validation_failed":
-      return "failed";
-    default:
-      return status.replace(/_/g, " ");
-  }
-}
-
-function formatGithubAuthProviderStatus(
-  provider: AuthProviderStatus | null,
-  isLoadingAuthProviders: boolean,
-) {
-  if (isLoadingAuthProviders) {
-    return "loading";
-  }
-
-  if (!provider) {
-    return "unavailable";
-  }
-
-  if (provider.status === "connected") {
-    return "connected";
-  }
-
-  if (provider.status === "disconnected") {
-    return "ready to connect";
-  }
-
-  return "unavailable";
-}
-function resolveRepositoryAccessBadgeTone(
-  assessment: RepositoryAccessAssessment | null,
-  isAssessingRepositoryAccess: boolean,
-  repositoryAccessError: string | null,
-): "strong" | "neutral" | "muted" {
-  if (isAssessingRepositoryAccess) {
-    return "muted";
-  }
-
-  if (repositoryAccessError) {
-    return "neutral";
-  }
-
-  if (!assessment) {
-    return "muted";
-  }
-
-  if (assessment.visibility === "public") {
-    return "strong";
-  }
-
-  if (assessment.visibility === "private") {
-    return assessment.supports_interactive_login ? "neutral" : "muted";
-  }
-
-  if (assessment.visibility === "invalid") {
-    return "neutral";
-  }
-
-  return "muted";
-}
-
-function formatRepositoryAccessStatus(
-  repositoryUrl: string,
-  assessment: RepositoryAccessAssessment | null,
-  isAssessingRepositoryAccess: boolean,
-  repositoryAccessError: string | null,
-) {
-  if (!repositoryUrl.trim()) {
-    return "pending";
-  }
-
-  if (isAssessingRepositoryAccess) {
-    return "checking";
-  }
-
-  if (repositoryAccessError) {
-    return "check failed";
-  }
-
-  if (!assessment) {
-    return "pending";
-  }
-
-  switch (assessment.visibility) {
-    case "public":
-      return "public";
-    case "private":
-      return assessment.supports_interactive_login
-        ? "login required"
-        : "unsupported";
-    case "invalid":
-      return "invalid";
-    default:
-      return "unknown";
-  }
-}
-
-function resolveRepositoryAccessCopy(
-  repositoryUrl: string,
-  assessment: RepositoryAccessAssessment | null,
-  isAssessingRepositoryAccess: boolean,
-  repositoryAccessError: string | null,
-) {
-  if (!repositoryUrl.trim()) {
-    return "Paste a repository URL, choose whether the repository is public or private, and HGP will detect which platform owns the host.";
-  }
-
-  if (isAssessingRepositoryAccess) {
-    return "HGP is identifying which platform owns this repository URL and whether private login is supported for the selected visibility.";
-  }
-
-  if (repositoryAccessError) {
-    return repositoryAccessError;
-  }
-
-  if (assessment) {
-    return assessment.message;
-  }
-
-  return "Repository access has not been checked yet.";
-}
-
 function formatRepositoryAccessSummary(
   repositoryUrl: string,
   assessment: RepositoryAccessAssessment | null,
   isAssessingRepositoryAccess: boolean,
   repositoryAccessError: string | null,
+  t?: Translate,
 ) {
   if (!repositoryUrl.trim()) {
-    return "Pending";
-  }
-
-  if (isAssessingRepositoryAccess) {
-    return "Checking";
-  }
-
-  if (repositoryAccessError) {
-    return "Check failed";
-  }
-
-  if (!assessment) {
-    return "Pending";
-  }
-
-  switch (assessment.visibility) {
-    case "public":
-      return "Public";
-    case "private":
-      return "Private";
-    case "invalid":
-      return "Invalid";
-    default:
-      return "Unknown";
-  }
-}
-
-function formatRepositoryAccessProviderLabel(
-  assessment: RepositoryAccessAssessment | null,
-  isAssessingRepositoryAccess: boolean,
-  repositoryAccessError: string | null,
-) {
-  if (isAssessingRepositoryAccess) {
-    return "Detecting";
-  }
-
-  if (repositoryAccessError || !assessment) {
-    return "Pending";
-  }
-
-  return assessment.provider_label;
-}
-
-function formatRepositoryVisibilityLabel(
-  assessment: RepositoryAccessAssessment | null,
-  isAssessingRepositoryAccess: boolean,
-  repositoryAccessError: string | null,
-) {
-  if (isAssessingRepositoryAccess) {
-    return "Checking";
-  }
-
-  if (repositoryAccessError) {
-    return "Needs review";
-  }
-
-  if (!assessment) {
-    return "Pending";
-  }
-
-  switch (assessment.visibility) {
-    case "public":
-      return "Public";
-    case "private":
-      return "Private";
-    case "invalid":
-      return "Invalid";
-    default:
-      return "Unknown";
-  }
-}
-
-function formatRepositoryLoginStatus(
-  assessment: RepositoryAccessAssessment | null,
-  githubAuthProvider: AuthProviderStatus | null,
-  isLoadingAuthProviders: boolean,
-) {
-  if (!assessment) {
-    return "Pending";
-  }
-
-  if (assessment.auth_requirement === "none") {
-    return "Not required";
-  }
-
-  if (!assessment.supports_interactive_login) {
-    return "Not available";
-  }
-
-  if (assessment.provider_id === "github") {
-    return formatGithubAuthProviderStatus(
-      githubAuthProvider,
-      isLoadingAuthProviders,
+    return translateMessage(
+      t,
+      "project_shared.repository_access.summary.pending",
+      "Pending",
     );
   }
 
-  return "Required";
-}
+  if (isAssessingRepositoryAccess) {
+    return translateMessage(
+      t,
+      "project_shared.repository_access.summary.checking",
+      "Checking",
+    );
+  }
 
-function formatRepositoryBindingStatus(
-  assessment: RepositoryAccessAssessment | null,
-  repositoryCredentialId: number | null,
-  pendingRepositoryAccessAction: boolean,
-) {
+  if (repositoryAccessError) {
+    return translateMessage(
+      t,
+      "project_shared.repository_access.summary.check_failed",
+      "Check failed",
+    );
+  }
+
   if (!assessment) {
-    return "Pending";
+    return translateMessage(
+      t,
+      "project_shared.repository_access.summary.pending",
+      "Pending",
+    );
   }
 
-  if (pendingRepositoryAccessAction) {
-    return "Connecting";
+  switch (assessment.visibility) {
+    case "public":
+      return translateMessage(
+        t,
+        "project_shared.repository_access.summary.public",
+        "Public",
+      );
+    case "private":
+      return translateMessage(
+        t,
+        "project_shared.repository_access.summary.private",
+        "Private",
+      );
+    case "invalid":
+      return translateMessage(
+        t,
+        "project_shared.repository_access.summary.invalid",
+        "Invalid",
+      );
+    default:
+      return translateMessage(
+        t,
+        "project_shared.repository_access.summary.unknown",
+        "Unknown",
+      );
   }
-
-  if (assessment.auth_requirement === "none") {
-    return "Not required";
-  }
-
-  if (!supportsShellRepositoryLoginAction(assessment)) {
-    return "Unavailable";
-  }
-
-  return repositoryCredentialId ? "Selected" : "Pending";
-}
-
-function formatRepositoryBindingActionLabel(
-  assessment: RepositoryAccessAssessment | null,
-  githubAuthProvider: AuthProviderStatus | null,
-  repositoryCredentialId: number | null,
-) {
-  if (!assessment) {
-    return "Connect credential";
-  }
-
-  if (repositoryCredentialId) {
-    return assessment.provider_id === "github"
-      ? "Reconnect GitHub login"
-      : "Change credential";
-  }
-
-  if (assessment.provider_id === "github") {
-    return githubAuthProvider?.status === "connected"
-      ? "Connect GitHub login"
-      : "Log in and connect";
-  }
-
-  return "Select credential";
-}
-
-function shouldShowRepositoryLoginAction(
-  assessment: RepositoryAccessAssessment | null,
-) {
-  return supportsShellRepositoryLoginAction(assessment);
 }
 
 function supportsShellRepositoryLoginAction(
@@ -2844,24 +2971,10 @@ function resolveRepositoryCredentialIdForSave(
   return repositoryCredentialId;
 }
 
-function formatRepositoryCredentialFieldHint(
-  assessment: RepositoryAccessAssessment | null,
-  isLoadingRepositoryCredentials: boolean,
-) {
-  if (isLoadingRepositoryCredentials) {
-    return "Loading stored repository credentials...";
-  }
-
-  if (!assessment || assessment.auth_requirement !== "required") {
-    return "Public repositories can keep this empty.";
-  }
-
-  return "Choose a stored GitHub credential or use the login action below.";
-}
-
 function buildRepositoryAccessAssessmentFromDetection(
   detection: RepositoryProviderDetection,
   repositoryVisibility: ProjectDraft["repositoryVisibility"],
+  t?: Translate,
 ): RepositoryAccessAssessment {
   if (repositoryVisibility === "public") {
     return {
@@ -2873,8 +2986,11 @@ function buildRepositoryAccessAssessmentFromDetection(
       auth_requirement: "none",
       auth_status: "not_required",
       supports_interactive_login: detection.supports_interactive_login,
-      message:
+      message: translateMessage(
+        t,
+        "project_shared.repository_access.assessment.public",
         "Public repository selected. HGP will poll and clone this remote without repository authentication.",
+      ),
     };
   }
 
@@ -2891,8 +3007,11 @@ function buildRepositoryAccessAssessmentFromDetection(
       auth_requirement: "required",
       auth_status: "required_unbound",
       supports_interactive_login: detection.supports_interactive_login,
-      message:
+      message: translateMessage(
+        t,
+        "create_project.validation.access.assessment_private_github",
         "Private GitHub repository selected. Log in and connect this project before setup can continue.",
+      ),
     };
   }
 
@@ -2906,8 +3025,11 @@ function buildRepositoryAccessAssessmentFromDetection(
       auth_requirement: "required",
       auth_status: "unsupported",
       supports_interactive_login: detection.supports_interactive_login,
-      message:
+      message: translateMessage(
+        t,
+        "project_shared.repository_access.assessment.private_unknown",
         "Private repository selected, but HGP could not identify a supported login platform from this URL. Only public repositories are supported for this host right now.",
+      ),
     };
   }
 
@@ -2920,7 +3042,12 @@ function buildRepositoryAccessAssessmentFromDetection(
     auth_requirement: "required",
     auth_status: "unsupported",
     supports_interactive_login: detection.supports_interactive_login,
-    message: `Private ${detection.provider_label} repositories are not supported yet. Only public repositories are available for this platform right now.`,
+    message: translateMessage(
+      t,
+      "project_shared.repository_access.assessment.private_provider",
+      "Private {{providerLabel}} repositories are not supported yet. Only public repositories are available for this platform right now.",
+      { providerLabel: detection.provider_label },
+    ),
   };
 }
 
@@ -2928,12 +3055,25 @@ function buildRepositoryCredentialOptions(
   credentials: SecretCredentialSetting[],
   repositoryCredentialId: number | null,
   isLoadingRepositoryCredentials: boolean,
+  t?: Translate,
 ): SelectOption[] {
   const placeholderLabel = isLoadingRepositoryCredentials
-    ? "Loading stored credentials..."
+    ? translateMessage(
+        t,
+        "project_shared.repository_access.option.loading",
+        "Loading stored credentials...",
+      )
     : credentials.length === 0
-      ? "No stored repository credentials available"
-      : "No repository credential selected";
+      ? translateMessage(
+          t,
+          "project_shared.repository_access.option.none_available",
+          "No stored repository credentials available",
+        )
+      : translateMessage(
+          t,
+          "project_shared.repository_access.option.none_selected",
+          "No repository credential selected",
+        );
   const options: SelectOption[] = [
     {
       disabled: isLoadingRepositoryCredentials,
@@ -2941,7 +3081,7 @@ function buildRepositoryCredentialOptions(
       value: "",
     },
     ...credentials.map((credential) => ({
-      label: formatRepositoryCredentialOptionLabel(credential),
+      label: formatRepositoryCredentialOptionLabel(credential, t),
       value: credential.credential_id.toString(),
     })),
   ];
@@ -2953,7 +3093,12 @@ function buildRepositoryCredentialOptions(
     )
   ) {
     options.push({
-      label: `Current credential #${repositoryCredentialId}`,
+      label: translateMessage(
+        t,
+        "project_shared.repository_access.option.current",
+        "Current credential #{{credentialId}}",
+        { credentialId: repositoryCredentialId },
+      ),
       value: repositoryCredentialId.toString(),
     });
   }
@@ -2976,6 +3121,7 @@ function buildAuthProviderRoundTripMessage(
   result: AuthProviderConnectionResult,
   repositoryCredentialId: number | null,
   previousGithubCredentialId: number | null,
+  t?: Translate,
 ) {
   const nextCredentialId = result.provider.credential_id;
   const shouldSelectCredential =
@@ -2984,26 +3130,47 @@ function buildAuthProviderRoundTripMessage(
       repositoryCredentialId === previousGithubCredentialId);
 
   if (shouldSelectCredential) {
-    return `${result.message} The connected credential is now selected for this project draft.`;
+    return `${result.message} ${translateMessage(
+      t,
+      "create_project.repository_access.message.round_trip_selected",
+      "The connected credential is now selected for this project draft.",
+    )}`;
   }
 
-  return `${result.message} Return to the repository credential field to choose how this draft should bind the refreshed account.`;
+  return `${result.message} ${translateMessage(
+    t,
+    "create_project.repository_access.message.round_trip_review",
+    "Return to the repository credential field to choose how this draft should bind the refreshed account.",
+  )}`;
 }
 
 function formatRepositoryCredentialOptionLabel(
   credential: SecretCredentialSetting,
+  t?: Translate,
 ) {
-  return `${credential.name} (${formatRepositoryCredentialKindLabel(credential.kind)})`;
+  return `${credential.name} (${formatRepositoryCredentialKindLabel(credential.kind, t)})`;
 }
 
-function formatRepositoryCredentialKindLabel(kind: string) {
+function formatRepositoryCredentialKindLabel(kind: string, t?: Translate) {
   switch (kind) {
     case "git-http-basic":
-      return "HTTP basic";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.kind.http_basic",
+        "HTTP basic",
+      );
     case "git-http-bearer":
-      return "Bearer token";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.kind.bearer",
+        "Bearer token",
+      );
     case "git-http-github-host-login":
-      return "GitHub login";
+      return translateMessage(
+        t,
+        "project_shared.repository_access.kind.github_login",
+        "GitHub login",
+      );
     default:
       return kind;
   }
@@ -3020,7 +3187,7 @@ function isRepositoryCredentialSelectable(credential: SecretCredentialSetting) {
   );
 }
 
-function buildProjectErrorMessage(error: unknown): string {
+function buildProjectErrorMessage(error: unknown, t?: Translate): string {
   if (error instanceof Error && error.message) {
     return error.message;
   }
@@ -3029,7 +3196,11 @@ function buildProjectErrorMessage(error: unknown): string {
     return error.trim();
   }
 
-  return "The desktop shell could not complete the project operation.";
+  return translateMessage(
+    t,
+    "create_project.error.unknown",
+    "The desktop shell could not complete the project operation.",
+  );
 }
 
 function joinClassNames(...tokens: Array<string | false | null | undefined>) {

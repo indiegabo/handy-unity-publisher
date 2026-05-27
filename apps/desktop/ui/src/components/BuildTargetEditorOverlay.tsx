@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Button } from "./Button";
 import { SelectField, TextField } from "./Field";
 import FullScreenModal from "./FullScreenModal";
+import { useLocalization, type Translate } from "../LocalizationProvider";
 
 export type SharedBuildTargetDraft = {
   id: string;
@@ -32,12 +33,42 @@ type BuildTargetEditorOverlayProps = {
 };
 
 const UNITY_TARGET_OPTIONS = [
-  { label: "Select a Unity target", value: "" },
-  { label: "Windows", value: "StandaloneWindows64" },
-  { label: "Linux", value: "StandaloneLinux64" },
-  { label: "macOS", value: "StandaloneOSX" },
-  { label: "WebGL", value: "WebGL" },
-  { label: "Android", value: "Android" },
+  {
+    fallbackLabel: "Select a Unity target",
+    key: "build_target_editor.target_platform.placeholder",
+    targetName: "",
+    value: "",
+  },
+  {
+    fallbackLabel: "Windows",
+    key: "build_target_editor.target_platform.windows",
+    targetName: "Windows",
+    value: "StandaloneWindows64",
+  },
+  {
+    fallbackLabel: "Linux",
+    key: "build_target_editor.target_platform.linux",
+    targetName: "Linux",
+    value: "StandaloneLinux64",
+  },
+  {
+    fallbackLabel: "macOS",
+    key: "build_target_editor.target_platform.macos",
+    targetName: "macOS",
+    value: "StandaloneOSX",
+  },
+  {
+    fallbackLabel: "WebGL",
+    key: "build_target_editor.target_platform.webgl",
+    targetName: "WebGL",
+    value: "WebGL",
+  },
+  {
+    fallbackLabel: "Android",
+    key: "build_target_editor.target_platform.android",
+    targetName: "Android",
+    value: "Android",
+  },
 ] as const;
 
 const DEFAULT_CUSTOM_TARGET_PLATFORM = "StandaloneWindows64";
@@ -49,6 +80,7 @@ export function BuildTargetEditorOverlay({
   onResolve,
   targetId,
 }: BuildTargetEditorOverlayProps) {
+  const { t } = useLocalization();
   const isCreateMode = mode === "create";
   const initialNormalizedPlatform = normalizeUnityTargetPlatformValue(
     initialTarget.targetPlatform,
@@ -85,12 +117,13 @@ export function BuildTargetEditorOverlay({
   const suggestedBuildMethod = resolveSuggestedUnityBuildMethod(
     normalizedTargetPlatform,
   );
+  const unityTargetOptions = buildUnityTargetOptions(t);
 
   const fieldErrors = attemptedSave
     ? validateBuildTargetDraftForOverlay(draft, {
         isCustomConfigurationEnabled,
         suggestedBuildMethod,
-      })
+      }, t)
     : initialErrors;
 
   const enableCustomConfiguration = () => {
@@ -134,7 +167,7 @@ export function BuildTargetEditorOverlay({
     const errors = validateBuildTargetDraftForOverlay(draft, {
       isCustomConfigurationEnabled,
       suggestedBuildMethod,
-    });
+    }, t);
 
     if (firstBuildTargetFieldError(errors)) {
       return;
@@ -158,13 +191,19 @@ export function BuildTargetEditorOverlay({
     <FullScreenModal
       description={
         isCreateMode
-          ? "Configure one build target and return once the target contract is ready."
-          : "Update this build target and return once the target contract is ready."
+          ? t(
+              "build_target_editor.create.description",
+              "Configure one build target and return once the target contract is ready.",
+            )
+          : t(
+              "build_target_editor.edit.description",
+              "Update this build target and return once the target contract is ready.",
+            )
       }
       footer={
         <div className="publish-destination-editor-modal__footer">
           <Button onClick={() => onResolve?.(null)} size="sm" variant="ghost">
-            Cancel
+            {t("build_target_editor.actions.cancel", "Cancel")}
           </Button>
           <Button
             leadingIcon="plus"
@@ -172,12 +211,18 @@ export function BuildTargetEditorOverlay({
             size="sm"
             variant="primary"
           >
-            {isCreateMode ? "Confirm" : "Save target"}
+            {isCreateMode
+              ? t("build_target_editor.actions.confirm", "Confirm")
+              : t("build_target_editor.actions.save", "Save target")}
           </Button>
         </div>
       }
       onResolve={onResolve}
-      title={isCreateMode ? "Add build target" : "Edit build target"}
+      title={
+        isCreateMode
+          ? t("build_target_editor.create.title", "Add build target")
+          : t("build_target_editor.edit.title", "Edit build target")
+      }
     >
       <div className="project-detail-form-grid publish-destination-editor-modal__content">
         <div className="build-target-editor__mode-actions">
@@ -194,8 +239,14 @@ export function BuildTargetEditorOverlay({
             variant={isCustomConfigurationEnabled ? "ghost" : "secondary"}
           >
             {isCustomConfigurationEnabled
-              ? "Default configuration"
-              : "Custom configuration"}
+              ? t(
+                  "build_target_editor.actions.default_configuration",
+                  "Default configuration",
+                )
+              : t(
+                  "build_target_editor.actions.custom_configuration",
+                  "Custom configuration",
+                )}
           </Button>
         </div>
 
@@ -204,8 +255,14 @@ export function BuildTargetEditorOverlay({
             <SelectField
               data-overlay-autofocus
               error={fieldErrors.targetPlatform}
-              hint="This writes the Unity targetPlatform contract field directly."
-              label="Unity target platform"
+              hint={t(
+                "build_target_editor.target_platform.hint",
+                "This writes the Unity targetPlatform contract field directly.",
+              )}
+              label={t(
+                "build_target_editor.target_platform.label",
+                "Unity target platform",
+              )}
               onChange={(event) => {
                 const nextTargetPlatform = normalizeUnityTargetPlatformValue(
                   event.currentTarget.value,
@@ -218,24 +275,40 @@ export function BuildTargetEditorOverlay({
                   name: resolveUnityBuildTargetName(nextTargetPlatform),
                 }));
               }}
-              options={UNITY_TARGET_OPTIONS}
+              options={unityTargetOptions}
               value={normalizedTargetPlatform}
             />
 
             <div className="wizard-callout wizard-callout--compact">
-              <p className="wizard-callout__title">Platform defaults</p>
+              <p className="wizard-callout__title">
+                {t(
+                  "build_target_editor.defaults.title",
+                  "Platform defaults",
+                )}
+              </p>
               <p className="wizard-callout__copy">
-                HGP derives the target name and Unity build method from the
-                selected target platform by default. You still need to implement
-                the static method in your Unity project.
+                {t(
+                  "build_target_editor.defaults.copy",
+                  "HGP derives the target name and Unity build method from the selected target platform by default. You still need to implement the static method in your Unity project.",
+                )}
               </p>
               <p className="wizard-callout__copy wizard-summary-list__copy--muted">
-                Default target name:{" "}
+                {t(
+                  "build_target_editor.defaults.target_name",
+                  "Default target name:",
+                )}{" "}
                 {resolveUnityBuildTargetName(normalizedTargetPlatform)}
               </p>
               <p className="wizard-callout__copy wizard-summary-list__copy--muted">
-                Default build method:{" "}
-                {suggestedBuildMethod ?? "Select a platform first"}
+                {t(
+                  "build_target_editor.defaults.build_method",
+                  "Default build method:",
+                )}{" "}
+                {suggestedBuildMethod ??
+                  t(
+                    "build_target_editor.defaults.select_platform_first",
+                    "Select a platform first",
+                  )}
               </p>
             </div>
           </>
@@ -246,8 +319,14 @@ export function BuildTargetEditorOverlay({
             <TextField
               data-overlay-autofocus
               error={fieldErrors.name}
-              hint="Keep the custom target name stable. It becomes part of the artifact file name."
-              label="Custom target name"
+              hint={t(
+                "build_target_editor.custom_name.hint",
+                "Keep the custom target name stable. It becomes part of the artifact file name.",
+              )}
+              label={t(
+                "build_target_editor.custom_name.label",
+                "Custom target name",
+              )}
               onChange={(event) => {
                 const nextName = event.currentTarget.value;
                 setDraft((current) => ({ ...current, name: nextName }));
@@ -259,8 +338,14 @@ export function BuildTargetEditorOverlay({
             />
             <TextField
               error={fieldErrors.buildMethod}
-              hint="Use this only when your Unity project requires a non-standard method path for this custom target."
-              label="Custom build method"
+              hint={t(
+                "build_target_editor.custom_method.hint",
+                "Use this only when your Unity project requires a non-standard method path for this custom target.",
+              )}
+              label={t(
+                "build_target_editor.custom_method.label",
+                "Custom build method",
+              )}
               onChange={(event) => {
                 const nextBuildMethod = event.currentTarget.value;
                 setDraft((current) => ({
@@ -284,27 +369,41 @@ function validateBuildTargetDraftForOverlay(
     isCustomConfigurationEnabled: boolean;
     suggestedBuildMethod: string | null;
   },
+  t: Translate,
 ): BuildTargetEditorFieldErrors {
   const errors: BuildTargetEditorFieldErrors = {};
 
   if (!target.targetPlatform.trim()) {
-    errors.targetPlatform = "Unity target platform is required.";
+    errors.targetPlatform = t(
+      "build_target_editor.validation.target_platform_required",
+      "Unity target platform is required.",
+    );
   }
 
   if (options.isCustomConfigurationEnabled) {
     if (!target.name.trim()) {
-      errors.name = "Custom target name is required.";
+      errors.name = t(
+        "build_target_editor.validation.custom_name_required",
+        "Custom target name is required.",
+      );
     }
 
     if (!target.buildMethod.trim()) {
-      errors.buildMethod = "Custom build method is required.";
+      errors.buildMethod = t(
+        "build_target_editor.validation.custom_method_required",
+        "Custom build method is required.",
+      );
     } else if (!target.buildMethod.includes(".")) {
-      errors.buildMethod =
-        "Use a full static method path such as Builder.PerformWindows.";
+      errors.buildMethod = t(
+        "build_target_editor.validation.custom_method_format",
+        "Use a full static method path such as Builder.PerformWindows.",
+      );
     }
   } else if (!options.suggestedBuildMethod) {
-    errors.buildMethod =
-      "Select a supported Unity target platform or enable method override.";
+    errors.buildMethod = t(
+      "build_target_editor.validation.build_method_unavailable",
+      "Select a supported Unity target platform or enable method override.",
+    );
   }
 
   return errors;
@@ -357,5 +456,12 @@ function resolveUnityBuildTargetName(targetPlatform: string) {
     (entry) => entry.value === normalizedTargetPlatform,
   );
 
-  return option?.label || normalizedTargetPlatform || "";
+  return option?.targetName || normalizedTargetPlatform || "";
+}
+
+function buildUnityTargetOptions(t: Translate) {
+  return UNITY_TARGET_OPTIONS.map((option) => ({
+    label: t(option.key, option.fallbackLabel),
+    value: option.value,
+  }));
 }

@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 
 use rfd::FileDialog;
 use runtime_config::{
-    HostPlatform, RuntimeConfig, RUNTIME_ROOT_ENV,
+    DEVELOPMENT_PRODUCT_DIRECTORY_NAME, HostPlatform,
+    PRODUCT_DIRECTORY_NAME, RuntimeConfig, RUNTIME_ROOT_ENV,
 };
 use runtime_core::{
     emit_runtime_event,
@@ -86,7 +87,7 @@ use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, PhysicalPosition, PhysicalSize, RunEvent,
-    WebviewWindow, WindowEvent,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_notification::NotificationExt;
 use zip::ZipArchive;
@@ -146,10 +147,14 @@ const LOCALIZATION_RESOURCE_DIR_NAME: &str = "localizations";
 const LOCALIZATION_SETTINGS_FILE_NAME: &str = "localization-settings.json";
 const DEFAULT_PRIMARY_LOCALE_CODE: &str = "en";
 const DEFAULT_FALLBACK_LOCALE_CODE: &str = "pt-BR";
-const OFFICIAL_LOCALE_CODES: &[&str] = &["en", "pt-BR"];
+const AUTO_SELECTION_SOURCE: &str = "auto";
+const USER_SELECTION_SOURCE: &str = "user";
+const OFFICIAL_LOCALE_CODES: &[&str] = &["en", "es", "pt-BR", "zh-CN"];
 const EMBEDDED_LOCALIZATION_FILES: &[(&str, &str)] = &[
     ("en.json", include_str!("../localizations/en.json")),
+    ("es.json", include_str!("../localizations/es.json")),
     ("pt-BR.json", include_str!("../localizations/pt-BR.json")),
+    ("zh-CN.json", include_str!("../localizations/zh-CN.json")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +370,20 @@ struct SaveLocalizationPreferencesInput {
 struct PersistedLocalizationPreferences {
     primary_locale: String,
     fallback_locale: String,
+    #[serde(default)]
+    selection_source: Option<String>,
+    #[serde(default)]
+    detected_host_locale: Option<String>,
+    #[serde(default)]
+    detected_region: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DetectedHostLocale {
+    locale_code: String,
+    language: String,
+    script: Option<String>,
+    region: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -977,6 +996,34 @@ fn main_window(app_handle: &AppHandle) -> Result<WebviewWindow, String> {
         .ok_or_else(|| "main window handle is unavailable".to_string())
 }
 
+fn main_window_config(app_handle: &AppHandle) -> Result<tauri::utils::config::WindowConfig, String> {
+    app_handle
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == MAIN_WINDOW_LABEL)
+        .cloned()
+        .ok_or_else(|| "main window config is unavailable".to_string())
+}
+
+fn create_main_window(app_handle: &AppHandle) -> Result<(), String> {
+    if app_handle.get_webview_window(MAIN_WINDOW_LABEL).is_some() {
+        return Ok(());
+    }
+
+    let window_config = main_window_config(app_handle)?;
+    let webview_data_directory = resolve_shell_local_data_dir(app_handle)
+        .map_err(|error| error.to_string())?;
+
+    WebviewWindowBuilder::from_config(app_handle, &window_config)
+        .map_err(|error| error.to_string())?
+        .data_directory(webview_data_directory)
+        .build()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn is_main_window_pinned(app_handle: &AppHandle) -> bool {
     let lifecycle = app_handle.state::<ShellLifecycleState>();
 
@@ -1328,6 +1375,10 @@ pub fn run() {
             unity_adapter_settings,
         ])
         .setup(|app| {
+            ensure_persisted_localization_resources(app.handle())
+                .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
+            create_main_window(app.handle())
+                .map_err(|error| -> Box<dyn std::error::Error> { Box::new(io::Error::other(error)) })?;
             launch_runtime_process(app)
                 .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
             let config = load_shell_runtime_config()
@@ -2147,23 +2198,102 @@ fn resolve_localization_resource_root<R: tauri::Runtime>(
         return Ok(resource_root);
     }
 
-    let fallback_root = app_handle
-        .path()
-        .app_config_dir()
-        .map_err(|error| io::Error::other(error.to_string()))?
-        .join(LOCALIZATION_RESOURCE_DIR_NAME);
+    let fallback_root = ensure_persisted_localization_resources(app_handle)?;
 
-    seed_embedded_localization_files(&fallback_root)?;
     Ok(fallback_root)
+}
+
+fn ensure_persisted_localization_resources<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> io::Result<PathBuf> {
+    let persisted_root = resolve_persisted_localization_resource_root(app_handle)?;
+    seed_embedded_localization_files(&persisted_root)?;
+    Ok(persisted_root)
+}
+
+fn resolve_persisted_localization_resource_root<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> io::Result<PathBuf> {
+    resolve_shell_persistence_dir(app_handle)
+        .map(|path| path.join(LOCALIZATION_RESOURCE_DIR_NAME))
 }
 
 fn resolve_localization_settings_dir<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
 ) -> io::Result<PathBuf> {
-    app_handle
+    resolve_shell_persistence_dir(app_handle)
+}
+
+fn resolve_shell_persistence_dir<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> io::Result<PathBuf> {
+    let app_config_dir = app_handle
         .path()
         .app_config_dir()
-        .map_err(|error| io::Error::other(error.to_string()))
+        .map_err(|error| io::Error::other(error.to_string()))?;
+
+    resolve_shell_persistence_dir_from_app_config_dir(
+        &app_config_dir,
+        cfg!(debug_assertions),
+    )
+}
+
+fn resolve_shell_local_data_dir<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> io::Result<PathBuf> {
+    let app_local_data_dir = app_handle
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| io::Error::other(error.to_string()))?;
+
+    resolve_shell_local_data_dir_from_app_local_data_dir(
+        &app_local_data_dir,
+        cfg!(debug_assertions),
+    )
+}
+
+fn shell_product_directory_name(is_development: bool) -> &'static str {
+    if is_development {
+        DEVELOPMENT_PRODUCT_DIRECTORY_NAME
+    } else {
+        PRODUCT_DIRECTORY_NAME
+    }
+}
+
+fn retarget_shell_directory_leaf(
+    source_dir: &Path,
+    is_development: bool,
+    directory_kind: &str,
+) -> io::Result<PathBuf> {
+    let base_dir = source_dir.parent().map(Path::to_path_buf).ok_or_else(|| {
+        io::Error::other(format!(
+            "failed to resolve shell {directory_kind} parent directory",
+        ))
+    })?;
+
+    Ok(base_dir.join(shell_product_directory_name(is_development)))
+}
+
+fn resolve_shell_persistence_dir_from_app_config_dir(
+    app_config_dir: &Path,
+    is_development: bool,
+) -> io::Result<PathBuf> {
+    retarget_shell_directory_leaf(
+        app_config_dir,
+        is_development,
+        "persistence",
+    )
+}
+
+fn resolve_shell_local_data_dir_from_app_local_data_dir(
+    app_local_data_dir: &Path,
+    is_development: bool,
+) -> io::Result<PathBuf> {
+    retarget_shell_directory_leaf(
+        app_local_data_dir,
+        is_development,
+        "local data",
+    )
 }
 
 fn workspace_localization_resource_root() -> PathBuf {
@@ -2198,10 +2328,28 @@ fn load_localization_settings_from_paths(
     localization_root: &Path,
     settings_dir: &Path,
 ) -> io::Result<LocalizationSettings> {
+    load_localization_settings_from_paths_with_detected_locale(
+        localization_root,
+        settings_dir,
+        detect_host_locale(),
+    )
+}
+
+fn load_localization_settings_from_paths_with_detected_locale(
+    localization_root: &Path,
+    settings_dir: &Path,
+    detected_host_locale: Option<DetectedHostLocale>,
+) -> io::Result<LocalizationSettings> {
     let (available_locales, mut warnings) =
         discover_localization_locale_settings(localization_root)?;
-    let (persisted_preferences, persisted_warning) =
+    let (read_preferences, persisted_warning) =
         read_persisted_localization_preferences(settings_dir)?;
+    let persisted_preferences = resolve_effective_localization_preferences(
+        settings_dir,
+        &available_locales,
+        read_preferences,
+        detected_host_locale,
+    )?;
 
     if let Some(persisted_warning) = persisted_warning {
         warnings.push(persisted_warning);
@@ -2284,16 +2432,221 @@ fn persist_localization_preferences_to_paths(
     }
 
     fs::create_dir_all(settings_dir)?;
-    fs::write(
-        localization_preferences_path(settings_dir),
-        serde_json::to_vec_pretty(&PersistedLocalizationPreferences {
+    write_persisted_localization_preferences(
+        settings_dir,
+        &PersistedLocalizationPreferences {
             primary_locale: normalized_primary_locale.to_owned(),
             fallback_locale: normalized_fallback_locale.to_owned(),
-        })
-        .map_err(|error| io::Error::other(error.to_string()))?,
+            selection_source: Some(String::from(USER_SELECTION_SOURCE)),
+            detected_host_locale: None,
+            detected_region: None,
+        },
     )?;
 
     load_localization_settings_from_paths(localization_root, settings_dir)
+}
+
+fn resolve_effective_localization_preferences(
+    settings_dir: &Path,
+    available_locales: &[LocalizationLocaleSettings],
+    persisted_preferences: Option<PersistedLocalizationPreferences>,
+    detected_host_locale: Option<DetectedHostLocale>,
+) -> io::Result<Option<PersistedLocalizationPreferences>> {
+    let should_auto_select = persisted_preferences
+        .as_ref()
+        .map(|preferences| !has_user_selected_localization(preferences))
+        .unwrap_or(true);
+
+    if !should_auto_select {
+        return Ok(persisted_preferences);
+    }
+
+    let auto_preferences = build_auto_localization_preferences(
+        available_locales,
+        detected_host_locale,
+    );
+
+    if auto_preferences.is_none() {
+        return Ok(persisted_preferences);
+    }
+
+    if persisted_preferences == auto_preferences {
+        return Ok(persisted_preferences);
+    }
+
+    if let Some(auto_preferences) = auto_preferences {
+        write_persisted_localization_preferences(settings_dir, &auto_preferences)?;
+        return Ok(Some(auto_preferences));
+    }
+
+    Ok(persisted_preferences)
+}
+
+fn build_auto_localization_preferences(
+    available_locales: &[LocalizationLocaleSettings],
+    detected_host_locale: Option<DetectedHostLocale>,
+) -> Option<PersistedLocalizationPreferences> {
+    let primary_locale = auto_selected_primary_locale_code(
+        available_locales,
+        detected_host_locale.as_ref(),
+    )?;
+    let fallback_locale = default_fallback_locale_code(available_locales, primary_locale)
+        .unwrap_or(primary_locale);
+
+    Some(PersistedLocalizationPreferences {
+        primary_locale: primary_locale.to_owned(),
+        fallback_locale: fallback_locale.to_owned(),
+        selection_source: Some(String::from(AUTO_SELECTION_SOURCE)),
+        detected_host_locale: detected_host_locale
+            .as_ref()
+            .map(|locale| locale.locale_code.clone()),
+        detected_region: detected_host_locale.and_then(|locale| locale.region),
+    })
+}
+
+fn has_user_selected_localization(
+    preferences: &PersistedLocalizationPreferences,
+) -> bool {
+    preferences.selection_source.as_deref() != Some(AUTO_SELECTION_SOURCE)
+}
+
+fn auto_selected_primary_locale_code<'a>(
+    available_locales: &'a [LocalizationLocaleSettings],
+    detected_host_locale: Option<&DetectedHostLocale>,
+) -> Option<&'a str> {
+    if let Some(detected_host_locale) = detected_host_locale {
+        for locale_code in OFFICIAL_LOCALE_CODES {
+            if *locale_code == DEFAULT_PRIMARY_LOCALE_CODE {
+                continue;
+            }
+
+            if locale_code_exists(locale_code, available_locales)
+                && host_locale_matches_official_locale(
+                    detected_host_locale,
+                    locale_code,
+                )
+            {
+                return Some(locale_code);
+            }
+        }
+    }
+
+    default_primary_locale_code(available_locales)
+}
+
+fn host_locale_matches_official_locale(
+    detected_host_locale: &DetectedHostLocale,
+    official_locale_code: &str,
+) -> bool {
+    let normalized_official_locale = normalize_locale_code(official_locale_code);
+
+    if detected_host_locale.locale_code == normalized_official_locale {
+        return true;
+    }
+
+    match official_locale_code {
+        "es" => detected_host_locale.language == "es",
+        "pt-BR" => detected_host_locale.language == "pt",
+        "zh-CN" => {
+            if detected_host_locale.language != "zh" {
+                return false;
+            }
+
+            if detected_host_locale.script.as_deref() == Some("Hans") {
+                return true;
+            }
+
+            matches!(
+                detected_host_locale.region.as_deref(),
+                Some("CN") | Some("SG")
+            )
+        }
+        _ => false,
+    }
+}
+
+fn detect_host_locale() -> Option<DetectedHostLocale> {
+    sys_locale::get_locale().and_then(|locale| parse_detected_host_locale(&locale))
+}
+
+fn parse_detected_host_locale(locale: &str) -> Option<DetectedHostLocale> {
+    let normalized_locale = normalize_locale_code(locale);
+    let mut segments = normalized_locale.split('-').filter(|segment| !segment.is_empty());
+    let language = segments.next()?.to_ascii_lowercase();
+    let mut script = None;
+    let mut region = None;
+
+    for segment in segments {
+        if segment.len() == 4 && script.is_none() {
+            script = Some(title_case_ascii(segment));
+            continue;
+        }
+
+        if (segment.len() == 2 || segment.len() == 3) && region.is_none() {
+            region = Some(segment.to_ascii_uppercase());
+        }
+    }
+
+    Some(DetectedHostLocale {
+        locale_code: normalized_locale,
+        language,
+        script,
+        region,
+    })
+}
+
+fn normalize_locale_code(locale: &str) -> String {
+    let trimmed = locale.trim();
+    let without_encoding = trimmed
+        .split(['.', '@'])
+        .next()
+        .unwrap_or(trimmed)
+        .replace('_', "-");
+    let mut segments = without_encoding
+        .split('-')
+        .filter(|segment| !segment.is_empty());
+    let Some(language) = segments.next() else {
+        return String::new();
+    };
+
+    let mut normalized_segments = vec![language.to_ascii_lowercase()];
+    for segment in segments {
+        if segment.len() == 4 {
+            normalized_segments.push(title_case_ascii(segment));
+        } else if segment.len() == 2 || segment.len() == 3 {
+            normalized_segments.push(segment.to_ascii_uppercase());
+        } else {
+            normalized_segments.push(segment.to_ascii_lowercase());
+        }
+    }
+
+    normalized_segments.join("-")
+}
+
+fn title_case_ascii(value: &str) -> String {
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return String::new();
+    };
+
+    let mut title_cased = String::with_capacity(value.len());
+    title_cased.push(first.to_ascii_uppercase());
+    for character in characters {
+        title_cased.push(character.to_ascii_lowercase());
+    }
+    title_cased
+}
+
+fn write_persisted_localization_preferences(
+    settings_dir: &Path,
+    preferences: &PersistedLocalizationPreferences,
+) -> io::Result<()> {
+    fs::create_dir_all(settings_dir)?;
+    fs::write(
+        localization_preferences_path(settings_dir),
+        serde_json::to_vec_pretty(preferences)
+            .map_err(|error| io::Error::other(error.to_string()))?,
+    )
 }
 
 fn discover_localization_locale_settings(
@@ -5565,11 +5918,19 @@ mod tests {
         load_repository_project_detail,
         load_release_status,
         load_localization_settings_from_paths,
+        load_localization_settings_from_paths_with_detected_locale,
+        localization_packs_exist,
         localization_preferences_path,
+        resolve_shell_local_data_dir_from_app_local_data_dir,
+        resolve_shell_persistence_dir_from_app_config_dir,
         development_runtime_command_plan, load_runtime_directory_settings,
         load_runtime_health_report, load_runtime_lifecycle_settings,
         load_runtime_log_lines,
+        DetectedHostLocale,
         detect_repository_provider,
+        seed_embedded_localization_files,
+        write_persisted_localization_preferences,
+        AUTO_SELECTION_SOURCE,
         EVENT_TOPIC_RELEASE_QUEUED,
         has_active_system_dialogs,
         is_main_window_focus_loss_suppressed,
@@ -5590,6 +5951,7 @@ mod tests {
         packaged_butler_sidecar_path,
         load_secret_settings,
         PersistedLocalizationPreferences,
+        USER_SELECTION_SOURCE,
         resolve_github_auth_credential,
         ShellLifecycleState,
         should_hide_main_window_on_focus_loss_state,
@@ -6037,9 +6399,10 @@ mod tests {
         )
         .expect("portuguese locale should write");
 
-        let settings = load_localization_settings_from_paths(
+        let settings = load_localization_settings_from_paths_with_detected_locale(
             &localization_root,
             &settings_dir,
+            None,
         )
         .expect("localization settings should load");
 
@@ -6051,6 +6414,217 @@ mod tests {
         assert_eq!(settings.available_locales[1].code, "pt-BR");
         assert!(settings.available_locales.iter().all(|locale| locale.is_official));
         assert!(settings.warnings.is_empty());
+
+        let persisted = std::fs::read(localization_preferences_path(&settings_dir))
+            .expect("auto-selected localization preferences should persist");
+        let persisted = serde_json::from_slice::<PersistedLocalizationPreferences>(&persisted)
+            .expect("persisted localization preferences should deserialize");
+        assert_eq!(persisted.primary_locale, "en");
+        assert_eq!(persisted.selection_source.as_deref(), Some(AUTO_SELECTION_SOURCE));
+
+        std::fs::remove_dir_all(&root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn windows_shell_persistence_dir_uses_product_directory_name() {
+        let settings_dir = resolve_shell_persistence_dir_from_app_config_dir(
+            Path::new("C:/Users/test/AppData/Roaming/tauri-app-identifier"),
+            false,
+        )
+        .expect("windows shell persistence dir should resolve");
+
+        assert_eq!(
+            settings_dir,
+            PathBuf::from("C:/Users/test/AppData/Roaming/HandyGamesPublisher")
+        );
+    }
+
+    #[test]
+    fn windows_shell_persistence_dir_uses_dev_product_directory_name() {
+        let settings_dir = resolve_shell_persistence_dir_from_app_config_dir(
+            Path::new("C:/Users/test/AppData/Roaming/tauri-app-identifier"),
+            true,
+        )
+        .expect("windows development shell persistence dir should resolve");
+
+        assert_eq!(
+            settings_dir,
+            PathBuf::from("C:/Users/test/AppData/Roaming/HandyGamesPublisher_DEV")
+        );
+    }
+
+    #[test]
+    fn windows_shell_local_data_dir_uses_product_directory_name() {
+        let local_data_dir = resolve_shell_local_data_dir_from_app_local_data_dir(
+            Path::new("C:/Users/test/AppData/Local/tauri-app-identifier"),
+            false,
+        )
+        .expect("windows shell local data dir should resolve");
+
+        assert_eq!(
+            local_data_dir,
+            PathBuf::from("C:/Users/test/AppData/Local/HandyGamesPublisher")
+        );
+    }
+
+    #[test]
+    fn windows_shell_local_data_dir_uses_dev_product_directory_name() {
+        let local_data_dir = resolve_shell_local_data_dir_from_app_local_data_dir(
+            Path::new("C:/Users/test/AppData/Local/tauri-app-identifier"),
+            true,
+        )
+        .expect("windows development shell local data dir should resolve");
+
+        assert_eq!(
+            local_data_dir,
+            PathBuf::from("C:/Users/test/AppData/Local/HandyGamesPublisher_DEV")
+        );
+    }
+
+    #[test]
+    fn load_localization_settings_from_paths_auto_selects_portuguese_for_portuguese_hosts() {
+        let root = std::env::temp_dir().join("desktop-shell-localization-auto-pt-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let localization_root = root.join("localizations");
+        let settings_dir = root.join("config");
+        std::fs::create_dir_all(&localization_root)
+            .expect("localization root should create");
+        seed_embedded_localization_files(&localization_root)
+            .expect("embedded locale files should seed");
+
+        let settings = load_localization_settings_from_paths_with_detected_locale(
+            &localization_root,
+            &settings_dir,
+            Some(DetectedHostLocale {
+                locale_code: String::from("pt-PT"),
+                language: String::from("pt"),
+                script: None,
+                region: Some(String::from("PT")),
+            }),
+        )
+        .expect("localization settings should load");
+
+        assert_eq!(settings.primary_locale, "pt-BR");
+        assert_eq!(settings.fallback_locale, "en");
+
+        let persisted = std::fs::read(localization_preferences_path(&settings_dir))
+            .expect("auto-selected localization preferences should persist");
+        let persisted = serde_json::from_slice::<PersistedLocalizationPreferences>(&persisted)
+            .expect("persisted localization preferences should deserialize");
+        assert_eq!(persisted.primary_locale, "pt-BR");
+        assert_eq!(persisted.selection_source.as_deref(), Some(AUTO_SELECTION_SOURCE));
+        assert_eq!(persisted.detected_host_locale.as_deref(), Some("pt-PT"));
+        assert_eq!(persisted.detected_region.as_deref(), Some("PT"));
+
+        std::fs::remove_dir_all(&root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn load_localization_settings_from_paths_auto_selects_spanish_for_spanish_hosts() {
+        let root = std::env::temp_dir().join("desktop-shell-localization-auto-es-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let localization_root = root.join("localizations");
+        let settings_dir = root.join("config");
+        std::fs::create_dir_all(&localization_root)
+            .expect("localization root should create");
+        seed_embedded_localization_files(&localization_root)
+            .expect("embedded locale files should seed");
+
+        let settings = load_localization_settings_from_paths_with_detected_locale(
+            &localization_root,
+            &settings_dir,
+            Some(DetectedHostLocale {
+                locale_code: String::from("es-MX"),
+                language: String::from("es"),
+                script: None,
+                region: Some(String::from("MX")),
+            }),
+        )
+        .expect("localization settings should load");
+
+        assert_eq!(settings.primary_locale, "es");
+        assert_eq!(settings.fallback_locale, "pt-BR");
+
+        std::fs::remove_dir_all(&root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn load_localization_settings_from_paths_auto_selects_simplified_chinese_for_hans_hosts() {
+        let root = std::env::temp_dir().join("desktop-shell-localization-auto-zh-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let localization_root = root.join("localizations");
+        let settings_dir = root.join("config");
+        std::fs::create_dir_all(&localization_root)
+            .expect("localization root should create");
+        seed_embedded_localization_files(&localization_root)
+            .expect("embedded locale files should seed");
+
+        let settings = load_localization_settings_from_paths_with_detected_locale(
+            &localization_root,
+            &settings_dir,
+            Some(DetectedHostLocale {
+                locale_code: String::from("zh-Hans-SG"),
+                language: String::from("zh"),
+                script: Some(String::from("Hans")),
+                region: Some(String::from("SG")),
+            }),
+        )
+        .expect("localization settings should load");
+
+        assert_eq!(settings.primary_locale, "zh-CN");
+        assert_eq!(settings.fallback_locale, "pt-BR");
+
+        std::fs::remove_dir_all(&root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn load_localization_settings_from_paths_keeps_user_choice_over_host_detection() {
+        let root = std::env::temp_dir().join("desktop-shell-localization-user-choice-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let localization_root = root.join("localizations");
+        let settings_dir = root.join("config");
+        std::fs::create_dir_all(&localization_root)
+            .expect("localization root should create");
+        seed_embedded_localization_files(&localization_root)
+            .expect("embedded locale files should seed");
+        write_persisted_localization_preferences(
+            &settings_dir,
+            &PersistedLocalizationPreferences {
+                primary_locale: String::from("zh-CN"),
+                fallback_locale: String::from("en"),
+                selection_source: Some(String::from(USER_SELECTION_SOURCE)),
+                detected_host_locale: None,
+                detected_region: None,
+            },
+        )
+        .expect("user localization preferences should persist");
+
+        let settings = load_localization_settings_from_paths_with_detected_locale(
+            &localization_root,
+            &settings_dir,
+            Some(DetectedHostLocale {
+                locale_code: String::from("pt-BR"),
+                language: String::from("pt"),
+                script: None,
+                region: Some(String::from("BR")),
+            }),
+        )
+        .expect("localization settings should load");
+
+        assert_eq!(settings.primary_locale, "zh-CN");
+        assert_eq!(settings.fallback_locale, "en");
 
         std::fs::remove_dir_all(&root).expect("temp directory should be removable");
     }
@@ -6110,7 +6684,7 @@ mod tests {
         assert_eq!(settings.available_locales.len(), 2);
         assert_eq!(settings.available_locales[0].code, "en");
         assert_eq!(settings.available_locales[1].code, "es");
-        assert!(!settings.available_locales[1].is_official);
+        assert!(settings.available_locales[1].is_official);
         assert!(settings.warnings.iter().any(|warning| warning.contains("broken.json")));
 
         let persisted = std::fs::read(localization_preferences_path(&settings_dir))
@@ -6119,6 +6693,50 @@ mod tests {
             .expect("persisted localization preferences should deserialize");
         assert_eq!(persisted.primary_locale, "es");
         assert_eq!(persisted.fallback_locale, "en");
+
+        std::fs::remove_dir_all(&root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn seed_embedded_localization_files_restores_every_official_locale_pack() {
+        let root = std::env::temp_dir().join("desktop-shell-localization-seed-test");
+        let settings_dir = root.join("config");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        std::fs::create_dir_all(&root).expect("localization root should create");
+        std::fs::write(root.join("en.json"), b"stale")
+            .expect("stale english locale should write");
+
+        seed_embedded_localization_files(&root)
+            .expect("embedded locale files should seed into the persisted root");
+
+        assert!(localization_packs_exist(&root));
+
+        let english = std::fs::read_to_string(root.join("en.json"))
+            .expect("english locale should exist after seeding");
+        let spanish = std::fs::read_to_string(root.join("es.json"))
+            .expect("spanish locale should exist after seeding");
+        let portuguese = std::fs::read_to_string(root.join("pt-BR.json"))
+            .expect("portuguese locale should exist after seeding");
+        let chinese = std::fs::read_to_string(root.join("zh-CN.json"))
+            .expect("chinese locale should exist after seeding");
+
+        assert!(english.contains("\"display_name\": \"English\""));
+        assert!(spanish.contains("\"native_name\": \"Español\""));
+        assert!(portuguese.contains("\"native_name\": \"Português (Brasil)\""));
+        assert!(chinese.contains("\"native_name\": \"简体中文\""));
+
+        let settings = load_localization_settings_from_paths(&root, &settings_dir)
+            .expect("seeded locale files should load as localization settings");
+
+        assert_eq!(settings.available_locales.len(), 4);
+        assert_eq!(settings.available_locales[0].code, "en");
+        assert_eq!(settings.available_locales[1].code, "es");
+        assert_eq!(settings.available_locales[2].code, "pt-BR");
+        assert_eq!(settings.available_locales[3].code, "zh-CN");
+        assert!(settings.available_locales.iter().all(|locale| locale.is_official));
 
         std::fs::remove_dir_all(&root).expect("temp directory should be removable");
     }

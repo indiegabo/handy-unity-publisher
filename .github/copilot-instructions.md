@@ -201,6 +201,11 @@ existing snippet".
 - Preserve the established dark monochrome theme with black and gray surfaces,
   subtle contrast, and `5px` border radii for buttons, inputs, and containers
   unless a deliberate exception is required.
+- Locale packs under `apps/desktop/src-tauri/localizations` must treat
+  `en.json` as the canonical key catalog. When adding or translating localized
+  strings, update `en.json` first, sync non-English packs from it, and only
+  then translate the target locale values. Do not add locale-only keys or let
+  non-English packs drift from the English key set.
 - Treat **Yaak** and **Hoppscotch** as the primary visual references for
   density, hierarchy, and tooling ergonomics.
 - When a desktop-UI change is shell-visible, finish with focused automated

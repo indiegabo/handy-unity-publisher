@@ -14,6 +14,7 @@
         "windows": [
             {
                 "label": "main",
+                "create": false,
                 "title": "Handy Games Publisher",
                 "decorations": false,
                 "width": 480,

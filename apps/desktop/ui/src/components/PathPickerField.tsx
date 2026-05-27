@@ -3,6 +3,7 @@ import { useEffectEvent, useState } from "react";
 import { Button, IconButton } from "./Button";
 import { useOverlay } from "./OverlayManager";
 import FullScreenFileBrowser from "./FullScreenFileBrowser";
+import { useLocalization } from "../LocalizationProvider";
 import {
   pickHostPath,
   type HostPathSelectionKind,
@@ -45,9 +46,11 @@ export function PathPickerField({
   placeholder,
   value,
 }: PathPickerFieldProps) {
+  const { t } = useLocalization();
   const [isPicking, setIsPicking] = useState(false);
   const canClear = clearable && Boolean(onClear) && Boolean(value.trim());
   const { openOverlay } = useOverlay();
+  const resolvedClearLabel = clearLabel || t("path_picker.actions.clear", "Clear");
 
   const handlePick = useEffectEvent(async () => {
     if (disabled || isPicking) {
@@ -125,7 +128,7 @@ export function PathPickerField({
               size="sm"
               variant="ghost"
             >
-              {clearLabel}
+              {resolvedClearLabel}
             </Button>
           ) : null}
         </span>

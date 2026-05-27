@@ -10,13 +10,7 @@ import { RepositoryCredentialComposer } from "./RepositoryCredentialComposer";
 import SelectListFullScreen, {
   type SelectListItem,
 } from "./SelectListFullScreen";
-import {
-  Badge,
-  MetaItem,
-  MetaRow,
-  SummaryStrip,
-  SurfacePanel,
-} from "./Surface";
+import { MetaItem, MetaRow, SummaryStrip, SurfacePanel } from "./Surface";
 import { VerticalAccordion } from "./VerticalAccordion";
 import type {
   CreateRepositoryProjectPublishTargetInput,
@@ -110,15 +104,6 @@ type PublishDestinationsEditorProps = {
   ) => Promise<PublishCredentialSaveResult> | PublishCredentialSaveResult;
 };
 
-const DESTINATION_STATUS_OPTIONS = [
-  { label: "Enabled", value: "enabled" },
-  { label: "Disabled", value: "disabled" },
-] as const;
-
-const BINDING_STATUS_OPTIONS = [
-  { label: "Enabled", value: "enabled" },
-  { label: "Disabled", value: "disabled" },
-] as const;
 const BINDING_SELECTOR_OVERLAY_THRESHOLD = 8;
 const ITCH_CHANNEL_EXAMPLE_PLACEHOLDER = "WebGL, Windows, Linux";
 
@@ -166,6 +151,7 @@ export function PublishDestinationsEditor({
         const nextDestination = {
           ...destination,
           ...patch,
+          enabled: true,
         };
 
         if (patch.kind === "filesystem") {
@@ -189,7 +175,13 @@ export function PublishDestinationsEditor({
           ? {
               ...destination,
               bindings: destination.bindings.map((binding) =>
-                binding.id === bindingId ? { ...binding, ...patch } : binding,
+                binding.id === bindingId
+                  ? {
+                      ...binding,
+                      ...patch,
+                      enabled: true,
+                    }
+                  : binding,
               ),
             }
           : destination,
@@ -351,6 +343,7 @@ export function PublishDestinationsEditor({
                 {
                   ...createEmptyPublishDestinationBindingDraft(selectedTarget),
                   ...(patch ?? {}),
+                  enabled: true,
                 },
               ],
             }
@@ -608,19 +601,6 @@ export function PublishDestinationsEditor({
                 <MetaRow className="wizard-target-card__summary">
                   <MetaItem
                     label={t(
-                      "publish_destinations.editor.meta.status",
-                      "Status",
-                    )}
-                  >
-                    {destination.enabled
-                      ? t("publish_destinations.editor.meta.enabled", "Enabled")
-                      : t(
-                          "publish_destinations.editor.meta.disabled",
-                          "Disabled",
-                        )}
-                  </MetaItem>
-                  <MetaItem
-                    label={t(
                       "publish_destinations.editor.meta.bindings",
                       "Bindings",
                     )}
@@ -701,20 +681,6 @@ export function PublishDestinationsEditor({
 
                 <div className="wizard-target-card__title-block">
                   <h3 className="wizard-target-card__title">{adapter.label}</h3>
-                </div>
-
-                <div className="wizard-target-card__badges">
-                  <Badge tone={destination.enabled ? "strong" : "muted"}>
-                    {destination.enabled
-                      ? t(
-                          "publish_destinations.editor.meta.enabled_lower",
-                          "enabled",
-                        )
-                      : t(
-                          "publish_destinations.editor.meta.disabled_lower",
-                          "disabled",
-                        )}
-                  </Badge>
                 </div>
 
                 <SummaryStrip className="publish-destination-card__summary-strip">
@@ -1187,7 +1153,6 @@ type PublishDestinationBindingEditorOverlayProps = {
     value?: PublishDestinationBindingEditorOverlayResult | null,
   ) => void;
   showItchUserversionTemplate?: boolean;
-  showBindingStatus?: boolean;
 };
 
 function PublishDestinationBindingEditorOverlay({
@@ -1198,7 +1163,6 @@ function PublishDestinationBindingEditorOverlay({
   mode,
   onResolve,
   showItchUserversionTemplate = true,
-  showBindingStatus = true,
 }: PublishDestinationBindingEditorOverlayProps) {
   const { t } = useLocalization();
   const isCreateMode = mode === "create";
@@ -1249,7 +1213,7 @@ function PublishDestinationBindingEditorOverlay({
     }
 
     const patch: Partial<PublishDestinationBindingDraft> = {
-      enabled: draft.enabled,
+      enabled: true,
       filesystemDirectoryPath: draft.filesystemDirectoryPath,
       itchChannel: draft.itchChannel.trim(),
       itchUserversionTemplate: draft.itchUserversionTemplate,
@@ -1316,23 +1280,6 @@ function PublishDestinationBindingEditorOverlay({
             onChange={(event) => setTargetDraftId(event.currentTarget.value)}
             options={buildBindingTargetOptions(t, buildTargets)}
             value={targetDraftId}
-          />
-        ) : null}
-
-        {showBindingStatus ? (
-          <SelectField
-            data-overlay-autofocus={!isCreateMode}
-            label={t("publish_destinations.editor.meta.status", "Status")}
-            onChange={(event) => {
-              const nextStatus = event.currentTarget.value;
-
-              setDraft((current) => ({
-                ...current,
-                enabled: nextStatus === "enabled",
-              }));
-            }}
-            options={BINDING_STATUS_OPTIONS}
-            value={draft.enabled ? "enabled" : "disabled"}
           />
         ) : null}
 
@@ -1425,7 +1372,6 @@ function FilesystemPublishDestinationAdapter({
   preferBindingCreateOverlay = false,
   onAddBinding,
   onBindingChange,
-  onDestinationChange,
   onPendingBindingTargetChange,
   onRemoveBinding,
   pendingBindingTargetId,
@@ -1433,89 +1379,58 @@ function FilesystemPublishDestinationAdapter({
 }: PublishDestinationAdapterComponentProps) {
   const { t } = useLocalization();
   return (
-    <>
-      {showDestinationStatus ? (
-        <SurfacePanel
-          bodyClassName="wizard-form-grid"
-          className="project-detail-form-grid__span-full"
-          description={t(
-            "publish_destinations.editor.filesystem.identity.description",
-            "Configure the lifecycle state for this filesystem publish destination. Bound target paths stay with each individual binding.",
+    <PublishDestinationBindingsSection
+      autoFocusTargetSelector={!showDestinationStatus}
+      buildTargets={buildTargets}
+      destination={destination}
+      destinationErrors={destinationErrors}
+      disabled={disabled}
+      preferBindingCreateOverlay={preferBindingCreateOverlay}
+      onAddBinding={onAddBinding}
+      onBindingChange={onBindingChange}
+      onPendingBindingTargetChange={onPendingBindingTargetChange}
+      onRemoveBinding={onRemoveBinding}
+      pendingBindingTargetId={pendingBindingTargetId}
+      renderBindingFields={({
+        binding,
+        bindingErrors,
+        disabled: bindingDisabled,
+        onBindingChange: handleBindingFieldChange,
+      }) => (
+        <PathPickerField
+          buttonLabel={t(
+            "publish_destinations.editor.filesystem.pick_folder",
+            "Pick folder",
           )}
-          headerSeparated
-          title={t(
-            "publish_destinations.editor.filesystem.identity.title",
-            "Destination identity",
+          dialogTitle={t(
+            "publish_destinations.editor.filesystem.dialog_title",
+            "Select publish destination folder",
           )}
-          tone="inset"
-        >
-          <SelectField
-            data-overlay-autofocus
-            label={t("publish_destinations.editor.meta.status", "Status")}
-            onChange={(event) =>
-              onDestinationChange({
-                enabled: event.currentTarget.value === "enabled",
-              })
-            }
-            options={DESTINATION_STATUS_OPTIONS}
-            value={destination.enabled ? "enabled" : "disabled"}
-          />
-        </SurfacePanel>
-      ) : null}
-
-      <PublishDestinationBindingsSection
-        autoFocusTargetSelector={!showDestinationStatus}
-        buildTargets={buildTargets}
-        destination={destination}
-        destinationErrors={destinationErrors}
-        disabled={disabled}
-        preferBindingCreateOverlay={preferBindingCreateOverlay}
-        onAddBinding={onAddBinding}
-        onBindingChange={onBindingChange}
-        onPendingBindingTargetChange={onPendingBindingTargetChange}
-        onRemoveBinding={onRemoveBinding}
-        pendingBindingTargetId={pendingBindingTargetId}
-        renderBindingFields={({
-          binding,
-          bindingErrors,
-          disabled: bindingDisabled,
-          onBindingChange: handleBindingFieldChange,
-        }) => (
-          <PathPickerField
-            buttonLabel={t(
-              "publish_destinations.editor.filesystem.pick_folder",
-              "Pick folder",
-            )}
-            dialogTitle={t(
-              "publish_destinations.editor.filesystem.dialog_title",
-              "Select publish destination folder",
-            )}
-            disabled={bindingDisabled}
-            error={bindingErrors.filesystemDirectoryPath}
-            hint={t(
-              "publish_destinations.editor.filesystem.directory_hint",
-              "The artifact will move into this absolute directory when the binding succeeds.",
-            )}
-            label={t(
-              "publish_destinations.editor.filesystem.directory_label",
-              "Destination directory",
-            )}
-            onPathPicked={(path) =>
-              handleBindingFieldChange({
-                filesystemDirectoryPath: path,
-              })
-            }
-            pickerKind="directory"
-            placeholder={t(
-              "publish_destinations.editor.filesystem.directory_placeholder",
-              "D:/Published/Windows",
-            )}
-            value={binding.filesystemDirectoryPath}
-          />
-        )}
-        showBindingStatus={showDestinationStatus}
-      />
-    </>
+          disabled={bindingDisabled}
+          error={bindingErrors.filesystemDirectoryPath}
+          hint={t(
+            "publish_destinations.editor.filesystem.directory_hint",
+            "The artifact will move into this absolute directory when the binding succeeds.",
+          )}
+          label={t(
+            "publish_destinations.editor.filesystem.directory_label",
+            "Destination directory",
+          )}
+          onPathPicked={(path) =>
+            handleBindingFieldChange({
+              filesystemDirectoryPath: path,
+            })
+          }
+          pickerKind="directory"
+          placeholder={t(
+            "publish_destinations.editor.filesystem.directory_placeholder",
+            "D:/Published/Windows",
+          )}
+          value={binding.filesystemDirectoryPath}
+        />
+      )}
+      showBindingStatus={showDestinationStatus}
+    />
   );
 }
 
@@ -1568,20 +1483,6 @@ function ItchPublishDestinationAdapter({
         }
         tone="inset"
       >
-        {showDestinationStatus ? (
-          <SelectField
-            data-overlay-autofocus
-            label={t("publish_destinations.editor.meta.status", "Status")}
-            onChange={(event) =>
-              onDestinationChange({
-                enabled: event.currentTarget.value === "enabled",
-              })
-            }
-            options={DESTINATION_STATUS_OPTIONS}
-            value={destination.enabled ? "enabled" : "disabled"}
-          />
-        ) : null}
-
         <TextField
           data-overlay-autofocus={!showDestinationStatus}
           error={destinationErrors.itchAccountName}
@@ -1842,7 +1743,6 @@ function PublishDestinationBindingsSection({
           initialTargetDraftId: initialTarget.id,
           mode: "create",
           showItchUserversionTemplate,
-          showBindingStatus,
         },
       );
 
@@ -1870,7 +1770,6 @@ function PublishDestinationBindingsSection({
           initialTargetDraftId: binding.buildTargetDraftId,
           mode: "edit",
           showItchUserversionTemplate,
-          showBindingStatus,
         },
       );
 
@@ -2196,22 +2095,6 @@ function PublishDestinationBindingsSection({
                   </div>
 
                   <div className="wizard-form-grid">
-                    {showBindingStatus ? (
-                      <SelectField
-                        label={t(
-                          "publish_destinations.editor.meta.status",
-                          "Status",
-                        )}
-                        onChange={(event) =>
-                          onBindingChange(binding.id, {
-                            enabled: event.currentTarget.value === "enabled",
-                          })
-                        }
-                        options={BINDING_STATUS_OPTIONS}
-                        value={binding.enabled ? "enabled" : "disabled"}
-                      />
-                    ) : null}
-
                     {renderBindingFields({
                       binding,
                       bindingErrors,
@@ -2261,7 +2144,7 @@ export function buildPublishDestinationDrafts(
       publishTargetId: publishTarget.publish_target_id,
       name: derivePublishDestinationName(kind),
       kind,
-      enabled: publishTarget.enabled,
+      enabled: true,
       itchAccountName: readJsonStringField(config, "account_name") || "",
       itchGameSlug: readJsonStringField(config, "game_slug") || "",
       credentialsId: publishTarget.credentials?.credential_id ?? null,
@@ -2281,7 +2164,7 @@ export function buildPublishDestinationDrafts(
             createDraftId(`missing-target-${binding.build_target_id}`),
           buildTargetId: binding.build_target_id,
           buildTargetName: binding.build_target_name,
-          enabled: binding.enabled,
+          enabled: true,
           filesystemDirectoryPath:
             readJsonStringField(options, "directory_path") || "",
           itchChannel: readJsonStringField(options, "channel") || "",
@@ -2368,7 +2251,7 @@ export function validatePublishDestinationDrafts(
         bindingErrors.itchChannel = "Itch channel is required.";
       }
 
-      if (binding.enabled && buildTarget && destination.kind === "filesystem") {
+      if (buildTarget && destination.kind === "filesystem") {
         const current = consumingBindingsByTarget.get(buildTarget.id) ?? [];
         current.push(formatPublishDestinationTitle(destination));
         consumingBindingsByTarget.set(buildTarget.id, current);
@@ -2417,7 +2300,7 @@ export function validatePublishDestinationDrafts(
           if (binding.buildTargetDraftId !== buildTargetDraftId) {
             continue;
           }
-          if (destination.kind !== "filesystem" || !binding.enabled) {
+          if (destination.kind !== "filesystem") {
             continue;
           }
 
@@ -2426,7 +2309,7 @@ export function validatePublishDestinationDrafts(
             createEmptyPublishDestinationErrors();
           const bindingErrors = destinationErrors.bindings[binding.id] ?? {};
           bindingErrors.buildTarget =
-            "Only one enabled consuming binding is allowed per build target.";
+            "Only one consuming binding is allowed per build target.";
           destinationErrors.bindings[binding.id] = bindingErrors;
           errors.destinations[destination.id] = destinationErrors;
         }
@@ -2448,7 +2331,7 @@ export function buildCreateProjectPublishTargetsInput(
   return destinations.map((destination) => ({
     name: derivePublishDestinationName(destination.kind),
     kind: destination.kind,
-    enabled: destination.enabled,
+    enabled: true,
     config_json: JSON.stringify(buildPublishTargetConfig(destination)),
     credentials_id:
       destination.kind === "itch" ? destination.credentialsId : null,
@@ -2458,7 +2341,7 @@ export function buildCreateProjectPublishTargetsInput(
         build_target_name: (
           buildTarget?.name || binding.buildTargetName
         ).trim(),
-        enabled: binding.enabled,
+        enabled: true,
         options_json: JSON.stringify(
           buildPublishBindingOptions(destination.kind, binding),
         ),
@@ -2475,7 +2358,7 @@ export function buildUpdateProjectPublishTargetsInput(
     publish_target_id: destination.publishTargetId,
     name: derivePublishDestinationName(destination.kind),
     kind: destination.kind,
-    enabled: destination.enabled,
+    enabled: true,
     config_json: JSON.stringify(buildPublishTargetConfig(destination)),
     credentials_id:
       destination.kind === "itch" ? destination.credentialsId : null,
@@ -2486,7 +2369,7 @@ export function buildUpdateProjectPublishTargetsInput(
         build_target_name: (
           buildTarget?.name || binding.buildTargetName
         ).trim(),
-        enabled: binding.enabled,
+        enabled: true,
         options_json: JSON.stringify(
           buildPublishBindingOptions(destination.kind, binding),
         ),
@@ -2548,7 +2431,7 @@ export function buildPublishDestinationReviewSummary(
       id: destination.id,
       name: destinationLabel,
       kindLabel: formatPublishDestinationKindLabel(destination.kind),
-      enabled: destination.enabled,
+      enabled: true,
       bindingTargetNames: collectPublishDestinationBindingTargets(
         destination,
         buildTargets,
@@ -2990,7 +2873,11 @@ function listPublishDestinationKinds(): PublishDestinationKind[] {
 function clonePublishDestinationDraft(destination: PublishDestinationDraft) {
   return {
     ...destination,
-    bindings: destination.bindings.map((binding) => ({ ...binding })),
+    enabled: true,
+    bindings: destination.bindings.map((binding) => ({
+      ...binding,
+      enabled: true,
+    })),
   };
 }
 

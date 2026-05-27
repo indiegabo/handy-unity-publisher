@@ -152,6 +152,14 @@ The desktop app version is centralized in `Cargo.toml` under
 value if you need to refresh the mirrored version fields without starting the
 desktop development loop.
 
+Localization packs under `apps/desktop/src-tauri/localizations/` use
+`en.json` as the source of truth for the message catalog. When adding or
+translating locale strings, update `en.json` first, run
+`npm run localization:sync` to mirror its keys into every non-English pack,
+translate the target locale values, and finish with
+`npm run localization:check` so no localized file drifts from the English key
+set.
+
 When capturing ad hoc build or runtime output during troubleshooting, write
 those logs under `tmp/diagnostics/` instead of the repository root. The
 workspace already keeps Cargo artifacts under `tmp/` to avoid polluting the

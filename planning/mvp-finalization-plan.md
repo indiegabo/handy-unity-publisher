@@ -49,7 +49,8 @@ In scope:
   and publish inspection
 - one operator-usable settings surface instead of the current placeholder shell
 - one file-based localization system rooted at `<install-root>/localizations`
-  with official `en` and `pt-BR` packs plus community drop-in language packs
+      with official `en`, `es`, `pt-BR`, and `zh-CN` packs plus community drop-in
+      language packs
   discovered automatically
 - reusable secret credential inventory with first-class Itch credential entry
 - one Windows-first release packaging and distribution contract for the desktop
@@ -85,8 +86,8 @@ The current baseline already includes:
   frontend service layer
 - Itch publication runtime behavior and tests under `crates/runtime-publish`
   and `crates/runtime-bin`
-- one install-root localization directory contract, official `en` and `pt-BR`
-  locale packs, packaged resource bundling, and settings-owned primary or
+- one install-root localization directory contract, official `en`, `pt-BR`,
+      `es`, and `zh-CN` locale packs, packaged resource bundling, and settings-owned primary or
   fallback selection now exist, but translated surface adoption and installed
   package verification still remain
 - semantic-release groundwork and a Windows release bundle workflow already
@@ -236,8 +237,9 @@ Consequences:
 - shell freshness must remain event-driven; the toggle must not introduce UI
   timer polling as a substitute for runtime events
 - the packaged beta must ship official locale files at
-  `<install-root>/localizations/en.json` and
-  `<install-root>/localizations/pt-BR.json`
+      `<install-root>/localizations/en.json`,
+      `<install-root>/localizations/pt-BR.json`, and
+      `<install-root>/localizations/zh-CN.json`
 - locale discovery must remain file-based: a valid pack dropped into the
   install-root localization directory becomes selectable without code changes
 - the operator may choose one fallback locale, but unresolved strings must
@@ -272,8 +274,8 @@ Consequences:
       decisions that must ship in beta
 - [x] the settings surface exposes primary-language and fallback-language
       selection backed by install-root localization file discovery
-- [x] the packaged beta ships official `en` and `pt-BR` locale files, and one
-      additional pack dropped into `<install-root>/localizations` becomes
+- [x] the packaged beta ships official `en`, `es`, `pt-BR`, and `zh-CN` locale
+      files, and one additional pack dropped into `<install-root>/localizations` becomes
       selectable without a rebuild
 - [x] Itch credentials can be created from the app and reused by project
       publish flows
@@ -403,7 +405,7 @@ Acceptance snapshot:
 ### 4. Localization
 
 Mission:
-Add one file-based localization system that ships with `en` and `pt-BR`, lets
+Add one file-based localization system that ships with `en`, `es`, `pt-BR`, and `zh-CN`, lets
 the operator choose both primary and fallback languages from settings, and lets
 the community add new languages by dropping files into the installed app.
 
@@ -416,6 +418,7 @@ Directory contract:
 ```text
 <install-root>/localizations/en.json
 <install-root>/localizations/pt-BR.json
+<install-root>/localizations/zh-CN.json
 <install-root>/localizations/es.json
 ```
 
@@ -425,8 +428,8 @@ Track checklist:
       `<install-root>/localizations`
 - [x] choose one durable community-authorable locale file format for beta;
       prefer JSON unless a stronger packaging reason appears
-- [x] ship official `en` and `pt-BR` locale files inside that directory as part
-      of the packaged app
+- [x] ship official `en`, `es`, `pt-BR`, and `zh-CN` locale files inside that
+      directory as part of the packaged app
 - [x] discover selectable locales by scanning the localization directory at
       runtime and using the file stem as the locale code
 - [x] ignore invalid locale files without crashing the shell and surface clear

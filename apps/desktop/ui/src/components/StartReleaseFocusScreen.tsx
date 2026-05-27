@@ -11,6 +11,7 @@ import {
 import { Button, IconButton } from "./Button";
 import { SelectField, TextField, type SelectOption } from "./Field";
 import ScreenScaffold from "./ScreenScaffold";
+import { useLocalization, type Translate } from "../LocalizationProvider";
 import {
   dispatchOnDemandReleaseProcess,
   readProjectSettingsVersion,
@@ -59,11 +60,6 @@ export type StartReleaseFocusScreenProps = {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const VERSION_SOURCE_OPTIONS: SelectOption[] = [
-  { label: "Manual version label", value: "manual" },
-  { label: "Detect from project settings", value: "project_settings" },
-];
-
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export function StartReleaseFocusScreen({
@@ -103,6 +99,7 @@ type SelectPhaseProps = {
 };
 
 function SelectPhase({ repositories, onSelect }: SelectPhaseProps) {
+  const { t } = useLocalization();
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -121,18 +118,27 @@ function SelectPhase({ repositories, onSelect }: SelectPhaseProps) {
       );
     });
   }, [deferredQuery, repositories]);
+  const resultCountHint =
+    filtered.length === 1
+      ? t("start_release.select.results.one", "1 result")
+      : t("start_release.select.results.other", "{{count}} results", {
+          count: filtered.length,
+        });
 
   return (
     <ScreenScaffold
-      eyebrow="Release"
-      subtitle="Choose a project to queue a release."
-      title="Start release"
+      eyebrow={t("start_release.eyebrow", "Release")}
+      subtitle={t(
+        "start_release.select.subtitle",
+        "Choose a project to queue a release.",
+      )}
+      title={t("start_release.select.title", "Start release")}
     >
       <div className="start-release-screen__body">
         <TextField
           autoComplete="off"
-          hint={`${filtered.length} result${filtered.length === 1 ? "" : "s"}`}
-          label="Filter projects"
+          hint={resultCountHint}
+          label={t("start_release.select.filter.label", "Filter projects")}
           leadingIcon="search"
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={(event) => {
@@ -141,29 +147,46 @@ function SelectPhase({ repositories, onSelect }: SelectPhaseProps) {
               itemRefs.current[0]?.focus();
             }
           }}
-          placeholder="Search by name or source path"
+          placeholder={t(
+            "start_release.select.filter.placeholder",
+            "Search by name or source path",
+          )}
           value={query}
         />
 
         <div
-          aria-label="Project list"
+          aria-label={t("start_release.select.list.aria_label", "Project list")}
           className="select-list-modal__list"
           role="list"
         >
           {repositories.length === 0 ? (
             <div className="feed-state start-release-screen__empty">
-              <p className="feed-state__title">No registered projects.</p>
+              <p className="feed-state__title">
+                {t(
+                  "start_release.select.empty.no_projects.title",
+                  "No registered projects.",
+                )}
+              </p>
               <p className="feed-state__copy">
-                Create a project first, then return here to queue a release.
+                {t(
+                  "start_release.select.empty.no_projects.copy",
+                  "Create a project first, then return here to queue a release.",
+                )}
               </p>
             </div>
           ) : filtered.length === 0 ? (
             <div className="feed-state start-release-screen__empty">
               <p className="feed-state__title">
-                No results matched the filter.
+                {t(
+                  "start_release.select.empty.no_results.title",
+                  "No results matched the filter.",
+                )}
               </p>
               <p className="feed-state__copy">
-                Try a broader search term or clear the filter.
+                {t(
+                  "start_release.select.empty.no_results.copy",
+                  "Try a broader search term or clear the filter.",
+                )}
               </p>
             </div>
           ) : (
@@ -222,7 +245,9 @@ function SelectPhase({ repositories, onSelect }: SelectPhaseProps) {
                     {buildProjectSourceDisplay(repo)}
                   </span>
                 </span>
-                <span className="select-list-modal__item-action">Select</span>
+                <span className="select-list-modal__item-action">
+                  {t("start_release.select.actions.select", "Select")}
+                </span>
               </button>
             ))
           )}
@@ -249,6 +274,7 @@ function ConfigurePhase({
   onQueued,
   onOpenProjects,
 }: ConfigurePhaseProps) {
+  const { t } = useLocalization();
   const [draft, setDraft] = useState<ReleaseDraft>({
     releaseVersion: "",
     versionSource: "manual",
@@ -261,6 +287,7 @@ function ConfigurePhase({
     status: "idle",
   });
   const isLocalWorkspace = isLocalWorkspaceSource(repository);
+  const versionSourceOptions = buildVersionSourceOptions(t);
 
   // Reads bundleVersion from the local workspace and caches it in state.
   // Safe to call multiple times; each call replaces the previous result.
@@ -269,7 +296,10 @@ function ConfigurePhase({
     if (!path) {
       setDetectedVersion({
         status: "error",
-        message: "No local path available for this project.",
+        message: t(
+          "start_release.configure.detect.error.no_local_path",
+          "No local path available for this project.",
+        ),
       });
       return;
     }
@@ -278,7 +308,10 @@ function ConfigurePhase({
       const version = await readProjectSettingsVersion(path);
       setDetectedVersion({ status: "ready", value: version });
     } catch (error) {
-      setDetectedVersion({ status: "error", message: readErrorMessage(error) });
+      setDetectedVersion({
+        status: "error",
+        message: readErrorMessage(t, error),
+      });
     }
   }, [repository.local_path]);
 
@@ -294,7 +327,7 @@ function ConfigurePhase({
       return;
     }
 
-    const errors = validateReleaseDraft(draft);
+    const errors = validateReleaseDraft(t, draft);
     if (errors.releaseVersion) {
       setValidationErrors(errors);
       return;
@@ -318,7 +351,7 @@ function ConfigurePhase({
       onQueued(release.git_tag, repository.repository_name);
     } catch (error) {
       startTransition(() => {
-        setDispatchError(readErrorMessage(error));
+        setDispatchError(readErrorMessage(t, error));
         setIsQueueing(false);
       });
     }
@@ -326,7 +359,7 @@ function ConfigurePhase({
 
   return (
     <ScreenScaffold
-      eyebrow="Release"
+      eyebrow={t("start_release.eyebrow", "Release")}
       footer={
         <div className="start-release-screen__footer">
           <Button
@@ -335,7 +368,7 @@ function ConfigurePhase({
             size="sm"
             variant="ghost"
           >
-            Cancel
+            {t("start_release.configure.actions.cancel", "Cancel")}
           </Button>
           {isLocalWorkspace ? (
             <Button
@@ -347,7 +380,15 @@ function ConfigurePhase({
               size="sm"
               variant="secondary"
             >
-              {isQueueing ? "Queueing..." : "Queue Local Release"}
+              {isQueueing
+                ? t(
+                    "start_release.configure.actions.queueing",
+                    "Queueing...",
+                  )
+                : t(
+                    "start_release.configure.actions.queue_local_release",
+                    "Queue Local Release",
+                  )}
             </Button>
           ) : (
             <Button
@@ -356,13 +397,20 @@ function ConfigurePhase({
               size="sm"
               variant="secondary"
             >
-              Open projects
+              {t(
+                "start_release.configure.actions.open_projects",
+                "Open projects",
+              )}
             </Button>
           )}
         </div>
       }
       subtitle={buildProjectSourceDisplay(repository)}
-      title={`Start release · ${repository.repository_name}`}
+      title={t(
+        "start_release.configure.title",
+        "Start release · {{repositoryName}}",
+        { repositoryName: repository.repository_name },
+      )}
     >
       <div className="start-release-screen__body">
         <button
@@ -370,20 +418,29 @@ function ConfigurePhase({
           onClick={onBack}
           type="button"
         >
-          ← Back to project list
+          {t(
+            "start_release.configure.actions.back",
+            "← Back to project list",
+          )}
         </button>
 
         {isLocalWorkspace ? (
           <div className="project-detail-form-grid">
             <SelectField
-              hint="Choose whether HGP should use a manual release label or detect it from project settings."
-              label="Version source"
+              hint={t(
+                "start_release.configure.version_source.hint",
+                "Choose whether HGP should use a manual release label or detect it from project settings.",
+              )}
+              label={t(
+                "start_release.configure.version_source.label",
+                "Version source",
+              )}
               onChange={(event) => {
                 const versionSource = event.currentTarget
                   .value as OnDemandReleaseVersionSource;
                 setDraft((current) => ({ ...current, versionSource }));
               }}
-              options={VERSION_SOURCE_OPTIONS}
+              options={versionSourceOptions}
               value={draft.versionSource}
             />
             <div className="start-release-screen__version-row">
@@ -391,8 +448,11 @@ function ConfigurePhase({
                 autoFocus
                 disabled={draft.versionSource !== "manual"}
                 error={validationErrors.releaseVersion}
-                hint={resolveVersionHint(draft.versionSource, detectedVersion)}
-                label="Release version"
+                hint={resolveVersionHint(t, draft.versionSource, detectedVersion)}
+                label={t(
+                  "start_release.configure.release_version.label",
+                  "Release version",
+                )}
                 onChange={(event) => {
                   const releaseVersion = event.currentTarget.value;
                   setDraft((current) => ({ ...current, releaseVersion }));
@@ -411,7 +471,10 @@ function ConfigurePhase({
                   className="start-release-screen__version-reload"
                   disabled={isQueueing || detectedVersion.status === "loading"}
                   icon="refresh"
-                  label="Reload detected version"
+                  label={t(
+                    "start_release.configure.actions.reload_detected_version",
+                    "Reload detected version",
+                  )}
                   onClick={() => void fetchDetectedVersion()}
                   size="sm"
                   variant="ghost"
@@ -425,11 +488,16 @@ function ConfigurePhase({
         ) : (
           <div className="feed-state">
             <p className="feed-state__title">
-              Quick release is available for local workspace projects.
+              {t(
+                "start_release.configure.unavailable.title",
+                "Quick release is available for local workspace projects.",
+              )}
             </p>
             <p className="feed-state__copy">
-              Open the project list to queue managed repository releases from
-              the project detail screen.
+              {t(
+                "start_release.configure.unavailable.copy",
+                "Open the project list to queue managed repository releases from the project detail screen.",
+              )}
             </p>
           </div>
         )}
@@ -440,7 +508,10 @@ function ConfigurePhase({
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function validateReleaseDraft(draft: ReleaseDraft): ReleaseValidationErrors {
+function validateReleaseDraft(
+  t: Translate,
+  draft: ReleaseDraft,
+): ReleaseValidationErrors {
   if (draft.versionSource !== "manual") {
     return {};
   }
@@ -448,33 +519,46 @@ function validateReleaseDraft(draft: ReleaseDraft): ReleaseValidationErrors {
   return draft.releaseVersion.trim()
     ? {}
     : {
-        releaseVersion:
+        releaseVersion: t(
+          "start_release.configure.validation.release_version_required",
           "Release version is required for manual local dispatch.",
+        ),
       };
 }
 
 // Builds the contextual hint string for the Release version field based on the
 // current version source selection and the async detection state.
 function resolveVersionHint(
+  t: Translate,
   versionSource: OnDemandReleaseVersionSource,
   detected: DetectedVersion,
 ): string {
   if (versionSource === "manual") {
-    return "Use the release label that should identify this local snapshot.";
+    return t(
+      "start_release.configure.release_version.manual_hint",
+      "Use the release label that should identify this local snapshot.",
+    );
   }
   switch (detected.status) {
     case "idle":
-      return "Detecting…";
+      return t("start_release.configure.release_version.detecting", "Detecting...");
     case "loading":
-      return "Detecting…";
+      return t("start_release.configure.release_version.detecting", "Detecting...");
     case "ready":
-      return "Detected from project settings.";
+      return t(
+        "start_release.configure.release_version.detected",
+        "Detected from project settings.",
+      );
     case "error":
-      return `Detection failed: ${detected.message}`;
+      return t(
+        "start_release.configure.release_version.detect_failed",
+        "Detection failed: {{message}}",
+        { message: detected.message },
+      );
   }
 }
 
-function readErrorMessage(error: unknown): string {
+function readErrorMessage(t: Translate, error: unknown): string {
   if (error instanceof Error && error.message) {
     return error.message;
   }
@@ -483,5 +567,27 @@ function readErrorMessage(error: unknown): string {
     return error.trim();
   }
 
-  return "The desktop shell could not queue the release.";
+  return t(
+    "start_release.error.queue_failed",
+    "The desktop shell could not queue the release.",
+  );
+}
+
+function buildVersionSourceOptions(t: Translate): SelectOption[] {
+  return [
+    {
+      label: t(
+        "start_release.configure.version_source.manual",
+        "Manual version label",
+      ),
+      value: "manual",
+    },
+    {
+      label: t(
+        "start_release.configure.version_source.project_settings",
+        "Detect from project settings",
+      ),
+      value: "project_settings",
+    },
+  ];
 }

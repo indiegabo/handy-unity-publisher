@@ -233,10 +233,7 @@ describe("PublishDestinationsEditor interactions", () => {
     expect(
       within(dialog).getByDisplayValue("D:/published/windows"),
     ).toBeInTheDocument();
-
-    fireEvent.change(within(dialog).getAllByLabelText("Status")[0], {
-      target: { value: "disabled" },
-    });
+    expect(within(dialog).queryByLabelText("Status")).not.toBeInTheDocument();
 
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Save destination" }),
@@ -248,7 +245,8 @@ describe("PublishDestinationsEditor interactions", () => {
       ).not.toBeInTheDocument();
     });
 
-    expect(screen.getByText("Disabled")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Folder" })).toBeInTheDocument();
+    expect(screen.queryByText("Disabled")).not.toBeInTheDocument();
   });
 
   it("opens the destination list, blocks duplicates, and adds the clicked destination", () => {
@@ -456,7 +454,9 @@ describe("PublishDestinationsEditor interactions", () => {
     });
 
     expect(within(bindingDialog).getByLabelText("Target")).toBeInTheDocument();
-    expect(within(bindingDialog).getByLabelText("Status")).toBeInTheDocument();
+    expect(
+      within(bindingDialog).queryByLabelText("Status"),
+    ).not.toBeInTheDocument();
     expect(
       within(bindingDialog).getByLabelText("Itch channel"),
     ).toBeInTheDocument();
