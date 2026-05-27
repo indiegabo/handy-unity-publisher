@@ -103,9 +103,9 @@ export const OverlayProvider: React.FC<
       closedEntry.restoreFocusTo &&
       document.contains(closedEntry.restoreFocusTo)
     ) {
-      requestAnimationFrame(() => {
+      window.setTimeout(() => {
         closedEntry?.restoreFocusTo?.focus();
-      });
+      }, 0);
     }
   }, []);
 

@@ -771,6 +771,7 @@ export function PublishDestinationsEditor({
               destination={destination}
               destinationErrors={destinationErrors}
               disabled={disabled}
+              preferBindingCreateOverlay={false}
               onAddBinding={() => handleAddBinding(destination.id)}
               onBindingChange={(bindingId, patch) =>
                 handleBindingChange(destination.id, bindingId, patch)
@@ -1019,6 +1020,7 @@ function PublishDestinationEditorOverlay({
           destination={draft}
           destinationErrors={destinationErrors}
           disabled={false}
+          preferBindingCreateOverlay
           onAddBinding={handleAddBinding}
           onBindingChange={handleBindingChange}
           onDestinationChange={handleDestinationChange}
@@ -1110,6 +1112,7 @@ type PublishDestinationAdapterComponentProps = {
   destination: PublishDestinationDraft;
   destinationErrors: PublishDestinationDraftErrors;
   disabled: boolean;
+  preferBindingCreateOverlay?: boolean;
   onAddBinding: (
     targetDraftId?: string,
     patch?: Partial<PublishDestinationBindingDraft>,
@@ -1147,6 +1150,7 @@ type PublishDestinationBindingsSectionProps = {
   destination: PublishDestinationDraft;
   destinationErrors: PublishDestinationDraftErrors;
   disabled: boolean;
+  preferBindingCreateOverlay?: boolean;
   onAddBinding: (
     targetDraftId?: string,
     patch?: Partial<PublishDestinationBindingDraft>,
@@ -1418,6 +1422,7 @@ function FilesystemPublishDestinationAdapter({
   destination,
   destinationErrors,
   disabled,
+  preferBindingCreateOverlay = false,
   onAddBinding,
   onBindingChange,
   onDestinationChange,
@@ -1464,6 +1469,7 @@ function FilesystemPublishDestinationAdapter({
         destination={destination}
         destinationErrors={destinationErrors}
         disabled={disabled}
+        preferBindingCreateOverlay={preferBindingCreateOverlay}
         onAddBinding={onAddBinding}
         onBindingChange={onBindingChange}
         onPendingBindingTargetChange={onPendingBindingTargetChange}
@@ -1519,6 +1525,7 @@ function ItchPublishDestinationAdapter({
   destination,
   destinationErrors,
   disabled,
+  preferBindingCreateOverlay = false,
   onAddBinding,
   onBindingChange,
   onDestinationChange,
@@ -1678,6 +1685,7 @@ function ItchPublishDestinationAdapter({
         destination={destination}
         destinationErrors={destinationErrors}
         disabled={disabled}
+        preferBindingCreateOverlay={preferBindingCreateOverlay}
         onAddBinding={onAddBinding}
         onBindingChange={onBindingChange}
         onPendingBindingTargetChange={onPendingBindingTargetChange}
@@ -1751,6 +1759,7 @@ function PublishDestinationBindingsSection({
   destination,
   destinationErrors,
   disabled,
+  preferBindingCreateOverlay = false,
   onAddBinding,
   onBindingChange,
   onPendingBindingTargetChange,
@@ -2117,7 +2126,14 @@ function PublishDestinationBindingsSection({
                 className="publish-destination-bindings-toolbar__add"
                 disabled={disabled || !pendingBindingTargetId}
                 leadingIcon="plus"
-                onClick={() => onAddBinding()}
+                onClick={() => {
+                  if (preferBindingCreateOverlay) {
+                    void handleOpenBindingCreateOverlay();
+                    return;
+                  }
+
+                  onAddBinding();
+                }}
                 size="sm"
                 variant="secondary"
               >

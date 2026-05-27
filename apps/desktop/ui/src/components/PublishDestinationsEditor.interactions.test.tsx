@@ -427,6 +427,41 @@ describe("PublishDestinationsEditor interactions", () => {
     expect(credentialSelect).not.toHaveTextContent("Current credential #2");
   });
 
+  it("opens the target binding overlay from the edit destination overlay", async () => {
+    render(
+      <Harness
+        editingMode="overlay"
+        initialDestinations={[
+          {
+            ...createEmptyPublishDestinationDraft("itch"),
+            credentialsId: 90,
+            credentialsName: "Itch Production Key",
+            itchAccountName: "indiegabo",
+            itchGameSlug: "red-horizon",
+          },
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Edit Itch destination",
+    });
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add target" }));
+
+    const bindingDialog = await screen.findByRole("dialog", {
+      name: "Add target binding",
+    });
+
+    expect(within(bindingDialog).getByLabelText("Target")).toBeInTheDocument();
+    expect(within(bindingDialog).getByLabelText("Status")).toBeInTheDocument();
+    expect(
+      within(bindingDialog).getByLabelText("Itch channel"),
+    ).toBeInTheDocument();
+  });
+
   it("keeps a compact summary visible when a destination accordion is collapsed", () => {
     const buildTargets = [
       {
