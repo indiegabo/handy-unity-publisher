@@ -82,6 +82,34 @@ jobs:
         shell: bash
         run: npm exec --yes --package @tauri-apps/cli@^2 -- tauri build --config src-tauri/tauri.release.conf.json --target "$TARGET_TRIPLE" --bundles msi,nsis
 
+      - name: Normalize Windows bundle filenames
+        shell: pwsh
+        run: |
+          $bundleRoot = $env:BUNDLE_ROOT
+          if (-not (Test-Path $bundleRoot)) {
+            throw "bundle output directory was not found at $bundleRoot"
+          }
+
+          $exeAsset = Get-ChildItem -Path $bundleRoot -Recurse -File |
+            Where-Object { $_.Extension -eq '.exe' } |
+            Select-Object -First 1
+          $msiAsset = Get-ChildItem -Path $bundleRoot -Recurse -File |
+            Where-Object { $_.Extension -eq '.msi' } |
+            Select-Object -First 1
+
+          if (-not $exeAsset) {
+            throw "No Windows .exe installer was produced under $bundleRoot"
+          }
+          if (-not $msiAsset) {
+            throw "No Windows .msi installer was produced under $bundleRoot"
+          }
+
+          $normalizedExeName = "HandyGamesPublisher.$($env:RELEASE_TAG).exe"
+          $normalizedMsiName = "HandyGamesPublisher.$($env:RELEASE_TAG).msi"
+
+          Rename-Item -Path $exeAsset.FullName -NewName $normalizedExeName -Force
+          Rename-Item -Path $msiAsset.FullName -NewName $normalizedMsiName -Force
+
       - name: Generate bundle checksums
         shell: pwsh
         run: |
@@ -242,6 +270,19 @@ jobs:
       - name: Build Linux desktop bundle
         shell: bash
         run: npm exec --yes --package @tauri-apps/cli@^2 -- tauri build --config src-tauri/tauri.release.conf.json --target "$TARGET_TRIPLE" --bundles appimage
+
+      - name: Normalize Linux bundle filename
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="$BUNDLE_ROOT"
+          [[ -d "$bundle_root" ]] || { echo "bundle output directory was not found at $bundle_root" >&2; exit 1; }
+
+          appimage_path="$(find "$bundle_root" -type f -name '*.AppImage' | head -n 1 || true)"
+          [[ -n "$appimage_path" ]] || { echo "No AppImage installer was produced under $bundle_root" >&2; exit 1; }
+
+          normalized_path="$(dirname "$appimage_path")/HandyGamesPublisher.${RELEASE_TAG}.AppImage"
+          mv -f "$appimage_path" "$normalized_path"
 
       - name: Generate bundle checksums
         shell: bash
