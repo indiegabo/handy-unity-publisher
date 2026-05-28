@@ -15759,21 +15759,11 @@ mod tests {
         };
         let queue_lease_ttl = Duration::from_secs(30);
         let first_claim = coordinator
-            .claim_next_build_job(
-                "planner-worker-a",
-                Duration::ZERO,
-                queue_lease_ttl,
-                &limits,
-            )
+            .claim_next_build_job("planner-worker-a", Duration::ZERO, queue_lease_ttl, &limits)
             .expect("first queued build should claim")
             .expect("first queued build should exist");
         let second_claim = coordinator
-            .claim_next_build_job(
-                "planner-worker-b",
-                Duration::ZERO,
-                queue_lease_ttl,
-                &limits,
-            )
+            .claim_next_build_job("planner-worker-b", Duration::ZERO, queue_lease_ttl, &limits)
             .expect("second queued build lookup should succeed");
         let first_job: BuildDispatchJob = serde_json::from_slice(&first_claim.payload)
             .expect("first queue payload should decode as build job");
@@ -15802,12 +15792,7 @@ mod tests {
             .expect("first planned build should complete");
 
         let second_claim = coordinator
-            .claim_next_build_job(
-                "planner-worker-b",
-                Duration::ZERO,
-                queue_lease_ttl,
-                &limits,
-            )
+            .claim_next_build_job("planner-worker-b", Duration::ZERO, queue_lease_ttl, &limits)
             .expect("second queued build should claim after the first terminal build")
             .expect("second queued build should exist after the first terminal build");
         let second_job: BuildDispatchJob = serde_json::from_slice(&second_claim.payload)
