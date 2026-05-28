@@ -18,69 +18,58 @@ use std::io::ErrorKind;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
 use std::process;
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+use builds::*;
+use cli::*;
 use runtime_config::{RuntimeConfig, SUPERVISION_ATTEMPT_ENV};
+use runtime_core::{
+    bootstrap_runtime, emit_runtime_event, load_runtime_automation_snapshot, read_health_report,
+    read_supervision_contract, shutdown_runtime, update_runtime_health, write_supervisor_snapshot,
+    RuntimeAutomationMode, RuntimeEventInput, RuntimeRestartPolicy, RuntimeStatus,
+    RuntimeSupervisionContract, RuntimeSupervisorSnapshot, RuntimeSupervisorStatus,
+    RUNTIME_HEARTBEAT_EVENT,
+};
 use runtime_git::{
     git_auth_options_from_credentials, GitAuthOptions, GitRemoteHeadRefRequest,
-    GitRemoteHeadRefResolver, GitTag, GitTagListRequest, GitTagLister,
-    GitWorkspaceSyncRefRequest, GitWorkspaceSyncer,
+    GitRemoteHeadRefResolver, GitTag, GitTagListRequest, GitTagLister, GitWorkspaceSyncRefRequest,
+    GitWorkspaceSyncer,
 };
 use runtime_manifests::sync_directory as sync_manifest_directory;
 use runtime_publish::{
-    ExecutionPlan as PublishExecutionPlan,
-    ExecutionProcessor as PublishExecutionProcessor,
-    Processor as PublishProcessor,
     resolve_destination_path as resolve_publish_destination_path,
-};
-use runtime_core::{
-    bootstrap_runtime, read_health_report, read_supervision_contract, shutdown_runtime,
-    update_runtime_health, write_supervisor_snapshot, emit_runtime_event,
-    load_runtime_automation_snapshot, RuntimeAutomationMode, RuntimeEventInput,
-    RuntimeRestartPolicy,
-    RuntimeSupervisionContract, RuntimeSupervisorSnapshot, RuntimeSupervisorStatus,
-    RuntimeStatus, RUNTIME_HEARTBEAT_EVENT,
+    ExecutionPlan as PublishExecutionPlan, ExecutionProcessor as PublishExecutionProcessor,
+    Processor as PublishProcessor,
 };
 use runtime_runner::{
-    discover_artifacts, ExecutionProgress, ExecutionProgressReporter,
-    RunnerFamily,
-    WorkspacePreparer,
+    discover_artifacts,
     unity::{
-        inspect_host_capability_profile,
-        resolve_host_native_unity_execution_plan, HostCapabilityProfile,
-        HostNativeUnityExecutor, UnityBuildExecutionPlan,
-        UnityBuildExecutionProcessOutcome, UnityBuildExecutionProcessor,
-        UnityBuildExecutionResult,
+        inspect_host_capability_profile, resolve_host_native_unity_execution_plan,
+        HostCapabilityProfile, HostNativeUnityExecutor, UnityBuildExecutionPlan,
+        UnityBuildExecutionProcessOutcome, UnityBuildExecutionProcessor, UnityBuildExecutionResult,
     },
+    ExecutionProgress, ExecutionProgressReporter, RunnerFamily, WorkspacePreparer,
 };
 use runtime_store::{
-    ArtifactRecord,
-    initialize_database, BuildDispatchJob, BuildExecutionPlan as StoredBuildExecutionPlan,
+    initialize_database, resolve_credential_secret_config_json, take_runtime_control_requests,
+    ArtifactRecord, BuildDispatchJob, BuildExecutionPlan as StoredBuildExecutionPlan,
     BuildRunRecord, BuildRunStageRecord, CancelBuildRunInput, CompleteBuildRunInput,
-    CompleteBuildRunStageInput, FailBuildRunInput,
-    FailBuildRunStageInput, HeartbeatBuildRunStageInput, LocalCoordinator,
-    InterruptedBuildRecoveryRecord,
-    ManualReleaseDispatchInput, PollingRepositoryRecord, PublishDispatchJob,
-    PublishExecutionPlan as StoredPublishExecutionPlan, PublishRunRecord,
-    ReleaseRunRecord, ReleaseSourceMetadata,
-    RepositoryCheckoutRecord,
-    resolve_credential_secret_config_json,
-    RepositoryPollDispatchInput, StartBuildRunInput,
-    StartBuildRunStageInput, StartPublishRunInput, StorageLayout, CompletePublishRunInput,
-    FailPublishRunInput,
-    RuntimeControlRequest, take_runtime_control_requests,
-    RuntimeRecoveryReport,
-    RECOVERY_INTERRUPTION_KIND_REQUESTED, RECOVERY_INTERRUPTION_KIND_SYSTEM,
+    CompleteBuildRunStageInput, CompletePublishRunInput, FailBuildRunInput, FailBuildRunStageInput,
+    FailPublishRunInput, HeartbeatBuildRunStageInput, InterruptedBuildRecoveryRecord,
+    LocalCoordinator, ManualReleaseDispatchInput, PollingRepositoryRecord, PublishDispatchJob,
+    PublishExecutionPlan as StoredPublishExecutionPlan, PublishRunRecord, ReleaseRunRecord,
+    ReleaseSourceMetadata, RepositoryCheckoutRecord, RepositoryPollDispatchInput,
+    RuntimeControlRequest, RuntimeRecoveryReport, StartBuildRunInput, StartBuildRunStageInput,
+    StartPublishRunInput, StorageLayout, RECOVERY_INTERRUPTION_KIND_REQUESTED,
+    RECOVERY_INTERRUPTION_KIND_SYSTEM,
 };
-use builds::*;
 use serde::{Deserialize, Serialize};
-use cli::*;
 use workers::*;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -185,14 +174,12 @@ pub(crate) fn persist_repository_auth_runtime_failure(
     repository_id: i64,
     error: &impl Display,
 ) {
-    if let Err(store_error) = coordinator.mark_repository_auth_runtime_failure(
-        repository_id,
-        &error.to_string(),
-    ) {
+    if let Err(store_error) =
+        coordinator.mark_repository_auth_runtime_failure(repository_id, &error.to_string())
+    {
         eprintln!(
             "failed to persist repository auth runtime failure for repository {}: {}",
-            repository_id,
-            store_error,
+            repository_id, store_error,
         );
     }
 }
@@ -208,15 +195,12 @@ fn user_requested_from_trigger_source(trigger_source: &str) -> bool {
     trigger_source.eq_ignore_ascii_case("manual")
 }
 
-fn decode_release_event_source_metadata(
-    source_metadata_json: &str,
-) -> ReleaseSourceMetadata {
+fn decode_release_event_source_metadata(source_metadata_json: &str) -> ReleaseSourceMetadata {
     if source_metadata_json.trim().is_empty() {
         return ReleaseSourceMetadata::default();
     }
 
-    serde_json::from_str::<ReleaseSourceMetadata>(source_metadata_json)
-        .unwrap_or_default()
+    serde_json::from_str::<ReleaseSourceMetadata>(source_metadata_json).unwrap_or_default()
 }
 
 fn normalize_release_event_optional_string(value: Option<&str>) -> Option<String> {
@@ -232,18 +216,10 @@ fn release_event_origin_context(record: &ReleaseRunRecord) -> ReleaseEventOrigin
     ReleaseEventOriginContext {
         user_requested: user_requested_from_trigger_source(&record.trigger_source),
         trigger_source: record.trigger_source.trim().to_owned(),
-        source_kind: normalize_release_event_optional_string(
-            metadata.source_kind.as_deref(),
-        ),
-        source_ref: normalize_release_event_optional_string(
-            metadata.source_ref.as_deref(),
-        ),
-        local_path: normalize_release_event_optional_string(
-            metadata.local_path.as_deref(),
-        ),
-        requested_via: normalize_release_event_optional_string(
-            metadata.requested_via.as_deref(),
-        ),
+        source_kind: normalize_release_event_optional_string(metadata.source_kind.as_deref()),
+        source_ref: normalize_release_event_optional_string(metadata.source_ref.as_deref()),
+        local_path: normalize_release_event_optional_string(metadata.local_path.as_deref()),
+        requested_via: normalize_release_event_optional_string(metadata.requested_via.as_deref()),
     }
 }
 
@@ -260,10 +236,7 @@ fn release_event_mode_label(origin: &ReleaseEventOriginContext) -> &'static str 
     }
 }
 
-fn release_event_context(
-    repository_name: &str,
-    record: &ReleaseRunRecord,
-) -> ReleaseEventContext {
+fn release_event_context(repository_name: &str, record: &ReleaseRunRecord) -> ReleaseEventContext {
     ReleaseEventContext {
         release_run_id: record.id,
         repository_id: record.repository_id,
@@ -705,7 +678,10 @@ fn run() -> Result<(), Box<dyn Error>> {
             println!("{}", run_automation_command(&arguments[1..], &storage)?);
         }
         RuntimeCommand::Registrations => {
-            println!("{}", run_registrations_command(&arguments[1..], &config, &storage)?);
+            println!(
+                "{}",
+                run_registrations_command(&arguments[1..], &config, &storage)?
+            );
         }
         RuntimeCommand::Manifests => {
             println!("{}", run_manifests_command(&arguments[1..], &storage)?);
@@ -714,10 +690,16 @@ fn run() -> Result<(), Box<dyn Error>> {
             println!("{}", run_releases_command(&arguments[1..], &storage)?);
         }
         RuntimeCommand::Builds => {
-            println!("{}", run_builds_command(&arguments[1..], &config, &storage)?);
+            println!(
+                "{}",
+                run_builds_command(&arguments[1..], &config, &storage)?
+            );
         }
         RuntimeCommand::Publishes => {
-            println!("{}", run_publishes_command(&arguments[1..], &config, &storage)?);
+            println!(
+                "{}",
+                run_publishes_command(&arguments[1..], &config, &storage)?
+            );
         }
         RuntimeCommand::Help => print_help(),
     }
@@ -754,9 +736,7 @@ fn run_registrations_command(
 
     match arguments[0].as_str() {
         "checkout" => run_registration_checkout_command(&arguments[1..], config, storage),
-        "import-runtime-db" => {
-            run_registration_import_runtime_db_command(&arguments[1..], storage)
-        }
+        "import-runtime-db" => run_registration_import_runtime_db_command(&arguments[1..], storage),
         command => Err(cli_usage_error(format!(
             "unknown registrations command {command:?}\n\n{}",
             registrations_usage()
@@ -1011,8 +991,12 @@ fn run_registration_checkout_command(
     let workspace_root_path = resolve_registration_checkout_workspace_root(config, &repository);
     let checkout_path = workspace_root_path.join("checkout");
     let git_auth = resolve_repository_git_auth(&coordinator, repository.credentials_id)?;
-    let (git_ref, git_ref_source) =
-        resolve_registration_checkout_ref(&repository, &repository_url, &git_auth, command.git_ref)?;
+    let (git_ref, git_ref_source) = resolve_registration_checkout_ref(
+        &repository,
+        &repository_url,
+        &git_auth,
+        command.git_ref,
+    )?;
 
     GitWorkspaceSyncer::new().sync_ref(&GitWorkspaceSyncRefRequest {
         repository_url,
@@ -1080,7 +1064,8 @@ fn run_publish_run_next_command(
         Duration::ZERO,
         PUBLISH_QUEUE_LEASE_TTL,
         &config.concurrency,
-    )? else {
+    )?
+    else {
         return Ok(String::from("null"));
     };
     let lease_renewer = QueueLeaseRenewer::spawn(
@@ -1154,7 +1139,9 @@ fn run_publish_run_next_command(
         Ok(record) => record,
         Err(error) => {
             if let Err(lease_error) = lease_renewer.finish() {
-                eprintln!("queue lease renewer stopped with error after publish failure: {lease_error}");
+                eprintln!(
+                    "queue lease renewer stopped with error after publish failure: {lease_error}"
+                );
             }
             return Err(error);
         }
@@ -1408,65 +1395,47 @@ fn release_claimed_publish_message(
 #[cfg(test)]
 mod tests {
     use super::{
-        package_build_output,
         build_execution_logs_archive_path, build_execution_report_path,
-        recover_interrupted_build_attempts,
+        failed_poll_attempt_log_path, package_build_output, parse_manifest_sync_command,
+        parse_manual_release_dispatch_command, parse_publish_inspect_command,
+        parse_registration_checkout_command, parse_registration_import_runtime_db_command,
+        parse_release_plan_command, record_failed_poll_attempt, recover_interrupted_build_attempts,
+        resolve_build_event_platform, resolve_build_execution_dispatch_plan_with_profile,
         run_automation_inspect_command, run_automation_poll_once_command,
-        run_repository_poll_cycle,
-        parse_manifest_sync_command, parse_manual_release_dispatch_command,
-        parse_registration_import_runtime_db_command,
-        parse_registration_checkout_command,
-        parse_publish_inspect_command,
-        QueueLeaseRenewer,
-        parse_release_plan_command, run_manifest_sync_command,
-        run_registrations_command,
-        resolve_build_event_platform,
-        resolve_build_execution_dispatch_plan_with_profile,
-        run_build_run_next_command, run_build_stage_next_command,
-        run_publish_inspect_command,
-        run_manual_release_dispatch_command, run_release_plan_command,
-        run_publish_run_next_command, run_release_planner_cycle,
-        run_runtime_worker_iteration,
-        failed_poll_attempt_log_path, record_failed_poll_attempt,
-        runtime_stop_requested,
-        select_queued_repository_tags,
-        AutomationPollReport, BuildExecutionReport, BuildRunRecord,
-        EVENT_TOPIC_RELEASE_QUEUED,
-        EVENT_TOPIC_TAG_DETECTED,
-        EVENT_TOPIC_POLL_AUTH_FAILED,
-        RegistrationCheckoutReport, RuntimeLoopCadence,
-        RepositoryPollSchedule,
-        PublishedOutputInspectionReport,
+        run_build_run_next_command, run_build_stage_next_command, run_manifest_sync_command,
+        run_manual_release_dispatch_command, run_publish_inspect_command,
+        run_publish_run_next_command, run_registrations_command, run_release_plan_command,
+        run_release_planner_cycle, run_repository_poll_cycle, run_runtime_worker_iteration,
+        runtime_stop_requested, select_queued_repository_tags, AutomationPollReport,
+        BuildExecutionReport, BuildRunRecord, PublishedOutputInspectionReport, QueueLeaseRenewer,
+        RegistrationCheckoutReport, RepositoryPollSchedule, RuntimeLoopCadence,
+        EVENT_TOPIC_POLL_AUTH_FAILED, EVENT_TOPIC_RELEASE_QUEUED, EVENT_TOPIC_TAG_DETECTED,
     };
-    use rusqlite::{params, Connection};
-    use runtime_core::{read_runtime_event_batch, shutdown_runtime};
     use runtime_config::{HostPlatform, RuntimeConfig, RuntimeDirectories};
     use runtime_contracts::{BuildKind, EngineKind};
+    use runtime_core::{read_runtime_event_batch, shutdown_runtime};
     use runtime_git::GitTag;
     use runtime_manifests::ApplyReport as ManifestApplyReport;
+    use runtime_runner::unity::{
+        resolve_final_unity_artifact_output_path, DiscoveredUnityEditor, HostCapabilityProfile,
+        HostToolCapability, RunnerSelectionDiagnostics,
+        UnityBuildExecutionPlan as RunnerExecutionPlan, UnityBuildExecutionResult,
+        UnityLicenseDiagnostics,
+    };
     use runtime_store::{
-        CreateRepositoryProjectBuildTargetInput, CreateRepositoryProjectInput,
-        enqueue_runtime_control_request,
-        ImportedRepositoryRegistrationReport, InterruptedBuildRecoveryRecord,
-        LocalCoordinator, RuntimeControlRequest, RuntimeRecoveryReport,
-        UpdateRepositoryAuthStateInput,
+        enqueue_runtime_control_request, CreateRepositoryProjectBuildTargetInput,
+        CreateRepositoryProjectInput, ImportedRepositoryRegistrationReport,
+        InterruptedBuildRecoveryRecord, LocalCoordinator, RuntimeControlRequest,
+        RuntimeRecoveryReport, UpdateRepositoryAuthStateInput,
         RECOVERY_INTERRUPTION_KIND_REQUESTED,
     };
-    use runtime_runner::{
-        unity::{
-            resolve_final_unity_artifact_output_path, DiscoveredUnityEditor,
-            HostCapabilityProfile, HostToolCapability,
-            RunnerSelectionDiagnostics,
-            UnityBuildExecutionPlan as RunnerExecutionPlan,
-            UnityBuildExecutionResult, UnityLicenseDiagnostics,
-        },
+    use runtime_store::{
+        initialize_database, AutomationSnapshot, BuildExecutionPlan, PollingRepositoryRecord,
+        PublishRunRecord, ReleaseRunRecord, StorageLayout,
     };
+    use rusqlite::{params, Connection};
     use serde_json::json;
     use std::fs;
-    use runtime_store::{
-        initialize_database, AutomationSnapshot, BuildExecutionPlan,
-        PollingRepositoryRecord, PublishRunRecord, ReleaseRunRecord, StorageLayout,
-    };
     use std::io::Read;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1505,10 +1474,7 @@ mod tests {
         contents
     }
 
-    fn test_archive_execution_plan(
-        platform: &str,
-        target_name: &str,
-    ) -> RunnerExecutionPlan {
+    fn test_archive_execution_plan(platform: &str, target_name: &str) -> RunnerExecutionPlan {
         RunnerExecutionPlan {
             build_run_id: 41,
             release_run_id: 11,
@@ -1534,7 +1500,10 @@ mod tests {
         output_path: &Path,
     ) -> UnityBuildExecutionResult {
         UnityBuildExecutionResult {
-            build_root_path: root.join("workspace").join("builds").join("build-run-1-attempt-1"),
+            build_root_path: root
+                .join("workspace")
+                .join("builds")
+                .join("build-run-1-attempt-1"),
             workspace_path: root.join("workspace"),
             log_path: root.join("workspace").join("logs").join("unity-build.log"),
             artifact_root_path: artifact_root_path.to_path_buf(),
@@ -1550,16 +1519,13 @@ mod tests {
         let output_root = root.join("unity-output");
         fs::create_dir_all(output_root.join("revolutions_Data/Managed"))
             .expect("player data directory should create");
-        fs::create_dir_all(output_root.join("D3D12"))
-            .expect("d3d12 directory should create");
+        fs::create_dir_all(output_root.join("D3D12")).expect("d3d12 directory should create");
         fs::create_dir_all(
             output_root.join("revolutions_BurstDebugInformation_DoNotShip/NativeData"),
         )
         .expect("burst do-not-ship directory should create");
         fs::create_dir_all(
-            output_root.join(
-                "revolutions_BackUpThisFolder_ButDontShipItWithYourGame/ShaderCache",
-            ),
+            output_root.join("revolutions_BackUpThisFolder_ButDontShipItWithYourGame/ShaderCache"),
         )
         .expect("backup do-not-ship directory should create");
         fs::write(output_root.join("revolutions.exe"), "player")
@@ -1574,9 +1540,7 @@ mod tests {
         fs::write(output_root.join("D3D12/d3d12core.dll"), "directstorage")
             .expect("d3d12 runtime should write");
         fs::write(
-            output_root.join(
-                "revolutions_BurstDebugInformation_DoNotShip/NativeData/methods.dbg",
-            ),
+            output_root.join("revolutions_BurstDebugInformation_DoNotShip/NativeData/methods.dbg"),
             "burst-symbols",
         )
         .expect("burst symbols should write");
@@ -1600,14 +1564,14 @@ mod tests {
         let names = archive_entry_names(&archive_path);
         assert!(names.iter().any(|name| name == "revolutions.exe"));
         assert!(names.iter().any(|name| name == "UnityPlayer.dll"));
-        assert!(names.iter().any(|name| {
-            name == "revolutions_Data/Managed/Assembly-CSharp.dll"
-        }));
+        assert!(names
+            .iter()
+            .any(|name| { name == "revolutions_Data/Managed/Assembly-CSharp.dll" }));
         assert!(names.iter().any(|name| name == "D3D12/d3d12core.dll"));
         assert!(!names.iter().any(|name| name.contains("_DoNotShip")));
-        assert!(!names.iter().any(|name| {
-            name.contains("_BackUpThisFolder_ButDontShipItWithYourGame")
-        }));
+        assert!(!names
+            .iter()
+            .any(|name| { name.contains("_BackUpThisFolder_ButDontShipItWithYourGame") }));
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -1621,8 +1585,7 @@ mod tests {
         fs::create_dir_all(&output_root).expect("unity output should create");
         fs::write(output_root.join("revolutions.exe"), "player")
             .expect("player executable should write");
-        fs::write(output_root.join("revolutions.pdb"), "debug-symbols")
-            .expect("pdb should write");
+        fs::write(output_root.join("revolutions.pdb"), "debug-symbols").expect("pdb should write");
 
         let artifact_root = root.join("artifact-root");
         fs::create_dir_all(&artifact_root).expect("artifact root should create");
@@ -1648,10 +1611,8 @@ mod tests {
         let output_root = root.join("unity-output");
         fs::create_dir_all(output_root.join("revolutions.app/Contents/MacOS"))
             .expect("macos app directory should create");
-        fs::create_dir_all(
-            output_root.join("revolutions.app.dSYM/Contents/Resources/DWARF"),
-        )
-        .expect("dSYM bundle should create");
+        fs::create_dir_all(output_root.join("revolutions.app.dSYM/Contents/Resources/DWARF"))
+            .expect("dSYM bundle should create");
         fs::write(
             output_root.join("revolutions.app/Contents/MacOS/revolutions"),
             "player",
@@ -1678,12 +1639,12 @@ mod tests {
         let archive_path = resolve_final_unity_artifact_output_path(&plan, &artifact_root)
             .expect("artifact archive path should resolve");
         let names = archive_entry_names(&archive_path);
-        assert!(
-            names.iter().any(|name| name == "revolutions.app/Contents/MacOS/revolutions")
-        );
-        assert!(
-            names.iter().any(|name| name == "revolutions.app/Contents/Info.plist")
-        );
+        assert!(names
+            .iter()
+            .any(|name| name == "revolutions.app/Contents/MacOS/revolutions"));
+        assert!(names
+            .iter()
+            .any(|name| name == "revolutions.app/Contents/Info.plist"));
         assert!(!names.iter().any(|name| name.contains(".dSYM/")));
         assert!(!names.iter().any(|name| name.ends_with(".dSYM")));
 
@@ -1696,18 +1657,19 @@ mod tests {
         fs::create_dir_all(&root).expect("test root should create");
 
         let output_root = root.join("unity-output");
-        fs::create_dir_all(output_root.join("Build"))
-            .expect("webgl build directory should create");
+        fs::create_dir_all(output_root.join("Build")).expect("webgl build directory should create");
         fs::create_dir_all(output_root.join("TemplateData"))
             .expect("template data directory should create");
-        fs::write(output_root.join("index.html"), "<html></html>")
-            .expect("index should write");
+        fs::write(output_root.join("index.html"), "<html></html>").expect("index should write");
         fs::write(output_root.join("TemplateData/style.css"), "body {}")
             .expect("template stylesheet should write");
         fs::write(output_root.join("Build/revolutions.loader.js"), "loader")
             .expect("loader should write");
-        fs::write(output_root.join("Build/revolutions.framework.js"), "framework")
-            .expect("framework should write");
+        fs::write(
+            output_root.join("Build/revolutions.framework.js"),
+            "framework",
+        )
+        .expect("framework should write");
         fs::write(output_root.join("Build/revolutions.data"), "data")
             .expect("data file should write");
         fs::write(output_root.join("Build/revolutions.wasm"), "wasm")
@@ -1730,8 +1692,12 @@ mod tests {
         let names = archive_entry_names(&archive_path);
         assert!(names.iter().any(|name| name == "index.html"));
         assert!(names.iter().any(|name| name == "TemplateData/style.css"));
-        assert!(names.iter().any(|name| name == "Build/revolutions.loader.js"));
-        assert!(names.iter().any(|name| name == "Build/revolutions.framework.js"));
+        assert!(names
+            .iter()
+            .any(|name| name == "Build/revolutions.loader.js"));
+        assert!(names
+            .iter()
+            .any(|name| name == "Build/revolutions.framework.js"));
         assert!(names.iter().any(|name| name == "Build/revolutions.data"));
         assert!(names.iter().any(|name| name == "Build/revolutions.wasm"));
         assert!(!names.iter().any(|name| name.ends_with(".symbols.json")));
@@ -1767,16 +1733,16 @@ mod tests {
             .expect_err("release plan command should require a release id");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("missing required --release-run-id"));
+        assert!(error
+            .to_string()
+            .contains("missing required --release-run-id"));
     }
 
     #[test]
     fn parse_manifest_sync_command_accepts_explicit_directory() {
-        let command = parse_manifest_sync_command(&[
-            String::from("--dir"),
-            String::from("custom/pipelines"),
-        ])
-        .expect("manifest sync command should parse");
+        let command =
+            parse_manifest_sync_command(&[String::from("--dir"), String::from("custom/pipelines")])
+                .expect("manifest sync command should parse");
 
         assert_eq!(command.manifest_dir, PathBuf::from("custom/pipelines"));
     }
@@ -1818,26 +1784,20 @@ mod tests {
         let config = RuntimeConfig::from_root(&root);
         let storage = StorageLayout::from_directories(&config.directories);
 
-        assert!(
-            !runtime_stop_requested(&storage).expect("missing report should not request stop")
-        );
+        assert!(!runtime_stop_requested(&storage).expect("missing report should not request stop"));
 
         shutdown_runtime(&config, &storage).expect("shutdown marker should persist");
 
-        assert!(
-            runtime_stop_requested(&storage).expect("shutdown marker should request stop")
-        );
+        assert!(runtime_stop_requested(&storage).expect("shutdown marker should request stop"));
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
 
     #[test]
     fn parse_publish_inspect_command_accepts_publish_run_id() {
-        let command = parse_publish_inspect_command(&[
-            String::from("--publish-run-id"),
-            String::from("17"),
-        ])
-        .expect("publish inspect command should parse");
+        let command =
+            parse_publish_inspect_command(&[String::from("--publish-run-id"), String::from("17")])
+                .expect("publish inspect command should parse");
 
         assert!(matches!(
             command.scope,
@@ -1907,10 +1867,7 @@ mod tests {
         .expect("manifest should write");
 
         let output = run_manifest_sync_command(
-            &[
-                String::from("--dir"),
-                pipelines_dir.display().to_string(),
-            ],
+            &[String::from("--dir"), pipelines_dir.display().to_string()],
             &storage,
         )
         .expect("manifest sync command should succeed");
@@ -1978,11 +1935,8 @@ mod tests {
         initialize_database(&storage).expect("database bootstrap should succeed");
 
         let repository_path = root.join("fixtures").join("revolutions");
-        let repository_url = create_unity_repository_with_tags(
-            &repository_path,
-            "2022.3.20f1",
-            &["v1.0.0"],
-        );
+        let repository_url =
+            create_unity_repository_with_tags(&repository_path, "2022.3.20f1", &["v1.0.0"]);
         let default_branch = current_git_branch_name(&repository_path);
         let expected_head_commit = current_git_head_commit(&repository_path);
         let workspace_root_override = root.join("managed-checkouts").join("revolutions");
@@ -2027,8 +1981,8 @@ mod tests {
             &storage,
         )
         .expect("registrations checkout command should succeed");
-        let report: RegistrationCheckoutReport = serde_json::from_str(&output)
-            .expect("registration checkout output should decode");
+        let report: RegistrationCheckoutReport =
+            serde_json::from_str(&output).expect("registration checkout output should decode");
 
         assert_eq!(report.repository_id, repository_id);
         assert_eq!(report.repository_name, "revolutions");
@@ -2045,7 +1999,10 @@ mod tests {
             workspace_root_override.join("checkout")
         );
         assert_eq!(report.head_commit, expected_head_commit);
-        assert!(workspace_root_override.join("checkout").join(".git").is_dir());
+        assert!(workspace_root_override
+            .join("checkout")
+            .join(".git")
+            .is_dir());
         assert!(workspace_root_override
             .join("checkout")
             .join("ProjectSettings")
@@ -2063,11 +2020,8 @@ mod tests {
         initialize_database(&storage).expect("database bootstrap should succeed");
 
         let repository_path = root.join("fixtures").join("revolutions");
-        let repository_url = create_unity_repository_with_tags(
-            &repository_path,
-            "2022.3.20f1",
-            &["v1.0.0"],
-        );
+        let repository_url =
+            create_unity_repository_with_tags(&repository_path, "2022.3.20f1", &["v1.0.0"]);
         let expected_remote_head = current_git_branch_name(&repository_path);
         let expected_head_commit = current_git_head_commit(&repository_path);
         let workspace_root_override = root.join("managed-checkouts").join("revolutions");
@@ -2108,14 +2062,17 @@ mod tests {
             &storage,
         )
         .expect("registrations checkout command should succeed without default_branch");
-        let report: RegistrationCheckoutReport = serde_json::from_str(&output)
-            .expect("registration checkout output should decode");
+        let report: RegistrationCheckoutReport =
+            serde_json::from_str(&output).expect("registration checkout output should decode");
 
         assert_eq!(report.repository_id, repository_id);
         assert_eq!(report.git_ref, expected_remote_head);
         assert_eq!(report.git_ref_source, "remote_head");
         assert_eq!(report.head_commit, expected_head_commit);
-        assert!(workspace_root_override.join("checkout").join(".git").is_dir());
+        assert!(workspace_root_override
+            .join("checkout")
+            .join(".git")
+            .is_dir());
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -2131,8 +2088,8 @@ mod tests {
         let source_storage = StorageLayout::from_directories(&source_directories);
         initialize_database(&source_storage).expect("source database bootstrap should succeed");
 
-        let source_connection = Connection::open(&source_storage.database_path)
-            .expect("source connection should open");
+        let source_connection =
+            Connection::open(&source_storage.database_path).expect("source connection should open");
         let credentials_id = seed_credentials(
             &source_connection,
             "Revolutions/origin",
@@ -2216,14 +2173,17 @@ mod tests {
             .expect("registration import-runtime-db output should decode");
 
         assert_eq!(report.repository_name, "Revolutions");
-        assert_eq!(report.credential_name.as_deref(), Some("Revolutions/origin"));
+        assert_eq!(
+            report.credential_name.as_deref(),
+            Some("Revolutions/origin")
+        );
         assert_eq!(report.trigger_rule_count, 1);
         assert_eq!(report.build_target_count, 1);
         assert_eq!(report.publish_target_count, 1);
         assert_eq!(report.binding_count, 1);
 
-        let target_connection = Connection::open(&target_storage.database_path)
-            .expect("target connection should open");
+        let target_connection =
+            Connection::open(&target_storage.database_path).expect("target connection should open");
         let counts: (i64, i64) = target_connection
             .query_row(
                 "
@@ -2259,19 +2219,12 @@ mod tests {
             "filesystem-release",
             "filesystem",
         );
-        let release_run_id = seed_queued_release(
-            &connection,
-            repository_id,
-            "v15.0.0",
-            "2021.3.33f1",
-        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v15.0.0", "2021.3.33f1");
         drop(connection);
 
         run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect("release plan command should succeed");
@@ -2467,7 +2420,8 @@ mod tests {
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         let repository_id = seed_repository(&connection, "runtime-bin-release-dispatch-rebuild");
-        let build_target_id = seed_build_target(&connection, repository_id, "windows-player", "windows");
+        let build_target_id =
+            seed_build_target(&connection, repository_id, "windows-player", "windows");
         let publish_target_id = seed_publish_target(
             &connection,
             repository_id,
@@ -2475,17 +2429,12 @@ mod tests {
             "filesystem",
         );
         seed_build_publish_binding(&connection, build_target_id, publish_target_id);
-        let release_run_id = seed_manual_release_for_rebuild(
-            &connection,
-            repository_id,
-            "v9.0.1",
-            "2022.3.20f1",
-        );
+        let release_run_id =
+            seed_manual_release_for_rebuild(&connection, repository_id, "v9.0.1", "2022.3.20f1");
         let artifact_root_path = root.join("artifacts");
         let workspace_path = root.join("runs").join("build-run-88");
         fs::create_dir_all(&artifact_root_path).expect("artifact root should create");
-        fs::create_dir_all(workspace_path.join("source"))
-            .expect("workspace root should create");
+        fs::create_dir_all(workspace_path.join("source")).expect("workspace root should create");
         fs::write(workspace_path.join("source").join("build.txt"), "workspace")
             .expect("workspace marker should write");
         fs::write(artifact_root_path.join("rebuilt.zip"), "artifact")
@@ -2580,14 +2529,12 @@ mod tests {
         let repository_id = seed_repository(&connection, "runtime-bin-release-plan");
         seed_build_target(&connection, repository_id, "windows-player", "windows");
         seed_build_target(&connection, repository_id, "linux-player", "linux");
-        let release_run_id = seed_queued_release(&connection, repository_id, "v9.1.0", "2022.3.20f1");
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v9.1.0", "2022.3.20f1");
         drop(connection);
 
         let output = run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect("release plan command should succeed");
@@ -2613,7 +2560,8 @@ mod tests {
         initialize_database(&storage).expect("database bootstrap should succeed");
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
-        let repository_id = seed_repository(&connection, "runtime-bin-release-plan-no-enabled-targets");
+        let repository_id =
+            seed_repository(&connection, "runtime-bin-release-plan-no-enabled-targets");
         seed_build_target(&connection, repository_id, "windows-player", "windows");
         connection
             .execute(
@@ -2621,14 +2569,12 @@ mod tests {
                 [repository_id],
             )
             .expect("build targets should disable");
-        let release_run_id = seed_queued_release(&connection, repository_id, "v9.1.1", "2022.3.20f1");
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v9.1.1", "2022.3.20f1");
         drop(connection);
 
         let error = run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect_err("release plan command should fail when no enabled targets exist");
@@ -2637,9 +2583,7 @@ mod tests {
             .expect("release plan error should be an io::Error");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(error
-            .to_string()
-            .contains("has no enabled build targets"));
+        assert!(error.to_string().contains("has no enabled build targets"));
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -2654,19 +2598,12 @@ mod tests {
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         let repository_id = seed_repository(&connection, "runtime-bin-release-plan-not-queued");
         seed_build_target(&connection, repository_id, "windows-player", "windows");
-        let release_run_id = seed_manual_release_for_rebuild(
-            &connection,
-            repository_id,
-            "v9.1.2",
-            "2022.3.20f1",
-        );
+        let release_run_id =
+            seed_manual_release_for_rebuild(&connection, repository_id, "v9.1.2", "2022.3.20f1");
         drop(connection);
 
         let error = run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect_err("release plan command should reject releases outside the queued state");
@@ -2696,11 +2633,8 @@ mod tests {
         );
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
-        let repository_id = seed_repository_with_url(
-            &connection,
-            "runtime-bin-release-plan-git",
-            &repository_url,
-        );
+        let repository_id =
+            seed_repository_with_url(&connection, "runtime-bin-release-plan-git", &repository_url);
         seed_build_target(&connection, repository_id, "windows-player", "windows");
         drop(connection);
 
@@ -2714,14 +2648,11 @@ mod tests {
             &storage,
         )
         .expect("manual release dispatch command should succeed");
-        let release: ReleaseRunRecord = serde_json::from_str(&dispatch_output)
-            .expect("release dispatch output should decode");
+        let release: ReleaseRunRecord =
+            serde_json::from_str(&dispatch_output).expect("release dispatch output should decode");
 
         let output = run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release.id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release.id.to_string()],
             &storage,
         )
         .expect("release plan command should detect unity version from git");
@@ -2730,10 +2661,7 @@ mod tests {
 
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].engine_version.as_deref(), Some("2021.3.33f1"));
-        assert_eq!(
-            runs[0].image_ref.as_deref(),
-            Some("host-native"),
-        );
+        assert_eq!(runs[0].image_ref.as_deref(), Some("host-native"),);
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         let persisted_engine_version: String = connection
@@ -2834,8 +2762,12 @@ mod tests {
             "Builder.PerformWindows",
             &script_path,
         );
-        let publish_target_id =
-            seed_publish_target(&connection, repository_id, "filesystem-release", "filesystem");
+        let publish_target_id = seed_publish_target(
+            &connection,
+            repository_id,
+            "filesystem-release",
+            "filesystem",
+        );
         seed_build_publish_binding(&connection, build_target_id, publish_target_id);
         drop(connection);
 
@@ -2988,12 +2920,9 @@ mod tests {
         let coordinator = LocalCoordinator::new(&storage);
         let mut poll_schedule = RepositoryPollSchedule::default();
 
-        let first_report = run_repository_poll_cycle(
-            &coordinator,
-            &storage,
-            Some(&mut poll_schedule),
-        )
-        .expect("first polling cycle should run immediately");
+        let first_report =
+            run_repository_poll_cycle(&coordinator, &storage, Some(&mut poll_schedule))
+                .expect("first polling cycle should run immediately");
 
         assert_eq!(first_report.repositories.len(), 1);
         let repository = &first_report.repositories[0];
@@ -3004,12 +2933,9 @@ mod tests {
         assert!(repository.queued_release_ids.is_empty());
         assert!(repository.discovered_tags.is_empty());
 
-        let second_report = run_repository_poll_cycle(
-            &coordinator,
-            &storage,
-            Some(&mut poll_schedule),
-        )
-        .expect("second polling cycle should respect the scheduled wait");
+        let second_report =
+            run_repository_poll_cycle(&coordinator, &storage, Some(&mut poll_schedule))
+                .expect("second polling cycle should respect the scheduled wait");
 
         assert!(second_report.repositories.is_empty());
 
@@ -3035,11 +2961,8 @@ mod tests {
         initialize_database(&storage).expect("database bootstrap should succeed");
 
         let repository_path = root.join("runtime-bin-force-poll-request-source");
-        let repository_url = create_unity_repository_with_tags(
-            &repository_path,
-            "2021.3.33f1",
-            &["v1.0.0"],
-        );
+        let repository_url =
+            create_unity_repository_with_tags(&repository_path, "2021.3.33f1", &["v1.0.0"]);
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         let repository_id = seed_repository_with_url(
@@ -3059,21 +2982,15 @@ mod tests {
         let coordinator = LocalCoordinator::new(&storage);
         let mut poll_schedule = RepositoryPollSchedule::default();
 
-        let first_report = run_repository_poll_cycle(
-            &coordinator,
-            &storage,
-            Some(&mut poll_schedule),
-        )
-        .expect("first polling cycle should run immediately");
+        let first_report =
+            run_repository_poll_cycle(&coordinator, &storage, Some(&mut poll_schedule))
+                .expect("first polling cycle should run immediately");
         assert_eq!(first_report.repositories.len(), 1);
         assert_eq!(first_report.repositories[0].status, "unchanged");
 
-        let second_report = run_repository_poll_cycle(
-            &coordinator,
-            &storage,
-            Some(&mut poll_schedule),
-        )
-        .expect("second polling cycle should respect the scheduled wait");
+        let second_report =
+            run_repository_poll_cycle(&coordinator, &storage, Some(&mut poll_schedule))
+                .expect("second polling cycle should respect the scheduled wait");
         assert!(second_report.repositories.is_empty());
 
         std::fs::write(repository_path.join("README.md"), "v1.1.0")
@@ -3110,7 +3027,8 @@ mod tests {
     }
 
     #[test]
-    fn automation_poll_once_command_registers_latest_baseline_for_repository_without_process_history() {
+    fn automation_poll_once_command_registers_latest_baseline_for_repository_without_process_history(
+    ) {
         let root = test_root("runtime-bin-automation-poll-once-initial-latest-only");
         let directories = RuntimeDirectories::from_root(&root);
         let storage = StorageLayout::from_directories(&directories);
@@ -3252,17 +3170,15 @@ mod tests {
         };
         let error = std::io::Error::other("Authentication failed for GitHub");
 
-        let written_path = record_failed_poll_attempt(
-            &storage,
-            &repository,
-            "poll_remote",
-            &error,
-        )
-        .expect("failed poll attempt log should persist");
+        let written_path = record_failed_poll_attempt(&storage, &repository, "poll_remote", &error)
+            .expect("failed poll attempt log should persist");
 
-        assert_eq!(written_path, failed_poll_attempt_log_path(&storage, &repository));
-        let contents = std::fs::read_to_string(&written_path)
-            .expect("failed poll attempt log should read");
+        assert_eq!(
+            written_path,
+            failed_poll_attempt_log_path(&storage, &repository)
+        );
+        let contents =
+            std::fs::read_to_string(&written_path).expect("failed poll attempt log should read");
         let line = contents
             .lines()
             .last()
@@ -3310,8 +3226,9 @@ mod tests {
         drop(connection);
 
         let coordinator = LocalCoordinator::new(&storage);
-        let report = run_repository_poll_cycle(&coordinator, &storage, None)
-            .expect("authentication failures should mark the repository and continue the poll cycle");
+        let report = run_repository_poll_cycle(&coordinator, &storage, None).expect(
+            "authentication failures should mark the repository and continue the poll cycle",
+        );
 
         assert_eq!(report.repositories.len(), 1);
         assert_eq!(report.repositories[0].repository_id, repository_id);
@@ -3333,8 +3250,8 @@ mod tests {
             .auth_status_message
             .contains("host keyring error"));
         let failed_attempt_path = failed_poll_attempt_log_path(&storage, &repository);
-        let failed_attempt_contents = fs::read_to_string(&failed_attempt_path)
-            .expect("failed poll attempt log should exist");
+        let failed_attempt_contents =
+            fs::read_to_string(&failed_attempt_path).expect("failed poll attempt log should exist");
         let failed_attempt: serde_json::Value = serde_json::from_str(
             failed_attempt_contents
                 .lines()
@@ -3390,17 +3307,14 @@ mod tests {
             Some(credentials_id),
         );
         seed_build_target(&connection, repository_id, "windows-player", "windows");
-        let release_run_id = seed_queued_release(
-            &connection,
-            repository_id,
-            "v1.0.0",
-            "2021.3.33f1",
-        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v1.0.0", "2021.3.33f1");
         drop(connection);
 
         let mut poll_schedule = RepositoryPollSchedule::default();
-        run_runtime_worker_iteration(&config, &storage, &mut poll_schedule)
-            .expect("worker iteration should continue after marking repository auth as reauth_required");
+        run_runtime_worker_iteration(&config, &storage, &mut poll_schedule).expect(
+            "worker iteration should continue after marking repository auth as reauth_required",
+        );
 
         let coordinator = LocalCoordinator::new(&storage);
         let repository = coordinator
@@ -3540,7 +3454,8 @@ mod tests {
     }
 
     #[test]
-    fn automation_poll_once_command_queues_newer_tags_after_stale_baseline_without_process_history() {
+    fn automation_poll_once_command_queues_newer_tags_after_stale_baseline_without_process_history()
+    {
         let root = test_root("runtime-bin-automation-poll-once-queue");
         let directories = RuntimeDirectories::from_root(&root);
         let storage = StorageLayout::from_directories(&directories);
@@ -3584,7 +3499,10 @@ mod tests {
         assert_eq!(repository.discovered_tags[1].name, "v1.2.0");
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
-        assert_eq!(load_repository_last_seen_tag(&connection, repository_id).as_deref(), Some("v1.2.0"));
+        assert_eq!(
+            load_repository_last_seen_tag(&connection, repository_id).as_deref(),
+            Some("v1.2.0")
+        );
         assert_eq!(
             release_tags_for_repository(&connection, repository_id),
             vec![String::from("v1.1.0"), String::from("v1.2.0")]
@@ -3652,8 +3570,14 @@ mod tests {
         assert!(repository.discovered_tags.is_empty());
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
-        assert_eq!(release_tags_for_repository(&connection, repository_id), vec![String::from("v2.0.0")]);
-        assert_eq!(load_repository_last_seen_tag(&connection, repository_id), None);
+        assert_eq!(
+            release_tags_for_repository(&connection, repository_id),
+            vec![String::from("v2.0.0")]
+        );
+        assert_eq!(
+            load_repository_last_seen_tag(&connection, repository_id),
+            None
+        );
         assert_eq!(queue_message_count(&connection, "build-runs"), 1);
         drop(connection);
 
@@ -3687,19 +3611,12 @@ mod tests {
             Some(credentials_id),
         );
         seed_build_target(&connection, repository_id, "windows-player", "windows");
-        let release_run_id = seed_queued_release(
-            &connection,
-            repository_id,
-            "v12.0.0",
-            "2021.3.33f1",
-        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v12.0.0", "2021.3.33f1");
         drop(connection);
 
         let planner_output = run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect("release plan command should succeed");
@@ -3714,11 +3631,26 @@ mod tests {
         assert_eq!(record.id, planned_runs[0].id);
         assert_eq!(record.status, "running");
         assert!(record.started_at.is_some());
-        assert_eq!(queue_message_count(&Connection::open(&storage.database_path).expect("connection should open"), "build-runs"), 0);
+        assert_eq!(
+            queue_message_count(
+                &Connection::open(&storage.database_path).expect("connection should open"),
+                "build-runs"
+            ),
+            0
+        );
 
-        let workspace_path = PathBuf::from(record.workspace_path.clone().expect("workspace path should persist"));
+        let workspace_path = PathBuf::from(
+            record
+                .workspace_path
+                .clone()
+                .expect("workspace path should persist"),
+        );
         assert!(workspace_path.is_dir());
-        assert!(workspace_path.join("source").join("ProjectSettings").join("ProjectVersion.txt").is_file());
+        assert!(workspace_path
+            .join("source")
+            .join("ProjectSettings")
+            .join("ProjectVersion.txt")
+            .is_file());
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -3731,24 +3663,14 @@ mod tests {
         initialize_database(&storage).expect("database bootstrap should succeed");
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
-        let repository_id = seed_repository(
-            &connection,
-            "runtime-bin-build-stage-next-fail",
-        );
+        let repository_id = seed_repository(&connection, "runtime-bin-build-stage-next-fail");
         seed_build_target(&connection, repository_id, "windows-player", "windows");
-        let release_run_id = seed_queued_release(
-            &connection,
-            repository_id,
-            "v99.0.0",
-            "2021.3.33f1",
-        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v99.0.0", "2021.3.33f1");
         drop(connection);
 
         run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect("release plan command should succeed");
@@ -3760,8 +3682,10 @@ mod tests {
         let error_message = record.error_message.as_deref().unwrap_or_default();
 
         assert_eq!(record.status, "failed");
-        assert!(error_message.contains("fetch repository tag")
-            || error_message.contains("clone repository into workspace"));
+        assert!(
+            error_message.contains("fetch repository tag")
+                || error_message.contains("clone repository into workspace")
+        );
         assert!(error_message.contains("exit code"));
         assert!(error_message.contains("stderr:"));
 
@@ -3797,12 +3721,8 @@ mod tests {
             Some(credentials_id),
         );
         seed_build_target(&connection, repository_id, "windows-player", "windows");
-        let release_run_id = seed_queued_release(
-            &connection,
-            repository_id,
-            "v1.0.0",
-            "2021.3.33f1",
-        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v1.0.0", "2021.3.33f1");
         drop(connection);
 
         let coordinator = LocalCoordinator::new(&storage);
@@ -3821,10 +3741,7 @@ mod tests {
             .expect("repository auth state should persist");
 
         run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect("release plan command should succeed");
@@ -3887,22 +3804,19 @@ mod tests {
             "Builder.PerformWebGL",
             &script_path,
         );
-        let publish_target_id =
-            seed_publish_target(&connection, repository_id, "filesystem-release", "filesystem");
-        seed_build_publish_binding(&connection, build_target_id, publish_target_id);
-        let release_run_id = seed_queued_release(
+        let publish_target_id = seed_publish_target(
             &connection,
             repository_id,
-            "v13.0.0",
-            "2021.3.33f1",
+            "filesystem-release",
+            "filesystem",
         );
+        seed_build_publish_binding(&connection, build_target_id, publish_target_id);
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v13.0.0", "2021.3.33f1");
         drop(connection);
 
         run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect("release plan command should succeed");
@@ -3931,7 +3845,10 @@ mod tests {
             .join("outputs")
             .join("runtime-bin-build-run-next-success.v13.0.0.webgl-player");
         let report = load_build_execution_report(&workspace_path);
-        assert_eq!(log_path, workspace_path.join("logs").join("03-unity-build-webgl.log"));
+        assert_eq!(
+            log_path,
+            workspace_path.join("logs").join("03-unity-build-webgl.log")
+        );
         assert!(log_path.is_file());
         assert!(!archived_logs_path.exists());
         let log_contents = fs::read_to_string(&log_path).expect("unity log should exist");
@@ -3990,11 +3907,8 @@ mod tests {
         initialize_database(&storage).expect("database bootstrap should succeed");
 
         let repository_path = root.join("runtime-bin-project-creation-smoke-source");
-        let repository_url = create_tagged_unity_repository(
-            &repository_path,
-            "v13.1.0",
-            "2021.3.33f1",
-        );
+        let repository_url =
+            create_tagged_unity_repository(&repository_path, "v13.1.0", "2021.3.33f1");
         let default_branch = current_git_branch_name(&repository_path);
         let script_path =
             create_fake_unity_script(&root, "project-creation-smoke", ScriptKind::Success);
@@ -4047,11 +3961,12 @@ mod tests {
             &storage,
         )
         .expect("manual release dispatch command should succeed for the created project");
-        let release: ReleaseRunRecord = serde_json::from_str(&dispatch_output)
-            .expect("release dispatch output should decode");
+        let release: ReleaseRunRecord =
+            serde_json::from_str(&dispatch_output).expect("release dispatch output should decode");
 
-        assert!(run_release_planner_cycle(&storage)
-            .expect("release planner cycle should convert the queued release into a build queue message"));
+        assert!(run_release_planner_cycle(&storage).expect(
+            "release planner cycle should convert the queued release into a build queue message"
+        ));
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         let planned_engine_version: String = connection
@@ -4088,13 +4003,17 @@ mod tests {
         assert_eq!(report.build_run.id, record.id);
         assert_eq!(report.build_run.status, "succeeded");
         assert_eq!(report.cleanup.status, "completed");
-        assert_eq!(report.cleanup.workspace_path, workspace_path.display().to_string());
+        assert_eq!(
+            report.cleanup.workspace_path,
+            workspace_path.display().to_string()
+        );
+        assert!(report.attempts.iter().any(|attempt| attempt.workspace_path
+            == workspace_path.display().to_string()
+            && attempt.is_final_workspace));
         assert!(report
-            .attempts
-            .iter()
-            .any(|attempt| attempt.workspace_path == workspace_path.display().to_string()
-                && attempt.is_final_workspace));
-        assert!(report.build_plan.contract_json.contains("Builder.PerformWebGL"));
+            .build_plan
+            .contract_json
+            .contains("Builder.PerformWebGL"));
         assert!(report
             .build_plan
             .contract_json
@@ -4117,7 +4036,8 @@ mod tests {
             "v13.1.0",
             "2021.3.33f1",
         );
-        let script_path = create_fake_unity_script(&root, "run-next-overrides", ScriptKind::Success);
+        let script_path =
+            create_fake_unity_script(&root, "run-next-overrides", ScriptKind::Success);
         let workspace_root_override = root.join("managed-workspace");
         let build_output_override = root.join("build-output");
 
@@ -4150,19 +4070,12 @@ mod tests {
             "Builder.PerformWebGL",
             &script_path,
         );
-        let release_run_id = seed_queued_release(
-            &connection,
-            repository_id,
-            "v13.1.0",
-            "2021.3.33f1",
-        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v13.1.0", "2021.3.33f1");
         drop(connection);
 
         run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect("release plan command should succeed");
@@ -4178,9 +4091,8 @@ mod tests {
                 .clone()
                 .expect("workspace path should persist"),
         );
-        let expected_log_path = PathBuf::from(
-            record.log_path.clone().expect("log path should persist"),
-        );
+        let expected_log_path =
+            PathBuf::from(record.log_path.clone().expect("log path should persist"));
         let expected_build_root = expected_workspace_root
             .join("builds")
             .join(format!("build-run-{}", record.id));
@@ -4197,7 +4109,9 @@ mod tests {
         assert!(expected_workspace_root.starts_with(workspace_root_override.join("runs")));
         assert_eq!(
             expected_log_path,
-            expected_workspace_root.join("logs").join("03-unity-build-webgl.log")
+            expected_workspace_root
+                .join("logs")
+                .join("03-unity-build-webgl.log")
         );
         assert_eq!(
             expected_workspace_root
@@ -4205,8 +4119,14 @@ mod tests {
                 .and_then(|value| value.to_str()),
             Some(expected_workspace_dir_name.as_str())
         );
-        assert_eq!(record.workspace_path.as_deref(), Some(expected_workspace_path.as_str()));
-        assert_eq!(record.log_path.as_deref(), Some(expected_log_path_string.as_str()));
+        assert_eq!(
+            record.workspace_path.as_deref(),
+            Some(expected_workspace_path.as_str())
+        );
+        assert_eq!(
+            record.log_path.as_deref(),
+            Some(expected_log_path_string.as_str())
+        );
         assert_eq!(
             record.artifact_root_path.as_deref(),
             Some(expected_artifact_root_string.as_str())
@@ -4220,7 +4140,10 @@ mod tests {
         let report = load_build_execution_report(&expected_workspace_root);
         assert_eq!(report.cleanup.status, "completed");
         assert_eq!(report.artifacts.len(), 1);
-        assert_eq!(report.artifacts[0].path, "runtime-bin-build-run-next-overrides.v13.1.0.webgl-player.zip");
+        assert_eq!(
+            report.artifacts[0].path,
+            "runtime-bin-build-run-next-overrides.v13.1.0.webgl-player.zip"
+        );
         assert!(!config
             .directories
             .artifacts_dir
@@ -4264,19 +4187,12 @@ mod tests {
             &script_path,
             "directory",
         );
-        let release_run_id = seed_queued_release(
-            &connection,
-            repository_id,
-            "v13.1.1",
-            "2021.3.33f1",
-        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v13.1.1", "2021.3.33f1");
         drop(connection);
 
         run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect("release plan command should succeed");
@@ -4301,7 +4217,9 @@ mod tests {
         let checkout_log_path = workspace_path
             .join("logs")
             .join("01-checkout-repository.log");
-        let unity_log_path = workspace_path.join("logs").join("03-unity-build-windows.log");
+        let unity_log_path = workspace_path
+            .join("logs")
+            .join("03-unity-build-windows.log");
         let register_log_path = workspace_path
             .join("builds")
             .join(format!("build-run-{}", record.id))
@@ -4324,7 +4242,11 @@ mod tests {
         assert_eq!(
             stages
                 .iter()
-                .map(|stage| (stage.position, stage.step_key.clone(), stage.log_path.clone()))
+                .map(|stage| (
+                    stage.position,
+                    stage.step_key.clone(),
+                    stage.log_path.clone()
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 (
@@ -4388,19 +4310,12 @@ mod tests {
             "Builder.PerformLinux",
             &script_path,
         );
-        let release_run_id = seed_queued_release(
-            &connection,
-            repository_id,
-            "v13.1.2",
-            "2021.3.33f1",
-        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v13.1.2", "2021.3.33f1");
         drop(connection);
 
         run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect("release plan command should succeed");
@@ -4437,7 +4352,9 @@ mod tests {
         assert_eq!(first_record.workspace_path, second_record.workspace_path);
         assert_eq!(
             first_log_path,
-            workspace_path.join("logs").join("03-unity-build-windows.log")
+            workspace_path
+                .join("logs")
+                .join("03-unity-build-windows.log")
         );
         assert_eq!(
             second_log_path,
@@ -4466,7 +4383,8 @@ mod tests {
                 .file_name()
                 .and_then(|value| value.to_str())
                 .expect("workspace directory name should exist");
-            let archived_names = archive_entry_names(&build_execution_logs_archive_path(&workspace_path));
+            let archived_names =
+                archive_entry_names(&build_execution_logs_archive_path(&workspace_path));
 
             for expected_name in expected_log_names {
                 assert!(archived_names.contains(&format!("{workspace_name}/logs/{expected_name}")));
@@ -4532,19 +4450,17 @@ mod tests {
             }],
         );
 
-        let resolved = resolve_build_execution_dispatch_plan_with_profile(
-            &plan,
-            &capability_profile,
-        )
-        .expect("runtime build dispatch plan should resolve with discovered editor")
-        .into_unity_host_native();
+        let resolved =
+            resolve_build_execution_dispatch_plan_with_profile(&plan, &capability_profile)
+                .expect("runtime build dispatch plan should resolve with discovered editor")
+                .into_unity_host_native();
 
         assert_eq!(
             resolved.runner_type,
             String::from(selected_host_runner_family_label(platform))
         );
-        let resolved_config: serde_json::Value = serde_json::from_str(&resolved.config_json)
-            .expect("resolved config should decode");
+        let resolved_config: serde_json::Value =
+            serde_json::from_str(&resolved.config_json).expect("resolved config should decode");
         assert_eq!(
             resolved_config
                 .get("unity_executable_path")
@@ -4608,7 +4524,8 @@ mod tests {
             "v13.0.1",
             "2021.3.33f1",
         );
-        let script_path = create_fake_unity_script(&root, "run-next-no-artifacts", ScriptKind::NoArtifact);
+        let script_path =
+            create_fake_unity_script(&root, "run-next-no-artifacts", ScriptKind::NoArtifact);
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         let repository_id = seed_repository_with_url(
@@ -4624,19 +4541,12 @@ mod tests {
             "Builder.PerformWindows",
             &script_path,
         );
-        let release_run_id = seed_queued_release(
-            &connection,
-            repository_id,
-            "v13.0.1",
-            "2021.3.33f1",
-        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v13.0.1", "2021.3.33f1");
         drop(connection);
 
         run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect("release plan command should succeed");
@@ -4692,19 +4602,12 @@ mod tests {
             &script_path,
             1,
         );
-        let release_run_id = seed_queued_release(
-            &connection,
-            repository_id,
-            "v13.0.2",
-            "2021.3.33f1",
-        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v13.0.2", "2021.3.33f1");
         drop(connection);
 
         run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect("release plan command should succeed");
@@ -4759,19 +4662,12 @@ mod tests {
             "Builder.PerformWindows",
             &script_path,
         );
-        let release_run_id = seed_queued_release(
-            &connection,
-            repository_id,
-            "v13.1.0",
-            "2021.3.33f1",
-        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v13.1.0", "2021.3.33f1");
         drop(connection);
 
         run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect("release plan command should succeed");
@@ -4805,8 +4701,12 @@ mod tests {
             &format!("{workspace_name}/logs/03-unity-build-windows.log"),
         );
         assert!(!log_path.exists());
-        assert!(log_contents.contains("No valid Unity Editor license found. Please activate your license."));
-        assert_eq!(load_build_execution_report(&workspace_path).cleanup.status, "completed");
+        assert!(log_contents
+            .contains("No valid Unity Editor license found. Please activate your license."));
+        assert_eq!(
+            load_build_execution_report(&workspace_path).cleanup.status,
+            "completed"
+        );
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         assert_eq!(queue_message_count(&connection, "build-runs"), 0);
@@ -4847,19 +4747,12 @@ mod tests {
             "Builder.PerformWindows",
             &script_path,
         );
-        let release_run_id = seed_queued_release(
-            &connection,
-            repository_id,
-            "v13.2.0",
-            "2021.3.33f1",
-        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v13.2.0", "2021.3.33f1");
         drop(connection);
 
         run_release_plan_command(
-            &[
-                String::from("--release-run-id"),
-                release_run_id.to_string(),
-            ],
+            &[String::from("--release-run-id"), release_run_id.to_string()],
             &storage,
         )
         .expect("release plan command should succeed");
@@ -4878,12 +4771,15 @@ mod tests {
         );
         let log_path = PathBuf::from(record.log_path.clone().expect("log path should persist"));
         assert_eq!(
-            workspace_path
-                .file_name()
-                .and_then(|value| value.to_str()),
+            workspace_path.file_name().and_then(|value| value.to_str()),
             Some(format!("release-run-{}", record.release_run_id).as_str())
         );
-        assert_eq!(log_path, workspace_path.join("logs").join("03-unity-build-windows.log"));
+        assert_eq!(
+            log_path,
+            workspace_path
+                .join("logs")
+                .join("03-unity-build-windows.log")
+        );
         assert!(!log_path.exists());
         assert!(!workspace_path.join("logs").exists());
         let report = load_build_execution_report(&workspace_path);
@@ -4984,12 +4880,10 @@ mod tests {
         let prior_logs = prior_attempt_workspace.join("logs");
         fs::create_dir_all(interrupted_workspace.join("source"))
             .expect("interrupted source directory should create");
-        fs::create_dir_all(&interrupted_logs)
-            .expect("interrupted logs directory should create");
+        fs::create_dir_all(&interrupted_logs).expect("interrupted logs directory should create");
         fs::create_dir_all(prior_attempt_workspace.join("source"))
             .expect("prior source directory should create");
-        fs::create_dir_all(&prior_logs)
-            .expect("prior logs directory should create");
+        fs::create_dir_all(&prior_logs).expect("prior logs directory should create");
         fs::write(
             interrupted_logs.join("02-checkout-repository.log"),
             "checking out repository\n",
@@ -5015,12 +4909,8 @@ mod tests {
             "Builder.PerformWindows",
             &script_path,
         );
-        let release_run_id = seed_queued_release(
-            &connection,
-            repository_id,
-            "v16.0.0",
-            "2021.3.33f1",
-        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v16.0.0", "2021.3.33f1");
         let build_run_id = seed_requeued_build_run(
             &connection,
             release_run_id,
@@ -5131,16 +5021,20 @@ mod tests {
 
         let artifact_root = root.join("publish-artifacts");
         let publish_root = root.join("published-artifacts");
-        let workspace_path = config.directories.runs_dir.join("publish-run-report-success");
-        fs::create_dir_all(artifact_root.join("nested"))
-            .expect("artifact directory should create");
+        let workspace_path = config
+            .directories
+            .runs_dir
+            .join("publish-run-report-success");
+        fs::create_dir_all(artifact_root.join("nested")).expect("artifact directory should create");
         let source_path = artifact_root.join("nested").join("game.zip");
         fs::write(&source_path, "artifact").expect("artifact source should write");
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         let repository_id = seed_repository(&connection, "runtime-bin-publish-run-next-success");
-        let build_target_id = seed_build_target(&connection, repository_id, "windows-player", "windows");
-        let release_run_id = seed_queued_release(&connection, repository_id, "v14.0.0", "2021.3.33f1");
+        let build_target_id =
+            seed_build_target(&connection, repository_id, "windows-player", "windows");
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v14.0.0", "2021.3.33f1");
         let build_run_id = seed_succeeded_build_run_with_workspace(
             &connection,
             release_run_id,
@@ -5239,16 +5133,17 @@ mod tests {
         let artifact_root = root.join("publish-artifacts-move");
         let publish_root = root.join("published-artifacts-move");
         let workspace_path = config.directories.runs_dir.join("publish-run-report-move");
-        fs::create_dir_all(artifact_root.join("nested"))
-            .expect("artifact directory should create");
+        fs::create_dir_all(artifact_root.join("nested")).expect("artifact directory should create");
         fs::create_dir_all(&publish_root).expect("publish directory should create");
         let source_path = artifact_root.join("nested").join("game.zip");
         fs::write(&source_path, "artifact").expect("artifact source should write");
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         let repository_id = seed_repository(&connection, "runtime-bin-publish-run-next-move");
-        let build_target_id = seed_build_target(&connection, repository_id, "windows-player", "windows");
-        let release_run_id = seed_queued_release(&connection, repository_id, "v14.0.1", "2021.3.33f1");
+        let build_target_id =
+            seed_build_target(&connection, repository_id, "windows-player", "windows");
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v14.0.1", "2021.3.33f1");
         let build_run_id = seed_succeeded_build_run_with_workspace(
             &connection,
             release_run_id,
@@ -5312,7 +5207,10 @@ mod tests {
         assert_eq!(record.status, "succeeded");
         let destination_path = publish_root.join("game.zip");
         let destination_ref = destination_path.display().to_string();
-        assert_eq!(record.destination_ref.as_deref(), Some(destination_ref.as_str()));
+        assert_eq!(
+            record.destination_ref.as_deref(),
+            Some(destination_ref.as_str())
+        );
         assert!(!source_path.exists());
         assert_eq!(
             fs::read_to_string(&destination_path).expect("moved artifact should exist"),
@@ -5359,8 +5257,10 @@ mod tests {
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         let repository_id = seed_repository(&connection, "runtime-bin-publish-run-next-itch");
-        let build_target_id = seed_build_target(&connection, repository_id, "windows-player", "windows");
-        let release_run_id = seed_queued_release(&connection, repository_id, "v14.2.0", "2021.3.33f1");
+        let build_target_id =
+            seed_build_target(&connection, repository_id, "windows-player", "windows");
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v14.2.0", "2021.3.33f1");
         let build_run_id = seed_succeeded_build_run_with_workspace(
             &connection,
             release_run_id,
@@ -5370,13 +5270,8 @@ mod tests {
             "2021.3.33f1",
             "host-native",
         );
-        let artifact_id = insert_artifact_record(
-            &connection,
-            build_run_id,
-            "game.zip",
-            "archive",
-            "game.zip",
-        );
+        let artifact_id =
+            insert_artifact_record(&connection, build_run_id, "game.zip", "archive", "game.zip");
         let credentials_id = insert_secret_credential_record(
             &connection,
             "itch-release-token",
@@ -5489,16 +5384,18 @@ mod tests {
 
         let artifact_root = root.join("publish-inspect-artifacts");
         let publish_root = root.join("publish-inspect-output");
-        fs::create_dir_all(artifact_root.join("nested"))
-            .expect("artifact directory should create");
+        fs::create_dir_all(artifact_root.join("nested")).expect("artifact directory should create");
         let source_path = artifact_root.join("nested").join("game.zip");
         fs::write(&source_path, "artifact").expect("artifact source should write");
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         let repository_id = seed_repository(&connection, "runtime-bin-publish-inspect");
-        let build_target_id = seed_build_target(&connection, repository_id, "windows-player", "windows");
-        let release_run_id = seed_queued_release(&connection, repository_id, "v15.0.0", "2021.3.33f1");
-        let build_run_id = seed_succeeded_build_run(&connection, release_run_id, build_target_id, &artifact_root);
+        let build_target_id =
+            seed_build_target(&connection, repository_id, "windows-player", "windows");
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v15.0.0", "2021.3.33f1");
+        let build_run_id =
+            seed_succeeded_build_run(&connection, release_run_id, build_target_id, &artifact_root);
         let _artifact_id = insert_artifact_record(
             &connection,
             build_run_id,
@@ -5557,17 +5454,17 @@ mod tests {
         let destination_path = PathBuf::from(&destination_ref);
 
         let inspect_output = run_publish_inspect_command(
-            &[
-                String::from("--publish-run-id"),
-                publish_run_id.to_string(),
-            ],
+            &[String::from("--publish-run-id"), publish_run_id.to_string()],
             &storage,
         )
         .expect("publish inspect command should succeed for one publish run");
-        let inspect_report: PublishedOutputInspectionReport = serde_json::from_str(&inspect_output)
-            .expect("publish inspect output should decode");
+        let inspect_report: PublishedOutputInspectionReport =
+            serde_json::from_str(&inspect_output).expect("publish inspect output should decode");
 
-        assert_eq!(inspect_report.requested_publish_run_id, Some(publish_run_id));
+        assert_eq!(
+            inspect_report.requested_publish_run_id,
+            Some(publish_run_id)
+        );
         assert_eq!(inspect_report.requested_build_run_id, None);
         assert_eq!(inspect_report.publish_runs.len(), 1);
         let diagnostic = &inspect_report.publish_runs[0];
@@ -5576,7 +5473,10 @@ mod tests {
         assert!(diagnostic.destination_exists);
         assert!(diagnostic.destination_is_file);
         assert_eq!(diagnostic.destination_size_bytes, Some(8));
-        assert_eq!(diagnostic.destination_ref.as_deref(), Some(destination_ref.as_str()));
+        assert_eq!(
+            diagnostic.destination_ref.as_deref(),
+            Some(destination_ref.as_str())
+        );
         assert_eq!(
             diagnostic.expected_destination_ref.as_deref(),
             Some(destination_ref.as_str())
@@ -5585,10 +5485,7 @@ mod tests {
             diagnostic.publish_target_name.as_deref(),
             Some("filesystem-release")
         );
-        assert_eq!(
-            diagnostic.artifact_path.as_deref(),
-            Some("nested/game.zip")
-        );
+        assert_eq!(diagnostic.artifact_path.as_deref(), Some("nested/game.zip"));
         assert!(diagnostic.destination_error.is_none());
         assert!(diagnostic.expected_destination_error.is_none());
         assert!(diagnostic.plan_error.is_none());
@@ -5596,10 +5493,7 @@ mod tests {
         fs::remove_file(&destination_path).expect("published artifact should be removable");
 
         let build_inspect_output = run_publish_inspect_command(
-            &[
-                String::from("--build-run-id"),
-                build_run_id.to_string(),
-            ],
+            &[String::from("--build-run-id"), build_run_id.to_string()],
             &storage,
         )
         .expect("publish inspect command should succeed for one build run");
@@ -5607,7 +5501,10 @@ mod tests {
             serde_json::from_str(&build_inspect_output)
                 .expect("build publish inspect output should decode");
 
-        assert_eq!(build_inspect_report.requested_build_run_id, Some(build_run_id));
+        assert_eq!(
+            build_inspect_report.requested_build_run_id,
+            Some(build_run_id)
+        );
         assert_eq!(build_inspect_report.requested_publish_run_id, None);
         assert_eq!(build_inspect_report.publish_runs.len(), 1);
         let diagnostic = &build_inspect_report.publish_runs[0];
@@ -5642,8 +5539,10 @@ mod tests {
 
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         let repository_id = seed_repository(&connection, "runtime-bin-publish-run-next-fail");
-        let build_target_id = seed_build_target(&connection, repository_id, "linux-player", "linux");
-        let release_run_id = seed_queued_release(&connection, repository_id, "v14.1.0", "2021.3.33f1");
+        let build_target_id =
+            seed_build_target(&connection, repository_id, "linux-player", "linux");
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v14.1.0", "2021.3.33f1");
         let build_run_id = seed_succeeded_build_run_with_workspace(
             &connection,
             release_run_id,
@@ -5653,13 +5552,8 @@ mod tests {
             "2021.3.33f1",
             "host-native",
         );
-        let _artifact_id = insert_artifact_record(
-            &connection,
-            build_run_id,
-            "game.zip",
-            "archive",
-            "game.zip",
-        );
+        let _artifact_id =
+            insert_artifact_record(&connection, build_run_id, "game.zip", "archive", "game.zip");
         let publish_target_id = seed_publish_target_with_config(
             &connection,
             repository_id,
@@ -5729,18 +5623,10 @@ mod tests {
     }
 
     fn seed_repository(connection: &Connection, name: &str) -> i64 {
-        seed_repository_with_url(
-            connection,
-            name,
-            &format!("https://example.com/{name}.git"),
-        )
+        seed_repository_with_url(connection, name, &format!("https://example.com/{name}.git"))
     }
 
-    fn seed_repository_with_url(
-        connection: &Connection,
-        name: &str,
-        repository_url: &str,
-    ) -> i64 {
+    fn seed_repository_with_url(connection: &Connection, name: &str, repository_url: &str) -> i64 {
         seed_repository_with_url_and_credentials(connection, name, repository_url, None)
     }
 
@@ -5760,12 +5646,7 @@ mod tests {
         connection.last_insert_rowid()
     }
 
-    fn seed_credentials(
-        connection: &Connection,
-        name: &str,
-        kind: &str,
-        config_json: &str,
-    ) -> i64 {
+    fn seed_credentials(connection: &Connection, name: &str, kind: &str, config_json: &str) -> i64 {
         connection
             .execute(
                 "INSERT INTO credentials (name, kind, config_json) VALUES (?, ?, ?)",
@@ -6087,14 +5968,7 @@ mod tests {
                     active_location_ref
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 ",
-                params![
-                    build_run_id,
-                    name,
-                    kind,
-                    path,
-                    "runtime_artifact",
-                    path,
-                ],
+                params![build_run_id, name, kind, path, "runtime_artifact", path,],
             )
             .expect("artifact record should insert");
 
@@ -6120,7 +5994,13 @@ mod tests {
                     status
                 ) VALUES (?, ?, ?, ?, ?)
                 ",
-                params![release_run_id, build_run_id, publish_target_id, artifact_id, status],
+                params![
+                    release_run_id,
+                    build_run_id,
+                    publish_target_id,
+                    artifact_id,
+                    status
+                ],
             )
             .expect("publish run should insert");
 
@@ -6263,7 +6143,10 @@ mod tests {
             .expect("publish run count should load")
     }
 
-    fn load_repository_last_seen_tag(connection: &Connection, repository_id: i64) -> Option<String> {
+    fn load_repository_last_seen_tag(
+        connection: &Connection,
+        repository_id: i64,
+    ) -> Option<String> {
         connection
             .query_row(
                 "SELECT last_seen_tag FROM repositories WHERE id = ?",
@@ -6448,24 +6331,20 @@ mod tests {
             root.join("fake-butler.sh")
         };
         let contents = if cfg!(windows) {
-            String::from(
-                concat!(
-                    "@echo off\r\n",
-                    "set SCRIPT_DIR=%~dp0\r\n",
-                    "> \"%SCRIPT_DIR%butler-args.txt\" echo %*\r\n",
-                    "> \"%SCRIPT_DIR%butler-api-key.txt\" echo %BUTLER_API_KEY%\r\n",
-                    "exit /b 0\r\n"
-                ),
-            )
+            String::from(concat!(
+                "@echo off\r\n",
+                "set SCRIPT_DIR=%~dp0\r\n",
+                "> \"%SCRIPT_DIR%butler-args.txt\" echo %*\r\n",
+                "> \"%SCRIPT_DIR%butler-api-key.txt\" echo %BUTLER_API_KEY%\r\n",
+                "exit /b 0\r\n"
+            ))
         } else {
-            String::from(
-                concat!(
-                    "#!/bin/sh\n",
-                    "SCRIPT_DIR=\"$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\"\n",
-                    "printf '%s' \"$*\" > \"$SCRIPT_DIR/butler-args.txt\"\n",
-                    "printf '%s' \"$BUTLER_API_KEY\" > \"$SCRIPT_DIR/butler-api-key.txt\"\n"
-                ),
-            )
+            String::from(concat!(
+                "#!/bin/sh\n",
+                "SCRIPT_DIR=\"$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\"\n",
+                "printf '%s' \"$*\" > \"$SCRIPT_DIR/butler-args.txt\"\n",
+                "printf '%s' \"$BUTLER_API_KEY\" > \"$SCRIPT_DIR/butler-api-key.txt\"\n"
+            ))
         };
         fs::write(&script_path, contents).expect("fake butler script should write");
 
@@ -6525,9 +6404,9 @@ mod tests {
             platform_prerequisites: Vec::new(),
             discovered_editors,
             runner_selection: RunnerSelectionDiagnostics {
-                selected_runner_family: Some(String::from(
-                    selected_host_runner_family_label(platform),
-                )),
+                selected_runner_family: Some(String::from(selected_host_runner_family_label(
+                    platform,
+                ))),
                 status: String::from("ready"),
                 message: String::from("ready"),
             },

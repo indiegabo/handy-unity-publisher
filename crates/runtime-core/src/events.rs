@@ -234,8 +234,7 @@ mod tests {
             .append(true)
             .open(&storage.runtime_events_path)
             .expect("event stream should be appendable");
-        write!(file, "{{\"event_id\":\"partial")
-            .expect("partial line should be written");
+        write!(file, "{{\"event_id\":\"partial").expect("partial line should be written");
 
         let batch = read_runtime_event_batch(&storage.runtime_events_path, 0)
             .expect("runtime event batch should read complete lines");

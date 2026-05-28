@@ -4,29 +4,26 @@
 use super::*;
 use runtime_contracts::BuildKind;
 use runtime_runner::{
-    BuildExecutionAdapter, DiscoveredArtifact, EngineAdapterRegistry,
-    PreparedWorkspace,
-    WorkspacePreparationInput, WorkspacePreparationSource,
     unity::{
         package_unity_build_output, resolve_final_unity_artifact_output_path,
         resolve_unity_build_stage_identity, UnityBuildStageIdentity,
     },
-};
-use runtime_store::{
-    CreateArtifactRecordInput, LocalCoordinator, ReleaseSourceMetadata,
+    BuildExecutionAdapter, DiscoveredArtifact, EngineAdapterRegistry, PreparedWorkspace,
+    WorkspacePreparationInput, WorkspacePreparationSource,
 };
 use runtime_store::lifecycle::{BuildStatus, ReleaseStatus};
+use runtime_store::{CreateArtifactRecordInput, LocalCoordinator, ReleaseSourceMetadata};
 use std::collections::HashMap;
-use std::path::PathBuf;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
+use std::path::PathBuf;
 
 #[cfg(test)]
 use runtime_config::RuntimeDirectories;
 #[cfg(test)]
 use runtime_store::{
-    CreateRepositoryProjectBuildTargetInput, CreateRepositoryProjectInput,
-    StorageLayout, initialize_database, open_connection,
+    initialize_database, open_connection, CreateRepositoryProjectBuildTargetInput,
+    CreateRepositoryProjectInput, StorageLayout,
 };
 
 const BUILD_EXECUTION_REPORT_SCHEMA_VERSION: u32 = 2;
@@ -35,10 +32,8 @@ const BUILD_EXECUTION_CLEANUP_PENDING: &str = "pending";
 const BUILD_EXECUTION_CLEANUP_COMPLETED: &str = "completed";
 const BUILD_EXECUTION_CLEANUP_FAILED: &str = "failed";
 const BUILD_EXECUTION_CLEANUP_TRIGGER_TERMINAL_STATE: &str = "terminal_state";
-const BUILD_EXECUTION_CLEANUP_TRIGGER_REQUESTED_INTERRUPTION: &str =
-    "requested_interruption";
-const BUILD_EXECUTION_CLEANUP_TRIGGER_SYSTEM_INTERRUPTION: &str =
-    "system_interruption";
+const BUILD_EXECUTION_CLEANUP_TRIGGER_REQUESTED_INTERRUPTION: &str = "requested_interruption";
+const BUILD_EXECUTION_CLEANUP_TRIGGER_SYSTEM_INTERRUPTION: &str = "system_interruption";
 const BUILD_EXECUTION_RETAINED_DIR_NAME: &str = "retained";
 const BUILD_EXECUTION_WORKSPACE_OUTPUTS_DIR_NAME: &str = "outputs";
 const BUILD_EXECUTION_REPORT_FILE_NAME: &str = "execution-report.json";
@@ -54,8 +49,7 @@ const REPOSITORY_SOURCE_MODE_LOCAL_WORKSPACE: &str = "local_workspace";
 const LOCAL_WORKSPACE_EDITOR_LOCKFILE_RELATIVE_PATH: &str = "Temp/UnityLockfile";
 const LOCAL_WORKSPACE_HOLD_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const LOCAL_WORKSPACE_HOLD_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
-const LOCAL_WORKSPACE_HOLD_MESSAGE_PREFIX: &str =
-    "[hgp-on-hold-local-workspace-editor-open]";
+const LOCAL_WORKSPACE_HOLD_MESSAGE_PREFIX: &str = "[hgp-on-hold-local-workspace-editor-open]";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -216,7 +210,10 @@ fn append_timestamped_log_message(path: &Path, message: &str) -> io::Result<()> 
         fs::create_dir_all(parent)?;
     }
 
-    let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     writeln!(
         file,
         "[{}] {}",
@@ -257,11 +254,15 @@ impl ExecutionProgressReporter for ProcessCheckoutLogReporter {
 }
 
 fn process_checkout_log_path(workspace_path: &Path) -> PathBuf {
-    workspace_path.join("logs").join(PROCESS_CHECKOUT_LOG_FILE_NAME)
+    workspace_path
+        .join("logs")
+        .join(PROCESS_CHECKOUT_LOG_FILE_NAME)
 }
 
 fn process_validation_log_path(workspace_path: &Path) -> PathBuf {
-    workspace_path.join("logs").join(PROCESS_VALIDATION_LOG_FILE_NAME)
+    workspace_path
+        .join("logs")
+        .join(PROCESS_VALIDATION_LOG_FILE_NAME)
 }
 
 fn ensure_release_process_checkout(
@@ -274,7 +275,8 @@ fn ensure_release_process_checkout(
         return Ok(planned);
     }
 
-    let mut reporter = ProcessCheckoutLogReporter::new(process_checkout_log_path(&planned.root_path))?;
+    let mut reporter =
+        ProcessCheckoutLogReporter::new(process_checkout_log_path(&planned.root_path))?;
     preparer.prepare_process_with_reporter(preparation, &mut reporter)
 }
 
@@ -642,9 +644,7 @@ impl QueueLeaseRenewer {
 
                         store_queue_lease_renewer_error(
                             &thread_error_message,
-                            format!(
-                                "{context} {message_id} lost its lease before work completed",
-                            ),
+                            format!("{context} {message_id} lost its lease before work completed",),
                         );
                         break;
                     }
@@ -717,7 +717,8 @@ pub(crate) fn run_build_stage_next_command(
         Duration::ZERO,
         BUILD_QUEUE_LEASE_TTL,
         &config.concurrency,
-    )? else {
+    )?
+    else {
         return Ok(String::from("null"));
     };
     let lease_renewer = QueueLeaseRenewer::spawn(
@@ -728,20 +729,18 @@ pub(crate) fn run_build_stage_next_command(
         "build queue message",
     );
 
-    let staged_result =
-        stage_claimed_build_job(&coordinator, config, storage, &message.payload).or_else(
-            |error| {
-                coordinator
-                    .release_message(message.id, &message.lease_token)
-                    .map_err(|release_error| {
-                        Box::new(io::Error::other(format!(
-                            "release claimed build message {} after error {error}: {release_error}",
-                            message.id
-                        ))) as Box<dyn Error>
-                    })
-                    .and_then(|_| Err(Box::new(error) as Box<dyn Error>))
-            },
-        );
+    let staged_result = stage_claimed_build_job(&coordinator, config, storage, &message.payload)
+        .or_else(|error| {
+            coordinator
+                .release_message(message.id, &message.lease_token)
+                .map_err(|release_error| {
+                    Box::new(io::Error::other(format!(
+                        "release claimed build message {} after error {error}: {release_error}",
+                        message.id
+                    ))) as Box<dyn Error>
+                })
+                .and_then(|_| Err(Box::new(error) as Box<dyn Error>))
+        });
 
     lease_renewer.stop();
     let staged = match staged_result {
@@ -793,7 +792,8 @@ pub(crate) fn run_build_run_next_command(
         Duration::ZERO,
         BUILD_QUEUE_LEASE_TTL,
         &config.concurrency,
-    )? else {
+    )?
+    else {
         return Ok(String::from("null"));
     };
     let lease_renewer = QueueLeaseRenewer::spawn(
@@ -833,8 +833,7 @@ pub(crate) fn run_build_run_next_command(
                     return Err(Box::new(error));
                 }
             };
-        let planned = match WorkspacePreparer::new(&config.directories).plan(&planned_preparation)
-        {
+        let planned = match WorkspacePreparer::new(&config.directories).plan(&planned_preparation) {
             Ok(planned) => planned,
             Err(error) => {
                 release_claimed_build_message(
@@ -889,7 +888,9 @@ pub(crate) fn run_build_run_next_command(
                 plan.build_run_id,
                 FailBuildRunInput {
                     workspace_path: planned.root_path.display().to_string(),
-                    log_path: process_checkout_log_path(&planned.root_path).display().to_string(),
+                    log_path: process_checkout_log_path(&planned.root_path)
+                        .display()
+                        .to_string(),
                     artifact_root_path: planned.artifact_root_path.display().to_string(),
                     error_message: error.to_string(),
                 },
@@ -926,10 +927,7 @@ pub(crate) fn run_build_run_next_command(
             repository_engine_kind,
             engine_version,
         );
-        validation_tracker.start_stage(
-            BuildProcessStage::ValidateContext,
-            &validation_message,
-        )?;
+        validation_tracker.start_stage(BuildProcessStage::ValidateContext, &validation_message)?;
         emit_build_stage_started_event(
             storage,
             &event_context,
@@ -947,10 +945,8 @@ pub(crate) fn run_build_run_next_command(
                 plan
             }
             Err(error) => {
-                validation_tracker.fail_stage(
-                    BuildProcessStage::ValidateContext,
-                    &error.to_string(),
-                )?;
+                validation_tracker
+                    .fail_stage(BuildProcessStage::ValidateContext, &error.to_string())?;
                 let record = coordinator.fail_build_run(
                     plan.build_run_id,
                     FailBuildRunInput {
@@ -1032,14 +1028,15 @@ fn stage_claimed_build_job(
 ) -> io::Result<BuildRunRecord> {
     let plan = load_claimed_build_plan(coordinator, payload)?;
     let planned_preparation = build_workspace_preparation(&plan, GitAuthOptions::default())?;
-    let planned = WorkspacePreparer::new(&config.directories)
-        .plan(&planned_preparation)?;
+    let planned = WorkspacePreparer::new(&config.directories).plan(&planned_preparation)?;
     let event_context = build_run_event_context(coordinator, &plan);
     let started = coordinator.start_build_run(
         plan.build_run_id,
         StartBuildRunInput {
             workspace_path: planned.root_path.display().to_string(),
-            log_path: process_validation_log_path(&planned.root_path).display().to_string(),
+            log_path: process_validation_log_path(&planned.root_path)
+                .display()
+                .to_string(),
             artifact_root_path: planned.artifact_root_path.display().to_string(),
         },
     )?;
@@ -1057,7 +1054,9 @@ fn stage_claimed_build_job(
                 plan.build_run_id,
                 FailBuildRunInput {
                     workspace_path: planned.root_path.display().to_string(),
-                    log_path: process_validation_log_path(&planned.root_path).display().to_string(),
+                    log_path: process_validation_log_path(&planned.root_path)
+                        .display()
+                        .to_string(),
                     artifact_root_path: planned.artifact_root_path.display().to_string(),
                     error_message: error.to_string(),
                 },
@@ -1075,7 +1074,9 @@ fn stage_claimed_build_job(
                 plan.build_run_id,
                 FailBuildRunInput {
                     workspace_path: planned.root_path.display().to_string(),
-                    log_path: process_checkout_log_path(&planned.root_path).display().to_string(),
+                    log_path: process_checkout_log_path(&planned.root_path)
+                        .display()
+                        .to_string(),
                     artifact_root_path: planned.artifact_root_path.display().to_string(),
                     error_message: error.to_string(),
                 },
@@ -1094,8 +1095,7 @@ fn complete_successful_build_run(
     tracker: &BuildRunStageTracker<'_>,
 ) -> io::Result<BuildRunRecord> {
     if output_requires_runtime_archive(runner_plan) {
-        let packaging_message =
-            "Packaging Unity output into a runtime-owned zip archive.";
+        let packaging_message = "Packaging Unity output into a runtime-owned zip archive.";
         tracker.start_stage(BuildProcessStage::PackageArtifact, packaging_message)?;
         emit_build_stage_started_event(
             storage,
@@ -1130,10 +1130,10 @@ fn complete_successful_build_run(
         runner_plan,
         &result.artifact_root_path,
     )
-        .map_err(|error| {
-            let _ = tracker.fail_stage(BuildProcessStage::RegisterArtifacts, &error.to_string());
-            error
-        })?;
+    .map_err(|error| {
+        let _ = tracker.fail_stage(BuildProcessStage::RegisterArtifacts, &error.to_string());
+        error
+    })?;
     tracker.complete_stage(
         BuildProcessStage::RegisterArtifacts,
         "Artifacts registered for downstream release-wide publish planning.",
@@ -1304,17 +1304,13 @@ fn archive_build_run_logs(
             .and_then(|value| value.to_str())
             .filter(|value| !value.is_empty())
             .unwrap_or("attempt");
-        add_directory_to_zip_with_prefix(
-            &mut zip,
-            attempt_root,
-            &logs_dir,
-            options,
-            Some(prefix),
-        )?;
+        add_directory_to_zip_with_prefix(&mut zip, attempt_root, &logs_dir, options, Some(prefix))?;
     }
 
     zip.finish().map_err(io::Error::other)?;
-    let size_bytes = fs::metadata(&archive_path).ok().map(|metadata| metadata.len());
+    let size_bytes = fs::metadata(&archive_path)
+        .ok()
+        .map(|metadata| metadata.len());
 
     Ok(Some(BuildExecutionRetainedFile {
         role: String::from("logs-archive"),
@@ -1482,8 +1478,11 @@ fn synchronize_build_execution_report_for_workspace(
     let cleanup = cleanup_override
         .or_else(|| existing.as_ref().map(|report| report.cleanup.clone()))
         .unwrap_or_else(|| default_build_execution_cleanup_snapshot(workspace_path));
-    let interruption = interruption_override
-        .or_else(|| existing.as_ref().and_then(|report| report.interruption.clone()));
+    let interruption = interruption_override.or_else(|| {
+        existing
+            .as_ref()
+            .and_then(|report| report.interruption.clone())
+    });
 
     let report = BuildExecutionReport {
         schema_version: BUILD_EXECUTION_REPORT_SCHEMA_VERSION,
@@ -1547,15 +1546,14 @@ fn maybe_run_release_cleanup(
         return;
     };
 
-    let all_attempt_roots = discover_release_attempt_roots(&final_workspace_path).unwrap_or_else(
-        |error| {
+    let all_attempt_roots =
+        discover_release_attempt_roots(&final_workspace_path).unwrap_or_else(|error| {
             eprintln!(
                 "runtime cleanup could not enumerate release workspace roots for {}: {}",
                 release_run_id, error
             );
             vec![final_workspace_path.clone()]
-        },
-    );
+        });
 
     let workspace_bytes_before = match total_workspace_size_bytes(&all_attempt_roots) {
         Ok(bytes) => bytes,
@@ -1611,12 +1609,9 @@ fn maybe_run_release_cleanup(
         error_message: cleanup_error,
     };
 
-    if let Err(error) = synchronize_build_execution_report(
-        coordinator,
-        build_run_id,
-        Some(attempts),
-        Some(cleanup),
-    ) {
+    if let Err(error) =
+        synchronize_build_execution_report(coordinator, build_run_id, Some(attempts), Some(cleanup))
+    {
         eprintln!(
             "runtime cleanup could not persist build execution report for {}: {}",
             build_run_id, error
@@ -1627,7 +1622,7 @@ fn maybe_run_release_cleanup(
 fn release_status_is_terminal(status: &str) -> bool {
     status == ReleaseStatus::Succeeded.as_str()
         || status == ReleaseStatus::Failed.as_str()
-    || status == ReleaseStatus::Canceled.as_str()
+        || status == ReleaseStatus::Canceled.as_str()
 }
 
 fn discover_release_attempt_roots(workspace_path: &Path) -> io::Result<Vec<PathBuf>> {
@@ -1663,17 +1658,15 @@ fn run_interrupted_build_cleanup(
     interrupted_build: &InterruptedBuildRecoveryRecord,
 ) {
     let workspace_path = PathBuf::from(interrupted_build.workspace_path.trim());
-    let attempt_roots = discover_build_run_attempt_roots(
-        interrupted_build.build_run_id,
-        &workspace_path,
-    )
-    .unwrap_or_else(|error| {
-        eprintln!(
-            "runtime recovery could not enumerate interrupted build attempts for {}: {}",
-            interrupted_build.build_run_id, error
-        );
-        vec![workspace_path.clone()]
-    });
+    let attempt_roots =
+        discover_build_run_attempt_roots(interrupted_build.build_run_id, &workspace_path)
+            .unwrap_or_else(|error| {
+                eprintln!(
+                    "runtime recovery could not enumerate interrupted build attempts for {}: {}",
+                    interrupted_build.build_run_id, error
+                );
+                vec![workspace_path.clone()]
+            });
     let workspace_bytes_before = match total_workspace_size_bytes(&attempt_roots) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -1784,17 +1777,17 @@ fn discover_build_run_attempt_roots(
 
     if roots.is_empty() {
         if let Some(parent) = workspace_path.parent() {
-        if parent.is_dir() {
-            let mut entries = fs::read_dir(parent)?.collect::<Result<Vec<_>, _>>()?;
-            entries.sort_by_key(|entry| entry.path());
-            for entry in entries {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                    continue;
-                };
+            if parent.is_dir() {
+                let mut entries = fs::read_dir(parent)?.collect::<Result<Vec<_>, _>>()?;
+                entries.sort_by_key(|entry| entry.path());
+                for entry in entries {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                        continue;
+                    };
                     if name.starts_with(&prefix) {
                         push_attempt_root(&mut roots, path);
                     }
@@ -1811,12 +1804,9 @@ pub(crate) fn synchronize_build_execution_report_from_publish(
     coordinator: &LocalCoordinator,
     publish_run: &PublishRunRecord,
 ) {
-    if let Err(error) = synchronize_build_execution_report(
-        coordinator,
-        publish_run.build_run_id,
-        None,
-        None,
-    ) {
+    if let Err(error) =
+        synchronize_build_execution_report(coordinator, publish_run.build_run_id, None, None)
+    {
         eprintln!(
             "runtime cleanup could not refresh build execution report for publish run {}: {}",
             publish_run.id, error
@@ -1878,8 +1868,7 @@ fn process_unity_build_run_with_retry(
 
         let unity_build_message = format!(
             "Launching Unity build method '{}' for target '{}'.",
-            runner_plan.unity_build_method,
-            runner_plan.unity_target_platform,
+            runner_plan.unity_build_method, runner_plan.unity_target_platform,
         );
         tracker.start_stage(BuildProcessStage::ExecuteBuild, &unity_build_message)?;
         emit_build_stage_started_event(
@@ -1927,7 +1916,9 @@ fn process_unity_build_run_with_retry(
 
         match execute_outcome {
             Ok(UnityBuildExecutionProcessOutcome { result, error }) => match error {
-                Some(error) if retry_available && should_retry_in_fresh_workspace(&result.log_path)? => {
+                Some(error)
+                    if retry_available && should_retry_in_fresh_workspace(&result.log_path)? =>
+                {
                     tracker.fail_stage(
                         BuildProcessStage::ExecuteBuild,
                         &format!("{} Retrying once with a fresh workspace.", error),
@@ -1937,12 +1928,8 @@ fn process_unity_build_run_with_retry(
                 }
                 Some(error) => {
                     tracker.fail_stage(BuildProcessStage::ExecuteBuild, &error.to_string())?;
-                    let record = persist_host_native_failure(
-                        coordinator,
-                        build_run_id,
-                        &result,
-                        &error,
-                    )?;
+                    let record =
+                        persist_host_native_failure(coordinator, build_run_id, &result, &error)?;
                     return Ok(record);
                 }
                 None => {
@@ -2026,9 +2013,8 @@ fn wait_for_local_workspace_preflight(
     while local_workspace_editor_lock_detected(source_path) {
         let hold_message = local_workspace_hold_message(source_path);
         let now = std::time::Instant::now();
-        let should_emit_heartbeat = last_hold_heartbeat_at.is_none_or(|last| {
-            now.duration_since(last) >= LOCAL_WORKSPACE_HOLD_HEARTBEAT_INTERVAL
-        });
+        let should_emit_heartbeat = last_hold_heartbeat_at
+            .is_none_or(|last| now.duration_since(last) >= LOCAL_WORKSPACE_HOLD_HEARTBEAT_INTERVAL);
 
         if should_emit_heartbeat {
             tracker.heartbeat_stage(BuildProcessStage::ExecuteBuild, &hold_message)?;
@@ -2139,8 +2125,7 @@ fn register_build_artifacts(
     plan: &UnityBuildExecutionPlan,
     artifact_root_path: &Path,
 ) -> io::Result<()> {
-    let expected_output_path =
-        resolve_final_unity_artifact_output_path(plan, artifact_root_path)?;
+    let expected_output_path = resolve_final_unity_artifact_output_path(plan, artifact_root_path)?;
     let artifacts = select_target_aware_artifacts(
         artifact_root_path,
         &expected_output_path,
@@ -2225,10 +2210,8 @@ fn resolve_build_workspace_preparation(
     let git_auth = match plan.repository_credentials_id {
         Some(credentials_id) => {
             let credentials = coordinator.get_credential_record(credentials_id)?;
-            let config_json = resolve_credential_secret_config_json(
-                &credentials.kind,
-                &credentials.config_json,
-            )?;
+            let config_json =
+                resolve_credential_secret_config_json(&credentials.kind, &credentials.config_json)?;
             git_auth_options_from_credentials(&credentials.kind, &config_json)?
         }
         None => GitAuthOptions::default(),
@@ -2244,26 +2227,21 @@ fn build_workspace_preparation(
     let source_metadata = resolve_build_source_metadata(plan)?;
     let source = match source_metadata.source_kind.as_str() {
         RELEASE_SOURCE_KIND_LOCAL_WORKSPACE => WorkspacePreparationSource::LocalWorkspace {
-            local_path: PathBuf::from(
-                source_metadata.local_path.ok_or_else(|| {
-                    io::Error::new(
-                        ErrorKind::InvalidInput,
-                        format!(
-                            "build run {} is missing a local workspace path",
-                            plan.build_run_id
-                        ),
-                    )
-                })?,
-            ),
+            local_path: PathBuf::from(source_metadata.local_path.ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "build run {} is missing a local workspace path",
+                        plan.build_run_id
+                    ),
+                )
+            })?),
         },
         RELEASE_SOURCE_KIND_MANAGED_TAG | RELEASE_SOURCE_KIND_MANAGED_REF => {
             let git_ref = source_metadata.source_ref.ok_or_else(|| {
                 io::Error::new(
                     ErrorKind::InvalidInput,
-                    format!(
-                        "build run {} is missing a source ref",
-                        plan.build_run_id
-                    ),
+                    format!("build run {} is missing a source ref", plan.build_run_id),
                 )
             })?;
             if plan.repository_url.trim().is_empty() {
@@ -2355,12 +2333,12 @@ fn resolve_build_source_metadata(
             },
         )?
     };
-    let default_source_kind = if plan.repository_source_mode == REPOSITORY_SOURCE_MODE_LOCAL_WORKSPACE
-    {
-        RELEASE_SOURCE_KIND_LOCAL_WORKSPACE
-    } else {
-        RELEASE_SOURCE_KIND_MANAGED_TAG
-    };
+    let default_source_kind =
+        if plan.repository_source_mode == REPOSITORY_SOURCE_MODE_LOCAL_WORKSPACE {
+            RELEASE_SOURCE_KIND_LOCAL_WORKSPACE
+        } else {
+            RELEASE_SOURCE_KIND_MANAGED_TAG
+        };
     let source_kind = metadata
         .source_kind
         .as_deref()
@@ -2402,16 +2380,15 @@ fn resolve_build_source_metadata(
     })
 }
 
-fn resolve_unity_runner_config_json(
-    plan: &StoredBuildExecutionPlan,
-) -> io::Result<String> {
+fn resolve_unity_runner_config_json(plan: &StoredBuildExecutionPlan) -> io::Result<String> {
     let source_metadata = resolve_build_source_metadata(plan)?;
-    let Some(unity_executable_path_override) = source_metadata.unity_executable_path_override else {
+    let Some(unity_executable_path_override) = source_metadata.unity_executable_path_override
+    else {
         return Ok(plan.config_json.clone());
     };
 
-    let mut config = serde_json::from_str::<serde_json::Value>(&plan.config_json).map_err(
-        |error| {
+    let mut config =
+        serde_json::from_str::<serde_json::Value>(&plan.config_json).map_err(|error| {
             io::Error::new(
                 ErrorKind::InvalidInput,
                 format!(
@@ -2419,8 +2396,7 @@ fn resolve_unity_runner_config_json(
                     plan.build_run_id
                 ),
             )
-        },
-    )?;
+        })?;
     let object = config.as_object_mut().ok_or_else(|| {
         io::Error::new(
             ErrorKind::InvalidInput,
@@ -2463,8 +2439,8 @@ fn resolve_unity_build_target_contract(
         ));
     }
 
-    let contract = serde_json::from_str::<StoredBuildTargetContract>(contract_json)
-        .map_err(|error| {
+    let contract =
+        serde_json::from_str::<StoredBuildTargetContract>(contract_json).map_err(|error| {
             io::Error::new(
                 ErrorKind::InvalidInput,
                 format!(
@@ -2591,8 +2567,8 @@ fn release_claimed_build_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runtime_core::read_runtime_event_batch;
     use runtime_contracts::EngineKind;
+    use runtime_core::read_runtime_event_batch;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     struct TestDir {
@@ -2633,11 +2609,9 @@ mod tests {
         .expect_err("non-Unity engines should be rejected before runner resolution");
 
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported repository engine_kind \"godot\"")
-        );
+        assert!(error
+            .to_string()
+            .contains("unsupported repository engine_kind \"godot\""));
     }
 
     #[test]
@@ -2669,11 +2643,9 @@ mod tests {
         .expect_err("Unity execution should reject build rows without a Unity contract payload");
 
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert!(
-            error
-                .to_string()
-                .contains("missing a Unity build target contract payload")
-        );
+        assert!(error
+            .to_string()
+            .contains("missing a Unity build target contract payload"));
     }
 
     #[test]
@@ -2689,12 +2661,13 @@ mod tests {
 
         fs::create_dir_all(previous_attempt_path.join("source"))
             .expect("previous attempt directory should be created");
-        fs::write(previous_attempt_path.join("source").join("stale.txt"), b"stale")
-            .expect("previous attempt file should be created");
-        fs::create_dir_all(&retained_path)
-            .expect("retained directory should be created");
-        fs::create_dir_all(&outputs_path)
-            .expect("outputs directory should be created");
+        fs::write(
+            previous_attempt_path.join("source").join("stale.txt"),
+            b"stale",
+        )
+        .expect("previous attempt file should be created");
+        fs::create_dir_all(&retained_path).expect("retained directory should be created");
+        fs::create_dir_all(&outputs_path).expect("outputs directory should be created");
         fs::create_dir_all(final_workspace_path.join("source"))
             .expect("final workspace source directory should be created");
         fs::create_dir_all(final_workspace_path.join("logs"))
@@ -2720,15 +2693,15 @@ mod tests {
 
         assert_eq!(removed_attempt_count, 1);
         assert!(!previous_attempt_path.exists());
-        assert!(retained_path.join(BUILD_EXECUTION_LOG_ARCHIVE_FILE_NAME).is_file());
+        assert!(retained_path
+            .join(BUILD_EXECUTION_LOG_ARCHIVE_FILE_NAME)
+            .is_file());
         assert!(outputs_path.join("artifact.txt").is_file());
         assert!(!final_workspace_path.join("source").exists());
         assert!(!final_workspace_path.join("logs").exists());
-        assert!(
-            !final_workspace_path
-                .join(BUILD_EXECUTION_REPORT_FILE_NAME)
-                .exists()
-        );
+        assert!(!final_workspace_path
+            .join(BUILD_EXECUTION_REPORT_FILE_NAME)
+            .exists());
     }
 
     #[test]
@@ -2763,8 +2736,8 @@ mod tests {
                 publish_targets: Vec::new(),
             })
             .expect("repository project should persist");
-        let connection = open_connection(&storage.database_path)
-            .expect("database connection should open");
+        let connection =
+            open_connection(&storage.database_path).expect("database connection should open");
         connection
             .execute(
                 "INSERT INTO release_runs (repository_id, git_tag, status) VALUES (?, ?, ?)",
@@ -2818,9 +2791,7 @@ mod tests {
             output_kind: Some(String::from("archive")),
             output_path_template: Some(String::from("Builds/Linux")),
             engine_version: String::from("2022.3.20f1"),
-            config_json: String::from(
-                r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
-            ),
+            config_json: String::from(r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#),
             timeout_seconds: 900,
         };
 
@@ -2843,9 +2814,8 @@ mod tests {
 
     #[test]
     fn wait_for_local_workspace_preflight_holds_then_resumes_after_lock_release() {
-        let root =
-            TestDir::new("local-workspace-preflight-hold-resume")
-                .expect("temporary test directory should be created");
+        let root = TestDir::new("local-workspace-preflight-hold-resume")
+            .expect("temporary test directory should be created");
         let directories = RuntimeDirectories::from_root(root.path());
         directories
             .ensure_exists()
@@ -2856,10 +2826,8 @@ mod tests {
         let local_workspace_path = root.path().join("local-workspace");
         fs::create_dir_all(local_workspace_path.join("Temp"))
             .expect("local workspace temp directory should create");
-        let lock_path = local_workspace_path
-            .join(LOCAL_WORKSPACE_EDITOR_LOCKFILE_RELATIVE_PATH);
-        fs::write(&lock_path, b"unity-lock")
-            .expect("unity lock file should be created");
+        let lock_path = local_workspace_path.join(LOCAL_WORKSPACE_EDITOR_LOCKFILE_RELATIVE_PATH);
+        fs::write(&lock_path, b"unity-lock").expect("unity lock file should be created");
 
         let coordinator = LocalCoordinator::new(&storage);
         let created = coordinator
@@ -2875,15 +2843,13 @@ mod tests {
                 workspace_root_override: None,
                 polling_interval_seconds: 300,
                 enabled: true,
-                build_targets: vec![
-                    test_build_target_input("Windows", "StandaloneWindows64"),
-                ],
+                build_targets: vec![test_build_target_input("Windows", "StandaloneWindows64")],
                 publish_targets: Vec::new(),
             })
             .expect("repository project should persist");
 
-        let connection = open_connection(&storage.database_path)
-            .expect("database connection should open");
+        let connection =
+            open_connection(&storage.database_path).expect("database connection should open");
         connection
             .execute(
                 "INSERT INTO release_runs (repository_id, git_tag, status) VALUES (?, ?, ?)",
@@ -2911,8 +2877,7 @@ mod tests {
         let process_root_path = root.path().join("release-run-1");
         let build_root_path = process_root_path.join("build-run-1");
         let artifact_root_path = build_root_path.join("outputs");
-        fs::create_dir_all(&artifact_root_path)
-            .expect("artifact root path should create");
+        fs::create_dir_all(&artifact_root_path).expect("artifact root path should create");
 
         let stage_sequence = Rc::new(RefCell::new(BuildRunStageSequence::default()));
         let tracker = BuildRunStageTracker::new(
@@ -2961,15 +2926,13 @@ mod tests {
         let release_lock_thread = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(250));
             drop(held_lock);
-            fs::remove_file(&lock_path_for_thread)
-                .expect("unity lock file should be removable");
+            fs::remove_file(&lock_path_for_thread).expect("unity lock file should be removable");
         });
 
         #[cfg(not(windows))]
         let release_lock_thread = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(250));
-            fs::remove_file(&lock_path_for_thread)
-                .expect("unity lock file should be removable");
+            fs::remove_file(&lock_path_for_thread).expect("unity lock file should be removable");
         });
 
         let event_context = BuildRunEventContext {
@@ -3038,16 +3001,13 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn local_workspace_editor_lock_detected_ignores_stale_windows_lockfile() {
-        let root =
-            TestDir::new("local-workspace-stale-lockfile")
-                .expect("temporary test directory should be created");
+        let root = TestDir::new("local-workspace-stale-lockfile")
+            .expect("temporary test directory should be created");
         let local_workspace_path = root.path().join("local-workspace");
         fs::create_dir_all(local_workspace_path.join("Temp"))
             .expect("local workspace temp directory should create");
-        let lock_path = local_workspace_path
-            .join(LOCAL_WORKSPACE_EDITOR_LOCKFILE_RELATIVE_PATH);
-        fs::write(&lock_path, b"unity-lock")
-            .expect("unity lock file should be created");
+        let lock_path = local_workspace_path.join(LOCAL_WORKSPACE_EDITOR_LOCKFILE_RELATIVE_PATH);
+        fs::write(&lock_path, b"unity-lock").expect("unity lock file should be created");
 
         assert!(lock_path.is_file());
         assert!(!local_workspace_editor_lock_detected(
@@ -3080,9 +3040,7 @@ mod tests {
             runner_type: String::from(RunnerFamily::HostNative.label()),
             output_kind: Some(String::from("archive")),
             output_path_template: Some(String::from("players/game.zip")),
-            config_json: String::from(
-                r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#,
-            ),
+            config_json: String::from(r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#),
             engine_version: String::from("2022.3.20f1"),
             image_ref: String::from("host-native"),
             timeout_seconds: 900,

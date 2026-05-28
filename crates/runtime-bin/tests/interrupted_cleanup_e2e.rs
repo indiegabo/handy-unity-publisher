@@ -1,11 +1,10 @@
 //! End-to-end coverage for interrupted build recovery through the runtime binary.
 
-use rusqlite::{params, Connection};
 use runtime_config::{
-    MAX_HEARTBEATS_ENV, RUNTIME_ROOT_ENV, RuntimeDirectories,
-    SUPERVISION_MAX_RESTARTS_ENV,
+    RuntimeDirectories, MAX_HEARTBEATS_ENV, RUNTIME_ROOT_ENV, SUPERVISION_MAX_RESTARTS_ENV,
 };
-use runtime_store::{StorageLayout, open_connection};
+use runtime_store::{open_connection, StorageLayout};
+use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -158,32 +157,27 @@ fn run_interrupted_recovery_case(
                 .and_then(Value::as_u64),
             None
         );
-        assert!(
-            supervisor_snapshot
-                .pointer("/message")
-                .and_then(Value::as_str)
-                .is_some_and(|message| message.contains("completed cleanly"))
-        );
+        assert!(supervisor_snapshot
+            .pointer("/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("completed cleanly")));
     }
 
     let report = load_json(&fixture.report_path);
-    assert_eq!(report.pointer("/schema_version").and_then(Value::as_u64), Some(2));
     assert_eq!(
-        report
-            .pointer("/build_run/status")
-            .and_then(Value::as_str),
+        report.pointer("/schema_version").and_then(Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        report.pointer("/build_run/status").and_then(Value::as_str),
         Some("queued")
     );
     assert_eq!(
-        report
-            .pointer("/cleanup/status")
-            .and_then(Value::as_str),
+        report.pointer("/cleanup/status").and_then(Value::as_str),
         Some("completed")
     );
     assert_eq!(
-        report
-            .pointer("/cleanup/trigger")
-            .and_then(Value::as_str),
+        report.pointer("/cleanup/trigger").and_then(Value::as_str),
         Some(expected_trigger)
     );
     assert_eq!(
@@ -199,9 +193,7 @@ fn run_interrupted_recovery_case(
         Some(fixture.workspace_path.display().to_string().as_str())
     );
     assert_eq!(
-        report
-            .pointer("/interruption/kind")
-            .and_then(Value::as_str),
+        report.pointer("/interruption/kind").and_then(Value::as_str),
         Some(expected_kind)
     );
     assert_eq!(
@@ -211,9 +203,7 @@ fn run_interrupted_recovery_case(
         Some(expected_message)
     );
     assert_eq!(
-        report
-            .pointer("/stages/0/status")
-            .and_then(Value::as_str),
+        report.pointer("/stages/0/status").and_then(Value::as_str),
         Some("failed")
     );
     assert_eq!(
@@ -231,11 +221,19 @@ fn run_interrupted_recovery_case(
         &[
             format!(
                 "{}/logs/02-checkout-repository.log",
-                fixture.workspace_path.file_name().unwrap().to_string_lossy()
+                fixture
+                    .workspace_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
             ),
             format!(
                 "{}/logs/01-validate-build-context.log",
-                fixture.prior_attempt_path.file_name().unwrap().to_string_lossy()
+                fixture
+                    .prior_attempt_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
             ),
         ],
     );
@@ -243,7 +241,10 @@ fn run_interrupted_recovery_case(
     assert!(!fixture.prior_attempt_path.exists());
     assert!(!fixture.workspace_path.join("logs").exists());
     assert!(!fixture.workspace_path.join("source").exists());
-    assert_eq!(list_directory_names(&fixture.workspace_path), vec![String::from("retained")]);
+    assert_eq!(
+        list_directory_names(&fixture.workspace_path),
+        vec![String::from("retained")]
+    );
 
     let connection = open_connection(&fixture.storage.database_path)
         .expect("database should reopen after runtime recovery");
@@ -332,7 +333,9 @@ fn seed_interrupted_build_fixture(root: &Path, case_name: &str) -> InterruptedBu
     let prior_attempt_path = directories
         .runs_dir
         .join(format!("build-run-{BUILD_RUN_ID}-attempt-100-1"));
-    let workspace_log_path = workspace_path.join("logs").join("02-checkout-repository.log");
+    let workspace_log_path = workspace_path
+        .join("logs")
+        .join("02-checkout-repository.log");
     let prior_log_path = prior_attempt_path
         .join("logs")
         .join("01-validate-build-context.log");
@@ -502,7 +505,9 @@ fn seed_interrupted_build_fixture(root: &Path, case_name: &str) -> InterruptedBu
     drop(connection);
 
     InterruptedBuildFixture {
-        report_path: workspace_path.join("retained").join("execution-report.json"),
+        report_path: workspace_path
+            .join("retained")
+            .join("execution-report.json"),
         archive_path: workspace_path.join("retained").join("execution-logs.zip"),
         storage,
         workspace_path,
@@ -554,12 +559,13 @@ fn assert_attempt_record(
     let workspace_path = workspace_path.display().to_string();
     let attempt = attempts
         .iter()
-        .find(|attempt| {
-            attempt["workspace_path"].as_str() == Some(workspace_path.as_str())
-        })
+        .find(|attempt| attempt["workspace_path"].as_str() == Some(workspace_path.as_str()))
         .expect("expected attempt snapshot should exist");
 
-    assert_eq!(attempt["is_final_workspace"].as_bool(), Some(expected_final));
+    assert_eq!(
+        attempt["is_final_workspace"].as_bool(),
+        Some(expected_final)
+    );
     assert_eq!(
         attempt["removed_after_cleanup"].as_bool(),
         Some(expected_removed_after_cleanup)

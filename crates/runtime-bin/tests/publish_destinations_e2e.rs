@@ -1,14 +1,12 @@
 //! End-to-end smoke coverage for publish destination execution through the runtime binary.
 
-use runtime_config::{RUNTIME_ROOT_ENV, RuntimeDirectories};
+use runtime_config::{RuntimeDirectories, RUNTIME_ROOT_ENV};
 use runtime_store::{
-    CompleteBuildRunInput, CreateArtifactRecordInput,
-    CreateRepositoryProjectBuildTargetInput,
-    CreateRepositoryProjectInput,
-    CreateRepositoryProjectPublishBindingInput,
-    CreateRepositoryProjectPublishTargetInput,
-    KIND_ITCH_API_KEY, LocalCoordinator, StartBuildRunInput, StorageLayout,
-    UpsertCredentialRecordInput, open_connection,
+    open_connection, CompleteBuildRunInput, CreateArtifactRecordInput,
+    CreateRepositoryProjectBuildTargetInput, CreateRepositoryProjectInput,
+    CreateRepositoryProjectPublishBindingInput, CreateRepositoryProjectPublishTargetInput,
+    LocalCoordinator, StartBuildRunInput, StorageLayout, UpsertCredentialRecordInput,
+    KIND_ITCH_API_KEY,
 };
 use rusqlite::params;
 use serde_json::Value;
@@ -43,8 +41,8 @@ fn smoke_keeps_unbound_artifacts_in_runtime_output_when_project_has_no_destinati
         &["Windows"],
         &created.build_target_ids,
     )
-        .remove("Windows")
-        .expect("windows build run should exist");
+    .remove("Windows")
+    .expect("windows build run should exist");
     let artifact_root = root.join("artifacts").join("zero-destinations");
     let source_path = complete_build_with_artifact(
         &coordinator,
@@ -99,7 +97,7 @@ fn smoke_moves_artifacts_into_one_filesystem_destination() {
             name: String::from("Windows Move"),
             kind: String::from("filesystem"),
             enabled: true,
-                config_json: String::from("{}"),
+            config_json: String::from("{}"),
             credentials_id: None,
             bindings: vec![CreateRepositoryProjectPublishBindingInput {
                 build_target_name: String::from("Windows"),
@@ -119,8 +117,8 @@ fn smoke_moves_artifacts_into_one_filesystem_destination() {
         &["Windows"],
         &created.build_target_ids,
     )
-        .remove("Windows")
-        .expect("windows build run should exist");
+    .remove("Windows")
+    .expect("windows build run should exist");
     let artifact_root = root.join("artifacts").join("filesystem-destination");
     let source_path = complete_build_with_artifact(
         &coordinator,
@@ -234,7 +232,7 @@ fn smoke_runs_mixed_itch_and_filesystem_destinations_only_for_bound_targets() {
                 name: String::from("Windows Move"),
                 kind: String::from("filesystem"),
                 enabled: true,
-                    config_json: String::from("{}"),
+                config_json: String::from("{}"),
                 credentials_id: None,
                 bindings: vec![CreateRepositoryProjectPublishBindingInput {
                     build_target_name: String::from("Windows"),
@@ -317,7 +315,10 @@ fn smoke_runs_mixed_itch_and_filesystem_destinations_only_for_bound_targets() {
         ],
         &[],
     );
-    assert_eq!(linux_inspect["publish_runs"].as_array().map(Vec::len), Some(0));
+    assert_eq!(
+        linux_inspect["publish_runs"].as_array().map(Vec::len),
+        Some(0)
+    );
 
     let windows_inspect = run_runtime_json_command(
         &root,
@@ -365,7 +366,10 @@ fn smoke_runs_mixed_itch_and_filesystem_destinations_only_for_bound_targets() {
         .list_artifacts_by_build_run(windows_build_run_id)
         .expect("windows artifacts should reload after mixed publish");
     assert_eq!(windows_artifacts.len(), 1);
-    assert_eq!(windows_artifacts[0].active_location_kind, "filesystem_absolute");
+    assert_eq!(
+        windows_artifacts[0].active_location_kind,
+        "filesystem_absolute"
+    );
     assert_eq!(
         windows_artifacts[0].active_location_ref,
         moved_path.display().to_string()
@@ -531,7 +535,8 @@ fn complete_build_with_artifact(
         .unwrap_or(artifact_root)
         .join("workspace");
     let log_path = artifact_root.join("build.log");
-    let source_path = artifact_root.join(artifact_relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let source_path =
+        artifact_root.join(artifact_relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
 
     if let Some(parent) = source_path.parent() {
         fs::create_dir_all(parent).expect("artifact parent directory should create");
@@ -601,11 +606,7 @@ fn run_runtime_json_command(
     serde_json::from_slice(&output.stdout).expect("runtime command should emit json")
 }
 
-fn run_runtime_command(
-    root: &Path,
-    arguments: &[String],
-    extra_env: &[(&str, &str)],
-) -> Output {
+fn run_runtime_command(root: &Path, arguments: &[String], extra_env: &[(&str, &str)]) -> Output {
     let mut command = Command::new(runtime_bin_path());
     command.args(arguments.iter().map(String::as_str));
     command.env(RUNTIME_ROOT_ENV, root);

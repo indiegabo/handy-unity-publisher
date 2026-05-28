@@ -185,9 +185,6 @@ mod tests {
 
     #[test]
     fn build_kind_defaults_empty_values_to_player() {
-        assert_eq!(
-            BuildKind::parse_or_default("").unwrap(),
-            BuildKind::Player
-        );
+        assert_eq!(BuildKind::parse_or_default("").unwrap(), BuildKind::Player);
     }
 }

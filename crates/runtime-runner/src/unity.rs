@@ -8,20 +8,18 @@ mod output;
 
 pub use self::capabilities::{
     default_unity_discovery_root_paths, diagnose_host_native_runner_config,
-    inspect_host_capability_profile, DiscoveredUnityEditor,
-    HostCapabilityProfile, HostNativeRunnerDiagnostics, HostToolCapability,
-    RunnerSelectionDiagnostics, UnityLicenseDiagnostics,
+    inspect_host_capability_profile, DiscoveredUnityEditor, HostCapabilityProfile,
+    HostNativeRunnerDiagnostics, HostToolCapability, RunnerSelectionDiagnostics,
+    UnityLicenseDiagnostics,
 };
 #[cfg(test)]
 pub(crate) use self::capabilities::{
-    CapabilityInspectionInput, inspect_host_capability_profile_with_input,
+    inspect_host_capability_profile_with_input, CapabilityInspectionInput,
 };
 pub use self::execution::{
-    HostNativeUnityExecutor, UnityBuildExecutionOutcome,
-    UnityBuildExecutionPlan, UnityBuildExecutionProcessOutcome,
-    UnityBuildExecutionProcessor, UnityBuildExecutionRequest,
-    UnityBuildExecutionResult, UnityBuildExecutor,
-    resolve_host_native_unity_execution_plan,
+    resolve_host_native_unity_execution_plan, HostNativeUnityExecutor, UnityBuildExecutionOutcome,
+    UnityBuildExecutionPlan, UnityBuildExecutionProcessOutcome, UnityBuildExecutionProcessor,
+    UnityBuildExecutionRequest, UnityBuildExecutionResult, UnityBuildExecutor,
 };
 pub use self::output::{
     package_unity_build_output, resolve_final_unity_artifact_output_path,
@@ -42,34 +40,22 @@ use std::time::Duration;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-const UNITY_NON_SHIPPABLE_ARCHIVE_PATH_SUFFIXES: &[&str] = &[
-    "_DoNotShip",
-    "_BackUpThisFolder_ButDontShipItWithYourGame",
-];
+const UNITY_NON_SHIPPABLE_ARCHIVE_PATH_SUFFIXES: &[&str] =
+    &["_DoNotShip", "_BackUpThisFolder_ButDontShipItWithYourGame"];
 const UNITY_MACOS_OPTIONAL_ARCHIVE_PATH_SUFFIXES: &[&str] = &[".dSYM"];
 const UNITY_WINDOWS_OPTIONAL_ARCHIVE_FILE_SUFFIXES: &[&str] = &[".pdb"];
 const UNITY_WEBGL_OPTIONAL_ARCHIVE_FILE_SUFFIXES: &[&str] = &[".symbols.json"];
 
 use crate::{
-    artifact_output_relative_path,
-    cleanup_previous_artifact_output,
-    host::execute_command_with_timeout,
-    normalized_optional_string,
-    require_non_empty,
-    resolve_artifact_output_path,
-    resolve_runtime_output_path,
-    ExecutionProgressReporter,
-    NoopExecutionProgressReporter,
-    PreparedWorkspace,
-    RunnerFamily,
-    WorkspacePreparationInput,
+    artifact_output_relative_path, cleanup_previous_artifact_output,
+    host::execute_command_with_timeout, normalized_optional_string, require_non_empty,
+    resolve_artifact_output_path, resolve_runtime_output_path, ExecutionProgressReporter,
+    NoopExecutionProgressReporter, PreparedWorkspace, RunnerFamily, WorkspacePreparationInput,
     WorkspacePreparer,
 };
 
 fn detect_wsl_from_environment() -> bool {
-    if std::env::var_os("WSL_INTEROP").is_some()
-        || std::env::var_os("WSL_DISTRO_NAME").is_some()
-    {
+    if std::env::var_os("WSL_INTEROP").is_some() || std::env::var_os("WSL_DISTRO_NAME").is_some() {
         return true;
     }
 
@@ -84,11 +70,7 @@ fn default_unity_license_paths(platform: HostPlatform) -> Vec<PathBuf> {
 
     match platform {
         HostPlatform::Windows => {
-            push_env_path(
-                &mut candidates,
-                "ProgramData",
-                ["Unity", "Unity_lic.ulf"],
-            );
+            push_env_path(&mut candidates, "ProgramData", ["Unity", "Unity_lic.ulf"]);
             push_env_path(
                 &mut candidates,
                 "LOCALAPPDATA",
@@ -106,10 +88,8 @@ fn default_unity_license_paths(platform: HostPlatform) -> Vec<PathBuf> {
             );
         }
         HostPlatform::MacOS => {
-            candidates.push(
-                PathBuf::from("/Library/Application Support/Unity")
-                    .join("Unity_lic.ulf"),
-            );
+            candidates
+                .push(PathBuf::from("/Library/Application Support/Unity").join("Unity_lic.ulf"));
             push_env_path(
                 &mut candidates,
                 "HOME",
@@ -133,11 +113,7 @@ fn default_unity_license_paths(platform: HostPlatform) -> Vec<PathBuf> {
     deduplicate_paths(candidates)
 }
 
-fn push_env_path<const N: usize>(
-    values: &mut Vec<PathBuf>,
-    env_key: &str,
-    segments: [&str; N],
-) {
+fn push_env_path<const N: usize>(values: &mut Vec<PathBuf>, env_key: &str, segments: [&str; N]) {
     let Some(base) = std::env::var_os(env_key).map(PathBuf::from) else {
         return;
     };
@@ -154,7 +130,10 @@ fn deduplicate_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = BTreeSet::new();
 
     for path in paths {
-        let key = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        let key = path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
         if seen.insert(key) {
             deduplicated.push(path);
         }
@@ -418,7 +397,10 @@ fn discover_unity_editors(
 }
 
 fn editor_key(editor: &DiscoveredUnityEditor) -> String {
-    editor.executable_path.replace('\\', "/").to_ascii_lowercase()
+    editor
+        .executable_path
+        .replace('\\', "/")
+        .to_ascii_lowercase()
 }
 
 fn is_unity_hub_root(root: &Path) -> bool {
@@ -506,17 +488,17 @@ fn build_discovered_unity_editor(
     }
 }
 
-fn discover_supported_build_targets(
-    platform: HostPlatform,
-    install_root: &Path,
-) -> Vec<String> {
+fn discover_supported_build_targets(platform: HostPlatform, install_root: &Path) -> Vec<String> {
     let mut targets = BTreeSet::new();
     targets.insert(String::from(platform.as_str()));
 
     let playback_engines_root = match platform {
         HostPlatform::Windows | HostPlatform::Linux => [
             install_root.join("Data").join("PlaybackEngines"),
-            install_root.join("Editor").join("Data").join("PlaybackEngines"),
+            install_root
+                .join("Editor")
+                .join("Data")
+                .join("PlaybackEngines"),
         ],
         HostPlatform::MacOS => [
             install_root.join("Contents").join("PlaybackEngines"),
@@ -718,18 +700,15 @@ fn unity_archive_path_is_optional_debug_symbol(
     };
 
     match unity_target_platform_family(&plan.unity_target_platform) {
-        Some("macos") => has_any_suffix_case_insensitive(
-            file_name,
-            UNITY_MACOS_OPTIONAL_ARCHIVE_PATH_SUFFIXES,
-        ),
-        Some("windows") => has_any_suffix_case_insensitive(
-            file_name,
-            UNITY_WINDOWS_OPTIONAL_ARCHIVE_FILE_SUFFIXES,
-        ),
-        Some("webgl") => has_any_suffix_case_insensitive(
-            file_name,
-            UNITY_WEBGL_OPTIONAL_ARCHIVE_FILE_SUFFIXES,
-        ),
+        Some("macos") => {
+            has_any_suffix_case_insensitive(file_name, UNITY_MACOS_OPTIONAL_ARCHIVE_PATH_SUFFIXES)
+        }
+        Some("windows") => {
+            has_any_suffix_case_insensitive(file_name, UNITY_WINDOWS_OPTIONAL_ARCHIVE_FILE_SUFFIXES)
+        }
+        Some("webgl") => {
+            has_any_suffix_case_insensitive(file_name, UNITY_WEBGL_OPTIONAL_ARCHIVE_FILE_SUFFIXES)
+        }
         _ => false,
     }
 }
@@ -814,17 +793,12 @@ fn execute_host_native_unity(
         ));
     }
 
-    let build_method = match require_non_empty(
-        &request.plan.unity_build_method,
-        "build method",
-    ) {
+    let build_method = match require_non_empty(&request.plan.unity_build_method, "build method") {
         Ok(build_method) => build_method,
         Err(error) => return Err((Vec::new(), error)),
     };
     let output_path = request.output_path.display().to_string();
-    let build_target = match platform_to_unity_build_target(
-        &request.plan.unity_target_platform,
-    ) {
+    let build_target = match platform_to_unity_build_target(&request.plan.unity_target_platform) {
         Ok(build_target) => build_target,
         Err(error) => return Err((Vec::new(), error)),
     };
@@ -866,8 +840,14 @@ fn execute_host_native_unity(
         command.env("HGB_OUTPUT_KIND", output_kind);
     }
     command.env("HGB_BUILD_RUN_ID", request.plan.build_run_id.to_string());
-    command.env("HGB_RELEASE_RUN_ID", request.plan.release_run_id.to_string());
-    command.env("HGB_BUILD_TARGET_ID", request.plan.build_target_id.to_string());
+    command.env(
+        "HGB_RELEASE_RUN_ID",
+        request.plan.release_run_id.to_string(),
+    );
+    command.env(
+        "HGB_BUILD_TARGET_ID",
+        request.plan.build_target_id.to_string(),
+    );
     command.env("HGB_LOG_PATH", &log_path);
     command.env(
         "HGB_TARGET_PLATFORM",
@@ -956,9 +936,7 @@ fn parse_host_native_runner_config_json(
     }
 }
 
-fn configured_unity_executable_path(
-    config_json: &JsonMap<String, JsonValue>,
-) -> Option<&str> {
+fn configured_unity_executable_path(config_json: &JsonMap<String, JsonValue>) -> Option<&str> {
     config_json
         .get("unity_executable_path")
         .and_then(JsonValue::as_str)
@@ -1039,9 +1017,12 @@ fn default_unity_editor_log_path() -> Option<PathBuf> {
             .or_else(|| env::var_os("APPDATA"))
             .map(PathBuf::from)
             .map(|root| root.join("Unity").join("Editor").join("Editor.log")),
-        HostPlatform::MacOS => env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|root| root.join("Library").join("Logs").join("Unity").join("Editor.log")),
+        HostPlatform::MacOS => env::var_os("HOME").map(PathBuf::from).map(|root| {
+            root.join("Library")
+                .join("Logs")
+                .join("Unity")
+                .join("Editor.log")
+        }),
         HostPlatform::Linux => env::var_os("HOME")
             .map(PathBuf::from)
             .map(|root| root.join(".config").join("unity3d").join("Editor.log")),
@@ -1088,12 +1069,9 @@ fn execution_log_preamble(
 
 fn parse_host_native_runner_config(config_json: &str) -> io::Result<HostNativeRunnerConfig> {
     let trimmed = config_json.trim();
-    let config: HostNativeRunnerConfig = serde_json::from_str(if trimmed.is_empty() {
-        "{}"
-    } else {
-        trimmed
-    })
-    .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    let config: HostNativeRunnerConfig =
+        serde_json::from_str(if trimmed.is_empty() { "{}" } else { trimmed })
+            .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
 
     let unity_executable_path = require_non_empty(
         &config.unity_executable_path,
@@ -1126,9 +1104,8 @@ fn build_host_native_runner_diagnostics(
             diagnostics.unity_executable_exists = true;
             diagnostics.unity_executable_is_file = true;
             diagnostics.status = String::from("ready");
-            diagnostics.message = String::from(
-                "host-native unity executable path resolves to a regular file",
-            );
+            diagnostics.message =
+                String::from("host-native unity executable path resolves to a regular file");
         }
         Ok(_) => {
             diagnostics.unity_executable_exists = true;
@@ -1222,10 +1199,7 @@ pub(crate) fn classify_execution_error(
     )
 }
 
-fn classify_execution_failure_class(
-    error: &io::Error,
-    summary: &str,
-) -> ExecutionFailureClass {
+fn classify_execution_failure_class(error: &io::Error, summary: &str) -> ExecutionFailureClass {
     if error.kind() == ErrorKind::TimedOut {
         return ExecutionFailureClass::Timeout;
     }
@@ -1390,7 +1364,9 @@ mod tests {
             .expect_err("blank Unity target platforms should fail");
 
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("Unity platform must not be empty"));
+        assert!(error
+            .to_string()
+            .contains("Unity platform must not be empty"));
     }
 
     #[test]

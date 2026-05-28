@@ -5,11 +5,9 @@ use super::*;
 
 use std::time::Instant;
 
-const POLL_FAILURE_STAGE_ADVANCE_RELEASE_QUEUE_PRECHECK: &str =
-    "advance_release_queue_precheck";
+const POLL_FAILURE_STAGE_ADVANCE_RELEASE_QUEUE_PRECHECK: &str = "advance_release_queue_precheck";
 const POLL_FAILURE_STAGE_POLL_REMOTE: &str = "poll_remote";
-const POLL_FAILURE_STAGE_ADVANCE_RELEASE_QUEUE_POST_POLL: &str =
-    "advance_release_queue_post_poll";
+const POLL_FAILURE_STAGE_ADVANCE_RELEASE_QUEUE_POST_POLL: &str = "advance_release_queue_post_poll";
 
 #[derive(Debug, Serialize)]
 struct FailedPollAttemptLogRecord<'a> {
@@ -50,9 +48,7 @@ impl RuntimeLoopCadence {
     }
 }
 
-pub(crate) fn run_release_planner_cycle(
-    storage: &StorageLayout,
-) -> Result<bool, Box<dyn Error>> {
+pub(crate) fn run_release_planner_cycle(storage: &StorageLayout) -> Result<bool, Box<dyn Error>> {
     let coordinator = LocalCoordinator::new(storage);
 
     coordinator
@@ -87,9 +83,7 @@ pub(crate) fn run_runtime_worker_iteration(
     let forced_repository_ids = match take_forced_repository_poll_ids(storage) {
         Ok(repository_ids) => repository_ids,
         Err(error) => {
-            eprintln!(
-                "failed to consume runtime control requests before polling: {error}"
-            );
+            eprintln!("failed to consume runtime control requests before polling: {error}");
             HashSet::new()
         }
     };
@@ -138,9 +132,7 @@ impl RepositoryPollSchedule {
     }
 }
 
-fn take_forced_repository_poll_ids(
-    storage: &StorageLayout,
-) -> io::Result<HashSet<i64>> {
+fn take_forced_repository_poll_ids(storage: &StorageLayout) -> io::Result<HashSet<i64>> {
     let requests = take_runtime_control_requests(storage)?;
     let mut repository_ids = HashSet::new();
 
@@ -319,7 +311,9 @@ fn run_repository_poll_cycle_with_forced_repositories(
         schedule.retain_repositories(&seen_repositories);
     }
 
-    Ok(AutomationPollReport { repositories: results })
+    Ok(AutomationPollReport {
+        repositories: results,
+    })
 }
 
 /// Polls one repository by listing remote tags and queuing unseen tags only.
@@ -451,7 +445,11 @@ fn baseline_latest_repository_tag_without_process_history(
         });
     };
 
-    let normalized_last_seen = repository.last_seen_tag.as_deref().unwrap_or_default().trim();
+    let normalized_last_seen = repository
+        .last_seen_tag
+        .as_deref()
+        .unwrap_or_default()
+        .trim();
     if normalized_last_seen == latest_tag.name {
         return Ok(RepositoryPollResult {
             repository_id: repository.id,
@@ -542,8 +540,9 @@ pub(crate) fn record_failed_poll_attempt(
         error: error.to_string(),
     };
 
-    let encoded = serde_json::to_string(&record)
-        .map_err(|serialization_error| io::Error::new(ErrorKind::InvalidData, serialization_error))?;
+    let encoded = serde_json::to_string(&record).map_err(|serialization_error| {
+        io::Error::new(ErrorKind::InvalidData, serialization_error)
+    })?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -562,8 +561,7 @@ fn log_failed_poll_attempt(
     if let Err(log_error) = record_failed_poll_attempt(storage, repository, stage, error) {
         eprintln!(
             "failed to persist poll failure log for repository {}: {}",
-            repository.id,
-            log_error
+            repository.id, log_error
         );
     }
 }
@@ -608,8 +606,7 @@ fn log_poll_auth_failure_event(
     ) {
         eprintln!(
             "failed to emit poll auth failure event for repository {}: {}",
-            repository.id,
-            event_error,
+            repository.id, event_error,
         );
     }
 }
@@ -736,7 +733,10 @@ pub(crate) fn select_queued_repository_tags(
         return (tags[index + 1..].to_vec(), "", true);
     }
 
-    if tags.last().is_some_and(|tag| tag.name == normalized_last_seen) {
+    if tags
+        .last()
+        .is_some_and(|tag| tag.name == normalized_last_seen)
+    {
         return (Vec::new(), POLL_STATUS_UNCHANGED, false);
     }
 
@@ -773,20 +773,21 @@ mod tests {
             git_tag("v1.2.0", "c3"),
         ];
 
-        let (selected, status, ok) =
-            select_queued_repository_tags(&tags, Some("v1.0.0"));
+        let (selected, status, ok) = select_queued_repository_tags(&tags, Some("v1.0.0"));
 
         assert!(ok);
         assert_eq!(status, "");
-        assert_eq!(selected, vec![git_tag("v1.1.0", "b2"), git_tag("v1.2.0", "c3")]);
+        assert_eq!(
+            selected,
+            vec![git_tag("v1.1.0", "b2"), git_tag("v1.2.0", "c3")]
+        );
     }
 
     #[test]
     fn select_queued_repository_tags_reports_unchanged_when_latest_tag_was_seen() {
         let tags = vec![git_tag("v1.0.0", "a1"), git_tag("v1.1.0", "b2")];
 
-        let (selected, status, ok) =
-            select_queued_repository_tags(&tags, Some("v1.1.0"));
+        let (selected, status, ok) = select_queued_repository_tags(&tags, Some("v1.1.0"));
 
         assert!(!ok);
         assert_eq!(status, POLL_STATUS_UNCHANGED);
@@ -807,10 +808,7 @@ mod tests {
         let storage = StorageLayout::from_directories(&config.directories);
 
         initialize_database(&storage).expect("database should initialize");
-        runtime_core::persist_runtime_automation_mode(
-            &storage,
-            RuntimeAutomationMode::Idle,
-        )
+        runtime_core::persist_runtime_automation_mode(&storage, RuntimeAutomationMode::Idle)
             .expect("automation mode should persist as idle");
 
         let connection = rusqlite::Connection::open(&storage.database_path)
@@ -826,10 +824,7 @@ mod tests {
                     polling_interval_seconds,
                     enabled
                  ) VALUES (?, 'managed_repository', 'managed_checkout', ?, 'unity', 300, 1)",
-                rusqlite::params![
-                    "Idle Demo",
-                    "https://example.com/idle-demo.git",
-                ],
+                rusqlite::params!["Idle Demo", "https://example.com/idle-demo.git",],
             )
             .expect("repository row should insert");
         let repository_id = connection.last_insert_rowid();
@@ -843,26 +838,21 @@ mod tests {
 
         let coordinator = LocalCoordinator::new(&storage);
         let mut poll_schedule = RepositoryPollSchedule::default();
-        let report = run_repository_poll_cycle(
-            &coordinator,
-            &storage,
-            Some(&mut poll_schedule),
-        )
-        .expect("poll cycle should complete while idle");
+        let report = run_repository_poll_cycle(&coordinator, &storage, Some(&mut poll_schedule))
+            .expect("poll cycle should complete while idle");
 
         assert_eq!(report.repositories.len(), 1);
-        assert_eq!(report.repositories[0].status, POLL_STATUS_SKIPPED_RUNTIME_IDLE);
+        assert_eq!(
+            report.repositories[0].status,
+            POLL_STATUS_SKIPPED_RUNTIME_IDLE
+        );
         assert!(poll_schedule.next_poll_at_by_repository.is_empty());
 
-        std::fs::remove_dir_all(&root)
-            .expect("temporary runtime root should be removable");
+        std::fs::remove_dir_all(&root).expect("temporary runtime root should be removable");
     }
 }
 
-fn skipped_poll_result(
-    repository: &PollingRepositoryRecord,
-    status: &str,
-) -> RepositoryPollResult {
+fn skipped_poll_result(repository: &PollingRepositoryRecord, status: &str) -> RepositoryPollResult {
     RepositoryPollResult {
         repository_id: repository.id,
         repository_name: repository.name.clone(),
@@ -1029,7 +1019,10 @@ pub(crate) fn supervise_runtime(
                 restart_count,
                 None,
                 RuntimeSupervisorStatus::Running,
-                format!("runtime serve attempt {attempt} running as pid {}", child.id()),
+                format!(
+                    "runtime serve attempt {attempt} running as pid {}",
+                    child.id()
+                ),
             )?,
         )?;
 
@@ -1064,14 +1057,11 @@ pub(crate) fn supervise_runtime(
                 RuntimeSupervisorStatus::Restarting,
                 format!(
                     "recoverable exit {:?} detected, restarting after {} ms",
-                    exit_code,
-                    restart_policy.restart_backoff_millis
+                    exit_code, restart_policy.restart_backoff_millis
                 ),
             )?;
             write_supervisor_snapshot(storage, &snapshot)?;
-            thread::sleep(Duration::from_millis(
-                restart_policy.restart_backoff_millis,
-            ));
+            thread::sleep(Duration::from_millis(restart_policy.restart_backoff_millis));
             attempt += 1;
             continue;
         }
@@ -1084,7 +1074,10 @@ pub(crate) fn supervise_runtime(
             restart_count,
             exit_code,
             RuntimeSupervisorStatus::Failed,
-            format!("runtime serve exited unsuccessfully with code {:?}", exit_code),
+            format!(
+                "runtime serve exited unsuccessfully with code {:?}",
+                exit_code
+            ),
         )?;
         write_supervisor_snapshot(storage, &snapshot)?;
         if let Ok(report) = read_health_report(&storage.health_report_path) {
@@ -1099,7 +1092,11 @@ pub(crate) fn supervise_runtime(
                 ),
             )?;
         }
-        return Err(format!("runtime serve exited unsuccessfully with code {:?}", exit_code).into());
+        return Err(format!(
+            "runtime serve exited unsuccessfully with code {:?}",
+            exit_code
+        )
+        .into());
     }
 }
 

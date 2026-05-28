@@ -124,7 +124,8 @@ where
         preparation: &WorkspacePreparationInput,
         reporter: &mut dyn ExecutionProgressReporter,
     ) -> io::Result<PreparedWorkspace> {
-        self.preparer.prepare_build_with_reporter(preparation, reporter)
+        self.preparer
+            .prepare_build_with_reporter(preparation, reporter)
     }
 
     /// Executes one already-prepared workspace and reports heartbeats while Unity is running.

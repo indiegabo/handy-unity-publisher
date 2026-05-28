@@ -212,13 +212,19 @@ pub(crate) struct ResolvedPublishContext {
 }
 
 pub(crate) fn print_status(config: &RuntimeConfig, storage: &StorageLayout) {
-    println!("runtime: {} {}", config.runtime_name, config.runtime_version);
+    println!(
+        "runtime: {} {}",
+        config.runtime_name, config.runtime_version
+    );
     println!("platform: {}", config.platform.as_str());
     println!("log level: {}", config.log_level);
     println!("data root: {}", config.directories.data_dir.display());
     println!("state root: {}", config.directories.state_dir.display());
     println!("logs root: {}", config.directories.logs_dir.display());
-    println!("artifacts root: {}", config.directories.artifacts_dir.display());
+    println!(
+        "artifacts root: {}",
+        config.directories.artifacts_dir.display()
+    );
     println!("runs root: {}", config.directories.runs_dir.display());
     println!("database path: {}", storage.database_path.display());
     println!("health report: {}", storage.health_report_path.display());
@@ -226,7 +232,10 @@ pub(crate) fn print_status(config: &RuntimeConfig, storage: &StorageLayout) {
         "supervision contract: {}",
         storage.supervision_contract_path.display()
     );
-    println!("supervisor state: {}", storage.supervisor_state_path.display());
+    println!(
+        "supervisor state: {}",
+        storage.supervisor_state_path.display()
+    );
     println!("runtime log: {}", storage.runtime_log_path.display());
     println!(
         "worker loop interval: {} ms",
@@ -488,7 +497,9 @@ pub(crate) fn parse_registration_import_runtime_db_command(
     })
 }
 
-pub(crate) fn parse_publish_inspect_command(arguments: &[String]) -> io::Result<PublishInspectCommand> {
+pub(crate) fn parse_publish_inspect_command(
+    arguments: &[String],
+) -> io::Result<PublishInspectCommand> {
     let mut build_run_id = None;
     let mut publish_run_id = None;
     let mut index = 0;
@@ -538,7 +549,11 @@ pub(crate) fn default_manifest_directory() -> PathBuf {
         .join("pipelines")
 }
 
-pub(crate) fn read_flag_value(arguments: &[String], index: usize, flag: &str) -> io::Result<String> {
+pub(crate) fn read_flag_value(
+    arguments: &[String],
+    index: usize,
+    flag: &str,
+) -> io::Result<String> {
     arguments
         .get(index + 1)
         .cloned()
@@ -546,9 +561,10 @@ pub(crate) fn read_flag_value(arguments: &[String], index: usize, flag: &str) ->
 }
 
 pub(crate) fn parse_positive_i64_flag(value: &str, label: &str) -> io::Result<i64> {
-    let parsed = value.trim().parse::<i64>().map_err(|error| {
-        cli_usage_error(format!("{label} must be a positive integer: {error}"))
-    })?;
+    let parsed = value
+        .trim()
+        .parse::<i64>()
+        .map_err(|error| cli_usage_error(format!("{label} must be a positive integer: {error}")))?;
     if parsed <= 0 {
         return Err(cli_usage_error(format!(
             "{label} must be greater than zero"
@@ -568,7 +584,10 @@ pub(crate) fn require_cli_value(value: &str, label: &str) -> io::Result<String> 
 }
 
 pub(crate) fn is_help_request(arguments: &[String]) -> bool {
-    matches!(arguments.first().map(String::as_str), Some("help") | Some("--help") | Some("-h"))
+    matches!(
+        arguments.first().map(String::as_str),
+        Some("help") | Some("--help") | Some("-h")
+    )
 }
 
 pub(crate) fn cli_usage_error(message: impl Into<String>) -> io::Error {

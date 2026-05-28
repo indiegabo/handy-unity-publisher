@@ -16,78 +16,61 @@ use std::time::{Duration, Instant};
 
 use rfd::FileDialog;
 use runtime_config::{
-    DEVELOPMENT_PRODUCT_DIRECTORY_NAME, HostPlatform,
-    PRODUCT_DIRECTORY_NAME, RuntimeConfig, RUNTIME_ROOT_ENV,
+    HostPlatform, RuntimeConfig, DEVELOPMENT_PRODUCT_DIRECTORY_NAME, PRODUCT_DIRECTORY_NAME,
+    RUNTIME_ROOT_ENV,
 };
 use runtime_core::{
-    emit_runtime_event,
-    load_runtime_automation_snapshot,
-    persist_runtime_automation_mode,
-    read_health_report, read_supervision_contract, read_supervisor_snapshot,
-    RuntimeAutomationMode, RuntimeAutomationSnapshot, RuntimeEventInput,
-    RuntimeHealthReport, RuntimeRestartPolicy, RuntimeSupervisorSnapshot,
-    RuntimeStatus, RuntimeSupervisorStatus,
+    emit_runtime_event, load_runtime_automation_snapshot, persist_runtime_automation_mode,
+    read_health_report, read_supervision_contract, read_supervisor_snapshot, RuntimeAutomationMode,
+    RuntimeAutomationSnapshot, RuntimeEventInput, RuntimeHealthReport, RuntimeRestartPolicy,
+    RuntimeStatus, RuntimeSupervisorSnapshot, RuntimeSupervisorStatus,
 };
+use runtime_events::start_runtime_event_bridge;
 use runtime_git::{
     assess_repository_access as assess_git_repository_access,
     detect_repository_provider_from_url as detect_git_repository_provider,
-    RepositoryAccessAssessment,
-    RepositoryProviderDetection,
-    KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER,
-    KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
+    RepositoryAccessAssessment, RepositoryProviderDetection, KIND_GIT_HTTP_BASIC,
+    KIND_GIT_HTTP_BEARER, KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
 };
 use runtime_runner::{
-    RunnerFamily,
     unity::{
-        default_unity_discovery_root_paths,
-        diagnose_host_native_runner_config,
-        inspect_host_capability_profile, HostCapabilityProfile,
-        HostNativeRunnerDiagnostics,
+        default_unity_discovery_root_paths, diagnose_host_native_runner_config,
+        inspect_host_capability_profile, HostCapabilityProfile, HostNativeRunnerDiagnostics,
     },
+    RunnerFamily,
 };
 use runtime_store::{
-    ArtifactInspectionRecord, AutomationSnapshot, BuildHistoryRecord,
-    CancelReleaseRunInput,
-    CredentialRecord,
+    enqueue_runtime_control_request, initialize_database, list_artifact_inspection_records,
+    list_build_history_records, list_build_target_runtime_settings, list_credential_records,
+    list_process_feed_page_filtered, list_publish_target_binding_runtime_settings,
+    list_publish_target_runtime_settings, read_unity_local_workspace_version,
+    ArtifactInspectionRecord, AutomationSnapshot, BuildHistoryRecord, CancelReleaseRunInput,
     CreateRepositoryProjectBuildTargetInput,
+    CreateRepositoryProjectInput as StoreCreateRepositoryProjectInput,
     CreateRepositoryProjectPublishBindingInput as StoreCreateRepositoryProjectPublishBindingInput,
     CreateRepositoryProjectPublishTargetInput as StoreCreateRepositoryProjectPublishTargetInput,
-    CreateRepositoryProjectInput as StoreCreateRepositoryProjectInput,
-    OnDemandReleaseDispatchInput as StoreOnDemandReleaseDispatchInput,
-    CreatedRepositoryProjectRecord,
-    RepositoryProjectRecord as StoreRepositoryProjectRecord,
+    CreatedRepositoryProjectRecord, CredentialRecord, LocalCoordinator,
+    OnDemandReleaseDispatchInput as StoreOnDemandReleaseDispatchInput, ProcessFeedPage,
+    ProcessFeedPageQuery, ProcessFeedScope, ProcessFeedStatusFilter, ReleaseAutomationStatus,
+    ReleaseRunRecord, ReleaseSourceMetadata,
     RemoveRepositoryProjectInput as StoreRemoveRepositoryProjectInput,
     RemoveRepositoryProjectReport as StoreRemoveRepositoryProjectReport,
-    ReleaseRunRecord,
-    ReleaseSourceMetadata,
-    RemoveRepositoryProjectStrategy,
-    RepositoryAutomationStatus as StoreRepositoryAutomationStatus,
+    RemoveRepositoryProjectStrategy, RepositoryAutomationStatus as StoreRepositoryAutomationStatus,
+    RepositoryProjectRecord as StoreRepositoryProjectRecord, RuntimeControlRequest, StorageLayout,
     UpdateRepositoryAuthStateInput as StoreUpdateRepositoryAuthStateInput,
     UpdateRepositoryProjectBuildTargetInput as StoreUpdateRepositoryProjectBuildTargetInput,
+    UpdateRepositoryProjectInput as StoreUpdateRepositoryProjectInput,
     UpdateRepositoryProjectPublishBindingInput as StoreUpdateRepositoryProjectPublishBindingInput,
     UpdateRepositoryProjectPublishTargetInput as StoreUpdateRepositoryProjectPublishTargetInput,
-    UpdateRepositoryProjectInput as StoreUpdateRepositoryProjectInput,
-    RuntimeControlRequest,
-    ProcessFeedPage, ProcessFeedPageQuery, ProcessFeedScope,
-    ProcessFeedStatusFilter, ReleaseAutomationStatus,
-    UpsertCredentialRecordInput,
-    enqueue_runtime_control_request,
-    initialize_database, list_artifact_inspection_records,
-    list_build_history_records, list_process_feed_page_filtered,
-    list_build_target_runtime_settings, list_credential_records,
-    list_publish_target_binding_runtime_settings,
-    list_publish_target_runtime_settings, LocalCoordinator, StorageLayout,
-    read_unity_local_workspace_version,
-    KIND_ITCH_API_KEY,
+    UpsertCredentialRecordInput, KIND_ITCH_API_KEY,
 };
-use runtime_events::start_runtime_event_bridge;
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, System};
 use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, PhysicalPosition, PhysicalSize, RunEvent,
-    WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Manager, PhysicalPosition, PhysicalSize, RunEvent, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_notification::NotificationExt;
 use zip::ZipArchive;
@@ -100,8 +83,7 @@ const DEFAULT_RUNTIME_LOG_LINE_LIMIT: usize = 100;
 const MAX_RUNTIME_LOG_LINE_LIMIT: usize = 500;
 const DEFAULT_TEXT_FILE_PREVIEW_MAX_BYTES: usize = 128 * 1024;
 const MAX_TEXT_FILE_PREVIEW_MAX_BYTES: usize = 512 * 1024;
-const SECRET_STORAGE_MODEL_INLINE_SQLITE: &str =
-    "sqlite-config-json-and-keyring-references";
+const SECRET_STORAGE_MODEL_INLINE_SQLITE: &str = "sqlite-config-json-and-keyring-references";
 const RUNTIME_STARTUP_PROBE_MILLIS: u64 = 150;
 const RUNTIME_SHUTDOWN_WAIT_POLL_MILLIS: u64 = 100;
 const RUNTIME_SHUTDOWN_WAIT_POLLS: usize = 20;
@@ -181,14 +163,8 @@ struct WindowTransitionSettings {
 impl WindowTransitionSettings {
     const fn current() -> Self {
         Self {
-            main: WindowLayoutPreset::new(
-                POPUP_WINDOW_WIDTH,
-                POPUP_WINDOW_HEIGHT,
-            ),
-            focus: WindowLayoutPreset::new(
-                FOCUS_WINDOW_WIDTH,
-                FOCUS_WINDOW_HEIGHT,
-            ),
+            main: WindowLayoutPreset::new(POPUP_WINDOW_WIDTH, POPUP_WINDOW_HEIGHT),
+            focus: WindowLayoutPreset::new(FOCUS_WINDOW_WIDTH, FOCUS_WINDOW_HEIGHT),
             duration_millis: WINDOW_FOCUS_TRANSITION_MILLIS,
         }
     }
@@ -324,10 +300,7 @@ impl Drop for ActiveSystemDialogGuard<'_> {
             *active_system_dialogs = active_system_dialogs.saturating_sub(1);
 
             if *active_system_dialogs == 0 {
-                suppress_main_window_focus_loss(
-                    self.lifecycle,
-                    SYSTEM_DIALOG_FOCUS_LOSS_GRACE,
-                );
+                suppress_main_window_focus_loss(self.lifecycle, SYSTEM_DIALOG_FOCUS_LOSS_GRACE);
             }
         }
     }
@@ -1049,7 +1022,9 @@ fn main_window(app_handle: &AppHandle) -> Result<WebviewWindow, String> {
         .ok_or_else(|| "main window handle is unavailable".to_string())
 }
 
-fn main_window_config(app_handle: &AppHandle) -> Result<tauri::utils::config::WindowConfig, String> {
+fn main_window_config(
+    app_handle: &AppHandle,
+) -> Result<tauri::utils::config::WindowConfig, String> {
     app_handle
         .config()
         .app
@@ -1066,8 +1041,8 @@ fn create_main_window(app_handle: &AppHandle) -> Result<(), String> {
     }
 
     let window_config = main_window_config(app_handle)?;
-    let webview_data_directory = resolve_shell_local_data_dir(app_handle)
-        .map_err(|error| error.to_string())?;
+    let webview_data_directory =
+        resolve_shell_local_data_dir(app_handle).map_err(|error| error.to_string())?;
 
     WebviewWindowBuilder::from_config(app_handle, &window_config)
         .map_err(|error| error.to_string())?
@@ -1106,10 +1081,7 @@ fn has_active_system_dialogs(lifecycle: &ShellLifecycleState) -> bool {
         .unwrap_or(true)
 }
 
-fn suppress_main_window_focus_loss(
-    lifecycle: &ShellLifecycleState,
-    duration: Duration,
-) {
+fn suppress_main_window_focus_loss(lifecycle: &ShellLifecycleState, duration: Duration) {
     if let Ok(mut suppressed_until) = lifecycle.suppress_main_window_focus_loss_until.lock() {
         *suppressed_until = Some(Instant::now() + duration);
     }
@@ -1284,10 +1256,7 @@ fn clamp_window_layout(
     ))
 }
 
-fn position_main_window(
-    window: &WebviewWindow,
-    layout: WindowLayoutPreset,
-) -> Result<(), String> {
+fn position_main_window(window: &WebviewWindow, layout: WindowLayoutPreset) -> Result<(), String> {
     let monitor = window
         .primary_monitor()
         .map_err(|error| error.to_string())?
@@ -1436,18 +1405,21 @@ pub fn run() {
                 localization_root,
             )
             .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
-            create_main_window(app.handle())
-                .map_err(|error| -> Box<dyn std::error::Error> { Box::new(io::Error::other(error)) })?;
+            create_main_window(app.handle()).map_err(|error| -> Box<dyn std::error::Error> {
+                Box::new(io::Error::other(error))
+            })?;
             launch_runtime_process(app)
                 .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
             let config = load_shell_runtime_config()
                 .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
             let storage = StorageLayout::from_directories(&config.directories);
             start_runtime_event_bridge(app.handle().clone(), storage);
-            initialize_tray(app)
-                .map_err(|error| -> Box<dyn std::error::Error> { Box::new(io::Error::other(error)) })?;
-            configure_main_window(app.handle())
-                .map_err(|error| -> Box<dyn std::error::Error> { Box::new(io::Error::other(error)) })?;
+            initialize_tray(app).map_err(|error| -> Box<dyn std::error::Error> {
+                Box::new(io::Error::other(error))
+            })?;
+            configure_main_window(app.handle()).map_err(|error| -> Box<dyn std::error::Error> {
+                Box::new(io::Error::other(error))
+            })?;
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -1470,8 +1442,7 @@ pub fn run() {
                 }
             }
             RunEvent::WindowEvent { label, event, .. }
-                if label == MAIN_WINDOW_LABEL
-                    && matches!(event, WindowEvent::Focused(false)) =>
+                if label == MAIN_WINDOW_LABEL && matches!(event, WindowEvent::Focused(false)) =>
             {
                 // Keep the main window visible on blur. Some host/IME interactions
                 // can emit transient focus-loss events while the operator is typing,
@@ -1550,7 +1521,10 @@ fn close_main_window(app_handle: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn pick_host_path(app_handle: AppHandle, input: PickHostPathInput) -> Result<Option<String>, String> {
+fn pick_host_path(
+    app_handle: AppHandle,
+    input: PickHostPathInput,
+) -> Result<Option<String>, String> {
     let mut dialog = FileDialog::new();
     let lifecycle = app_handle.state::<ShellLifecycleState>();
     let dialog_guard = ActiveSystemDialogGuard::acquire(&lifecycle)?;
@@ -1566,8 +1540,7 @@ fn pick_host_path(app_handle: AppHandle, input: PickHostPathInput) -> Result<Opt
                 continue;
             }
 
-            let extensions: Vec<&str> =
-                filter.extensions.iter().map(String::as_str).collect();
+            let extensions: Vec<&str> = filter.extensions.iter().map(String::as_str).collect();
             dialog = dialog.add_filter(filter_name, &extensions);
         }
     }
@@ -1585,14 +1558,17 @@ fn pick_host_path(app_handle: AppHandle, input: PickHostPathInput) -> Result<Opt
 
 #[tauri::command]
 fn pick_unity_executable_path(app_handle: AppHandle) -> Result<Option<String>, String> {
-    pick_host_path(app_handle, PickHostPathInput {
-        kind: HostPathSelectionKind::File,
-        title: Some("Select Unity Editor executable".to_string()),
-        filters: vec![PickHostPathFilterInput {
-            name: "Unity Editor".to_string(),
-            extensions: vec!["exe".to_string(), "app".to_string()],
-        }],
-    })
+    pick_host_path(
+        app_handle,
+        PickHostPathInput {
+            kind: HostPathSelectionKind::File,
+            title: Some("Select Unity Editor executable".to_string()),
+            filters: vec![PickHostPathFilterInput {
+                name: "Unity Editor".to_string(),
+                extensions: vec!["exe".to_string(), "app".to_string()],
+            }],
+        },
+    )
 }
 
 #[tauri::command]
@@ -1609,9 +1585,7 @@ fn create_repository_project(
 }
 
 #[tauri::command]
-fn update_repository_project(
-    input: UpdateRepositoryProjectCommandInput,
-) -> Result<(), String> {
+fn update_repository_project(input: UpdateRepositoryProjectCommandInput) -> Result<(), String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     persist_repository_project_update(&config, input).map_err(|error| error.to_string())
 }
@@ -1671,12 +1645,8 @@ fn save_localization_preferences(
     let settings_dir =
         resolve_localization_settings_dir(&app_handle).map_err(|error| error.to_string())?;
 
-    persist_localization_preferences_to_paths(
-        &localization_root,
-        &settings_dir,
-        input,
-    )
-    .map_err(|error| error.to_string())
+    persist_localization_preferences_to_paths(&localization_root, &settings_dir, input)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1722,8 +1692,7 @@ fn repository_inspection() -> Result<RepositoryInspectionSettings, String> {
 #[tauri::command]
 fn repository_project_detail(repository_id: i64) -> Result<RepositoryInspectionEntry, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    load_repository_project_detail(&config, repository_id)
-        .map_err(|error| error.to_string())
+    load_repository_project_detail(&config, repository_id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1765,8 +1734,7 @@ fn purge_build_execution_retention(
     build_run_id: i64,
 ) -> Result<BuildExecutionRetentionPurgeReport, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    purge_build_execution_retention_files(&config, build_run_id)
-        .map_err(|error| error.to_string())
+    purge_build_execution_retention_files(&config, build_run_id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1774,8 +1742,7 @@ fn delete_release_process_outputs(
     release_run_id: i64,
 ) -> Result<ReleaseProcessOutputsDeleteReport, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    delete_release_process_outputs_files(&config, release_run_id)
-        .map_err(|error| error.to_string())
+    delete_release_process_outputs_files(&config, release_run_id).map_err(|error| error.to_string())
 }
 
 /// Reads the `bundleVersion` from `ProjectSettings/ProjectSettings.asset`
@@ -1792,8 +1759,8 @@ fn dispatch_on_demand_release_process(
     input: OnDemandReleaseProcessCommandInput,
 ) -> Result<ReleaseRunRecord, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    let record = request_on_demand_release_process(&config, input)
-        .map_err(|error| error.to_string())?;
+    let record =
+        request_on_demand_release_process(&config, input).map_err(|error| error.to_string())?;
 
     launch_runtime_process_handle(&app_handle).map_err(|error| error.to_string())?;
     Ok(record)
@@ -1813,10 +1780,7 @@ fn rerun_release_process(
 }
 
 #[tauri::command]
-fn cancel_release_process(
-    app_handle: AppHandle,
-    release_run_id: i64,
-) -> Result<(), String> {
+fn cancel_release_process(app_handle: AppHandle, release_run_id: i64) -> Result<(), String> {
     if release_run_id <= 0 {
         return Err(String::from("release_run_id must be a positive integer"));
     }
@@ -1835,9 +1799,7 @@ fn cancel_release_process(
     let active_build = load_build_history(&config)
         .map_err(|error| error.to_string())?
         .into_iter()
-        .filter(|record| {
-            record.release_run_id == release_run_id && record.status == "running"
-        })
+        .filter(|record| record.release_run_id == release_run_id && record.status == "running")
         .max_by_key(|record| record.build_run_id);
 
     coordinator
@@ -1879,8 +1841,7 @@ fn auth_providers() -> Result<Vec<AuthProviderStatus>, String> {
 fn detect_repository_provider(
     input: RepositoryAccessAssessmentInput,
 ) -> Result<RepositoryProviderDetection, String> {
-    detect_git_repository_provider(&input.repository_url)
-        .map_err(|error| error.to_string())
+    detect_git_repository_provider(&input.repository_url).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1893,8 +1854,7 @@ fn assess_repository_access(
 #[tauri::command]
 fn login_github_auth(force: Option<bool>) -> Result<AuthProviderStatus, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    persist_github_auth_login(&config, force.unwrap_or(false))
-        .map_err(|error| error.to_string())
+    persist_github_auth_login(&config, force.unwrap_or(false)).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1918,26 +1878,19 @@ fn connect_repository_auth(input: ConnectRepositoryAuthInput) -> Result<(), Stri
 #[tauri::command]
 fn reconnect_repository_auth(input: ReconnectRepositoryAuthInput) -> Result<(), String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    persist_repository_auth_reconnect(&config, input)
-        .map_err(|error| error.to_string())
+    persist_repository_auth_reconnect(&config, input).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn disconnect_repository_auth(
-    input: DisconnectRepositoryAuthInput,
-) -> Result<(), String> {
+fn disconnect_repository_auth(input: DisconnectRepositoryAuthInput) -> Result<(), String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    persist_repository_auth_disconnect(&config, input)
-        .map_err(|error| error.to_string())
+    persist_repository_auth_disconnect(&config, input).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn sync_repository_auth_assessment(
-    input: SyncRepositoryAuthAssessmentInput,
-) -> Result<(), String> {
+fn sync_repository_auth_assessment(input: SyncRepositoryAuthAssessmentInput) -> Result<(), String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    persist_repository_auth_assessment(&config, input)
-        .map_err(|error| error.to_string())
+    persist_repository_auth_assessment(&config, input).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1945,8 +1898,7 @@ fn update_publish_target_secret_binding(
     input: UpdatePublishTargetSecretBindingInput,
 ) -> Result<(), String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    persist_publish_target_secret_binding(&config, input)
-        .map_err(|error| error.to_string())
+    persist_publish_target_secret_binding(&config, input).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1966,9 +1918,7 @@ fn restart_runtime(app_handle: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_runtime_automation_mode(
-    mode: String,
-) -> Result<RuntimeAutomationSnapshot, String> {
+fn set_runtime_automation_mode(mode: String) -> Result<RuntimeAutomationSnapshot, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
     let storage = StorageLayout::from_directories(&config.directories);
     let normalized = mode.trim().to_ascii_lowercase();
@@ -2043,9 +1993,7 @@ fn notify_process_on_hold(
     input: OnHoldProcessNotificationInput,
 ) -> Result<(), String> {
     if input.release_run_id <= 0 {
-        return Err(String::from(
-            "release_run_id must be a positive integer",
-        ));
+        return Err(String::from("release_run_id must be a positive integer"));
     }
 
     let reason = input
@@ -2058,10 +2006,7 @@ fn notify_process_on_hold(
     let title = String::from("Process on hold");
     let body = format!(
         "#{} {} {}\n{}",
-        input.release_run_id,
-        input.repository_name,
-        input.git_tag,
-        reason,
+        input.release_run_id, input.repository_name, input.git_tag, reason,
     );
 
     app_handle
@@ -2120,9 +2065,7 @@ fn stop_runtime_process<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) {
     let _ = request_runtime_stop(app_handle);
 }
 
-fn request_runtime_stop<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-) -> io::Result<()> {
+fn request_runtime_stop<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> io::Result<()> {
     let config = load_shell_runtime_config()?;
     let state = app_handle.state::<RuntimeProcessState>();
     let child = match state.child.lock() {
@@ -2144,9 +2087,7 @@ fn request_runtime_stop<R: tauri::Runtime>(
         for _ in 0..RUNTIME_SHUTDOWN_WAIT_POLLS {
             match child.try_wait() {
                 Ok(Some(_)) => break,
-                Ok(None) => thread::sleep(Duration::from_millis(
-                    RUNTIME_SHUTDOWN_WAIT_POLL_MILLIS,
-                )),
+                Ok(None) => thread::sleep(Duration::from_millis(RUNTIME_SHUTDOWN_WAIT_POLL_MILLIS)),
                 Err(_) => break,
             }
         }
@@ -2194,10 +2135,7 @@ fn load_runtime_health_report(config: &RuntimeConfig) -> io::Result<RuntimeHealt
     read_health_report(&storage.health_report_path)
 }
 
-fn load_runtime_log_lines(
-    config: &RuntimeConfig,
-    line_limit: usize,
-) -> io::Result<Vec<String>> {
+fn load_runtime_log_lines(config: &RuntimeConfig, line_limit: usize) -> io::Result<Vec<String>> {
     let storage = StorageLayout::from_directories(&config.directories);
     let content = fs::read_to_string(&storage.runtime_log_path)?;
     let mut lines = VecDeque::with_capacity(line_limit);
@@ -2218,9 +2156,7 @@ fn normalize_runtime_log_line_limit(line_limit: Option<usize>) -> usize {
         .clamp(1, MAX_RUNTIME_LOG_LINE_LIMIT)
 }
 
-fn load_runtime_directory_settings(
-    config: &RuntimeConfig,
-) -> io::Result<RuntimeDirectorySettings> {
+fn load_runtime_directory_settings(config: &RuntimeConfig) -> io::Result<RuntimeDirectorySettings> {
     config.directories.ensure_exists()?;
     let storage = StorageLayout::from_directories(&config.directories);
 
@@ -2243,9 +2179,7 @@ fn load_runtime_directory_settings(
 fn resolve_localization_resource_root<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
 ) -> io::Result<PathBuf> {
-    read_bootstrapped_localization_resource_root(
-        &app_handle.state::<LocalizationResourceState>(),
-    )
+    read_bootstrapped_localization_resource_root(&app_handle.state::<LocalizationResourceState>())
 }
 
 fn store_bootstrapped_localization_resource_root(
@@ -2301,8 +2235,7 @@ fn ensure_persisted_localization_resources<R: tauri::Runtime>(
 fn resolve_persisted_localization_resource_root<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
 ) -> io::Result<PathBuf> {
-    resolve_shell_persistence_dir(app_handle)
-        .map(|path| path.join(LOCALIZATION_RESOURCE_DIR_NAME))
+    resolve_shell_persistence_dir(app_handle).map(|path| path.join(LOCALIZATION_RESOURCE_DIR_NAME))
 }
 
 fn resolve_localization_bundle_root<R: tauri::Runtime>(
@@ -2314,8 +2247,7 @@ fn resolve_localization_bundle_root<R: tauri::Runtime>(
 fn resolve_localization_bundle_cache_root<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
 ) -> io::Result<PathBuf> {
-    resolve_shell_local_data_dir(app_handle)
-        .map(|path| localization_bundle_cache_root(&path))
+    resolve_shell_local_data_dir(app_handle).map(|path| localization_bundle_cache_root(&path))
 }
 
 fn resolve_official_localization_source_root<R: tauri::Runtime>(
@@ -2357,10 +2289,7 @@ fn resolve_shell_persistence_dir<R: tauri::Runtime>(
         .app_config_dir()
         .map_err(|error| io::Error::other(error.to_string()))?;
 
-    resolve_shell_persistence_dir_from_app_config_dir(
-        &app_config_dir,
-        cfg!(debug_assertions),
-    )
+    resolve_shell_persistence_dir_from_app_config_dir(&app_config_dir, cfg!(debug_assertions))
 }
 
 fn resolve_shell_local_data_dir<R: tauri::Runtime>(
@@ -2403,22 +2332,14 @@ fn resolve_shell_persistence_dir_from_app_config_dir(
     app_config_dir: &Path,
     is_development: bool,
 ) -> io::Result<PathBuf> {
-    retarget_shell_directory_leaf(
-        app_config_dir,
-        is_development,
-        "persistence",
-    )
+    retarget_shell_directory_leaf(app_config_dir, is_development, "persistence")
 }
 
 fn resolve_shell_local_data_dir_from_app_local_data_dir(
     app_local_data_dir: &Path,
     is_development: bool,
 ) -> io::Result<PathBuf> {
-    retarget_shell_directory_leaf(
-        app_local_data_dir,
-        is_development,
-        "local data",
-    )
+    retarget_shell_directory_leaf(app_local_data_dir, is_development, "local data")
 }
 
 fn workspace_localization_resource_root() -> PathBuf {
@@ -2531,7 +2452,8 @@ fn sync_localization_source_directory(
         retained_files.insert(file_name.to_owned());
     }
 
-    let mut persisted_entries = fs::read_dir(persisted_locale_dir)?.collect::<Result<Vec<_>, _>>()?;
+    let mut persisted_entries =
+        fs::read_dir(persisted_locale_dir)?.collect::<Result<Vec<_>, _>>()?;
     persisted_entries.sort_by(|left, right| left.path().cmp(&right.path()));
 
     for entry in persisted_entries {
@@ -2626,7 +2548,9 @@ fn discover_localization_source_packs(
         for locale_entry in locale_entries {
             let locale_entry_path = locale_entry.path();
             if !locale_entry_path.is_file()
-                || locale_entry_path.extension().and_then(|extension| extension.to_str())
+                || locale_entry_path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
                     != Some("json")
             {
                 continue;
@@ -2675,8 +2599,7 @@ fn compile_localization_bundle(
     cache_root: &Path,
 ) -> io::Result<()> {
     let bundle_path = bundle_root.join(format!("{}.json", source_pack.locale_code));
-    let frozen_bundle_path =
-        cache_root.join(format!("{}.frozen.json", source_pack.locale_code));
+    let frozen_bundle_path = cache_root.join(format!("{}.frozen.json", source_pack.locale_code));
     let metadata_path = cache_root.join(format!("{}.meta.json", source_pack.locale_code));
     let current_metadata = build_localization_bundle_cache_metadata(source_pack)?;
     let existing_metadata = read_localization_bundle_cache_metadata(&metadata_path)?;
@@ -2703,10 +2626,7 @@ fn compile_localization_bundle(
                 .iter()
                 .skip(existing_metadata.increment_numbers.len())
             {
-                apply_localization_overlay_from_path(
-                    &mut cached_bundle,
-                    &increment_source.path,
-                )?;
+                apply_localization_overlay_from_path(&mut cached_bundle, &increment_source.path)?;
             }
             cached_bundle
         } else {
@@ -2773,9 +2693,7 @@ fn read_localization_bundle_cache_metadata(
     }
 }
 
-fn localization_source_file_signature(
-    path: &Path,
-) -> io::Result<LocalizationSourceFileSignature> {
+fn localization_source_file_signature(path: &Path) -> io::Result<LocalizationSourceFileSignature> {
     let metadata = fs::metadata(path)?;
     let modified_unix_millis = metadata
         .modified()
@@ -2862,14 +2780,17 @@ fn write_localization_pack_document(
 }
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    let mut bytes = serde_json::to_vec_pretty(value)
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    let mut bytes =
+        serde_json::to_vec_pretty(value).map_err(|error| io::Error::other(error.to_string()))?;
     bytes.push(b'\n');
     write_bytes_atomic(path, &bytes)
 }
 
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if fs::read(path).map(|existing| existing == bytes).unwrap_or(false) {
+    if fs::read(path)
+        .map(|existing| existing == bytes)
+        .unwrap_or(false)
+    {
         return Ok(());
     }
 
@@ -3074,10 +2995,8 @@ fn resolve_effective_localization_preferences(
         return Ok(persisted_preferences);
     }
 
-    let auto_preferences = build_auto_localization_preferences(
-        available_locales,
-        detected_host_locale,
-    );
+    let auto_preferences =
+        build_auto_localization_preferences(available_locales, detected_host_locale);
 
     if auto_preferences.is_none() {
         return Ok(persisted_preferences);
@@ -3099,12 +3018,10 @@ fn build_auto_localization_preferences(
     available_locales: &[LocalizationLocaleSettings],
     detected_host_locale: Option<DetectedHostLocale>,
 ) -> Option<PersistedLocalizationPreferences> {
-    let primary_locale = auto_selected_primary_locale_code(
-        available_locales,
-        detected_host_locale.as_ref(),
-    )?;
-    let fallback_locale = default_fallback_locale_code(available_locales, primary_locale)
-        .unwrap_or(primary_locale);
+    let primary_locale =
+        auto_selected_primary_locale_code(available_locales, detected_host_locale.as_ref())?;
+    let fallback_locale =
+        default_fallback_locale_code(available_locales, primary_locale).unwrap_or(primary_locale);
 
     Some(PersistedLocalizationPreferences {
         primary_locale: primary_locale.to_owned(),
@@ -3117,9 +3034,7 @@ fn build_auto_localization_preferences(
     })
 }
 
-fn has_user_selected_localization(
-    preferences: &PersistedLocalizationPreferences,
-) -> bool {
+fn has_user_selected_localization(preferences: &PersistedLocalizationPreferences) -> bool {
     preferences.selection_source.as_deref() != Some(AUTO_SELECTION_SOURCE)
 }
 
@@ -3134,10 +3049,7 @@ fn auto_selected_primary_locale_code<'a>(
             }
 
             if locale_code_exists(locale_code, available_locales)
-                && host_locale_matches_official_locale(
-                    detected_host_locale,
-                    locale_code,
-                )
+                && host_locale_matches_official_locale(detected_host_locale, locale_code)
             {
                 return Some(locale_code);
             }
@@ -3184,7 +3096,9 @@ fn detect_host_locale() -> Option<DetectedHostLocale> {
 
 fn parse_detected_host_locale(locale: &str) -> Option<DetectedHostLocale> {
     let normalized_locale = normalize_locale_code(locale);
-    let mut segments = normalized_locale.split('-').filter(|segment| !segment.is_empty());
+    let mut segments = normalized_locale
+        .split('-')
+        .filter(|segment| !segment.is_empty());
     let language = segments.next()?.to_ascii_lowercase();
     let mut script = None;
     let mut region = None;
@@ -3292,7 +3206,8 @@ fn discover_localization_locale_settings(
         let path = entry.path();
 
         if path.is_dir() {
-            let Some(locale_code) = path.file_name().and_then(|file_name| file_name.to_str()) else {
+            let Some(locale_code) = path.file_name().and_then(|file_name| file_name.to_str())
+            else {
                 warnings.push(format!(
                     "Ignoring locale source directory with a non-UTF8 name at {}.",
                     path.display()
@@ -3409,8 +3324,7 @@ fn resolve_configured_locale_code(
     warnings: &mut Vec<String>,
 ) -> String {
     if let Some(saved_locale_code) = saved_locale_code.map(str::trim) {
-        if !saved_locale_code.is_empty()
-            && locale_code_exists(saved_locale_code, available_locales)
+        if !saved_locale_code.is_empty() && locale_code_exists(saved_locale_code, available_locales)
         {
             return saved_locale_code.to_owned();
         }
@@ -3418,8 +3332,7 @@ fn resolve_configured_locale_code(
         if !saved_locale_code.is_empty() {
             warnings.push(format!(
                 "Saved {} locale {:?} is not available and was replaced.",
-                setting_name,
-                saved_locale_code
+                setting_name, saved_locale_code
             ));
         }
     }
@@ -3431,9 +3344,7 @@ fn resolve_configured_locale_code(
     String::from(DEFAULT_PRIMARY_LOCALE_CODE)
 }
 
-fn default_primary_locale_code(
-    available_locales: &[LocalizationLocaleSettings],
-) -> Option<&str> {
+fn default_primary_locale_code(available_locales: &[LocalizationLocaleSettings]) -> Option<&str> {
     if locale_code_exists(DEFAULT_PRIMARY_LOCALE_CODE, available_locales) {
         return Some(DEFAULT_PRIMARY_LOCALE_CODE);
     }
@@ -3470,25 +3381,16 @@ fn default_fallback_locale_code<'a>(
         .iter()
         .find(|locale| locale.code != primary_locale_code)
         .map(|locale| locale.code.as_str())
-        .or_else(|| {
-            official_locales
-                .first()
-                .map(|locale| locale.code.as_str())
-        })
+        .or_else(|| official_locales.first().map(|locale| locale.code.as_str()))
 }
 
-fn locale_code_exists(
-    locale_code: &str,
-    available_locales: &[LocalizationLocaleSettings],
-) -> bool {
+fn locale_code_exists(locale_code: &str, available_locales: &[LocalizationLocaleSettings]) -> bool {
     available_locales
         .iter()
         .any(|locale| locale.code == locale_code)
 }
 
-fn load_runtime_lifecycle_settings(
-    config: &RuntimeConfig,
-) -> io::Result<RuntimeLifecycleSettings> {
+fn load_runtime_lifecycle_settings(config: &RuntimeConfig) -> io::Result<RuntimeLifecycleSettings> {
     let storage = StorageLayout::from_directories(&config.directories);
     let startup_command = current_runtime_command_plan(RuntimeLaunchAction::Supervise)?;
     let shutdown_command = current_runtime_command_plan(RuntimeLaunchAction::Shutdown)?;
@@ -3529,9 +3431,7 @@ fn load_release_status(config: &RuntimeConfig) -> io::Result<AutomationSnapshot>
     LocalCoordinator::new(&storage).automation_snapshot()
 }
 
-fn load_repository_inspection(
-    config: &RuntimeConfig,
-) -> io::Result<RepositoryInspectionSettings> {
+fn load_repository_inspection(config: &RuntimeConfig) -> io::Result<RepositoryInspectionSettings> {
     config.directories.ensure_exists()?;
     let storage = StorageLayout::from_directories(&config.directories);
     if !storage.database_path.is_file() {
@@ -3581,7 +3481,10 @@ fn load_repository_project_detail(
             )
         })?;
 
-    Ok(build_repository_inspection_entry(repository, &mut resources))
+    Ok(build_repository_inspection_entry(
+        repository,
+        &mut resources,
+    ))
 }
 
 fn load_repository_inspection_resources(
@@ -3615,10 +3518,7 @@ fn load_repository_credential_references(
     list_credential_records(storage)?
         .into_iter()
         .map(|credential| {
-            let summary = summarize_credential_config(
-                &credential.kind,
-                &credential.config_json,
-            );
+            let summary = summarize_credential_config(&credential.kind, &credential.config_json);
 
             Ok((
                 credential.id,
@@ -3682,10 +3582,7 @@ fn load_repository_publish_targets(
                 kind: target.kind,
                 enabled: target.enabled,
                 config_json: target.config_json,
-                credentials: clone_credential_reference(
-                    credential_by_id,
-                    target.credentials_id,
-                ),
+                credentials: clone_credential_reference(credential_by_id, target.credentials_id),
                 bindings: publish_bindings_by_target
                     .remove(&target.id)
                     .unwrap_or_default(),
@@ -3800,10 +3697,8 @@ fn request_release_process_rerun(
     let coordinator = LocalCoordinator::new(&storage);
     coordinator.get_release_run_record(release_run_id)?;
 
-    let record = coordinator.dispatch_release_rebuild_by_id(
-        release_run_id,
-        DESKTOP_SHELL_RERUN_REQUESTED_VIA,
-    )?;
+    let record = coordinator
+        .dispatch_release_rebuild_by_id(release_run_id, DESKTOP_SHELL_RERUN_REQUESTED_VIA)?;
     emit_shell_release_queued_event(&storage, &coordinator, &record)?;
 
     Ok(record)
@@ -3823,9 +3718,8 @@ fn request_on_demand_release_process(
     }
 
     let coordinator = LocalCoordinator::new(&storage);
-    let record = coordinator.dispatch_on_demand_release(
-        normalize_on_demand_release_process_command_input(input),
-    )?;
+    let record = coordinator
+        .dispatch_on_demand_release(normalize_on_demand_release_process_command_input(input))?;
     emit_shell_release_queued_event(&storage, &coordinator, &record)?;
 
     Ok(record)
@@ -3934,10 +3828,7 @@ fn decode_shell_release_source_metadata(record: &ReleaseRunRecord) -> ReleaseSou
     serde_json::from_str(record.source_metadata_json.trim()).unwrap_or_default()
 }
 
-fn shell_release_event_mode_label(
-    trigger_source: &str,
-    source_kind: Option<&str>,
-) -> &'static str {
+fn shell_release_event_mode_label(trigger_source: &str, source_kind: Option<&str>) -> &'static str {
     if trigger_source.eq_ignore_ascii_case("poll") {
         return "Automatic";
     }
@@ -3950,9 +3841,7 @@ fn shell_release_event_mode_label(
     }
 }
 
-fn load_artifact_inspection(
-    config: &RuntimeConfig,
-) -> io::Result<Vec<ArtifactInspectionRecord>> {
+fn load_artifact_inspection(config: &RuntimeConfig) -> io::Result<Vec<ArtifactInspectionRecord>> {
     config.directories.ensure_exists()?;
     let storage = StorageLayout::from_directories(&config.directories);
     if !storage.database_path.is_file() {
@@ -4016,7 +3905,9 @@ fn load_build_execution_report(
         .map(PathBuf::from);
     let retained_dir_path = workspace_path.as_deref().map(build_execution_retained_dir);
     let report_path = workspace_path.as_deref().map(build_execution_report_path);
-    let logs_archive_path = workspace_path.as_deref().map(build_execution_log_archive_path);
+    let logs_archive_path = workspace_path
+        .as_deref()
+        .map(build_execution_log_archive_path);
     let logs_archive_exists = logs_archive_path
         .as_ref()
         .map(|path| path.is_file())
@@ -4026,10 +3917,9 @@ fn load_build_execution_report(
         _ => Vec::new(),
     };
     let report = match report_path.as_ref() {
-        Some(path) if path.is_file() => Some(
-            serde_json::from_slice(&fs::read(path)?)
-                .map_err(io::Error::other)?,
-        ),
+        Some(path) if path.is_file() => {
+            Some(serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)?)
+        }
         _ => None,
     };
 
@@ -4105,10 +3995,14 @@ pub(crate) fn load_retained_log_archive_entry(
         .ok_or_else(|| {
             io::Error::new(
                 ErrorKind::NotFound,
-                format!("build run {} does not have a retained workspace path", build_run_id),
+                format!(
+                    "build run {} does not have a retained workspace path",
+                    build_run_id
+                ),
             )
         })?;
-    let archive_path = require_existing_regular_file(&build_execution_log_archive_path(&workspace_path))?;
+    let archive_path =
+        require_existing_regular_file(&build_execution_log_archive_path(&workspace_path))?;
     let archive_file = fs::File::open(&archive_path)?;
     let mut archive = ZipArchive::new(archive_file).map_err(io::Error::other)?;
     let mut entry = archive.by_name(normalized_entry_path).map_err(|_| {
@@ -4125,7 +4019,10 @@ pub(crate) fn load_retained_log_archive_entry(
     if entry.is_dir() {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
-            format!("retained log entry '{}' is a directory", normalized_entry_path),
+            format!(
+                "retained log entry '{}' is a directory",
+                normalized_entry_path
+            ),
         ));
     }
 
@@ -4425,9 +4322,7 @@ fn normalize_external_url(url: &str) -> io::Result<&str> {
         ));
     }
 
-    if trimmed.chars().any(char::is_whitespace)
-        || trimmed.chars().any(char::is_control)
-    {
+    if trimmed.chars().any(char::is_whitespace) || trimmed.chars().any(char::is_control) {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
             "external URL must not contain whitespace or control characters",
@@ -4442,8 +4337,7 @@ fn normalize_external_url(url: &str) -> io::Result<&str> {
     };
 
     if remainder.is_empty()
-        || (!scheme.eq_ignore_ascii_case("http")
-            && !scheme.eq_ignore_ascii_case("https"))
+        || (!scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https"))
     {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -4502,7 +4396,10 @@ fn remove_directory_path(
     if !path.is_dir() {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
-            format!("expected directory path '{}', found non-directory", path.display()),
+            format!(
+                "expected directory path '{}', found non-directory",
+                path.display()
+            ),
         ));
     }
 
@@ -4544,9 +4441,7 @@ fn load_auth_providers(config: &RuntimeConfig) -> io::Result<Vec<AuthProviderSta
     Ok(vec![load_github_auth_provider_status(config)?])
 }
 
-fn load_github_auth_provider_status(
-    config: &RuntimeConfig,
-) -> io::Result<AuthProviderStatus> {
+fn load_github_auth_provider_status(config: &RuntimeConfig) -> io::Result<AuthProviderStatus> {
     if !git_credential_manager_available() {
         return Ok(build_auth_provider_status(
             AUTH_PROVIDER_STATUS_UNAVAILABLE,
@@ -4698,12 +4593,8 @@ fn run_github_browser_login_command(force: bool) -> io::Result<()> {
 }
 
 fn load_known_github_accounts() -> io::Result<Vec<String>> {
-    let output = run_git_credential_manager_command([
-        "github",
-        "list",
-        "--url",
-        GITHUB_AUTH_INSTANCE_URL,
-    ])?;
+    let output =
+        run_git_credential_manager_command(["github", "list", "--url", GITHUB_AUTH_INSTANCE_URL])?;
 
     Ok(output
         .lines()
@@ -4729,9 +4620,7 @@ where
     command.stdin(Stdio::null());
 
     let output = command.output().map_err(|error| {
-        io::Error::other(format!(
-            "spawn git credential-manager {preview}: {error}"
-        ))
+        io::Error::other(format!("spawn git credential-manager {preview}: {error}"))
     })?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
@@ -4745,9 +4634,7 @@ where
         Some(code) => format!("exit code {code}"),
         None => String::from("termination by signal"),
     };
-    let mut details = format!(
-        "git credential-manager {preview} failed with {exit_detail}"
-    );
+    let mut details = format!("git credential-manager {preview} failed with {exit_detail}");
     if !stderr.is_empty() {
         details.push_str("; stderr: ");
         details.push_str(stderr);
@@ -4760,9 +4647,7 @@ where
     Err(io::Error::other(details))
 }
 
-fn resolve_github_auth_credential(
-    storage: &StorageLayout,
-) -> io::Result<Option<CredentialRecord>> {
+fn resolve_github_auth_credential(storage: &StorageLayout) -> io::Result<Option<CredentialRecord>> {
     Ok(list_credential_records(storage)?
         .into_iter()
         .find(|credential| credential.kind == KIND_GIT_HTTP_GITHUB_HOST_LOGIN))
@@ -4780,14 +4665,12 @@ fn ensure_github_auth_credential(
         known_accounts,
     );
 
-    LocalCoordinator::new(storage).upsert_credential_record(
-        UpsertCredentialRecordInput {
-            credential_id: existing.as_ref().map(|credential| credential.id),
-            name: String::from(GITHUB_AUTH_CREDENTIAL_NAME),
-            kind: String::from(KIND_GIT_HTTP_GITHUB_HOST_LOGIN),
-            config_json: github_auth_credential_config_json(selected_login.as_deref()),
-        },
-    )
+    LocalCoordinator::new(storage).upsert_credential_record(UpsertCredentialRecordInput {
+        credential_id: existing.as_ref().map(|credential| credential.id),
+        name: String::from(GITHUB_AUTH_CREDENTIAL_NAME),
+        kind: String::from(KIND_GIT_HTTP_GITHUB_HOST_LOGIN),
+        config_json: github_auth_credential_config_json(selected_login.as_deref()),
+    })
 }
 
 fn github_auth_credential_config_json(login: Option<&str>) -> String {
@@ -4828,7 +4711,10 @@ fn select_github_auth_login(
     if let Some(existing_login) =
         existing_login.and_then(|login| normalize_optional_auth_login(Some(&login)))
     {
-        if normalized_accounts.iter().any(|account| account == &existing_login) {
+        if normalized_accounts
+            .iter()
+            .any(|account| account == &existing_login)
+        {
             return Some(existing_login);
         }
     }
@@ -4858,7 +4744,7 @@ fn preferred_known_github_login(known_accounts: &[String]) -> Option<String> {
         .iter()
         .filter(|account| !github_auth_login_is_placeholder(account))
         .filter(|account| !account.chars().all(|character| character.is_ascii_digit()))
-    .next()
+        .next()
         .cloned()
 }
 
@@ -4876,10 +4762,7 @@ fn normalize_optional_auth_login(value: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn count_repository_bindings(
-    storage: &StorageLayout,
-    credential_id: i64,
-) -> io::Result<usize> {
+fn count_repository_bindings(storage: &StorageLayout, credential_id: i64) -> io::Result<usize> {
     Ok(LocalCoordinator::new(storage)
         .list_polling_repositories()?
         .into_iter()
@@ -4984,14 +4867,13 @@ fn persist_secret_credential(
     }
 
     let storage = writable_secret_storage(config)?;
-    let credential = LocalCoordinator::new(&storage).upsert_credential_record(
-        UpsertCredentialRecordInput {
+    let credential =
+        LocalCoordinator::new(&storage).upsert_credential_record(UpsertCredentialRecordInput {
             credential_id: input.credential_id,
             name: input.name,
             kind: input.kind,
             config_json: input.config_json,
-        },
-    )?;
+        })?;
 
     Ok(credential.id)
 }
@@ -5002,7 +4884,8 @@ fn persist_repository_auth_binding(
     credentials_id: Option<i64>,
 ) -> io::Result<()> {
     let storage = writable_secret_storage(config)?;
-    LocalCoordinator::new(&storage).update_repository_credentials_binding(repository_id, credentials_id)
+    LocalCoordinator::new(&storage)
+        .update_repository_credentials_binding(repository_id, credentials_id)
 }
 
 fn persist_repository_auth_connect(
@@ -5064,10 +4947,8 @@ fn persist_publish_target_secret_binding(
     input: UpdatePublishTargetSecretBindingInput,
 ) -> io::Result<()> {
     let storage = writable_secret_storage(config)?;
-    LocalCoordinator::new(&storage).update_publish_target_credentials_binding(
-        input.publish_target_id,
-        input.credentials_id,
-    )
+    LocalCoordinator::new(&storage)
+        .update_publish_target_credentials_binding(input.publish_target_id, input.credentials_id)
 }
 
 fn persist_repository_project(
@@ -5106,9 +4987,7 @@ fn persist_repository_project(
                         &target.target_platform,
                         &target.build_method,
                     ),
-                    runner_config_json: unity_runner_config_json(
-                        &target.unity_executable_path,
-                    ),
+                    runner_config_json: unity_runner_config_json(&target.unity_executable_path),
                 })
                 .collect(),
             publish_targets: normalized
@@ -5143,11 +5022,7 @@ fn persist_repository_project(
     }
 
     if let Some(assessment) = repository_access_assessment.as_ref() {
-        persist_repository_auth_state_snapshot(
-            &storage,
-            created.repository_id,
-            assessment,
-        )?;
+        persist_repository_auth_state_snapshot(&storage, created.repository_id, assessment)?;
     }
 
     Ok(created)
@@ -5190,9 +5065,7 @@ fn persist_repository_project_update(
                         &target.target_platform,
                         &target.build_method,
                     ),
-                    runner_config_json: unity_runner_config_json(
-                        &target.unity_executable_path,
-                    ),
+                    runner_config_json: unity_runner_config_json(&target.unity_executable_path),
                 })
                 .collect(),
             publish_targets: normalized
@@ -5221,11 +5094,7 @@ fn persist_repository_project_update(
     )?;
 
     if let Some(assessment) = repository_access_assessment.as_ref() {
-        persist_repository_auth_state_snapshot(
-            &storage,
-            normalized.repository_id,
-            assessment,
-        )?;
+        persist_repository_auth_state_snapshot(&storage, normalized.repository_id, assessment)?;
     }
 
     Ok(())
@@ -5306,10 +5175,8 @@ fn normalize_repository_project_removal_paths(
     file_paths: &[String],
     skipped_paths: &mut Vec<PathBuf>,
 ) -> NormalizedRepositoryProjectRemovalPaths {
-    let mut directory_paths = normalize_repository_project_path_list(
-        directory_paths,
-        skipped_paths,
-    );
+    let mut directory_paths =
+        normalize_repository_project_path_list(directory_paths, skipped_paths);
     directory_paths.sort_by(|left, right| {
         left.components()
             .count()
@@ -5329,10 +5196,8 @@ fn normalize_repository_project_removal_paths(
         normalized_directory_paths.push(path);
     }
 
-    let mut normalized_file_paths = normalize_repository_project_path_list(
-        file_paths,
-        skipped_paths,
-    );
+    let mut normalized_file_paths =
+        normalize_repository_project_path_list(file_paths, skipped_paths);
     normalized_file_paths.sort();
     normalized_file_paths.retain(|path| {
         !normalized_directory_paths
@@ -5413,9 +5278,7 @@ fn normalize_create_repository_project_command_input(
                 )
             })?;
 
-            if !(repository_url.starts_with("https://")
-                || repository_url.starts_with("http://"))
-            {
+            if !(repository_url.starts_with("https://") || repository_url.starts_with("http://")) {
                 return Err(io::Error::new(
                     ErrorKind::InvalidInput,
                     "repository project URL must use http:// or https://",
@@ -5531,8 +5394,9 @@ fn normalize_update_repository_project_command_input(
 
     let engine_kind = normalize_repository_project_engine_kind(&input.engine_kind)?;
     let name = require_shell_non_empty(&input.name, "repository project name")?;
-    let source_mode = require_shell_non_empty(&input.source_mode, "repository project source_mode")?
-        .to_ascii_lowercase();
+    let source_mode =
+        require_shell_non_empty(&input.source_mode, "repository project source_mode")?
+            .to_ascii_lowercase();
     let repository_url = normalize_optional_shell_string(input.repository_url);
     let local_path = normalize_optional_shell_string(input.local_path);
 
@@ -5689,14 +5553,13 @@ fn normalize_create_repository_project_build_target_command_input(
             "build target contract.unity is required while Unity is the only supported engine",
         )
     })?;
-    let unity_executable_path =
-        require_shell_non_empty(&input.unity_executable_path, "build target Unity executable path")?;
+    let unity_executable_path = require_shell_non_empty(
+        &input.unity_executable_path,
+        "build target Unity executable path",
+    )?;
     let diagnostics = validate_unity_executable_path_diagnostics(&unity_executable_path);
     if diagnostics.status != "ready" {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            diagnostics.message,
-        ));
+        return Err(io::Error::new(ErrorKind::InvalidInput, diagnostics.message));
     }
 
     Ok(NormalizedCreateRepositoryProjectBuildTargetCommandInput {
@@ -5757,7 +5620,8 @@ fn normalize_create_repository_project_publish_target_command_input(
     let mut build_target_names = HashSet::new();
     let mut bindings = Vec::with_capacity(input.bindings.len());
     for binding in input.bindings {
-        let normalized = normalize_create_repository_project_publish_binding_command_input(binding)?;
+        let normalized =
+            normalize_create_repository_project_publish_binding_command_input(binding)?;
         let duplicate_key = normalized.build_target_name.to_ascii_lowercase();
         if !build_target_names.insert(duplicate_key) {
             return Err(io::Error::new(
@@ -5770,8 +5634,7 @@ fn normalize_create_repository_project_publish_target_command_input(
 
     Ok(NormalizedCreateRepositoryProjectPublishTargetCommandInput {
         name: require_shell_non_empty(&input.name, "publish target name")?,
-        kind: require_shell_non_empty(&input.kind, "publish target kind")?
-            .to_ascii_lowercase(),
+        kind: require_shell_non_empty(&input.kind, "publish target kind")?.to_ascii_lowercase(),
         enabled: input.enabled,
         config_json: require_shell_non_empty(&input.config_json, "publish target config_json")?,
         credentials_id: input.credentials_id,
@@ -5782,14 +5645,19 @@ fn normalize_create_repository_project_publish_target_command_input(
 fn normalize_create_repository_project_publish_binding_command_input(
     input: CreateRepositoryProjectPublishBindingCommandInput,
 ) -> io::Result<NormalizedCreateRepositoryProjectPublishBindingCommandInput> {
-    Ok(NormalizedCreateRepositoryProjectPublishBindingCommandInput {
-        build_target_name: require_shell_non_empty(
-            &input.build_target_name,
-            "publish binding build_target_name",
-        )?,
-        enabled: input.enabled,
-        options_json: require_shell_non_empty(&input.options_json, "publish binding options_json")?,
-    })
+    Ok(
+        NormalizedCreateRepositoryProjectPublishBindingCommandInput {
+            build_target_name: require_shell_non_empty(
+                &input.build_target_name,
+                "publish binding build_target_name",
+            )?,
+            enabled: input.enabled,
+            options_json: require_shell_non_empty(
+                &input.options_json,
+                "publish binding options_json",
+            )?,
+        },
+    )
 }
 
 fn normalize_update_repository_project_publish_target_command_input(
@@ -5816,7 +5684,8 @@ fn normalize_update_repository_project_publish_target_command_input(
     let mut claimed_build_targets = HashSet::new();
     let mut bindings = Vec::with_capacity(input.bindings.len());
     for binding in input.bindings {
-        let normalized = normalize_update_repository_project_publish_binding_command_input(binding)?;
+        let normalized =
+            normalize_update_repository_project_publish_binding_command_input(binding)?;
         let duplicate_key = normalized
             .build_target_id
             .map(|build_target_id| format!("id:{build_target_id}"))
@@ -5833,8 +5702,7 @@ fn normalize_update_repository_project_publish_target_command_input(
     Ok(NormalizedUpdateRepositoryProjectPublishTargetCommandInput {
         publish_target_id: input.publish_target_id,
         name: require_shell_non_empty(&input.name, "publish target name")?,
-        kind: require_shell_non_empty(&input.kind, "publish target kind")?
-            .to_ascii_lowercase(),
+        kind: require_shell_non_empty(&input.kind, "publish target kind")?.to_ascii_lowercase(),
         enabled: input.enabled,
         config_json: require_shell_non_empty(&input.config_json, "publish target config_json")?,
         credentials_id: input.credentials_id,
@@ -5854,15 +5722,20 @@ fn normalize_update_repository_project_publish_binding_command_input(
         }
     }
 
-    Ok(NormalizedUpdateRepositoryProjectPublishBindingCommandInput {
-        build_target_id: input.build_target_id,
-        build_target_name: require_shell_non_empty(
-            &input.build_target_name,
-            "publish binding build_target_name",
-        )?,
-        enabled: input.enabled,
-        options_json: require_shell_non_empty(&input.options_json, "publish binding options_json")?,
-    })
+    Ok(
+        NormalizedUpdateRepositoryProjectPublishBindingCommandInput {
+            build_target_id: input.build_target_id,
+            build_target_name: require_shell_non_empty(
+                &input.build_target_name,
+                "publish binding build_target_name",
+            )?,
+            enabled: input.enabled,
+            options_json: require_shell_non_empty(
+                &input.options_json,
+                "publish binding options_json",
+            )?,
+        },
+    )
 }
 
 fn normalize_repository_project_engine_kind(engine_kind: &str) -> io::Result<String> {
@@ -5991,9 +5864,7 @@ fn summarize_credential_config(kind: &str, config_json: &str) -> CredentialConfi
         Err(error) => {
             return CredentialConfigSummary {
                 status: String::from("invalid_config_json"),
-                message: format!(
-                    "stored credential config_json is not valid JSON: {error}"
-                ),
+                message: format!("stored credential config_json is not valid JSON: {error}"),
                 top_level_keys: Vec::new(),
                 missing_required_keys: expected_keys,
             }
@@ -6002,9 +5873,7 @@ fn summarize_credential_config(kind: &str, config_json: &str) -> CredentialConfi
     let Some(object) = parsed.as_object() else {
         return CredentialConfigSummary {
             status: String::from("invalid_config_shape"),
-            message: String::from(
-                "stored credential config_json must decode to a JSON object",
-            ),
+            message: String::from("stored credential config_json must decode to a JSON object"),
             top_level_keys: Vec::new(),
             missing_required_keys: expected_keys,
         };
@@ -6132,9 +6001,7 @@ fn load_unity_adapter_settings(config: &RuntimeConfig) -> io::Result<UnityAdapte
     })
 }
 
-fn load_cached_host_capability_profile(
-    platform: HostPlatform,
-) -> HostCapabilityProfile {
+fn load_cached_host_capability_profile(platform: HostPlatform) -> HostCapabilityProfile {
     let cache_key = platform.as_str();
 
     if let Ok(cache) = HOST_CAPABILITY_PROFILE_CACHE.lock() {
@@ -6159,9 +6026,7 @@ fn load_cached_host_capability_profile(
     profile
 }
 
-fn default_unity_discovery_roots(
-    platform: HostPlatform,
-) -> Vec<UnityDiscoveryRootSetting> {
+fn default_unity_discovery_roots(platform: HostPlatform) -> Vec<UnityDiscoveryRootSetting> {
     default_unity_discovery_root_paths(platform)
         .into_iter()
         .map(|path| UnityDiscoveryRootSetting {
@@ -6180,10 +6045,7 @@ fn map_build_target_runner_settings(
         None
     };
     let (diagnostic_status, diagnostic_message) = match diagnostic.as_ref() {
-        Some(diagnostic) => (
-            diagnostic.status.clone(),
-            diagnostic.message.clone(),
-        ),
+        Some(diagnostic) => (diagnostic.status.clone(), diagnostic.message.clone()),
         None => (
             String::from("unsupported_runner_type"),
             format!(
@@ -6256,10 +6118,7 @@ fn process_matches_runtime_identity(process: &sysinfo::Process) -> bool {
     process_identity_matches_runtime(&process_name, &command_line)
 }
 
-fn process_identity_matches_runtime(
-    process_name: &str,
-    command_line: &str,
-) -> bool {
+fn process_identity_matches_runtime(process_name: &str, command_line: &str) -> bool {
     let normalized_name = process_name.trim().to_ascii_lowercase();
     let normalized_command_line = command_line.trim().to_ascii_lowercase();
 
@@ -6282,12 +6141,13 @@ fn runtime_process_ids(storage: &StorageLayout) -> io::Result<Vec<u32>> {
                 RuntimeSupervisorStatus::Starting
                     | RuntimeSupervisorStatus::Running
                     | RuntimeSupervisorStatus::Restarting
-            ) => {
-                pids.push(snapshot.supervisor_process_id);
-                if let Some(active_child_process_id) = snapshot.active_child_process_id {
-                    pids.push(active_child_process_id);
-                }
+            ) =>
+        {
+            pids.push(snapshot.supervisor_process_id);
+            if let Some(active_child_process_id) = snapshot.active_child_process_id {
+                pids.push(active_child_process_id);
             }
+        }
         Ok(_) => {}
         Err(error) if is_ignorable_runtime_state_error(&error) => {}
         Err(error) => return Err(error),
@@ -6297,12 +6157,11 @@ fn runtime_process_ids(storage: &StorageLayout) -> io::Result<Vec<u32>> {
         Ok(report)
             if matches!(
                 report.status,
-                RuntimeStatus::Bootstrapping
-                    | RuntimeStatus::Healthy
-                    | RuntimeStatus::ShuttingDown
-            ) => {
-                pids.push(report.process_id);
-            }
+                RuntimeStatus::Bootstrapping | RuntimeStatus::Healthy | RuntimeStatus::ShuttingDown
+            ) =>
+        {
+            pids.push(report.process_id);
+        }
         Ok(_) => {}
         Err(error) if is_ignorable_runtime_state_error(&error) => {}
         Err(error) => return Err(error),
@@ -6321,9 +6180,7 @@ fn runtime_shutdown_grace_period_millis() -> u64 {
     RUNTIME_SHUTDOWN_WAIT_POLL_MILLIS * RUNTIME_SHUTDOWN_WAIT_POLLS as u64
 }
 
-fn runtime_crash_recovery_status(
-    snapshot: Option<&RuntimeSupervisorSnapshot>,
-) -> String {
+fn runtime_crash_recovery_status(snapshot: Option<&RuntimeSupervisorSnapshot>) -> String {
     match snapshot.map(|snapshot| snapshot.status) {
         Some(RuntimeSupervisorStatus::Starting | RuntimeSupervisorStatus::Running) => {
             String::from("supervisor_running")
@@ -6359,18 +6216,8 @@ fn animate_main_window_focus_transition(
 
     for step in 1..=total_steps {
         let next_layout = WindowLayoutPreset::new(
-            interpolate_dimension(
-                start_layout.width,
-                target_layout.width,
-                step,
-                total_steps,
-            ),
-            interpolate_dimension(
-                start_layout.height,
-                target_layout.height,
-                step,
-                total_steps,
-            ),
+            interpolate_dimension(start_layout.width, target_layout.width, step, total_steps),
+            interpolate_dimension(start_layout.height, target_layout.height, step, total_steps),
         );
         apply_main_window_layout(app_handle, next_layout)?;
 
@@ -6473,8 +6320,7 @@ fn development_cargo_path() -> PathBuf {
 }
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
 fn runtime_binary_file_name() -> String {
@@ -6506,13 +6352,10 @@ fn current_butler_sidecar_path() -> Option<PathBuf> {
 
 fn development_butler_sidecar_path(workspace_root: &Path) -> Option<PathBuf> {
     let target_triple = current_desktop_target_triple()?;
-    let sidecar_path = workspace_root
-        .join("src-tauri")
-        .join("bin")
-        .join(format!(
-            "{BUTLER_BINARY_NAME}-{target_triple}{}",
-            std::env::consts::EXE_SUFFIX,
-        ));
+    let sidecar_path = workspace_root.join("src-tauri").join("bin").join(format!(
+        "{BUTLER_BINARY_NAME}-{target_triple}{}",
+        std::env::consts::EXE_SUFFIX,
+    ));
 
     sidecar_path.is_file().then_some(sidecar_path)
 }
@@ -6556,112 +6399,63 @@ fn current_desktop_target_triple() -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use crate::load_retained_log_archive_entry;
     use super::{
-        ActiveSystemDialogGuard,
-        apply_runtime_command_environment,
-        butler_binary_file_name,
-        LocalizationResourceState,
-        development_butler_sidecar_path,
-        finalize_github_auth_login_with_known_accounts,
-        github_browser_login_command_args,
-        github_auth_credential_config_json,
-        select_github_auth_login,
-        load_artifact_inspection,
-        load_build_execution_report,
-        load_build_history,
-        load_process_feed,
-        OnDemandReleaseProcessCommandInput,
-        request_on_demand_release_process,
-        request_release_process_rerun,
-        load_repository_inspection,
-        load_repository_project_detail,
-        load_release_status,
-        read_bootstrapped_localization_resource_root,
-        load_localization_settings_from_paths,
-        load_localization_settings_from_paths_with_detected_locale,
-        discover_localization_locale_settings,
-        localization_preferences_path,
-        localization_source_root,
-        compile_localization_bundles,
-        resolve_shell_local_data_dir_from_app_local_data_dir,
-        resolve_shell_persistence_dir_from_app_config_dir,
-        development_runtime_command_plan, load_runtime_directory_settings,
-        load_runtime_health_report, load_runtime_lifecycle_settings,
-        load_runtime_log_lines,
-        DetectedHostLocale,
-        detect_repository_provider,
-        seed_embedded_localization_files,
-        write_persisted_localization_preferences,
-        AUTO_SELECTION_SOURCE,
-        EMBEDDED_LOCALIZATION_FILES,
-        EVENT_TOPIC_RELEASE_QUEUED,
-        LOCALIZATION_BUNDLE_CACHE_SCHEMA_VERSION,
-        LOCALIZATION_ORIGIN_FILE_NAME,
-        LOCALIZATION_WORKING_FILE_NAME,
-        has_active_system_dialogs,
-        is_main_window_focus_loss_suppressed,
-        normalize_external_url,
-        runtime_process_ids,
-        persist_repository_auth_assessment,
-        persist_repository_auth_connect,
-        persist_repository_auth_disconnect,
-        persist_repository_auth_reconnect,
-        persist_repository_project,
-        persist_repository_project_removal,
-        persist_repository_project_update,
-        persist_localization_preferences_to_paths,
-        persist_publish_target_secret_binding,
-        persist_secret_credential,
-        process_identity_matches_runtime,
-        purge_build_execution_retention_files,
-        packaged_butler_sidecar_path,
-        load_secret_settings,
-        PersistedLocalizationPreferences,
-        LocalizationBundleCacheMetadata,
+        apply_runtime_command_environment, butler_binary_file_name, compile_localization_bundles,
+        detect_repository_provider, development_butler_sidecar_path,
+        development_runtime_command_plan, discover_localization_locale_settings,
+        finalize_github_auth_login_with_known_accounts, github_auth_credential_config_json,
+        github_browser_login_command_args, has_active_system_dialogs,
+        is_main_window_focus_loss_suppressed, load_artifact_inspection,
+        load_build_execution_report, load_build_history, load_localization_settings_from_paths,
+        load_localization_settings_from_paths_with_detected_locale, load_process_feed,
+        load_release_status, load_repository_inspection, load_repository_project_detail,
+        load_runtime_directory_settings, load_runtime_health_report,
+        load_runtime_lifecycle_settings, load_runtime_log_lines, load_secret_settings,
+        load_unity_adapter_settings, localization_preferences_path, localization_source_root,
+        normalize_external_url, normalize_runtime_log_line_limit, packaged_butler_sidecar_path,
+        packaged_runtime_command_plan, persist_localization_preferences_to_paths,
+        persist_publish_target_secret_binding, persist_repository_auth_assessment,
+        persist_repository_auth_connect, persist_repository_auth_disconnect,
+        persist_repository_auth_reconnect, persist_repository_project,
+        persist_repository_project_removal, persist_repository_project_update,
+        persist_secret_credential, process_identity_matches_runtime,
+        purge_build_execution_retention_files, read_bootstrapped_localization_resource_root,
+        read_localization_bundle_cache_metadata, read_localization_pack_document,
+        request_on_demand_release_process, request_release_process_rerun,
+        resolve_github_auth_credential, resolve_shell_local_data_dir_from_app_local_data_dir,
+        resolve_shell_persistence_dir_from_app_config_dir, runtime_binary_file_name,
+        runtime_process_ids, seed_embedded_localization_files, select_github_auth_login,
+        should_hide_main_window_on_focus_loss_state, store_bootstrapped_localization_resource_root,
+        sync_official_localization_sources, window_transition_settings,
+        write_persisted_localization_preferences, ActiveSystemDialogGuard,
+        BuildContractCommandInput, ConnectRepositoryAuthInput,
+        CreateRepositoryProjectBuildTargetCommandInput, CreateRepositoryProjectCommandInput,
+        DetectedHostLocale, DisconnectRepositoryAuthInput, LocalizationBundleCacheMetadata,
+        LocalizationResourceState, OnDemandReleaseProcessCommandInput,
+        PersistedLocalizationPreferences, ProcessFeedInput, ReconnectRepositoryAuthInput,
+        RemoveRepositoryProjectCommandInput, RepositoryAccessAssessment,
+        RepositoryAccessAssessmentInput, RepositoryProviderDetection, RuntimeLaunchAction,
+        SaveLocalizationPreferencesInput, SaveSecretCredentialInput, ShellLifecycleState,
+        SyncRepositoryAuthAssessmentInput, UnityBuildContractCommandInput,
+        UpdatePublishTargetSecretBindingInput, UpdateRepositoryProjectBuildTargetCommandInput,
+        UpdateRepositoryProjectCommandInput, AUTH_PROVIDER_STATUS_CONNECTED, AUTO_SELECTION_SOURCE,
+        BUTLER_BINARY_NAME, EMBEDDED_LOCALIZATION_FILES, EVENT_TOPIC_RELEASE_QUEUED,
+        HGP_BUTLER_PATH_ENV, LOCALIZATION_BUNDLE_CACHE_SCHEMA_VERSION,
+        LOCALIZATION_ORIGIN_FILE_NAME, LOCALIZATION_WORKING_FILE_NAME, RUNTIME_BINARY_NAME,
         USER_SELECTION_SOURCE,
-        read_localization_bundle_cache_metadata,
-        read_localization_pack_document,
-        resolve_github_auth_credential,
-        ShellLifecycleState,
-        should_hide_main_window_on_focus_loss_state,
-        store_bootstrapped_localization_resource_root,
-        sync_official_localization_sources,
-        load_unity_adapter_settings,
-        normalize_runtime_log_line_limit, packaged_runtime_command_plan,
-        runtime_binary_file_name, RuntimeLaunchAction, BUTLER_BINARY_NAME,
-        HGP_BUTLER_PATH_ENV, RUNTIME_BINARY_NAME,
-        BuildContractCommandInput,
-        CreateRepositoryProjectBuildTargetCommandInput,
-        CreateRepositoryProjectCommandInput,
-        ProcessFeedInput,
-        RemoveRepositoryProjectCommandInput,
-        RepositoryAccessAssessment,
-        RepositoryAccessAssessmentInput,
-        RepositoryProviderDetection,
-        AUTH_PROVIDER_STATUS_CONNECTED,
-        UpdateRepositoryProjectBuildTargetCommandInput,
-        UpdateRepositoryProjectCommandInput,
-        ConnectRepositoryAuthInput, DisconnectRepositoryAuthInput,
-        ReconnectRepositoryAuthInput, SaveLocalizationPreferencesInput,
-        SaveSecretCredentialInput,
-        SyncRepositoryAuthAssessmentInput,
-        UpdatePublishTargetSecretBindingInput, UnityBuildContractCommandInput,
-        window_transition_settings,
     };
+    use crate::load_retained_log_archive_entry;
     use runtime_config::{RuntimeConfig, RUNTIME_ROOT_ENV};
     use runtime_core::{
         bootstrap_runtime, read_runtime_event_batch, write_supervisor_snapshot,
-        RuntimeRestartPolicy, RuntimeStatus, RuntimeSupervisorSnapshot,
-        RuntimeSupervisorStatus,
+        RuntimeRestartPolicy, RuntimeStatus, RuntimeSupervisorSnapshot, RuntimeSupervisorStatus,
     };
     use runtime_store::{
-        initialize_database, open_connection, LocalCoordinator,
-        ManualReleaseDispatchInput, RemoveRepositoryProjectStrategy,
-        StorageLayout,
+        initialize_database, open_connection, LocalCoordinator, ManualReleaseDispatchInput,
+        RemoveRepositoryProjectStrategy, StorageLayout,
     };
-    use std::io::ErrorKind;
     use rusqlite::params;
+    use std::io::ErrorKind;
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -6694,11 +6488,8 @@ mod tests {
         let state = LocalizationResourceState::default();
         let bundle_root = PathBuf::from("C:/tmp/localizations/bundles");
 
-        store_bootstrapped_localization_resource_root(
-            &state,
-            bundle_root.clone(),
-        )
-        .expect("bootstrap should store the compiled localization root");
+        store_bootstrapped_localization_resource_root(&state, bundle_root.clone())
+            .expect("bootstrap should store the compiled localization root");
 
         assert_eq!(
             read_bootstrapped_localization_resource_root(&state)
@@ -6776,19 +6567,23 @@ mod tests {
 
         let target_triple = super::current_desktop_target_triple()
             .expect("test host should map to a supported target triple");
-        let sidecar_path = root
-            .join("src-tauri")
-            .join("bin")
-            .join(format!(
-                "{BUTLER_BINARY_NAME}-{target_triple}{}",
-                std::env::consts::EXE_SUFFIX,
-            ));
+        let sidecar_path = root.join("src-tauri").join("bin").join(format!(
+            "{BUTLER_BINARY_NAME}-{target_triple}{}",
+            std::env::consts::EXE_SUFFIX,
+        ));
 
-        std::fs::create_dir_all(sidecar_path.parent().expect("sidecar path should have parent"))
-            .expect("sidecar directory should create");
+        std::fs::create_dir_all(
+            sidecar_path
+                .parent()
+                .expect("sidecar path should have parent"),
+        )
+        .expect("sidecar directory should create");
         std::fs::write(&sidecar_path, b"butler").expect("sidecar placeholder should write");
 
-        assert_eq!(development_butler_sidecar_path(&root), Some(sidecar_path.clone()));
+        assert_eq!(
+            development_butler_sidecar_path(&root),
+            Some(sidecar_path.clone())
+        );
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }
@@ -6806,7 +6601,10 @@ mod tests {
         std::fs::write(&desktop_path, b"desktop").expect("desktop binary placeholder should write");
         std::fs::write(&sidecar_path, b"butler").expect("butler sidecar placeholder should write");
 
-        assert_eq!(packaged_butler_sidecar_path(&desktop_path), Some(sidecar_path.clone()));
+        assert_eq!(
+            packaged_butler_sidecar_path(&desktop_path),
+            Some(sidecar_path.clone())
+        );
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }
@@ -6825,11 +6623,7 @@ mod tests {
         };
         let mut command = Command::new("cargo");
 
-        apply_runtime_command_environment(
-            &mut command,
-            &runtime_root,
-            Some(&butler_sidecar_path),
-        );
+        apply_runtime_command_environment(&mut command, &runtime_root, Some(&butler_sidecar_path));
 
         let runtime_root_env = command
             .get_envs()
@@ -7030,7 +6824,10 @@ mod tests {
         assert_eq!(settings.logs_dir, settings.data_dir.join("logs"));
         assert_eq!(settings.artifacts_dir, settings.data_dir.join("artifacts"));
         assert_eq!(settings.runs_dir, settings.data_dir.join("runs"));
-        assert_eq!(settings.database_path, settings.state_dir.join("runtime.db"));
+        assert_eq!(
+            settings.database_path,
+            settings.state_dir.join("runtime.db")
+        );
         assert_eq!(
             settings.health_report_path,
             settings.state_dir.join("health.json")
@@ -7051,15 +6848,17 @@ mod tests {
             settings.runtime_events_cursor_path,
             settings.state_dir.join("runtime-events.cursor.json")
         );
-        assert_eq!(settings.runtime_log_path, settings.logs_dir.join("runtime.jsonl"));
+        assert_eq!(
+            settings.runtime_log_path,
+            settings.logs_dir.join("runtime.jsonl")
+        );
         assert!(settings.data_dir.is_dir());
         assert!(settings.state_dir.is_dir());
         assert!(settings.logs_dir.is_dir());
         assert!(settings.artifacts_dir.is_dir());
         assert!(settings.runs_dir.is_dir());
 
-        std::fs::remove_dir_all(&settings.data_dir)
-            .expect("temp directory should be removable");
+        std::fs::remove_dir_all(&settings.data_dir).expect("temp directory should be removable");
     }
 
     #[test]
@@ -7071,8 +6870,7 @@ mod tests {
 
         let localization_root = root.join("localizations");
         let settings_dir = root.join("config");
-        std::fs::create_dir_all(&localization_root)
-            .expect("localization root should create");
+        std::fs::create_dir_all(&localization_root).expect("localization root should create");
         std::fs::write(
             localization_root.join("en.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
@@ -7111,7 +6909,10 @@ mod tests {
         assert_eq!(settings.available_locales.len(), 2);
         assert_eq!(settings.available_locales[0].code, "en");
         assert_eq!(settings.available_locales[1].code, "pt-BR");
-        assert!(settings.available_locales.iter().all(|locale| locale.is_official));
+        assert!(settings
+            .available_locales
+            .iter()
+            .all(|locale| locale.is_official));
         assert!(settings.warnings.is_empty());
 
         let persisted = std::fs::read(localization_preferences_path(&settings_dir))
@@ -7119,7 +6920,10 @@ mod tests {
         let persisted = serde_json::from_slice::<PersistedLocalizationPreferences>(&persisted)
             .expect("persisted localization preferences should deserialize");
         assert_eq!(persisted.primary_locale, "en");
-        assert_eq!(persisted.selection_source.as_deref(), Some(AUTO_SELECTION_SOURCE));
+        assert_eq!(
+            persisted.selection_source.as_deref(),
+            Some(AUTO_SELECTION_SOURCE)
+        );
 
         std::fs::remove_dir_all(&root).expect("temp directory should be removable");
     }
@@ -7189,8 +6993,7 @@ mod tests {
 
         let localization_root = root.join("localizations");
         let settings_dir = root.join("config");
-        std::fs::create_dir_all(&localization_root)
-            .expect("localization root should create");
+        std::fs::create_dir_all(&localization_root).expect("localization root should create");
         seed_embedded_localization_files(&localization_root)
             .expect("embedded locale files should seed");
 
@@ -7214,7 +7017,10 @@ mod tests {
         let persisted = serde_json::from_slice::<PersistedLocalizationPreferences>(&persisted)
             .expect("persisted localization preferences should deserialize");
         assert_eq!(persisted.primary_locale, "pt-BR");
-        assert_eq!(persisted.selection_source.as_deref(), Some(AUTO_SELECTION_SOURCE));
+        assert_eq!(
+            persisted.selection_source.as_deref(),
+            Some(AUTO_SELECTION_SOURCE)
+        );
         assert_eq!(persisted.detected_host_locale.as_deref(), Some("pt-PT"));
         assert_eq!(persisted.detected_region.as_deref(), Some("PT"));
 
@@ -7230,8 +7036,7 @@ mod tests {
 
         let localization_root = root.join("localizations");
         let settings_dir = root.join("config");
-        std::fs::create_dir_all(&localization_root)
-            .expect("localization root should create");
+        std::fs::create_dir_all(&localization_root).expect("localization root should create");
         seed_embedded_localization_files(&localization_root)
             .expect("embedded locale files should seed");
 
@@ -7262,8 +7067,7 @@ mod tests {
 
         let localization_root = root.join("localizations");
         let settings_dir = root.join("config");
-        std::fs::create_dir_all(&localization_root)
-            .expect("localization root should create");
+        std::fs::create_dir_all(&localization_root).expect("localization root should create");
         seed_embedded_localization_files(&localization_root)
             .expect("embedded locale files should seed");
 
@@ -7294,8 +7098,7 @@ mod tests {
 
         let localization_root = root.join("localizations");
         let settings_dir = root.join("config");
-        std::fs::create_dir_all(&localization_root)
-            .expect("localization root should create");
+        std::fs::create_dir_all(&localization_root).expect("localization root should create");
         seed_embedded_localization_files(&localization_root)
             .expect("embedded locale files should seed");
         write_persisted_localization_preferences(
@@ -7337,8 +7140,7 @@ mod tests {
 
         let localization_root = root.join("localizations");
         let settings_dir = root.join("config");
-        std::fs::create_dir_all(&localization_root)
-            .expect("localization root should create");
+        std::fs::create_dir_all(&localization_root).expect("localization root should create");
         std::fs::write(
             localization_root.join("en.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
@@ -7362,11 +7164,8 @@ mod tests {
             .expect("spanish locale should serialize"),
         )
         .expect("spanish locale should write");
-        std::fs::write(
-            localization_root.join("broken.json"),
-            b"{not-json",
-        )
-        .expect("broken locale should write");
+        std::fs::write(localization_root.join("broken.json"), b"{not-json")
+            .expect("broken locale should write");
 
         let settings = persist_localization_preferences_to_paths(
             &localization_root,
@@ -7384,7 +7183,10 @@ mod tests {
         assert_eq!(settings.available_locales[0].code, "en");
         assert_eq!(settings.available_locales[1].code, "es");
         assert!(settings.available_locales[1].is_official);
-        assert!(settings.warnings.iter().any(|warning| warning.contains("broken.json")));
+        assert!(settings
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("broken.json")));
 
         let persisted = std::fs::read(localization_preferences_path(&settings_dir))
             .expect("localization preferences file should exist");
@@ -7405,8 +7207,7 @@ mod tests {
         }
 
         std::fs::create_dir_all(&root).expect("localization root should create");
-        std::fs::write(root.join("en.json"), b"stale")
-            .expect("stale english locale should write");
+        std::fs::write(root.join("en.json"), b"stale").expect("stale english locale should write");
 
         seed_embedded_localization_files(&root)
             .expect("embedded locale files should seed into the persisted root");
@@ -7418,10 +7219,9 @@ mod tests {
             let locale_code = file_name.strip_suffix(".json").unwrap_or(file_name);
             let compatibility_bundle = std::fs::read_to_string(root.join(file_name))
                 .expect("compatibility locale bundle should exist after seeding");
-            let persisted_source = std::fs::read_to_string(
-                source_root.join(locale_code).join("origin.json"),
-            )
-            .expect("persisted locale source should exist after seeding");
+            let persisted_source =
+                std::fs::read_to_string(source_root.join(locale_code).join("origin.json"))
+                    .expect("persisted locale source should exist after seeding");
 
             assert_eq!(compatibility_bundle, *file_contents);
             assert_eq!(persisted_source, *file_contents);
@@ -7430,11 +7230,20 @@ mod tests {
         let settings = load_localization_settings_from_paths(&root, &settings_dir)
             .expect("seeded locale files should load as localization settings");
 
-        assert_eq!(settings.available_locales.len(), EMBEDDED_LOCALIZATION_FILES.len());
-        assert!(settings.available_locales.iter().zip(EMBEDDED_LOCALIZATION_FILES.iter()).all(
-            |(locale, (file_name, _))| locale.code == file_name.strip_suffix(".json").unwrap_or(file_name)
-        ));
-        assert!(settings.available_locales.iter().all(|locale| locale.is_official));
+        assert_eq!(
+            settings.available_locales.len(),
+            EMBEDDED_LOCALIZATION_FILES.len()
+        );
+        assert!(settings
+            .available_locales
+            .iter()
+            .zip(EMBEDDED_LOCALIZATION_FILES.iter())
+            .all(|(locale, (file_name, _))| locale.code
+                == file_name.strip_suffix(".json").unwrap_or(file_name)));
+        assert!(settings
+            .available_locales
+            .iter()
+            .all(|locale| locale.is_official));
 
         std::fs::remove_dir_all(&root).expect("temp directory should be removable");
     }
@@ -7522,7 +7331,10 @@ mod tests {
             Some("origin")
         );
         assert_eq!(
-            final_bundle.messages.get("key.increment").map(String::as_str),
+            final_bundle
+                .messages
+                .get("key.increment")
+                .map(String::as_str),
             Some("increment-value")
         );
         assert_eq!(
@@ -7537,7 +7349,10 @@ mod tests {
         let frozen_bundle = read_localization_pack_document(&cache_root.join("en.frozen.json"))
             .expect("frozen bundle cache should load");
         assert_eq!(
-            frozen_bundle.messages.get("key.working").map(String::as_str),
+            frozen_bundle
+                .messages
+                .get("key.working")
+                .map(String::as_str),
             Some("increment-working")
         );
         assert_eq!(frozen_bundle.messages.get("key.final"), None);
@@ -7592,11 +7407,8 @@ mod tests {
         let persisted_english_root = persisted_source_root.join("en");
         std::fs::create_dir_all(&persisted_english_root)
             .expect("persisted english source root should create");
-        std::fs::write(
-            persisted_english_root.join("increment-9.json"),
-            b"obsolete",
-        )
-        .expect("obsolete increment should write");
+        std::fs::write(persisted_english_root.join("increment-9.json"), b"obsolete")
+            .expect("obsolete increment should write");
 
         sync_official_localization_sources(&official_root, &persisted_root)
             .expect("official locale sources should sync");
@@ -7626,15 +7438,15 @@ mod tests {
 
     #[test]
     fn load_localization_settings_from_paths_normalizes_non_official_fallback_to_english() {
-        let root = std::env::temp_dir().join("desktop-shell-localization-fallback-normalization-test");
+        let root =
+            std::env::temp_dir().join("desktop-shell-localization-fallback-normalization-test");
         if root.exists() {
             std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
         }
 
         let localization_root = root.join("localizations");
         let settings_dir = root.join("config");
-        std::fs::create_dir_all(&localization_root)
-            .expect("localization root should create");
+        std::fs::create_dir_all(&localization_root).expect("localization root should create");
         std::fs::write(
             localization_root.join("en.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
@@ -7679,7 +7491,8 @@ mod tests {
 
         assert_eq!(settings.primary_locale, "rs");
         assert_eq!(settings.fallback_locale, "en");
-        assert!(settings.warnings.iter().any(|warning| warning.contains("Saved fallback locale \"rs\" is not available and was replaced.")));
+        assert!(settings.warnings.iter().any(|warning| warning
+            .contains("Saved fallback locale \"rs\" is not available and was replaced.")));
 
         std::fs::remove_dir_all(&root).expect("temp directory should be removable");
     }
@@ -7693,8 +7506,7 @@ mod tests {
 
         let localization_root = root.join("localizations");
         let settings_dir = root.join("config");
-        std::fs::create_dir_all(&localization_root)
-            .expect("localization root should create");
+        std::fs::create_dir_all(&localization_root).expect("localization root should create");
         std::fs::write(
             localization_root.join("en.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
@@ -7763,8 +7575,7 @@ mod tests {
             "recoverable exit detected, retry in progress",
         )
         .expect("supervisor snapshot should build");
-        write_supervisor_snapshot(&storage, &snapshot)
-            .expect("supervisor snapshot should persist");
+        write_supervisor_snapshot(&storage, &snapshot).expect("supervisor snapshot should persist");
 
         let settings = load_runtime_lifecycle_settings(&config)
             .expect("runtime lifecycle settings should load");
@@ -7776,8 +7587,14 @@ mod tests {
         assert!(settings.runtime_supervisor_owns_crash_recovery);
         assert_eq!(settings.shutdown_grace_period_millis, 2_000);
         assert_eq!(settings.restart_policy, restart_policy);
-        assert_eq!(settings.startup_command.args.last(), Some(&String::from("supervise")));
-        assert_eq!(settings.shutdown_command.args.last(), Some(&String::from("shutdown")));
+        assert_eq!(
+            settings.startup_command.args.last(),
+            Some(&String::from("supervise"))
+        );
+        assert_eq!(
+            settings.shutdown_command.args.last(),
+            Some(&String::from("shutdown"))
+        );
         assert_eq!(settings.crash_recovery_status, "recovering");
         assert_eq!(settings.supervisor_snapshot, Some(snapshot));
 
@@ -7799,7 +7616,11 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
-                params!["release-status-repo", "https://example.com/release-status.git", "unity"],
+                params![
+                    "release-status-repo",
+                    "https://example.com/release-status.git",
+                    "unity"
+                ],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -7842,7 +7663,10 @@ mod tests {
 
         assert!(!snapshot.generated_at.is_empty());
         assert_eq!(snapshot.repositories.len(), 1);
-        assert_eq!(snapshot.repositories[0].repository_name, "release-status-repo");
+        assert_eq!(
+            snapshot.repositories[0].repository_name,
+            "release-status-repo"
+        );
         assert_eq!(snapshot.repositories[0].enabled_build_target_count, 1);
         assert_eq!(snapshot.repositories[0].pending_release_count, 1);
         assert_eq!(snapshot.repositories[0].release_queue.len(), 1);
@@ -7874,7 +7698,11 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
-                params!["release-rerun-repo", "https://example.com/release-rerun.git", "unity"],
+                params![
+                    "release-rerun-repo",
+                    "https://example.com/release-rerun.git",
+                    "unity"
+                ],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -7919,7 +7747,9 @@ mod tests {
         assert_eq!(rerun_release.repository_id, repository_id);
         assert_eq!(rerun_release.git_tag, "v9.1.0");
         assert_eq!(rerun_release.git_commit.as_deref(), Some("deadbeef"));
-        assert!(rerun_release.source_metadata_json.contains("desktop-shell-ui"));
+        assert!(rerun_release
+            .source_metadata_json
+            .contains("desktop-shell-ui"));
 
         let queued_event = latest_runtime_event(&storage);
         assert_eq!(queued_event.topic, EVENT_TOPIC_RELEASE_QUEUED);
@@ -8014,8 +7844,7 @@ mod tests {
         initialize_database(&storage).expect("database bootstrap should succeed");
 
         let local_workspace = root.join("local-project");
-        std::fs::create_dir_all(&local_workspace)
-            .expect("local workspace directory should create");
+        std::fs::create_dir_all(&local_workspace).expect("local workspace directory should create");
 
         let connection = open_connection(&storage.database_path).expect("connection should open");
         connection
@@ -8258,15 +8087,19 @@ mod tests {
 
         let inspection = load_repository_inspection(&config)
             .expect("repository inspection should aggregate repository metadata");
-        let detail = load_repository_project_detail(&config, repository_id)
-            .expect("repository detail should load one repository without host capability discovery");
+        let detail = load_repository_project_detail(&config, repository_id).expect(
+            "repository detail should load one repository without host capability discovery",
+        );
 
         assert!(!inspection.generated_at.is_empty());
         assert_eq!(inspection.repositories.len(), 1);
 
         let repository = &inspection.repositories[0];
         assert_eq!(repository.repository_name, "repo-inspection");
-        assert_eq!(repository.repo_url, "https://example.com/repo-inspection.git");
+        assert_eq!(
+            repository.repo_url,
+            "https://example.com/repo-inspection.git"
+        );
         assert_eq!(repository.polling_interval_seconds, 120);
         assert_eq!(repository.enabled_build_target_count, 1);
         assert_eq!(repository.build_targets.len(), 1);
@@ -8301,7 +8134,10 @@ mod tests {
         );
         assert_eq!(itch_target.bindings.len(), 1);
         assert_eq!(itch_target.bindings[0].build_target_name, "windows-player");
-        assert_eq!(itch_target.bindings[0].consumption_behavior, "non_consuming");
+        assert_eq!(
+            itch_target.bindings[0].consumption_behavior,
+            "non_consuming"
+        );
 
         let publish_credentials = itch_target
             .credentials
@@ -8346,7 +8182,11 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
-                params!["build-history-repo", "https://example.com/build-history.git", "unity"],
+                params![
+                    "build-history-repo",
+                    "https://example.com/build-history.git",
+                    "unity"
+                ],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -8438,7 +8278,12 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO artifacts (build_run_id, name, kind, path) VALUES (?, ?, ?, ?)",
-                params![build_run_id, "history.zip", "archive", "artifacts/history.zip"],
+                params![
+                    build_run_id,
+                    "history.zip",
+                    "archive",
+                    "artifacts/history.zip"
+                ],
             )
             .expect("artifact should insert");
         let artifact_id = connection.last_insert_rowid();
@@ -8465,8 +8310,8 @@ mod tests {
             .expect("publish run should insert");
         drop(connection);
 
-        let builds = load_build_history(&config)
-            .expect("build history should load recent build activity");
+        let builds =
+            load_build_history(&config).expect("build history should load recent build activity");
 
         assert_eq!(builds.len(), 1);
         assert_eq!(builds[0].build_run_id, build_run_id);
@@ -8728,10 +8573,19 @@ mod tests {
             .expect("build execution report should load");
 
         assert_eq!(payload.build_run_id, build_run_id);
-        assert_eq!(payload.workspace_path.as_deref(), Some(workspace_path.as_path()));
-        assert_eq!(payload.retained_dir_path.as_deref(), Some(retained_dir.as_path()));
+        assert_eq!(
+            payload.workspace_path.as_deref(),
+            Some(workspace_path.as_path())
+        );
+        assert_eq!(
+            payload.retained_dir_path.as_deref(),
+            Some(retained_dir.as_path())
+        );
         assert_eq!(payload.report_path.as_deref(), Some(report_path.as_path()));
-        assert_eq!(payload.logs_archive_path.as_deref(), Some(archive_path.as_path()));
+        assert_eq!(
+            payload.logs_archive_path.as_deref(),
+            Some(archive_path.as_path())
+        );
         assert!(payload.exists);
         assert!(payload.logs_archive_exists);
         assert_eq!(payload.log_entries.len(), 2);
@@ -8763,7 +8617,10 @@ mod tests {
         let storage = StorageLayout::from_directories(&config.directories);
         initialize_database(&storage).expect("database bootstrap should succeed");
 
-        let workspace_path = config.directories.runs_dir.join("build-run-log-entry-sample");
+        let workspace_path = config
+            .directories
+            .runs_dir
+            .join("build-run-log-entry-sample");
         let retained_dir = workspace_path.join("retained");
         std::fs::create_dir_all(&retained_dir).expect("retained directory should create");
         let archive_path = retained_dir.join("execution-logs.zip");
@@ -8779,7 +8636,11 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
-                params!["log-entry-repo", "https://example.com/log-entry.git", "unity"],
+                params![
+                    "log-entry-repo",
+                    "https://example.com/log-entry.git",
+                    "unity"
+                ],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -8976,8 +8837,14 @@ mod tests {
             .expect("retention purge should succeed");
 
         assert_eq!(purge_report.build_run_id, build_run_id);
-        assert_eq!(purge_report.workspace_path.as_deref(), Some(workspace_path.as_path()));
-        assert_eq!(purge_report.retained_dir_path.as_deref(), Some(retained_dir.as_path()));
+        assert_eq!(
+            purge_report.workspace_path.as_deref(),
+            Some(workspace_path.as_path())
+        );
+        assert_eq!(
+            purge_report.retained_dir_path.as_deref(),
+            Some(retained_dir.as_path())
+        );
         assert!(purge_report.workspace_removed);
         assert_eq!(
             purge_report.removed_paths,
@@ -8992,8 +8859,8 @@ mod tests {
     }
 
     fn write_test_log_archive(archive_path: &Path, entries: &[(&str, &str)]) {
-        let archive_file = std::fs::File::create(archive_path)
-            .expect("log archive file should create");
+        let archive_file =
+            std::fs::File::create(archive_path).expect("log archive file should create");
         let mut archive = zip::ZipWriter::new(archive_file);
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
@@ -9199,7 +9066,11 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
-                params!["unity-settings-repo", "https://example.com/unity-settings.git", "unity"],
+                params![
+                    "unity-settings-repo",
+                    "https://example.com/unity-settings.git",
+                    "unity"
+                ],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -9236,20 +9107,30 @@ mod tests {
         let build_target_id = connection.last_insert_rowid();
         drop(connection);
 
-        let settings = load_unity_adapter_settings(&config)
-            .expect("unity runner settings should load");
+        let settings =
+            load_unity_adapter_settings(&config).expect("unity runner settings should load");
 
         assert_eq!(settings.platform, config.platform.as_str());
         assert_eq!(settings.supported_runner_families[0], "host-native");
         assert!(!settings.discovery_roots.is_empty());
-        assert_eq!(settings.capability_profile.platform, config.platform.as_str());
+        assert_eq!(
+            settings.capability_profile.platform,
+            config.platform.as_str()
+        );
         assert!(!settings.capability_profile.architecture.is_empty());
         assert!(!settings.capability_profile.packaging_mode.is_empty());
-        assert!(!settings.capability_profile.runner_selection.status.is_empty());
+        assert!(!settings
+            .capability_profile
+            .runner_selection
+            .status
+            .is_empty());
         assert_eq!(settings.build_targets.len(), 1);
         assert_eq!(settings.build_targets[0].build_target_id, build_target_id);
         assert_eq!(settings.build_targets[0].repository_id, repository_id);
-        assert_eq!(settings.build_targets[0].repository_name, "unity-settings-repo");
+        assert_eq!(
+            settings.build_targets[0].repository_name,
+            "unity-settings-repo"
+        );
         assert_eq!(settings.build_targets[0].target_name, "windows-player");
         assert_eq!(settings.build_targets[0].unity_target_platform, "windows");
         assert_eq!(settings.build_targets[0].runner_type, "host-native");
@@ -9344,8 +9225,7 @@ mod tests {
         let publish_target_id = connection.last_insert_rowid();
         drop(connection);
 
-        let settings = load_secret_settings(&config)
-            .expect("secret settings should load");
+        let settings = load_secret_settings(&config).expect("secret settings should load");
 
         assert_eq!(
             settings.storage_model,
@@ -9369,14 +9249,32 @@ mod tests {
             vec!["password", "username"]
         );
         assert_eq!(settings.credentials[0].bindings.len(), 1);
-        assert_eq!(settings.credentials[0].bindings[0].binding_kind, "repository");
-        assert_eq!(settings.credentials[0].bindings[0].binding_id, bound_repository_id);
+        assert_eq!(
+            settings.credentials[0].bindings[0].binding_kind,
+            "repository"
+        );
+        assert_eq!(
+            settings.credentials[0].bindings[0].binding_id,
+            bound_repository_id
+        );
         assert_eq!(settings.credentials[1].name, "publish-bearer");
-        assert_eq!(settings.credentials[1].config_summary.top_level_keys, vec!["token"]);
+        assert_eq!(
+            settings.credentials[1].config_summary.top_level_keys,
+            vec!["token"]
+        );
         assert_eq!(settings.credentials[1].bindings.len(), 1);
-        assert_eq!(settings.credentials[1].bindings[0].binding_kind, "publish_target");
-        assert_eq!(settings.credentials[1].bindings[0].binding_id, publish_target_id);
-        assert_eq!(settings.repository_bindings[0].repository_name, "revolutions");
+        assert_eq!(
+            settings.credentials[1].bindings[0].binding_kind,
+            "publish_target"
+        );
+        assert_eq!(
+            settings.credentials[1].bindings[0].binding_id,
+            publish_target_id
+        );
+        assert_eq!(
+            settings.repository_bindings[0].repository_name,
+            "revolutions"
+        );
         assert_eq!(
             settings.repository_bindings[0].credentials_id,
             Some(repository_credentials_id)
@@ -9410,9 +9308,7 @@ mod tests {
                 credential_id: None,
                 name: String::from("origin-basic"),
                 kind: String::from("git-http-basic"),
-                config_json: String::from(
-                    r#"{"username":"worker","password":"solidarity"}"#,
-                ),
+                config_json: String::from(r#"{"username":"worker","password":"solidarity"}"#),
             },
         )
         .expect("credential should persist");
@@ -9468,7 +9364,11 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
-                params!["revolutions", "https://example.com/revolutions.git", "unity"],
+                params![
+                    "revolutions",
+                    "https://example.com/revolutions.git",
+                    "unity"
+                ],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -9506,8 +9406,8 @@ mod tests {
         )
         .expect("publish target binding should persist");
 
-        let settings = load_secret_settings(&config)
-            .expect("secret settings should reflect updated bindings");
+        let settings =
+            load_secret_settings(&config).expect("secret settings should reflect updated bindings");
 
         assert_eq!(settings.repository_bindings.len(), 1);
         assert_eq!(
@@ -9559,7 +9459,11 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
-                params!["revolutions", "https://example.com/revolutions.git", "unity"],
+                params![
+                    "revolutions",
+                    "https://example.com/revolutions.git",
+                    "unity"
+                ],
             )
             .expect("repository should insert");
         let repository_id = connection.last_insert_rowid();
@@ -9582,9 +9486,7 @@ mod tests {
                     provider_id: String::from("github"),
                     provider_label: String::from("GitHub"),
                     instance_url: String::from("https://github.com"),
-                    normalized_url: String::from(
-                        "https://github.com/indiegabo/revolutions.git",
-                    ),
+                    normalized_url: String::from("https://github.com/indiegabo/revolutions.git"),
                     visibility: String::from("public"),
                     auth_requirement: String::from("none"),
                     auth_status: String::from("not_required"),
@@ -9600,7 +9502,10 @@ mod tests {
         let inspection = load_repository_inspection(&config)
             .expect("repository inspection should reflect synced auth assessment");
         assert_eq!(inspection.repositories.len(), 1);
-        assert_eq!(inspection.repositories[0].auth_binding_status, "not_required");
+        assert_eq!(
+            inspection.repositories[0].auth_binding_status,
+            "not_required"
+        );
         assert_eq!(inspection.repositories[0].auth_requirement_status, "none");
         assert_eq!(inspection.repositories[0].visibility_status, "public");
         assert!(inspection.repositories[0].credentials.is_none());
@@ -9674,14 +9579,26 @@ mod tests {
             .expect("repository inspection should reflect created project");
 
         assert_eq!(inspection.repositories.len(), 1);
-        assert_eq!(inspection.repositories[0].repository_id, created.repository_id);
+        assert_eq!(
+            inspection.repositories[0].repository_id,
+            created.repository_id
+        );
         assert_eq!(inspection.repositories[0].repository_name, "Workers");
-        assert_eq!(inspection.repositories[0].repo_url, "https://example.com/workers.git");
+        assert_eq!(
+            inspection.repositories[0].repo_url,
+            "https://example.com/workers.git"
+        );
         assert_eq!(inspection.repositories[0].engine_kind, "unity");
         assert_eq!(inspection.repositories[0].polling_interval_seconds, 300);
         assert_eq!(inspection.repositories[0].build_targets.len(), 1);
-        assert_eq!(inspection.repositories[0].build_targets[0].target_name, "Windows");
-        assert_eq!(inspection.repositories[0].build_targets[0].diagnostic_status, "ready");
+        assert_eq!(
+            inspection.repositories[0].build_targets[0].target_name,
+            "Windows"
+        );
+        assert_eq!(
+            inspection.repositories[0].build_targets[0].diagnostic_status,
+            "ready"
+        );
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }
@@ -9699,8 +9616,7 @@ mod tests {
             .display()
             .to_string();
         let local_workspace = root.join("local-project");
-        std::fs::create_dir_all(&local_workspace)
-            .expect("local workspace directory should create");
+        std::fs::create_dir_all(&local_workspace).expect("local workspace directory should create");
         let local_workspace_path = local_workspace.display().to_string();
 
         let created = persist_repository_project(
@@ -9737,7 +9653,10 @@ mod tests {
             .expect("repository inspection should reflect created local project");
 
         assert_eq!(inspection.repositories.len(), 1);
-        assert_eq!(inspection.repositories[0].repository_id, created.repository_id);
+        assert_eq!(
+            inspection.repositories[0].repository_id,
+            created.repository_id
+        );
         assert_eq!(inspection.repositories[0].repository_name, "Workers Local");
         assert_eq!(inspection.repositories[0].source_mode, "local_workspace");
         assert_eq!(inspection.repositories[0].workspace_strategy, "direct");
@@ -9755,8 +9674,14 @@ mod tests {
         assert_eq!(inspection.repositories[0].engine_kind, "unity");
         assert_eq!(inspection.repositories[0].polling_interval_seconds, 0);
         assert_eq!(inspection.repositories[0].build_targets.len(), 1);
-        assert_eq!(inspection.repositories[0].build_targets[0].target_name, "Windows");
-        assert_eq!(inspection.repositories[0].build_targets[0].diagnostic_status, "ready");
+        assert_eq!(
+            inspection.repositories[0].build_targets[0].target_name,
+            "Windows"
+        );
+        assert_eq!(
+            inspection.repositories[0].build_targets[0].diagnostic_status,
+            "ready"
+        );
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }
@@ -9786,9 +9711,7 @@ mod tests {
                     provider_id: String::from("github"),
                     provider_label: String::from("GitHub"),
                     instance_url: String::from("https://github.com"),
-                    normalized_url: String::from(
-                        "https://github.com/indiegabo/workers.git",
-                    ),
+                    normalized_url: String::from("https://github.com/indiegabo/workers.git"),
                     visibility: String::from("private"),
                     auth_requirement: String::from("required"),
                     auth_status: String::from("required_unbound"),
@@ -9936,16 +9859,18 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO repositories (name, repo_url, engine_kind) VALUES (?, ?, ?)",
-                params!["workers", "https://github.com/indiegabo/workers.git", "unity"],
+                params![
+                    "workers",
+                    "https://github.com/indiegabo/workers.git",
+                    "unity"
+                ],
             )
             .expect("repository should insert");
         drop(connection);
 
-        let provider = finalize_github_auth_login_with_known_accounts(
-            &storage,
-            &[String::from("indiegabo")],
-        )
-            .expect("finalizing GitHub auth should persist the reusable credential record");
+        let provider =
+            finalize_github_auth_login_with_known_accounts(&storage, &[String::from("indiegabo")])
+                .expect("finalizing GitHub auth should persist the reusable credential record");
 
         assert_eq!(provider.status, AUTH_PROVIDER_STATUS_CONNECTED);
         assert_eq!(provider.bound_repository_count, 0);
@@ -9957,7 +9882,10 @@ mod tests {
             .expect("finalizing GitHub auth should persist the reusable credential record");
         let config_json = serde_json::from_str::<serde_json::Value>(&credential.config_json)
             .expect("stored GitHub auth config should be valid JSON");
-        assert_eq!(config_json.get("login").and_then(serde_json::Value::as_str), Some("indiegabo"));
+        assert_eq!(
+            config_json.get("login").and_then(serde_json::Value::as_str),
+            Some("indiegabo")
+        );
 
         let inspection = load_repository_inspection(&config)
             .expect("repository inspection should keep the project unbound");
@@ -9971,10 +9899,7 @@ mod tests {
     fn select_github_auth_login_prefers_existing_known_login() {
         let selected = select_github_auth_login(
             Some(String::from("indiegabo")),
-            &[
-                String::from("x-access-token"),
-                String::from("indiegabo"),
-            ],
+            &[String::from("x-access-token"), String::from("indiegabo")],
         );
 
         assert_eq!(selected.as_deref(), Some("indiegabo"));
@@ -10001,7 +9926,10 @@ mod tests {
         let config_json = serde_json::from_str::<serde_json::Value>(&config_json)
             .expect("GitHub auth config should be valid JSON");
 
-        assert_eq!(config_json.get("login").and_then(serde_json::Value::as_str), Some("indiegabo"));
+        assert_eq!(
+            config_json.get("login").and_then(serde_json::Value::as_str),
+            Some("indiegabo")
+        );
     }
 
     #[test]
@@ -10139,11 +10067,9 @@ mod tests {
         )
         .expect_err("PAT-based repository auth should be rejected");
 
-        assert!(
-            error
-                .to_string()
-                .contains("personal access token is no longer supported")
-        );
+        assert!(error
+            .to_string()
+            .contains("personal access token is no longer supported"));
 
         if root.exists() {
             std::fs::remove_dir_all(root).expect("temp directory should be removable");
@@ -10193,11 +10119,9 @@ mod tests {
         )
         .expect_err("non-Unity repository engines should be rejected");
 
-        assert!(
-            error
-                .to_string()
-                .contains("only \"unity\" is currently allowed")
-        );
+        assert!(error
+            .to_string()
+            .contains("only \"unity\" is currently allowed"));
 
         if root.exists() {
             std::fs::remove_dir_all(root).expect("temp directory should be removable");
@@ -10295,24 +10219,41 @@ mod tests {
             .expect("repository inspection should reflect updated project");
 
         assert_eq!(inspection.repositories.len(), 1);
-        assert_eq!(inspection.repositories[0].repository_id, created.repository_id);
-        assert_eq!(inspection.repositories[0].repository_name, "Workers Updated");
+        assert_eq!(
+            inspection.repositories[0].repository_id,
+            created.repository_id
+        );
+        assert_eq!(
+            inspection.repositories[0].repository_name,
+            "Workers Updated"
+        );
         assert_eq!(
             inspection.repositories[0].repo_url,
             "https://example.com/workers-updated.git"
         );
-        assert_eq!(inspection.repositories[0].default_branch.as_deref(), Some("release"));
+        assert_eq!(
+            inspection.repositories[0].default_branch.as_deref(),
+            Some("release")
+        );
         assert_eq!(inspection.repositories[0].artifacts_root_override, None);
         assert_eq!(
-            inspection.repositories[0].workspace_root_override.as_deref(),
+            inspection.repositories[0]
+                .workspace_root_override
+                .as_deref(),
             Some("D:/workspaces/workers")
         );
         assert_eq!(inspection.repositories[0].polling_interval_seconds, 45);
         assert!(!inspection.repositories[0].enabled);
         assert_eq!(inspection.repositories[0].enabled_build_target_count, 2);
         assert_eq!(inspection.repositories[0].build_targets.len(), 2);
-        assert_eq!(inspection.repositories[0].build_targets[0].target_name, "Windows Stable");
-        assert_eq!(inspection.repositories[0].build_targets[1].target_name, "WebGL");
+        assert_eq!(
+            inspection.repositories[0].build_targets[0].target_name,
+            "Windows Stable"
+        );
+        assert_eq!(
+            inspection.repositories[0].build_targets[1].target_name,
+            "WebGL"
+        );
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }
@@ -10391,11 +10332,9 @@ mod tests {
         )
         .expect_err("non-Unity repository engines should be rejected on update");
 
-        assert!(
-            error
-                .to_string()
-                .contains("only \"unity\" is currently allowed")
-        );
+        assert!(error
+            .to_string()
+            .contains("only \"unity\" is currently allowed"));
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }
@@ -10472,11 +10411,9 @@ mod tests {
             )
             .expect("publish count should load");
         let queue_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(1) FROM worker_queue_messages",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(1) FROM worker_queue_messages", [], |row| {
+                row.get(0)
+            })
             .expect("queue count should load");
         let lease_count: i64 = connection
             .query_row(
@@ -10486,11 +10423,9 @@ mod tests {
             )
             .expect("lease count should load");
         let idempotency_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(1) FROM worker_idempotency_keys",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(1) FROM worker_idempotency_keys", [], |row| {
+                row.get(0)
+            })
             .expect("idempotency count should load");
 
         assert_eq!(repository_count, 0);
@@ -10550,11 +10485,9 @@ mod tests {
             )
             .expect("repository count should load");
         let queue_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(1) FROM worker_queue_messages",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(1) FROM worker_queue_messages", [], |row| {
+                row.get(0)
+            })
             .expect("queue count should load");
         let lease_count: i64 = connection
             .query_row(
@@ -10564,11 +10497,9 @@ mod tests {
             )
             .expect("lease count should load");
         let idempotency_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(1) FROM worker_idempotency_keys",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(1) FROM worker_idempotency_keys", [], |row| {
+                row.get(0)
+            })
             .expect("idempotency count should load");
 
         assert_eq!(repository_count, 0);
@@ -10600,29 +10531,30 @@ mod tests {
             .join("runtime-logs")
             .join("steps")
             .join("build-run-91-stage-01.log");
-        let retained_file_path = root
-            .join("retained-files")
-            .join("build-run-91-report.json");
+        let retained_file_path = root.join("retained-files").join("build-run-91-report.json");
 
         std::fs::create_dir_all(&workspace_path).expect("workspace directory should create");
-        std::fs::create_dir_all(&artifact_root_path)
-            .expect("artifact directory should create");
+        std::fs::create_dir_all(&artifact_root_path).expect("artifact directory should create");
         std::fs::create_dir_all(build_log_path.parent().expect("log parent should exist"))
             .expect("log directory should create");
-        std::fs::create_dir_all(stage_log_path.parent().expect("stage log parent should exist"))
-            .expect("stage log directory should create");
         std::fs::create_dir_all(
-            retained_file_path.parent().expect("retained parent should exist"),
+            stage_log_path
+                .parent()
+                .expect("stage log parent should exist"),
+        )
+        .expect("stage log directory should create");
+        std::fs::create_dir_all(
+            retained_file_path
+                .parent()
+                .expect("retained parent should exist"),
         )
         .expect("retained directory should create");
         std::fs::write(workspace_path.join("README.txt"), "workspace")
             .expect("workspace file should write");
         std::fs::write(artifact_root_path.join("game.zip"), "artifact")
             .expect("artifact file should write");
-        std::fs::write(&build_log_path, "build log")
-            .expect("build log should write");
-        std::fs::write(&stage_log_path, "stage log")
-            .expect("stage log should write");
+        std::fs::write(&build_log_path, "build log").expect("build log should write");
+        std::fs::write(&stage_log_path, "stage log").expect("stage log should write");
         std::fs::write(&retained_file_path, "{\"status\":\"retained\"}")
             .expect("retained file should write");
 
@@ -10681,13 +10613,7 @@ mod tests {
                 )
                 VALUES (?, ?, ?, ?, ?)
                 ",
-                params![
-                    repository_id,
-                    "v1.9.1",
-                    "deadbeef",
-                    "2022.3.20f1",
-                    "queued",
-                ],
+                params![repository_id, "v1.9.1", "deadbeef", "2022.3.20f1", "queued",],
             )
             .expect("release run should insert");
         let release_run_id = connection.last_insert_rowid();
@@ -10865,7 +10791,11 @@ mod tests {
                     lease_expires_at_unix_millis
                 ) VALUES (?, ?, ?)
                 ",
-                params![format!("release-plan:{release_run_id}"), "lock-a", 9_999_999_999_i64],
+                params![
+                    format!("release-plan:{release_run_id}"),
+                    "lock-a",
+                    9_999_999_999_i64
+                ],
             )
             .expect("release coordination lease should insert");
         connection

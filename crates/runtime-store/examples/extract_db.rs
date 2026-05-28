@@ -14,7 +14,10 @@ fn main() -> Result<()> {
         let enabled: bool = row.get(2)?;
         let interval: i32 = row.get(3)?;
         let tag: Option<String> = row.get(4)?;
-        println!("ID: {}, Name: {}, Enabled: {}, Polling Interval: {}s, Last Seen Tag: {:?}", id, name, enabled, interval, tag);
+        println!(
+            "ID: {}, Name: {}, Enabled: {}, Polling Interval: {}s, Last Seen Tag: {:?}",
+            id, name, enabled, interval, tag
+        );
         id
     } else {
         println!("Repository 'Revolutions' not found.");
@@ -41,7 +44,10 @@ fn main() -> Result<()> {
             [id],
             |row| row.get(0),
         )?;
-        println!("Enabled Poll-Source Trigger Rules: {}", poll_source_trigger_count);
+        println!(
+            "Enabled Poll-Source Trigger Rules: {}",
+            poll_source_trigger_count
+        );
     }
 
     Ok(())

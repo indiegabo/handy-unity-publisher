@@ -245,7 +245,10 @@ impl fmt::Display for LifecycleError {
                 status.as_str()
             ),
             Self::MissingFailureMessage(kind) => {
-                write!(formatter, "{kind} failure requires a non-empty error message")
+                write!(
+                    formatter,
+                    "{kind} failure requires a non-empty error message"
+                )
             }
         }
     }
@@ -255,7 +258,10 @@ impl Error for LifecycleError {}
 
 /// Reports whether one repository still has queued or running build work.
 pub fn repository_build_process_active(statuses: &[BuildStatus]) -> bool {
-    statuses.iter().copied().any(BuildStatus::blocks_repository_queue)
+    statuses
+        .iter()
+        .copied()
+        .any(BuildStatus::blocks_repository_queue)
 }
 
 /// Reports whether one queued release still blocks repository-local execution.
@@ -263,10 +269,7 @@ pub fn release_needs_attention(statuses: &[BuildStatus]) -> bool {
     statuses.is_empty() || repository_build_process_active(statuses)
 }
 
-fn require_failure_message(
-    error_message: &str,
-    kind: &'static str,
-) -> Result<(), LifecycleError> {
+fn require_failure_message(error_message: &str, kind: &'static str) -> Result<(), LifecycleError> {
     if error_message.trim().is_empty() {
         return Err(LifecycleError::MissingFailureMessage(kind));
     }
@@ -277,8 +280,8 @@ fn require_failure_message(
 #[cfg(test)]
 mod tests {
     use super::{
-        release_needs_attention, repository_build_process_active, BuildStatus,
-        LifecycleError, PublishStatus, ReleaseStatus,
+        release_needs_attention, repository_build_process_active, BuildStatus, LifecycleError,
+        PublishStatus, ReleaseStatus,
     };
 
     #[test]
@@ -319,12 +322,12 @@ mod tests {
     #[test]
     fn build_run_transitions_enforce_runtime_guards() {
         assert_eq!(BuildStatus::Queued.start(), Ok(BuildStatus::Running));
-        assert_eq!(
-            BuildStatus::Running.complete(),
-            Ok(BuildStatus::Succeeded)
-        );
+        assert_eq!(BuildStatus::Running.complete(), Ok(BuildStatus::Succeeded));
         assert_eq!(BuildStatus::Running.fail("boom"), Ok(BuildStatus::Failed));
-        assert_eq!(BuildStatus::Running.cancel("boom"), Ok(BuildStatus::Canceled));
+        assert_eq!(
+            BuildStatus::Running.cancel("boom"),
+            Ok(BuildStatus::Canceled)
+        );
 
         assert_eq!(
             BuildStatus::Running.start(),

@@ -21,13 +21,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use runtime_config::{RuntimeConcurrencySettings, RuntimeDirectories};
 use runtime_contracts::{BuildKind, EngineKind};
 use runtime_git::{
-    git_auth_options_from_credentials, GitAuthOptions,
-    KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER,
+    git_auth_options_from_credentials, GitAuthOptions, KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER,
 };
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sysinfo::System;
 
@@ -119,7 +118,6 @@ const MIGRATIONS: &[Migration] = &[
         name: "0004_local_coordination.sql",
         sql: include_str!("../migrations/0004_local_coordination.sql"),
         transactional: true,
-
     },
     Migration {
         name: "0005_host_native_runner_defaults.sql",
@@ -418,11 +416,9 @@ impl LocalCoordinator {
         let started_at = Instant::now();
 
         loop {
-            if let Some(message) = self.claim_next_once(
-                &queue_name,
-                &worker_name,
-                lease_ttl_millis,
-            )? {
+            if let Some(message) =
+                self.claim_next_once(&queue_name, &worker_name, lease_ttl_millis)?
+            {
                 return Ok(Some(message));
             }
 
@@ -447,11 +443,9 @@ impl LocalCoordinator {
         let started_at = Instant::now();
 
         loop {
-            if let Some(message) = self.claim_next_build_job_once(
-                &worker_name,
-                lease_ttl_millis,
-                concurrency,
-            )? {
+            if let Some(message) =
+                self.claim_next_build_job_once(&worker_name, lease_ttl_millis, concurrency)?
+            {
                 return Ok(Some(message));
             }
 
@@ -476,11 +470,9 @@ impl LocalCoordinator {
         let started_at = Instant::now();
 
         loop {
-            if let Some(message) = self.claim_next_publish_job_once(
-                &worker_name,
-                lease_ttl_millis,
-                concurrency,
-            )? {
+            if let Some(message) =
+                self.claim_next_publish_job_once(&worker_name, lease_ttl_millis, concurrency)?
+            {
                 return Ok(Some(message));
             }
 
@@ -788,7 +780,9 @@ impl LocalCoordinator {
         require_positive_identifier(release_run_id, "release run id")?;
         let record = self
             .load_release_run_record(release_run_id)?
-            .ok_or_else(|| not_found_error(format!("release run {release_run_id} was not found")))?;
+            .ok_or_else(|| {
+                not_found_error(format!("release run {release_run_id} was not found"))
+            })?;
         if record.status == ReleaseStatus::Queued.as_str() {
             return Ok(record);
         }
@@ -810,9 +804,8 @@ impl LocalCoordinator {
     /// Loads one persisted release run by identifier.
     pub fn get_release_run_record(&self, release_run_id: i64) -> io::Result<ReleaseRunRecord> {
         require_positive_identifier(release_run_id, "release run id")?;
-        self.load_release_run_record(release_run_id)?.ok_or_else(|| {
-            not_found_error(format!("release run {release_run_id} was not found"))
-        })
+        self.load_release_run_record(release_run_id)?
+            .ok_or_else(|| not_found_error(format!("release run {release_run_id} was not found")))
     }
 
     /// Plans queued build runs for one queued release and dispatches queued work.
@@ -822,24 +815,26 @@ impl LocalCoordinator {
         let mut connection = open_connection(&self.database_path)?;
         let release = self
             .load_release_build_planning_state_from_connection(&connection, release_run_id)?
-            .ok_or_else(|| not_found_error(format!("release run {release_run_id} was not found")))?;
+            .ok_or_else(|| {
+                not_found_error(format!("release run {release_run_id} was not found"))
+            })?;
         if release.status != ReleaseStatus::Queued.as_str() {
             return Err(invalid_input_error(format!(
                 "release run {release_run_id} must be queued before build planning"
             )));
         }
 
-        let initial_release_engine_version = self.resolve_release_engine_version(
-            release_run_id,
-            &release,
-        )?;
+        let initial_release_engine_version =
+            self.resolve_release_engine_version(release_run_id, &release)?;
 
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_error)?;
         let release = self
             .load_release_build_planning_state(&transaction, release_run_id)?
-            .ok_or_else(|| not_found_error(format!("release run {release_run_id} was not found")))?;
+            .ok_or_else(|| {
+                not_found_error(format!("release run {release_run_id} was not found"))
+            })?;
         if release.status != ReleaseStatus::Queued.as_str() {
             return Err(invalid_input_error(format!(
                 "release run {release_run_id} must be queued before build planning"
@@ -858,10 +853,8 @@ impl LocalCoordinator {
             )));
         }
 
-        let targets = self.list_enabled_build_targets_for_planning(
-            &transaction,
-            release.repository_id,
-        )?;
+        let targets =
+            self.list_enabled_build_targets_for_planning(&transaction, release.repository_id)?;
         if targets.is_empty() {
             return Err(invalid_input_error(format!(
                 "release run {release_run_id} has no enabled build targets"
@@ -869,11 +862,8 @@ impl LocalCoordinator {
         }
 
         for target in &targets {
-            let engine_version = resolve_target_engine_version(
-                target,
-                release.engine_kind,
-                release_engine_version,
-            )?;
+            let engine_version =
+                resolve_target_engine_version(target, release.engine_kind, release_engine_version)?;
             let image_ref = resolve_build_image_ref(target, &engine_version)?;
             transaction
                 .execute(
@@ -963,10 +953,7 @@ impl LocalCoordinator {
     }
 
     /// Loads one stored credentials row by identifier.
-    pub fn get_credential_record(
-        &self,
-        credentials_id: i64,
-    ) -> io::Result<CredentialRecord> {
+    pub fn get_credential_record(&self, credentials_id: i64) -> io::Result<CredentialRecord> {
         require_positive_identifier(credentials_id, "credentials id")?;
 
         let connection = open_connection(&self.database_path)?;
@@ -1034,11 +1021,7 @@ impl LocalCoordinator {
                     INSERT INTO credentials (name, kind, config_json)
                     VALUES (?, ?, ?)
                     ",
-                    params![
-                        normalized.name,
-                        normalized.kind,
-                        normalized.config_json,
-                    ],
+                    params![normalized.name, normalized.kind, normalized.config_json,],
                 )
                 .map_err(sqlite_error)?;
             connection.last_insert_rowid()
@@ -1087,11 +1070,7 @@ impl LocalCoordinator {
                     INSERT INTO credentials (name, kind, config_json)
                     VALUES (?, ?, ?)
                     ",
-                    params![
-                        credentials.name,
-                        credentials.kind,
-                        credentials.config_json,
-                    ],
+                    params![credentials.name, credentials.kind, credentials.config_json,],
                 )
                 .map_err(sqlite_error)?;
             Some(transaction.last_insert_rowid())
@@ -1387,10 +1366,7 @@ impl LocalCoordinator {
 
     /// Updates the core configuration stored for one managed repository
     /// project while preserving credentials and build target registrations.
-    pub fn update_repository_project(
-        &self,
-        input: UpdateRepositoryProjectInput,
-    ) -> io::Result<()> {
+    pub fn update_repository_project(&self, input: UpdateRepositoryProjectInput) -> io::Result<()> {
         let normalized = normalize_update_repository_project_input(input)?;
         let mut connection = open_connection(&self.database_path)?;
         let transaction = connection
@@ -1525,10 +1501,8 @@ impl LocalCoordinator {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_error)?;
 
-        let repository = Self::load_repository_project_removal_record(
-            &transaction,
-            input.repository_id,
-        )?;
+        let repository =
+            Self::load_repository_project_removal_record(&transaction, input.repository_id)?;
         let runtime_state = Self::load_repository_project_removal_runtime_state(
             &transaction,
             input.repository_id,
@@ -1547,16 +1521,10 @@ impl LocalCoordinator {
             &transaction,
             &runtime_state.coordination_lease_names,
         )?;
-        Self::delete_target_idempotency_keys(
-            &transaction,
-            &runtime_state.idempotency_keys,
-        )?;
+        Self::delete_target_idempotency_keys(&transaction, &runtime_state.idempotency_keys)?;
 
         let deleted = transaction
-            .execute(
-                "DELETE FROM repositories WHERE id = ?",
-                [repository.id],
-            )
+            .execute("DELETE FROM repositories WHERE id = ?", [repository.id])
             .map_err(sqlite_error)?;
         if deleted == 0 {
             return Err(not_found_error(format!(
@@ -1767,11 +1735,10 @@ impl LocalCoordinator {
                     auth_status_message: row.get(13)?,
                     auth_last_verified_at: normalize_optional_string(row.get(14)?),
                     enabled: row.get::<_, i64>(15)? != 0,
-                    polling_interval_seconds:
-                        project_polling_interval_seconds_for_read_model(
-                            source_mode.as_str(),
-                            polling_interval_seconds,
-                        ),
+                    polling_interval_seconds: project_polling_interval_seconds_for_read_model(
+                        source_mode.as_str(),
+                        polling_interval_seconds,
+                    ),
                     last_seen_tag: normalize_optional_string(row.get(17)?),
                     default_branch: normalize_optional_string(row.get(18)?),
                     artifacts_root_override: normalize_optional_string(row.get(19)?),
@@ -1905,10 +1872,8 @@ impl LocalCoordinator {
         };
         let version_source = normalize_release_version_source(&input.version_source)?;
         let mut source_ref = normalize_optional_string(input.source_ref);
-        let mut local_path = normalize_absolute_path_string(
-            input.local_path,
-            "on-demand release local_path",
-        )?;
+        let mut local_path =
+            normalize_absolute_path_string(input.local_path, "on-demand release local_path")?;
 
         match source_kind.as_str() {
             RELEASE_SOURCE_KIND_MANAGED_TAG | RELEASE_SOURCE_KIND_MANAGED_REF => {
@@ -2006,9 +1971,8 @@ impl LocalCoordinator {
                 let repository_url = repository.repo_url.as_deref().ok_or_else(|| {
                     invalid_input_error("managed repository URL must not be empty")
                 })?;
-                let git_ref = source_ref.ok_or_else(|| {
-                    invalid_input_error("on-demand source_ref must not be empty")
-                })?;
+                let git_ref = source_ref
+                    .ok_or_else(|| invalid_input_error("on-demand source_ref must not be empty"))?;
                 let git_auth = self.resolve_release_git_auth(repository.credentials_id)?;
 
                 detect_release_version_from_git_ref(
@@ -2798,12 +2762,13 @@ impl LocalCoordinator {
             )
             .map_err(sqlite_error)?;
 
-        self.load_build_run_stage_record(build_run_id, step_key.as_str())?.ok_or_else(|| {
-            not_found_error(format!(
-                "started build stage {:?} for build run {build_run_id} could not be reloaded",
-                step_key,
-            ))
-        })
+        self.load_build_run_stage_record(build_run_id, step_key.as_str())?
+            .ok_or_else(|| {
+                not_found_error(format!(
+                    "started build stage {:?} for build run {build_run_id} could not be reloaded",
+                    step_key,
+                ))
+            })
     }
 
     /// Refreshes the heartbeat of one running build stage and the parent build run.
@@ -2985,12 +2950,13 @@ impl LocalCoordinator {
             ));
         }
 
-        self.load_build_run_stage_record(build_run_id, step_key.as_str())?.ok_or_else(|| {
-            not_found_error(format!(
-                "completed build stage {:?} for build run {build_run_id} could not be reloaded",
-                step_key,
-            ))
-        })
+        self.load_build_run_stage_record(build_run_id, step_key.as_str())?
+            .ok_or_else(|| {
+                not_found_error(format!(
+                    "completed build stage {:?} for build run {build_run_id} could not be reloaded",
+                    step_key,
+                ))
+            })
     }
 
     /// Fails one build stage while keeping the parent build run transition separate.
@@ -3008,7 +2974,8 @@ impl LocalCoordinator {
         let log_path = require_non_empty(&input.log_path, "build run log path")?;
         let artifact_root_path =
             require_non_empty(&input.artifact_root_path, "build run artifact root path")?;
-        let error_message = require_non_empty(&input.error_message, "build run stage error message")?;
+        let error_message =
+            require_non_empty(&input.error_message, "build run stage error message")?;
 
         let connection = open_connection(&self.database_path)?;
         let stage_updated = connection
@@ -3081,19 +3048,17 @@ impl LocalCoordinator {
             ));
         }
 
-        self.load_build_run_stage_record(build_run_id, step_key.as_str())?.ok_or_else(|| {
-            not_found_error(format!(
-                "failed build stage {:?} for build run {build_run_id} could not be reloaded",
-                step_key,
-            ))
-        })
+        self.load_build_run_stage_record(build_run_id, step_key.as_str())?
+            .ok_or_else(|| {
+                not_found_error(format!(
+                    "failed build stage {:?} for build run {build_run_id} could not be reloaded",
+                    step_key,
+                ))
+            })
     }
 
     /// Lists the durable stages recorded for one build run in execution order.
-    pub fn list_build_run_stages(
-        &self,
-        build_run_id: i64,
-    ) -> io::Result<Vec<BuildRunStageRecord>> {
+    pub fn list_build_run_stages(&self, build_run_id: i64) -> io::Result<Vec<BuildRunStageRecord>> {
         require_positive_identifier(build_run_id, "build run id")?;
 
         let connection = open_connection(&self.database_path)?;
@@ -3139,9 +3104,8 @@ impl LocalCoordinator {
         inputs: Vec<CreateArtifactRecordInput>,
     ) -> io::Result<Vec<ArtifactRecord>> {
         require_positive_identifier(build_run_id, "build run id")?;
-        self.load_build_run_record(build_run_id)?.ok_or_else(|| {
-            not_found_error(format!("build run {build_run_id} was not found"))
-        })?;
+        self.load_build_run_record(build_run_id)?
+            .ok_or_else(|| not_found_error(format!("build run {build_run_id} was not found")))?;
 
         let mut connection = open_connection(&self.database_path)?;
         let transaction = connection
@@ -3197,19 +3161,15 @@ impl LocalCoordinator {
         build_run_id: i64,
     ) -> io::Result<Vec<ArtifactRecord>> {
         require_positive_identifier(build_run_id, "build run id")?;
-        self.load_build_run_record(build_run_id)?.ok_or_else(|| {
-            not_found_error(format!("build run {build_run_id} was not found"))
-        })?;
+        self.load_build_run_record(build_run_id)?
+            .ok_or_else(|| not_found_error(format!("build run {build_run_id} was not found")))?;
 
         let connection = open_connection(&self.database_path)?;
         list_build_artifacts_with_connection(&connection, build_run_id)
     }
 
     /// Materializes queued publish runs for every enabled binding and registered artifact.
-    pub fn plan_build_publish_runs(
-        &self,
-        build_run_id: i64,
-    ) -> io::Result<Vec<PublishRunRecord>> {
+    pub fn plan_build_publish_runs(&self, build_run_id: i64) -> io::Result<Vec<PublishRunRecord>> {
         require_positive_identifier(build_run_id, "build run id")?;
 
         let mut connection = open_connection(&self.database_path)?;
@@ -3285,9 +3245,8 @@ impl LocalCoordinator {
         build_run_id: i64,
     ) -> io::Result<Vec<PublishRunRecord>> {
         require_positive_identifier(build_run_id, "build run id")?;
-        self.load_build_run_record(build_run_id)?.ok_or_else(|| {
-            not_found_error(format!("build run {build_run_id} was not found"))
-        })?;
+        self.load_build_run_record(build_run_id)?
+            .ok_or_else(|| not_found_error(format!("build run {build_run_id} was not found")))?;
 
         let connection = open_connection(&self.database_path)?;
         list_publish_runs_with_connection(&connection, build_run_id)
@@ -3297,18 +3256,16 @@ impl LocalCoordinator {
     pub fn get_build_run_record(&self, build_run_id: i64) -> io::Result<BuildRunRecord> {
         require_positive_identifier(build_run_id, "build run id")?;
 
-        self.load_build_run_record(build_run_id)?.ok_or_else(|| {
-            not_found_error(format!("build run {build_run_id} was not found"))
-        })
+        self.load_build_run_record(build_run_id)?
+            .ok_or_else(|| not_found_error(format!("build run {build_run_id} was not found")))
     }
 
     /// Loads one durable publish run by identifier.
     pub fn get_publish_run_record(&self, publish_run_id: i64) -> io::Result<PublishRunRecord> {
         require_positive_identifier(publish_run_id, "publish run id")?;
 
-        self.load_publish_run_record(publish_run_id)?.ok_or_else(|| {
-            not_found_error(format!("publish run {publish_run_id} was not found"))
-        })
+        self.load_publish_run_record(publish_run_id)?
+            .ok_or_else(|| not_found_error(format!("publish run {publish_run_id} was not found")))
     }
 
     /// Loads the joined metadata required to execute one publish run.
@@ -3397,11 +3354,13 @@ impl LocalCoordinator {
             ));
         }
 
-        let record = self.load_publish_run_record(publish_run_id)?.ok_or_else(|| {
-            not_found_error(format!(
-                "started publish run {publish_run_id} could not be reloaded"
-            ))
-        })?;
+        let record = self
+            .load_publish_run_record(publish_run_id)?
+            .ok_or_else(|| {
+                not_found_error(format!(
+                    "started publish run {publish_run_id} could not be reloaded"
+                ))
+            })?;
         self.reconcile_release_run_status(record.release_run_id)?;
 
         Ok(record)
@@ -3478,11 +3437,13 @@ impl LocalCoordinator {
             }
         }
 
-        let record = self.load_publish_run_record(publish_run_id)?.ok_or_else(|| {
-            not_found_error(format!(
-                "completed publish run {publish_run_id} could not be reloaded"
-            ))
-        })?;
+        let record = self
+            .load_publish_run_record(publish_run_id)?
+            .ok_or_else(|| {
+                not_found_error(format!(
+                    "completed publish run {publish_run_id} could not be reloaded"
+                ))
+            })?;
         self.reconcile_release_run_status(record.release_run_id)?;
 
         Ok(record)
@@ -3527,11 +3488,13 @@ impl LocalCoordinator {
             ));
         }
 
-        let record = self.load_publish_run_record(publish_run_id)?.ok_or_else(|| {
-            not_found_error(format!(
-                "failed publish run {publish_run_id} could not be reloaded"
-            ))
-        })?;
+        let record = self
+            .load_publish_run_record(publish_run_id)?
+            .ok_or_else(|| {
+                not_found_error(format!(
+                    "failed publish run {publish_run_id} could not be reloaded"
+                ))
+            })?;
         self.reconcile_release_run_status(record.release_run_id)?;
 
         Ok(record)
@@ -3549,7 +3512,8 @@ impl LocalCoordinator {
         let started_at = Instant::now();
 
         loop {
-            if let Some(message) = self.claim_next_release_job_once(&worker_name, lease_ttl_millis)?
+            if let Some(message) =
+                self.claim_next_release_job_once(&worker_name, lease_ttl_millis)?
             {
                 return Ok(Some(message));
             }
@@ -3588,7 +3552,10 @@ impl LocalCoordinator {
                 if !acknowledged {
                     return Err(io::Error::new(
                         ErrorKind::NotFound,
-                        format!("release queue message {} could not be acknowledged", message.id),
+                        format!(
+                            "release queue message {} could not be acknowledged",
+                            message.id
+                        ),
                     ));
                 }
             }
@@ -3616,16 +3583,13 @@ impl LocalCoordinator {
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite_error)?;
         let generated_at = transaction
-            .query_row(
-                "SELECT STRFTIME('%Y-%m-%dT%H:%M:%SZ', 'now')",
-                [],
-                |row| row.get::<_, String>(0),
-            )
+            .query_row("SELECT STRFTIME('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(sqlite_error)?;
 
         let queue_messages = self.list_automation_queue_snapshots(&transaction, now)?;
-        let coordination_leases =
-            self.list_automation_coordination_leases(&transaction, now)?;
+        let coordination_leases = self.list_automation_coordination_leases(&transaction, now)?;
         let repositories = self.list_automation_repositories(&transaction)?;
 
         let mut repository_statuses = Vec::with_capacity(repositories.len());
@@ -3722,11 +3686,11 @@ impl LocalCoordinator {
                                         OR TRIM(engine_version) = ''
                   )
                 ",
-                                params![detected_engine_version, release_run_id],
+                params![detected_engine_version, release_run_id],
             )
             .map_err(sqlite_error)?;
 
-                Ok(detected_engine_version)
+        Ok(detected_engine_version)
     }
 
     /// Resolves one stored credential binding into Git authentication headers,
@@ -3785,9 +3749,8 @@ impl LocalCoordinator {
             return Err(map_release_store_sqlite_error(error));
         }
 
-        self.load_release_run_record(connection.last_insert_rowid())?.ok_or_else(|| {
-            not_found_error("inserted manual release could not be reloaded")
-        })
+        self.load_release_run_record(connection.last_insert_rowid())?
+            .ok_or_else(|| not_found_error("inserted manual release could not be reloaded"))
     }
 
     fn create_repository_poll_dispatch(
@@ -3802,8 +3765,7 @@ impl LocalCoordinator {
         }
         self.reject_if_repository_build_work_active(input.repository_id)?;
 
-        let metadata_json =
-            repository_poll_metadata_json(&input.observed_via, &input.git_tag)?;
+        let metadata_json = repository_poll_metadata_json(&input.observed_via, &input.git_tag)?;
         let connection = open_connection(&self.database_path)?;
         let inserted = connection.execute(
             "
@@ -3831,9 +3793,10 @@ impl LocalCoordinator {
             return Err(map_release_store_sqlite_error(error));
         }
 
-        self.load_release_run_record(connection.last_insert_rowid())?.ok_or_else(|| {
-            not_found_error("inserted repository-poll release could not be reloaded")
-        })
+        self.load_release_run_record(connection.last_insert_rowid())?
+            .ok_or_else(|| {
+                not_found_error("inserted repository-poll release could not be reloaded")
+            })
     }
 
     fn rebuild_manual_release_dispatch(
@@ -3848,24 +3811,21 @@ impl LocalCoordinator {
         }
         self.reject_if_repository_build_work_active(input.repository_id)?;
 
-        let Some(existing_release_run_id) = self.release_run_id_by_repository_tag_and_source_identity(
-            input.repository_id,
-            &input.git_tag,
-            &input.source_identity,
-        )? else {
+        let Some(existing_release_run_id) = self
+            .release_run_id_by_repository_tag_and_source_identity(
+                input.repository_id,
+                &input.git_tag,
+                &input.source_identity,
+            )?
+        else {
             return self.create_manual_release_dispatch(input);
         };
 
         let metadata_json = manual_dispatch_metadata_json(&input.requested_via, &input.git_tag)?;
         let mut connection = open_connection(&self.database_path)?;
-        let cleanup_paths = Self::collect_release_run_rebuild_cleanup_paths(
-            &connection,
-            existing_release_run_id,
-        )?;
-        Self::remove_release_run_rebuild_cleanup_paths(
-            &cleanup_paths,
-            existing_release_run_id,
-        )?;
+        let cleanup_paths =
+            Self::collect_release_run_rebuild_cleanup_paths(&connection, existing_release_run_id)?;
+        Self::remove_release_run_rebuild_cleanup_paths(&cleanup_paths, existing_release_run_id)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sqlite_error)?;
@@ -3904,11 +3864,12 @@ impl LocalCoordinator {
             .map_err(sqlite_error)?;
         transaction.commit().map_err(sqlite_error)?;
 
-        self.load_release_run_record(existing_release_run_id)?.ok_or_else(|| {
-            not_found_error(format!(
-                "rebuilt release run {existing_release_run_id} could not be reloaded"
-            ))
-        })
+        self.load_release_run_record(existing_release_run_id)?
+            .ok_or_else(|| {
+                not_found_error(format!(
+                    "rebuilt release run {existing_release_run_id} could not be reloaded"
+                ))
+            })
     }
 
     fn create_on_demand_release_dispatch(
@@ -3951,9 +3912,8 @@ impl LocalCoordinator {
             return Err(map_release_store_sqlite_error(error));
         }
 
-        self.load_release_run_record(connection.last_insert_rowid())?.ok_or_else(|| {
-            not_found_error("inserted on-demand release could not be reloaded")
-        })
+        self.load_release_run_record(connection.last_insert_rowid())?
+            .ok_or_else(|| not_found_error("inserted on-demand release could not be reloaded"))
     }
 
     fn rebuild_release_dispatch_by_id(
@@ -3963,7 +3923,9 @@ impl LocalCoordinator {
     ) -> io::Result<ReleaseRunRecord> {
         let existing = self
             .load_release_run_record(release_run_id)?
-            .ok_or_else(|| not_found_error(format!("release run {release_run_id} was not found")))?;
+            .ok_or_else(|| {
+                not_found_error(format!("release run {release_run_id} was not found"))
+            })?;
         self.reject_if_repository_build_work_active(existing.repository_id)?;
 
         let metadata_json = rebuild_release_metadata_json(&existing, requested_via)?;
@@ -4005,95 +3967,98 @@ impl LocalCoordinator {
             .map_err(sqlite_error)?;
         transaction.commit().map_err(sqlite_error)?;
 
-        self.load_release_run_record(release_run_id)?.ok_or_else(|| {
-            not_found_error(format!(
-                "rebuilt release run {release_run_id} could not be reloaded"
-            ))
-        })
+        self.load_release_run_record(release_run_id)?
+            .ok_or_else(|| {
+                not_found_error(format!(
+                    "rebuilt release run {release_run_id} could not be reloaded"
+                ))
+            })
     }
 
-fn collect_release_run_rebuild_cleanup_paths(
-    connection: &Connection,
-    release_run_id: i64,
-) -> io::Result<Vec<PathBuf>> {
-    let mut statement = connection
-        .prepare(
-            "
+    fn collect_release_run_rebuild_cleanup_paths(
+        connection: &Connection,
+        release_run_id: i64,
+    ) -> io::Result<Vec<PathBuf>> {
+        let mut statement = connection
+            .prepare(
+                "
             SELECT workspace_path, artifact_root_path
             FROM build_runs
             WHERE release_run_id = ?
             ",
-        )
-        .map_err(sqlite_error)?;
-    let rows = statement
-        .query_map([release_run_id], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-            ))
-        })
-        .map_err(sqlite_error)?;
+            )
+            .map_err(sqlite_error)?;
+        let rows = statement
+            .query_map([release_run_id], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .map_err(sqlite_error)?;
 
-    let mut paths = HashSet::new();
-    for row in rows {
-        let (workspace_path, artifact_root_path) = row.map_err(sqlite_error)?;
-        for candidate in [workspace_path, artifact_root_path] {
-            let Some(path) = candidate
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            else {
-                continue;
-            };
+        let mut paths = HashSet::new();
+        for row in rows {
+            let (workspace_path, artifact_root_path) = row.map_err(sqlite_error)?;
+            for candidate in [workspace_path, artifact_root_path] {
+                let Some(path) = candidate
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                else {
+                    continue;
+                };
 
-            paths.insert(PathBuf::from(path));
+                paths.insert(PathBuf::from(path));
+            }
         }
+
+        let mut paths = paths.into_iter().collect::<Vec<_>>();
+        paths.sort();
+        Ok(paths)
     }
 
-    let mut paths = paths.into_iter().collect::<Vec<_>>();
-    paths.sort();
-    Ok(paths)
-}
+    fn remove_release_run_rebuild_cleanup_paths(
+        paths: &[PathBuf],
+        release_run_id: i64,
+    ) -> io::Result<()> {
+        for path in paths {
+            if !path.exists() {
+                continue;
+            }
 
-fn remove_release_run_rebuild_cleanup_paths(
-    paths: &[PathBuf],
-    release_run_id: i64,
-) -> io::Result<()> {
-    for path in paths {
-        if !path.exists() {
-            continue;
-        }
-
-        let metadata = fs::metadata(path).map_err(|error| {
-            io::Error::other(format!(
-                "inspect rebuild cleanup path '{}' for release run {release_run_id}: {error}",
-                path.display()
-            ))
-        })?;
-        if metadata.is_dir() {
-            fs::remove_dir_all(path).map_err(|error| {
+            let metadata = fs::metadata(path).map_err(|error| {
+                io::Error::other(format!(
+                    "inspect rebuild cleanup path '{}' for release run {release_run_id}: {error}",
+                    path.display()
+                ))
+            })?;
+            if metadata.is_dir() {
+                fs::remove_dir_all(path).map_err(|error| {
                 io::Error::other(format!(
                     "remove rebuild cleanup directory '{}' for release run {release_run_id}: {error}",
                     path.display()
                 ))
             })?;
-        } else {
-            fs::remove_file(path).map_err(|error| {
-                io::Error::other(format!(
+            } else {
+                fs::remove_file(path).map_err(|error| {
+                    io::Error::other(format!(
                     "remove rebuild cleanup file '{}' for release run {release_run_id}: {error}",
                     path.display()
                 ))
-            })?;
+                })?;
+            }
         }
-    }
 
-    Ok(())
-}
+        Ok(())
+    }
 
     fn queue_release_run_locked(&self, release_run_id: i64) -> io::Result<ReleaseRunRecord> {
         let record = self
             .load_release_run_record(release_run_id)?
-            .ok_or_else(|| not_found_error(format!("release run {release_run_id} was not found")))?;
+            .ok_or_else(|| {
+                not_found_error(format!("release run {release_run_id} was not found"))
+            })?;
         if record.status == ReleaseStatus::Queued.as_str() {
             return Ok(record);
         }
@@ -4143,8 +4108,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                 ErrorKind::WouldBlock,
                 format!(
                     "release run {} already has running build run {}",
-                    state.job.release_run_id,
-                    running_build_run_id
+                    state.job.release_run_id, running_build_run_id
                 ),
             ));
         }
@@ -4182,13 +4146,12 @@ fn remove_release_run_rebuild_cleanup_paths(
         Ok(QueueDispatchOutcome::Enqueued)
     }
 
-    fn dispatch_publish_run_locked(
-        &self,
-        publish_run_id: i64,
-    ) -> io::Result<QueueDispatchOutcome> {
-        let state = self.load_publish_run_dispatch_state(publish_run_id)?.ok_or_else(|| {
-            not_found_error(format!("publish run {publish_run_id} was not found"))
-        })?;
+    fn dispatch_publish_run_locked(&self, publish_run_id: i64) -> io::Result<QueueDispatchOutcome> {
+        let state = self
+            .load_publish_run_dispatch_state(publish_run_id)?
+            .ok_or_else(|| {
+                not_found_error(format!("publish run {publish_run_id} was not found"))
+            })?;
         if state.status != PublishStatus::Queued.as_str() {
             return Err(invalid_input_error(format!(
                 "publish run {publish_run_id} must be queued before dispatch"
@@ -4399,7 +4362,8 @@ fn remove_release_run_rebuild_cleanup_paths(
                 }
             };
 
-            let Some(release) = self.load_release_build_planning_state(&transaction, job.release_run_id)?
+            let Some(release) =
+                self.load_release_build_planning_state(&transaction, job.release_run_id)?
             else {
                 self.delete_queue_message(&transaction, message.id)?;
                 continue;
@@ -4462,7 +4426,8 @@ fn remove_release_run_rebuild_cleanup_paths(
                 }
             };
 
-            let Some(run) = self.load_publish_run_claim_state(&transaction, job.publish_run_id)? else {
+            let Some(run) = self.load_publish_run_claim_state(&transaction, job.publish_run_id)?
+            else {
                 self.delete_queue_message(&transaction, message.id)?;
                 continue;
             };
@@ -4601,10 +4566,7 @@ fn remove_release_run_rebuild_cleanup_paths(
         Ok(())
     }
 
-    fn active_build_run_count(
-        &self,
-        transaction: &rusqlite::Transaction<'_>,
-    ) -> io::Result<u32> {
+    fn active_build_run_count(&self, transaction: &rusqlite::Transaction<'_>) -> io::Result<u32> {
         transaction
             .query_row(
                 "SELECT COUNT(1) FROM build_runs WHERE status = ?",
@@ -4614,10 +4576,7 @@ fn remove_release_run_rebuild_cleanup_paths(
             .map_err(sqlite_error)
     }
 
-    fn active_publish_run_count(
-        &self,
-        transaction: &rusqlite::Transaction<'_>,
-    ) -> io::Result<u32> {
+    fn active_publish_run_count(&self, transaction: &rusqlite::Transaction<'_>) -> io::Result<u32> {
         transaction
             .query_row(
                 "SELECT COUNT(1) FROM publish_runs WHERE status = ?",
@@ -4887,10 +4846,7 @@ fn remove_release_run_rebuild_cleanup_paths(
             .map_err(sqlite_error)
     }
 
-    fn load_publish_run_record(
-        &self,
-        publish_run_id: i64,
-    ) -> io::Result<Option<PublishRunRecord>> {
+    fn load_publish_run_record(&self, publish_run_id: i64) -> io::Result<Option<PublishRunRecord>> {
         let connection = open_connection(&self.database_path)?;
         connection
             .query_row(
@@ -5049,11 +5005,12 @@ fn remove_release_run_rebuild_cleanup_paths(
             )));
         }
 
-        self.load_release_run_record(release_run_id)?.ok_or_else(|| {
-            not_found_error(format!(
-                "queued release run {release_run_id} could not be reloaded"
-            ))
-        })
+        self.load_release_run_record(release_run_id)?
+            .ok_or_else(|| {
+                not_found_error(format!(
+                    "queued release run {release_run_id} could not be reloaded"
+                ))
+            })
     }
 
     fn load_repository_project_removal_record(
@@ -5085,18 +5042,11 @@ fn remove_release_run_rebuild_cleanup_paths(
         repository_id: i64,
         collect_paths: bool,
     ) -> io::Result<RepositoryProjectRemovalRuntimeState> {
-        let release_run_ids = Self::load_release_run_ids_for_repository(
-            transaction,
-            repository_id,
-        )?;
-        let build_run_ids = Self::load_build_run_ids_for_repository(
-            transaction,
-            repository_id,
-        )?;
-        let publish_run_ids = Self::load_publish_run_ids_for_repository(
-            transaction,
-            repository_id,
-        )?;
+        let release_run_ids =
+            Self::load_release_run_ids_for_repository(transaction, repository_id)?;
+        let build_run_ids = Self::load_build_run_ids_for_repository(transaction, repository_id)?;
+        let publish_run_ids =
+            Self::load_publish_run_ids_for_repository(transaction, repository_id)?;
         let queue_messages = Self::load_target_queue_messages(
             transaction,
             repository_id,
@@ -5141,10 +5091,7 @@ fn remove_release_run_rebuild_cleanup_paths(
         runtime_state: &RepositoryProjectRemovalRuntimeState,
     ) -> io::Result<()> {
         let has_running_process_work =
-            Self::repository_has_running_process_work_in_transaction(
-                transaction,
-                repository_id,
-            )?;
+            Self::repository_has_running_process_work_in_transaction(transaction, repository_id)?;
         let has_leased_queue_messages = runtime_state
             .queue_messages
             .iter()
@@ -5566,9 +5513,7 @@ fn remove_release_run_rebuild_cleanup_paths(
             .prepare("DELETE FROM worker_idempotency_keys WHERE idempotency_key = ?")
             .map_err(sqlite_error)?;
         for idempotency_key in idempotency_keys {
-            statement
-                .execute([idempotency_key])
-                .map_err(sqlite_error)?;
+            statement.execute([idempotency_key]).map_err(sqlite_error)?;
         }
 
         Ok(())
@@ -5588,34 +5533,25 @@ fn remove_release_run_rebuild_cleanup_paths(
     }
 
     fn matches_publish_lock_name(name: &str, publish_run_ids: &HashSet<i64>) -> bool {
-        publish_run_ids.iter().any(|publish_run_id| {
-            name == format!("publish-run:{publish_run_id}:dispatch")
-        })
+        publish_run_ids
+            .iter()
+            .any(|publish_run_id| name == format!("publish-run:{publish_run_id}:dispatch"))
     }
 
-    fn matches_release_idempotency_key(
-        key: &str,
-        release_run_ids: &HashSet<i64>,
-    ) -> bool {
-        release_run_ids.iter().any(|release_run_id| {
-            key == format!("release-run:{release_run_id}:queued")
-        })
+    fn matches_release_idempotency_key(key: &str, release_run_ids: &HashSet<i64>) -> bool {
+        release_run_ids
+            .iter()
+            .any(|release_run_id| key == format!("release-run:{release_run_id}:queued"))
     }
 
-    fn matches_build_idempotency_key(
-        key: &str,
-        build_run_ids: &HashSet<i64>,
-    ) -> bool {
+    fn matches_build_idempotency_key(key: &str, build_run_ids: &HashSet<i64>) -> bool {
         build_run_ids.iter().any(|build_run_id| {
             key == format!("build-run:{build_run_id}:queued")
                 || key.starts_with(&format!("build-run:{build_run_id}:"))
         })
     }
 
-    fn matches_publish_idempotency_key(
-        key: &str,
-        publish_run_ids: &HashSet<i64>,
-    ) -> bool {
+    fn matches_publish_idempotency_key(key: &str, publish_run_ids: &HashSet<i64>) -> bool {
         publish_run_ids.iter().any(|publish_run_id| {
             key == format!("publish-run:{publish_run_id}:queued")
                 || key.starts_with(&format!("publish-run:{publish_run_id}:"))
@@ -5955,10 +5891,8 @@ fn remove_release_run_rebuild_cleanup_paths(
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(sqlite_error)?;
-        let releases = self.list_queued_releases_by_repository_in_transaction(
-            &transaction,
-            repository_id,
-        )?;
+        let releases =
+            self.list_queued_releases_by_repository_in_transaction(&transaction, repository_id)?;
         transaction.commit().map_err(sqlite_error)?;
 
         Ok(releases)
@@ -6129,9 +6063,8 @@ fn remove_release_run_rebuild_cleanup_paths(
                 .map_err(sqlite_error)?
                 .trim()
                 .to_owned();
-            let artifact_name = normalize_optional_string(
-                row.get::<_, Option<String>>(2).map_err(sqlite_error)?,
-            );
+            let artifact_name =
+                normalize_optional_string(row.get::<_, Option<String>>(2).map_err(sqlite_error)?);
 
             contexts.insert(
                 publish_run_id,
@@ -6150,10 +6083,8 @@ fn remove_release_run_rebuild_cleanup_paths(
         transaction: &rusqlite::Transaction<'_>,
         repository_id: i64,
     ) -> io::Result<Vec<ReleaseAutomationStatus>> {
-        let releases = self.list_queued_releases_by_repository_in_transaction(
-            transaction,
-            repository_id,
-        )?;
+        let releases =
+            self.list_queued_releases_by_repository_in_transaction(transaction, repository_id)?;
         let mut release_queue = Vec::new();
 
         for release in releases {
@@ -6219,10 +6150,7 @@ fn remove_release_run_rebuild_cleanup_paths(
         Ok(runs)
     }
 
-    fn list_open_release_run_ids(
-        &self,
-        transaction: &Transaction<'_>,
-    ) -> io::Result<Vec<i64>> {
+    fn list_open_release_run_ids(&self, transaction: &Transaction<'_>) -> io::Result<Vec<i64>> {
         let mut statement = transaction
             .prepare(
                 "
@@ -6257,7 +6185,8 @@ fn remove_release_run_rebuild_cleanup_paths(
         transaction: &Transaction<'_>,
         release_run_id: i64,
     ) -> io::Result<()> {
-        let Some(release) = self.load_release_run_record_in_transaction(transaction, release_run_id)?
+        let Some(release) =
+            self.load_release_run_record_in_transaction(transaction, release_run_id)?
         else {
             return Ok(());
         };
@@ -6387,10 +6316,7 @@ fn remove_release_run_rebuild_cleanup_paths(
         Ok(())
     }
 
-    fn next_queued_build_run_id_for_release(
-        &self,
-        release_run_id: i64,
-    ) -> io::Result<Option<i64>> {
+    fn next_queued_build_run_id_for_release(&self, release_run_id: i64) -> io::Result<Option<i64>> {
         let mut connection = open_connection(&self.database_path)?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -6595,11 +6521,7 @@ fn remove_release_run_rebuild_cleanup_paths(
                   AND br.status = ?
                   AND br.release_run_id != ?
                 ",
-                params![
-                    repository_id,
-                    BuildStatus::Running.as_str(),
-                    release_run_id,
-                ],
+                params![repository_id, BuildStatus::Running.as_str(), release_run_id,],
                 |row| row.get(0),
             )
             .map_err(sqlite_error)?;
@@ -6922,7 +6844,8 @@ fn sync_repository_project_publish_targets(
 
     let mut retained_target_ids = HashSet::new();
     for planned_target in planned_targets {
-        let publish_target_id = if let Some(existing_target_id) = planned_target.existing_target_id {
+        let publish_target_id = if let Some(existing_target_id) = planned_target.existing_target_id
+        {
             update_repository_project_publish_target(
                 transaction,
                 existing_target_id,
@@ -7044,14 +6967,16 @@ fn list_active_repository_project_build_targets(
     connection: &Connection,
     repository_id: i64,
 ) -> io::Result<Vec<ActiveRepositoryProjectBuildTarget>> {
-    Ok(list_repository_project_build_targets(connection, repository_id)?
-        .into_iter()
-        .filter(|target| target.enabled)
-        .map(|target| ActiveRepositoryProjectBuildTarget {
-            id: target.id,
-            name: target.name,
-        })
-        .collect())
+    Ok(
+        list_repository_project_build_targets(connection, repository_id)?
+            .into_iter()
+            .filter(|target| target.enabled)
+            .map(|target| ActiveRepositoryProjectBuildTarget {
+                id: target.id,
+                name: target.name,
+            })
+            .collect(),
+    )
 }
 
 fn list_repository_project_publish_targets(
@@ -7220,7 +7145,10 @@ fn delete_repository_project_publish_target(
     publish_target_id: i64,
 ) -> io::Result<()> {
     transaction
-        .execute("DELETE FROM publish_targets WHERE id = ?", [publish_target_id])
+        .execute(
+            "DELETE FROM publish_targets WHERE id = ?",
+            [publish_target_id],
+        )
         .map_err(sqlite_error)?;
 
     Ok(())
@@ -7248,10 +7176,8 @@ fn sync_repository_project_publish_target_bindings(
     build_targets_by_id: &HashMap<i64, ActiveRepositoryProjectBuildTarget>,
     build_targets_by_name: &HashMap<String, ActiveRepositoryProjectBuildTarget>,
 ) -> io::Result<()> {
-    let existing_bindings = list_repository_project_publish_target_bindings(
-        transaction,
-        publish_target_id,
-    )?;
+    let existing_bindings =
+        list_repository_project_publish_target_bindings(transaction, publish_target_id)?;
     let existing_by_build_target_id = existing_bindings
         .iter()
         .cloned()
@@ -7721,7 +7647,10 @@ pub fn recover_runtime_state(
                 updated_at = CURRENT_TIMESTAMP
             WHERE status = ?
             ",
-            params![PublishStatus::Queued.as_str(), PublishStatus::Running.as_str()],
+            params![
+                PublishStatus::Queued.as_str(),
+                PublishStatus::Running.as_str()
+            ],
         )
         .map_err(sqlite_error)? as u64;
 
@@ -7780,10 +7709,7 @@ fn terminate_interrupted_build_processes(
     }
 
     let observed_processes = snapshot_observed_processes();
-    let process_roots = select_orphan_build_process_roots(
-        interrupted_builds,
-        &observed_processes,
-    );
+    let process_roots = select_orphan_build_process_roots(interrupted_builds, &observed_processes);
     let mut report = OrphanBuildProcessTerminationReport::default();
 
     for pid in process_roots {
@@ -7860,17 +7786,13 @@ fn select_orphan_build_process_roots(
     let mut roots = matched_pids
         .iter()
         .copied()
-        .filter(|pid| {
-            !has_matched_ancestor(*pid, &matched_pids, &process_lookup)
-        })
+        .filter(|pid| !has_matched_ancestor(*pid, &matched_pids, &process_lookup))
         .collect::<Vec<_>>();
     roots.sort_unstable();
     roots
 }
 
-fn interrupted_build_process_match_tokens(
-    build: &InterruptedBuildRecoveryRecord,
-) -> Vec<String> {
+fn interrupted_build_process_match_tokens(build: &InterruptedBuildRecoveryRecord) -> Vec<String> {
     let mut tokens = Vec::new();
 
     if !build.workspace_path.trim().is_empty() {
@@ -7906,7 +7828,9 @@ fn has_matched_ancestor(
     process_lookup: &HashMap<u32, &ObservedProcess>,
 ) -> bool {
     let mut visited = HashSet::new();
-    let mut current = process_lookup.get(&pid).and_then(|process| process.parent_pid);
+    let mut current = process_lookup
+        .get(&pid)
+        .and_then(|process| process.parent_pid);
 
     while let Some(parent_pid) = current {
         if !visited.insert(parent_pid) {
@@ -8000,30 +7924,26 @@ pub fn list_process_feed_page_filtered(
         .transaction_with_behavior(TransactionBehavior::Deferred)
         .map_err(sqlite_error)?;
     let generated_at = transaction
-        .query_row(
-            "SELECT STRFTIME('%Y-%m-%dT%H:%M:%SZ', 'now')",
-            [],
-            |row| row.get::<_, String>(0),
-        )
+        .query_row("SELECT STRFTIME('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
+            row.get::<_, String>(0)
+        })
         .map_err(sqlite_error)?;
-    let page_rows = list_process_feed_release_rows(
-        &transaction,
-        query.scope,
-        normalized_query.as_deref(),
-    )?;
+    let page_rows =
+        list_process_feed_release_rows(&transaction, query.scope, normalized_query.as_deref())?;
     let mut matching_items = Vec::with_capacity(page_rows.len());
 
     for row in page_rows {
         let repository_engine_kind = row.repository_engine_kind.clone();
         let build_runs = coordinator.list_build_runs_by_release(&transaction, row.release.id)?;
-        let publish_runs = coordinator.list_publish_runs_by_release(&transaction, row.release.id)?;
+        let publish_runs =
+            coordinator.list_publish_runs_by_release(&transaction, row.release.id)?;
         let build_run_contexts = coordinator.list_process_feed_build_run_contexts(
             &transaction,
             row.release.id,
             repository_engine_kind.as_str(),
         )?;
-        let publish_run_contexts = coordinator
-            .list_process_feed_publish_run_contexts(&transaction, row.release.id)?;
+        let publish_run_contexts =
+            coordinator.list_process_feed_publish_run_contexts(&transaction, row.release.id)?;
         let record = summarize_process_feed_record(
             row,
             &build_runs,
@@ -8072,9 +7992,7 @@ pub fn list_process_feed_page_filtered(
 }
 
 /// Lists persisted build runs enriched for operator-facing history surfaces.
-pub fn list_build_history_records(
-    storage: &StorageLayout,
-) -> io::Result<Vec<BuildHistoryRecord>> {
+pub fn list_build_history_records(storage: &StorageLayout) -> io::Result<Vec<BuildHistoryRecord>> {
     let connection = open_connection(&storage.database_path)?;
     let mut statement = connection
         .prepare(
@@ -8533,8 +8451,7 @@ struct ProcessFeedPublishRunContext {
 }
 
 const PROCESS_FEED_ON_HOLD_STATUS: &str = "on_hold";
-const PROCESS_FEED_LOCAL_WORKSPACE_HOLD_PREFIX: &str =
-    "[hgp-on-hold-local-workspace-editor-open]";
+const PROCESS_FEED_LOCAL_WORKSPACE_HOLD_PREFIX: &str = "[hgp-on-hold-local-workspace-editor-open]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DatabasePragmas {
@@ -8696,7 +8613,11 @@ fn unsupported_pre_contract_build_target_schema(migration_name: &str) -> io::Err
     )
 }
 
-fn table_has_column(connection: &Connection, table_name: &str, column_name: &str) -> io::Result<bool> {
+fn table_has_column(
+    connection: &Connection,
+    table_name: &str,
+    column_name: &str,
+) -> io::Result<bool> {
     let mut statement = connection
         .prepare(&format!("PRAGMA table_info({table_name})"))
         .map_err(sqlite_error)?;
@@ -8785,10 +8706,8 @@ fn resolve_target_engine_version(
     repository_engine_kind: EngineKind,
     release_engine_version: &str,
 ) -> io::Result<String> {
-    let contract_engine_version = resolve_target_contract_engine_version(
-        repository_engine_kind,
-        target,
-    )?;
+    let contract_engine_version =
+        resolve_target_contract_engine_version(repository_engine_kind, target)?;
     Ok(contract_engine_version
         .as_deref()
         .map(str::trim)
@@ -8846,7 +8765,10 @@ fn resolve_unity_target_contract_engine_version(
     Ok(normalize_optional_string(Some(unity.editor_version)))
 }
 
-fn resolve_build_image_ref(target: &BuildTargetPlanningState, engine_version: &str) -> io::Result<String> {
+fn resolve_build_image_ref(
+    target: &BuildTargetPlanningState,
+    engine_version: &str,
+) -> io::Result<String> {
     let runner_type = target.runner_type.trim();
     if runner_type == DEFAULT_HOST_NATIVE_RUNNER_TYPE {
         return Ok(String::from(DEFAULT_HOST_NATIVE_RUNNER_TYPE));
@@ -8916,11 +8838,9 @@ fn detect_release_engine_version_from_source(
     git_auth: &GitAuthOptions,
 ) -> io::Result<String> {
     match repository_engine_kind {
-        EngineKind::Unity => detect_release_unity_engine_version_from_source(
-            repository_url,
-            source,
-            git_auth,
-        ),
+        EngineKind::Unity => {
+            detect_release_unity_engine_version_from_source(repository_url, source, git_auth)
+        }
         other => Err(invalid_input_error(format!(
             "repository engine_kind {:?} is not supported for release planning",
             other.as_str()
@@ -8942,14 +8862,11 @@ fn detect_release_unity_engine_version_from_source(
             )
         }
         RELEASE_SOURCE_KIND_MANAGED_TAG | RELEASE_SOURCE_KIND_MANAGED_REF => {
-            let git_ref = source.source_ref.as_deref().ok_or_else(|| {
-                invalid_input_error("release source_ref must not be empty")
-            })?;
-            detect_release_unity_engine_version_from_git_ref(
-                repository_url,
-                git_ref,
-                git_auth,
-            )
+            let git_ref = source
+                .source_ref
+                .as_deref()
+                .ok_or_else(|| invalid_input_error("release source_ref must not be empty"))?;
+            detect_release_unity_engine_version_from_git_ref(repository_url, git_ref, git_auth)
         }
         other => Err(invalid_input_error(format!(
             "unsupported release source_kind {:?}",
@@ -8962,16 +8879,15 @@ fn detect_release_unity_engine_version_from_local_workspace(
     local_path: &str,
 ) -> io::Result<String> {
     let local_path = require_non_empty(local_path, "local workspace path")?;
-    let contents = fs::read(Path::new(&local_path).join(PROJECT_VERSION_FILE_PATH)).map_err(
-        |error| {
+    let contents =
+        fs::read(Path::new(&local_path).join(PROJECT_VERSION_FILE_PATH)).map_err(|error| {
             io::Error::new(
                 ErrorKind::InvalidData,
                 format!(
                     "read {PROJECT_VERSION_FILE_PATH} from local workspace {local_path:?}: {error}"
                 ),
             )
-        },
-    )?;
+        })?;
 
     parse_project_version_unity_version(&contents)
 }
@@ -9072,8 +8988,7 @@ fn read_repository_file_from_git_ref(
                 ErrorKind::InvalidData,
                 format!(
                     "read {} from repository ref {:?}: {error}",
-                    file_path,
-                    git_ref,
+                    file_path, git_ref,
                 ),
             )
         })
@@ -9198,9 +9113,7 @@ fn parse_project_version_unity_version(contents: &[u8]) -> io::Result<String> {
 
     Err(io::Error::new(
         ErrorKind::InvalidData,
-        format!(
-            "{PROJECT_VERSION_FILE_PATH} does not define m_EditorVersion"
-        ),
+        format!("{PROJECT_VERSION_FILE_PATH} does not define m_EditorVersion"),
     ))
 }
 
@@ -9221,9 +9134,7 @@ fn parse_project_settings_bundle_version(contents: &[u8]) -> io::Result<String> 
 
     Err(io::Error::new(
         ErrorKind::InvalidData,
-        format!(
-            "{PROJECT_SETTINGS_ASSET_PATH} does not define bundleVersion"
-        ),
+        format!("{PROJECT_SETTINGS_ASSET_PATH} does not define bundleVersion"),
     ))
 }
 
@@ -9325,11 +9236,8 @@ fn normalize_manual_release_dispatch_input(
     }
 
     let git_tag = require_non_empty(&input.git_tag, "git tag")?;
-    let source_identity = build_release_source_identity(
-        RELEASE_SOURCE_KIND_MANAGED_TAG,
-        Some(&git_tag),
-        None,
-    )?;
+    let source_identity =
+        build_release_source_identity(RELEASE_SOURCE_KIND_MANAGED_TAG, Some(&git_tag), None)?;
 
     Ok(NormalizedManualReleaseDispatchInput {
         repository_id: input.repository_id,
@@ -9350,11 +9258,8 @@ fn normalize_repository_poll_dispatch_input(
     }
 
     let git_tag = require_non_empty(&input.git_tag, "git tag")?;
-    let source_identity = build_release_source_identity(
-        RELEASE_SOURCE_KIND_MANAGED_TAG,
-        Some(&git_tag),
-        None,
-    )?;
+    let source_identity =
+        build_release_source_identity(RELEASE_SOURCE_KIND_MANAGED_TAG, Some(&git_tag), None)?;
 
     Ok(NormalizedRepositoryPollDispatchInput {
         repository_id: input.repository_id,
@@ -9488,7 +9393,9 @@ fn decode_release_source_metadata(
         source_ref: normalize_optional_string(metadata.source_ref)
             .or_else(|| normalize_optional_string(default_source_ref.map(str::to_owned))),
         local_path: normalize_absolute_path_string(
-            metadata.local_path.or_else(|| default_local_path.map(str::to_owned)),
+            metadata
+                .local_path
+                .or_else(|| default_local_path.map(str::to_owned)),
             "release source metadata local_path",
         )?,
         version_source: metadata
@@ -9600,9 +9507,7 @@ fn list_process_feed_release_rows(
 ) -> io::Result<Vec<ProcessFeedReleaseRow>> {
     let scope_clause = match scope {
         ProcessFeedScope::All => None,
-        ProcessFeedScope::Active => {
-            Some("rr.status IN ('detected', 'queued', 'running')")
-        }
+        ProcessFeedScope::Active => Some("rr.status IN ('detected', 'queued', 'running')"),
     };
     let search_clause = query.map(|_| {
         "(CAST(rr.id AS TEXT) LIKE ?1
@@ -9656,9 +9561,7 @@ fn list_process_feed_release_rows(
         ",
     );
 
-    let mut statement = transaction
-        .prepare(&sql)
-        .map_err(sqlite_error)?;
+    let mut statement = transaction.prepare(&sql).map_err(sqlite_error)?;
     let rows = if let Some(query) = query {
         let pattern = format!("%{query}%");
         statement
@@ -9716,8 +9619,7 @@ fn summarize_process_feed_record(
         repository_engine_kind,
     } = row;
     let build_counts = count_run_statuses(build_runs.iter().map(|run| run.status.as_str()));
-    let publish_counts =
-        count_run_statuses(publish_runs.iter().map(|run| run.status.as_str()));
+    let publish_counts = count_run_statuses(publish_runs.iter().map(|run| run.status.as_str()));
     let (current_step_label, current_step_status, current_step_detail) =
         summarize_process_feed_step(
             &release,
@@ -9787,11 +9689,7 @@ fn summarize_process_feed_step(
         }
 
         return (
-            format_process_feed_running_build_label(
-                run,
-                build_run_contexts,
-                build_counts.running,
-            ),
+            format_process_feed_running_build_label(run, build_run_contexts, build_counts.running),
             run.current_stage_status
                 .clone()
                 .unwrap_or_else(|| String::from(BuildStatus::Running.as_str())),
@@ -9861,7 +9759,9 @@ fn summarize_process_feed_step(
                 build_counts.failed,
             ),
             String::from(BuildStatus::Failed.as_str()),
-            run.error_message.clone().or(run.last_progress_message.clone()),
+            run.error_message
+                .clone()
+                .or(run.last_progress_message.clone()),
         );
     }
 
@@ -9874,12 +9774,9 @@ fn summarize_process_feed_step(
                 publish_counts.failed,
             ),
             String::from(PublishStatus::Failed.as_str()),
-            run.error_message.clone().or_else(|| {
-                Some(format!(
-                    "{} publish task(s) failed",
-                    publish_counts.failed
-                ))
-            }),
+            run.error_message
+                .clone()
+                .or_else(|| Some(format!("{} publish task(s) failed", publish_counts.failed))),
         );
     }
 
@@ -9892,11 +9789,14 @@ fn summarize_process_feed_step(
                 build_counts.canceled,
             ),
             String::from(BuildStatus::Canceled.as_str()),
-            run.error_message.clone().or(run.last_progress_message.clone()),
+            run.error_message
+                .clone()
+                .or(run.last_progress_message.clone()),
         );
     }
 
-    if let Some(run) = latest_publish_run_by_status(publish_runs, PublishStatus::Canceled.as_str()) {
+    if let Some(run) = latest_publish_run_by_status(publish_runs, PublishStatus::Canceled.as_str())
+    {
         return (
             format_process_feed_publish_label(
                 "Publish canceled:",
@@ -10179,9 +10079,7 @@ fn format_process_feed_build_target_alias(target_name: &str, platform: &str) -> 
 
 fn tokenize_process_feed_label(value: &str) -> Vec<String> {
     value
-        .split(|character: char| {
-            matches!(character, '-' | '_' | '/' | '\\' | ' ' | '.' | ':')
-        })
+        .split(|character: char| matches!(character, '-' | '_' | '/' | '\\' | ' ' | '.' | ':'))
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .map(|token| token.to_ascii_lowercase())
@@ -10235,7 +10133,10 @@ fn truncate_process_feed_label(value: &str, max_chars: usize) -> String {
         return trimmed.to_owned();
     }
 
-    let truncated = trimmed.chars().take(max_chars.saturating_sub(3)).collect::<String>();
+    let truncated = trimmed
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
     format!("{truncated}...")
 }
 
@@ -10254,9 +10155,7 @@ fn resolve_process_feed_publish_subject(
 
 fn humanize_unity_target_platform(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
-        "windows" | "standalonewindows" | "standalonewindows64" => {
-            String::from("Windows")
-        }
+        "windows" | "standalonewindows" | "standalonewindows64" => String::from("Windows"),
         "linux" | "standalonelinux64" => String::from("Linux"),
         "mac" | "macos" | "osx" | "standaloneosx" => String::from("macOS"),
         "webgl" => String::from("WebGL"),
@@ -10379,15 +10278,13 @@ fn derive_release_run_reconciliation(
             PublishStatus::Failed.as_str(),
         )
         .or_else(|| release.error_message.clone()),
-        value if value == ReleaseStatus::Canceled.as_str() => {
-            latest_release_child_error_message(
-                build_runs,
-                publish_runs,
-                BuildStatus::Canceled.as_str(),
-                PublishStatus::Canceled.as_str(),
-            )
-            .or_else(|| release.error_message.clone())
-        }
+        value if value == ReleaseStatus::Canceled.as_str() => latest_release_child_error_message(
+            build_runs,
+            publish_runs,
+            BuildStatus::Canceled.as_str(),
+            PublishStatus::Canceled.as_str(),
+        )
+        .or_else(|| release.error_message.clone()),
         _ => None,
     };
 
@@ -10442,8 +10339,8 @@ fn latest_release_child_error_message(
             .as_ref()
             .map(|message| (build_run_activity_key(run), message.clone()))
     });
-    let publish_candidate = latest_publish_run_by_status(publish_runs, publish_status)
-        .and_then(|run| {
+    let publish_candidate =
+        latest_publish_run_by_status(publish_runs, publish_status).and_then(|run| {
             run.error_message
                 .as_ref()
                 .map(|message| (publish_run_activity_key(run), message.clone()))
@@ -10629,9 +10526,7 @@ fn scan_build_run_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<BuildRunRe
     })
 }
 
-fn scan_build_run_stage_record(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<BuildRunStageRecord> {
+fn scan_build_run_stage_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<BuildRunStageRecord> {
     Ok(BuildRunStageRecord {
         id: row.get(0)?,
         build_run_id: row.get(1)?,
@@ -10650,9 +10545,7 @@ fn scan_build_run_stage_record(
     })
 }
 
-fn scan_build_history_record(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<BuildHistoryRecord> {
+fn scan_build_history_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<BuildHistoryRecord> {
     let engine_kind: String = row.get(9)?;
     let build_kind: String = row.get(10)?;
     let contract_json: String = row.get(11)?;
@@ -10662,11 +10555,7 @@ fn scan_build_history_record(
         &contract_json,
     )
     .map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            11,
-            rusqlite::types::Type::Text,
-            Box::new(error),
-        )
+        rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, Box::new(error))
     })?;
 
     Ok(BuildHistoryRecord {
@@ -10710,11 +10599,7 @@ fn scan_artifact_inspection_record(
         &contract_json,
     )
     .map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            12,
-            rusqlite::types::Type::Text,
-            Box::new(error),
-        )
+        rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(error))
     })?;
 
     Ok(ArtifactInspectionRecord {
@@ -10737,8 +10622,14 @@ fn scan_artifact_inspection_record(
         artifact_root_path: normalize_optional_string(row.get(18)?),
         artifact_active_location_kind: normalize_optional_string(row.get(19)?)
             .unwrap_or_else(|| String::from("runtime_artifact")),
-        artifact_active_location_ref: normalize_optional_string(row.get(20)?)
-            .unwrap_or_else(|| row.get::<_, String>(17).unwrap_or_default().trim().to_owned()),
+        artifact_active_location_ref: normalize_optional_string(row.get(20)?).unwrap_or_else(
+            || {
+                row.get::<_, String>(17)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned()
+            },
+        ),
         size_bytes: row.get(21)?,
         checksum_sha256: normalize_optional_string(row.get(22)?),
         publish_run_count: row.get(23)?,
@@ -10938,7 +10829,8 @@ fn list_enabled_publish_binding_plans(
         )));
     }
 
-    publish_bindings.sort_by_key(|binding| (binding.consumption.dispatch_rank(), binding.binding_id));
+    publish_bindings
+        .sort_by_key(|binding| (binding.consumption.dispatch_rank(), binding.binding_id));
 
     Ok(publish_bindings)
 }
@@ -10947,7 +10839,10 @@ fn classify_publish_binding_consumption(
     publish_target_kind: &str,
     binding_options_json: &str,
 ) -> io::Result<PublishBindingConsumption> {
-    if !publish_target_kind.trim().eq_ignore_ascii_case("filesystem") {
+    if !publish_target_kind
+        .trim()
+        .eq_ignore_ascii_case("filesystem")
+    {
         return Ok(PublishBindingConsumption::NonConsuming);
     }
 
@@ -11078,12 +10973,10 @@ fn scan_publish_run_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<PublishR
     })
 }
 
-fn scan_publish_execution_plan(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<PublishExecutionPlan> {
+fn scan_publish_execution_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<PublishExecutionPlan> {
     let execution_contract_json = row.get::<_, String>(10)?;
-    let target_snapshot =
-        scan_publish_execution_target_snapshot(execution_contract_json.as_str()).map_err(|error| {
+    let target_snapshot = scan_publish_execution_target_snapshot(execution_contract_json.as_str())
+        .map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 10,
                 rusqlite::types::Type::Text,
@@ -11124,11 +11017,9 @@ fn scan_publish_execution_plan(
         .and_then(|value| normalize_optional_string(Some(value)))
         .unwrap_or_else(|| String::from("file"));
     let artifact_path = normalize_relative_store_artifact_path(
-        &row
-            .get::<_, Option<String>>(15)?
+        &row.get::<_, Option<String>>(15)?
             .and_then(|value| normalize_optional_string(Some(value)))
-            .ok_or_else(
-            || {
+            .ok_or_else(|| {
                 rusqlite::Error::FromSqlConversionFailure(
                     15,
                     rusqlite::types::Type::Text,
@@ -11140,15 +11031,11 @@ fn scan_publish_execution_plan(
                         ),
                     )),
                 )
-            },
-        )?)
-        .map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                15,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?;
+            })?,
+    )
+    .map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(15, rusqlite::types::Type::Text, Box::new(error))
+    })?;
     let artifact_root_path = row
         .get::<_, Option<String>>(16)?
         .and_then(|value| normalize_optional_string(Some(value)))
@@ -11173,11 +11060,7 @@ fn scan_publish_execution_plan(
         artifact_root_path.as_str(),
     )
     .map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            18,
-            rusqlite::types::Type::Text,
-            Box::new(error),
-        )
+        rusqlite::Error::FromSqlConversionFailure(18, rusqlite::types::Type::Text, Box::new(error))
     })?;
 
     Ok(PublishExecutionPlan {
@@ -11198,10 +11081,7 @@ fn scan_publish_execution_plan(
         } else {
             target_snapshot.publish_target_kind.trim().to_owned()
         },
-        publish_target_config_json: if target_snapshot
-            .publish_target_config_json
-            .trim()
-            .is_empty()
+        publish_target_config_json: if target_snapshot.publish_target_config_json.trim().is_empty()
         {
             row.get(9)?
         } else {
@@ -11251,10 +11131,10 @@ fn scan_artifact_active_location_columns(
     reference: Option<String>,
     artifact_path: &str,
 ) -> (String, String) {
-    let normalized_kind = normalize_optional_string(kind)
-        .unwrap_or_else(|| String::from("runtime_artifact"));
-    let normalized_ref = normalize_optional_string(reference)
-        .unwrap_or_else(|| artifact_path.trim().to_owned());
+    let normalized_kind =
+        normalize_optional_string(kind).unwrap_or_else(|| String::from("runtime_artifact"));
+    let normalized_ref =
+        normalize_optional_string(reference).unwrap_or_else(|| artifact_path.trim().to_owned());
 
     (normalized_kind, normalized_ref)
 }
@@ -11314,7 +11194,11 @@ fn build_publish_run_execution_contract_json(
             |row| {
                 let artifact_path = row.get::<_, String>(0)?.trim().to_owned();
                 let (active_location_kind, active_location_ref) =
-                    scan_artifact_active_location_columns(row.get(1)?, row.get(2)?, artifact_path.as_str());
+                    scan_artifact_active_location_columns(
+                        row.get(1)?,
+                        row.get(2)?,
+                        artifact_path.as_str(),
+                    );
 
                 Ok(serde_json::json!({
                     "publish_target_id": publish_binding.publish_target_id,
@@ -11337,8 +11221,7 @@ fn build_publish_run_execution_contract_json(
         .map_err(sqlite_error)?
         .ok_or_else(|| not_found_error(format!("artifact {artifact_id} was not found")))?;
 
-    serde_json::to_string(&snapshot)
-        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
+    serde_json::to_string(&snapshot).map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
 }
 
 fn has_incomplete_prior_publish_run_for_artifact(
@@ -11561,10 +11444,8 @@ fn normalize_create_repository_project_input(
     let source_mode = require_non_empty(&input.source_mode, "repository project source_mode")?
         .to_ascii_lowercase();
     let repo_url = normalize_optional_string(input.repo_url);
-    let local_path = normalize_absolute_path_string(
-        input.local_path,
-        "repository project local_path",
-    )?;
+    let local_path =
+        normalize_absolute_path_string(input.local_path, "repository project local_path")?;
 
     match source_mode.as_str() {
         SOURCE_MODE_MANAGED_REPOSITORY => {
@@ -11620,10 +11501,8 @@ fn normalize_create_repository_project_input(
     let mut publish_target_names = HashSet::new();
     let mut publish_targets = Vec::with_capacity(input.publish_targets.len());
     for target in input.publish_targets {
-        let normalized = normalize_create_repository_project_publish_target_input(
-            target,
-            &build_target_names,
-        )?;
+        let normalized =
+            normalize_create_repository_project_publish_target_input(target, &build_target_names)?;
         let duplicate_key = normalized.name.to_ascii_lowercase();
         if !publish_target_names.insert(duplicate_key) {
             return Err(invalid_input_error(
@@ -11660,10 +11539,8 @@ fn normalize_update_repository_project_input(
     let source_mode = require_non_empty(&input.source_mode, "repository project source_mode")?
         .to_ascii_lowercase();
     let repo_url = normalize_optional_string(input.repo_url);
-    let local_path = normalize_absolute_path_string(
-        input.local_path,
-        "repository project local_path",
-    )?;
+    let local_path =
+        normalize_absolute_path_string(input.local_path, "repository project local_path")?;
 
     match source_mode.as_str() {
         SOURCE_MODE_MANAGED_REPOSITORY => {
@@ -11816,17 +11693,12 @@ fn normalize_create_repository_project_build_target_input(
         ));
     }
 
-    let build_kind =
-        normalize_repository_project_build_kind(&input.build_kind, engine_kind)?;
+    let build_kind = normalize_repository_project_build_kind(&input.build_kind, engine_kind)?;
     let contract_json = normalize_required_object_json_string(
         &input.contract_json,
         "repository project build target contract_json",
     )?;
-    project_repository_project_build_target_contract(
-        engine_kind,
-        &build_kind,
-        &contract_json,
-    )?;
+    project_repository_project_build_target_contract(engine_kind, &build_kind, &contract_json)?;
 
     Ok(CreateRepositoryProjectBuildTargetInput {
         name: require_non_empty(&input.name, "repository project build target name")?,
@@ -11852,7 +11724,10 @@ fn normalize_create_repository_project_publish_target_input(
     build_target_names: &HashSet<String>,
 ) -> io::Result<CreateRepositoryProjectPublishTargetInput> {
     if let Some(credentials_id) = input.credentials_id {
-        require_positive_identifier(credentials_id, "repository project publish target credentials id")?;
+        require_positive_identifier(
+            credentials_id,
+            "repository project publish target credentials id",
+        )?;
     }
 
     let name = require_non_empty(&input.name, "repository project publish target name")?;
@@ -11970,7 +11845,10 @@ fn normalize_update_repository_project_publish_target_input(
         require_positive_identifier(publish_target_id, "repository project publish target id")?;
     }
     if let Some(credentials_id) = input.credentials_id {
-        require_positive_identifier(credentials_id, "repository project publish target credentials id")?;
+        require_positive_identifier(
+            credentials_id,
+            "repository project publish target credentials id",
+        )?;
     }
 
     let name = require_non_empty(&input.name, "repository project publish target name")?;
@@ -12023,7 +11901,10 @@ fn normalize_update_repository_project_publish_binding_input(
     build_target_names_by_id: &HashMap<i64, String>,
 ) -> io::Result<UpdateRepositoryProjectPublishBindingInput> {
     if let Some(build_target_id) = input.build_target_id {
-        require_positive_identifier(build_target_id, "repository project publish binding build_target_id")?;
+        require_positive_identifier(
+            build_target_id,
+            "repository project publish binding build_target_id",
+        )?;
         if !build_target_ids.contains(&build_target_id) {
             return Err(not_found_error(format!(
                 "repository project publish binding build target {build_target_id} was not declared by this project"
@@ -12069,8 +11950,8 @@ fn normalize_update_repository_project_publish_binding_input(
 }
 
 fn normalize_repository_project_publish_target_kind(kind: &str) -> io::Result<String> {
-    let normalized = require_non_empty(kind, "repository project publish target kind")?
-        .to_ascii_lowercase();
+    let normalized =
+        require_non_empty(kind, "repository project publish target kind")?.to_ascii_lowercase();
     if normalized == "filesystem" || normalized == "itch" {
         return Ok(normalized);
     }
@@ -12088,7 +11969,9 @@ fn validate_repository_project_publish_target_config(
     let parsed = serde_json::from_str::<serde_json::Value>(config_json)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
     let object = parsed.as_object().ok_or_else(|| {
-        invalid_input_error("repository project publish target config_json must decode to a JSON object")
+        invalid_input_error(
+            "repository project publish target config_json must decode to a JSON object",
+        )
     })?;
 
     match publish_target_kind.trim() {
@@ -12111,7 +11994,10 @@ fn validate_repository_project_publish_target_config(
                 "game_slug",
                 "itch publish target config_json game_slug",
             )?;
-            if let Some(butler_path) = object.get("butler_path").and_then(serde_json::Value::as_str) {
+            if let Some(butler_path) = object
+                .get("butler_path")
+                .and_then(serde_json::Value::as_str)
+            {
                 require_non_empty(butler_path, "itch publish target config_json butler_path")?;
             }
             Ok(())
@@ -12130,7 +12016,9 @@ fn validate_repository_project_publish_binding_options(
     let parsed = serde_json::from_str::<serde_json::Value>(options_json)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
     let object = parsed.as_object().ok_or_else(|| {
-        invalid_input_error("repository project publish binding options_json must decode to a JSON object")
+        invalid_input_error(
+            "repository project publish binding options_json must decode to a JSON object",
+        )
     })?;
 
     match publish_target_kind.trim() {
@@ -12257,8 +12145,8 @@ fn normalize_repository_project_build_kind(
     build_kind: &str,
     engine_kind: &str,
 ) -> io::Result<String> {
-    let repository_engine_kind = EngineKind::parse(engine_kind)
-        .map_err(|error| invalid_input_error(error.to_string()))?;
+    let repository_engine_kind =
+        EngineKind::parse(engine_kind).map_err(|error| invalid_input_error(error.to_string()))?;
     let normalized = BuildKind::parse_or_default(build_kind)
         .map_err(|error| invalid_input_error(error.to_string()))?;
 
@@ -12298,9 +12186,8 @@ fn parse_build_kind_sql(column_index: usize, value: String) -> rusqlite::Result<
 
 fn normalize_required_object_json_string(value: &str, label: &str) -> io::Result<String> {
     let value = require_non_empty(value, label)?;
-    let parsed = serde_json::from_str::<serde_json::Value>(&value).map_err(|error| {
-        invalid_input_error(format!("{label} must be valid JSON: {error}"))
-    })?;
+    let parsed = serde_json::from_str::<serde_json::Value>(&value)
+        .map_err(|error| invalid_input_error(format!("{label} must be valid JSON: {error}")))?;
     if !parsed.is_object() {
         return Err(invalid_input_error(format!(
             "{label} must decode to a JSON object"
@@ -12359,11 +12246,7 @@ fn resolve_build_target_read_model_projection(
     build_kind: &str,
     contract_json: &str,
 ) -> io::Result<BuildTargetReadModelProjection> {
-    project_repository_project_build_target_contract(
-        engine_kind,
-        build_kind,
-        contract_json,
-    )
+    project_repository_project_build_target_contract(engine_kind, build_kind, contract_json)
 }
 
 fn normalize_optional_input_string(value: Option<String>) -> Option<String> {
@@ -12431,7 +12314,10 @@ fn reject_duplicate_repository_project_url(
     if exists != 0 {
         return Err(io::Error::new(
             ErrorKind::AlreadyExists,
-            format!("repository project URL {:?} is already registered", repo_url),
+            format!(
+                "repository project URL {:?} is already registered",
+                repo_url
+            ),
         ));
     }
 
@@ -12477,7 +12363,10 @@ fn reject_duplicate_repository_project_url_for_update(
     if exists != 0 {
         return Err(io::Error::new(
             ErrorKind::AlreadyExists,
-            format!("repository project URL {:?} is already registered", repo_url),
+            format!(
+                "repository project URL {:?} is already registered",
+                repo_url
+            ),
         ));
     }
 
@@ -12527,10 +12416,7 @@ pub fn delete_host_secret(secret_ref: &str) -> io::Result<()> {
 }
 
 /// Resolves host-keyring-backed secret references inside one credential config JSON blob.
-pub fn resolve_credential_secret_config_json(
-    kind: &str,
-    config_json: &str,
-) -> io::Result<String> {
+pub fn resolve_credential_secret_config_json(kind: &str, config_json: &str) -> io::Result<String> {
     let config_json = require_non_empty(config_json, "credentials config_json")?;
     let mut parsed = serde_json::from_str::<serde_json::Value>(&config_json)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
@@ -12692,16 +12578,15 @@ pub fn take_runtime_control_requests(
     let mut requests = Vec::with_capacity(request_paths.len());
     for request_path in request_paths {
         let content = fs::read(&request_path)?;
-        let request: RuntimeControlRequest =
-            serde_json::from_slice(&content).map_err(|error| {
-                io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!(
-                        "failed to decode runtime control request {}: {error}",
-                        request_path.display(),
-                    ),
-                )
-            })?;
+        let request: RuntimeControlRequest = serde_json::from_slice(&content).map_err(|error| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "failed to decode runtime control request {}: {error}",
+                    request_path.display(),
+                ),
+            )
+        })?;
 
         fs::remove_file(&request_path)?;
         requests.push(request);
@@ -12732,49 +12617,32 @@ fn sqlite_error(error: rusqlite::Error) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_pragmas, decode_release_dispatch_job,
-        ensure_migration_ledger, initialize_database,
-        list_artifact_inspection_records, list_build_history_records,
+        apply_pragmas, decode_release_dispatch_job, enqueue_runtime_control_request,
+        ensure_migration_ledger, initialize_database, list_artifact_inspection_records,
+        list_build_history_records, list_build_target_runtime_settings, list_credential_records,
         list_process_feed_page, list_process_feed_page_filtered,
-        list_publish_target_binding_runtime_settings,
-        list_build_target_runtime_settings,
-        resolve_build_target_read_model_projection,
-        CreateRepositoryProjectBuildTargetInput,
-        CreateRepositoryProjectCredentialInput,
-        CreateRepositoryProjectInput,
-        ProcessFeedPageQuery, ProcessFeedScope, ProcessFeedStatusFilter,
-        UpdateRepositoryAuthStateInput,
-        UpdateRepositoryProjectBuildTargetInput,
-        UpdateRepositoryProjectInput,
-        list_credential_records,
-        list_publish_target_runtime_settings, open_connection, recover_runtime_state,
-        select_orphan_build_process_roots,
-        BuildDispatchJob, BuildExecutionPlan, BuildRunRecord,
-        BuildTargetRuntimeSettingsRecord, CancelBuildRunInput, CancelReleaseRunInput,
-        CreatedRepositoryProjectRecord,
-        CompleteBuildRunInput, CreateArtifactRecordInput, FailBuildRunInput,
-        CompletePublishRunInput, CredentialRecord, LocalCoordinator,
-        InterruptedBuildRecoveryRecord, ObservedProcess,
-        ManualReleaseDispatchInput, PublishDispatchJob, QueueDispatchOutcome,
-        PublishTargetRuntimeSettingsRecord, ReleaseDispatchJob,
-        ReleaseRunRecord, RuntimeRecoveryReport,
-        RuntimeControlRequest,
-        StartBuildRunInput, StartPublishRunInput, StorageLayout,
-        enqueue_runtime_control_request,
-        take_runtime_control_requests,
-        UpsertCredentialRecordInput,
-        KIND_GIT_HTTP_BASIC,
-        RECOVERY_INTERRUPTION_KIND_SYSTEM,
-        DEFAULT_HOST_NATIVE_RUNNER_TYPE,
-        MIGRATIONS,
-        PROJECT_VERSION_FILE_PATH, TRIGGER_SOURCE_MANUAL,
-        TRIGGER_SOURCE_POLL,
-        BUILD_RUN_QUEUE_NAME, PUBLISH_RUN_QUEUE_NAME, RELEASE_RUN_QUEUE_NAME,
-        SQLITE_BUSY_TIMEOUT_MILLIS,
+        list_publish_target_binding_runtime_settings, list_publish_target_runtime_settings,
+        open_connection, recover_runtime_state, resolve_build_target_read_model_projection,
+        select_orphan_build_process_roots, take_runtime_control_requests, BuildDispatchJob,
+        BuildExecutionPlan, BuildRunRecord, BuildTargetRuntimeSettingsRecord, CancelBuildRunInput,
+        CancelReleaseRunInput, CompleteBuildRunInput, CompletePublishRunInput,
+        CreateArtifactRecordInput, CreateRepositoryProjectBuildTargetInput,
+        CreateRepositoryProjectCredentialInput, CreateRepositoryProjectInput,
+        CreatedRepositoryProjectRecord, CredentialRecord, FailBuildRunInput,
+        InterruptedBuildRecoveryRecord, LocalCoordinator, ManualReleaseDispatchInput,
+        ObservedProcess, ProcessFeedPageQuery, ProcessFeedScope, ProcessFeedStatusFilter,
+        PublishDispatchJob, PublishTargetRuntimeSettingsRecord, QueueDispatchOutcome,
+        ReleaseDispatchJob, ReleaseRunRecord, RuntimeControlRequest, RuntimeRecoveryReport,
+        StartBuildRunInput, StartPublishRunInput, StorageLayout, UpdateRepositoryAuthStateInput,
+        UpdateRepositoryProjectBuildTargetInput, UpdateRepositoryProjectInput,
+        UpsertCredentialRecordInput, BUILD_RUN_QUEUE_NAME, DEFAULT_HOST_NATIVE_RUNNER_TYPE,
+        KIND_GIT_HTTP_BASIC, MIGRATIONS, PROJECT_VERSION_FILE_PATH, PUBLISH_RUN_QUEUE_NAME,
+        RECOVERY_INTERRUPTION_KIND_SYSTEM, RELEASE_RUN_QUEUE_NAME, SQLITE_BUSY_TIMEOUT_MILLIS,
+        TRIGGER_SOURCE_MANUAL, TRIGGER_SOURCE_POLL,
     };
-    use runtime_contracts::{BuildKind, EngineKind};
     use crate::lifecycle::{BuildStatus, PublishStatus, ReleaseStatus};
     use runtime_config::{RuntimeConcurrencySettings, RuntimeDirectories};
+    use runtime_contracts::{BuildKind, EngineKind};
     use rusqlite::{params, Connection};
     use serde_json::Value;
     use std::ffi::OsString;
@@ -12790,8 +12658,14 @@ mod tests {
         let directories = RuntimeDirectories::from_root(PathBuf::from("/tmp/runtime"));
         let layout = StorageLayout::from_directories(&directories);
 
-        assert_eq!(layout.database_path, PathBuf::from("/tmp/runtime/state/runtime.db"));
-        assert_eq!(layout.health_report_path, PathBuf::from("/tmp/runtime/state/health.json"));
+        assert_eq!(
+            layout.database_path,
+            PathBuf::from("/tmp/runtime/state/runtime.db")
+        );
+        assert_eq!(
+            layout.health_report_path,
+            PathBuf::from("/tmp/runtime/state/health.json")
+        );
         assert_eq!(
             layout.automation_state_path,
             PathBuf::from("/tmp/runtime/state/automation-state.json")
@@ -12844,8 +12718,8 @@ mod tests {
         )
         .expect("second runtime control request should queue");
 
-        let requests = take_runtime_control_requests(&storage)
-            .expect("runtime control requests should load");
+        let requests =
+            take_runtime_control_requests(&storage).expect("runtime control requests should load");
 
         assert_eq!(
             requests,
@@ -12854,15 +12728,12 @@ mod tests {
                 RuntimeControlRequest::ForceRepositoryPoll { repository_id: 11 },
             ]
         );
-        assert!(
-            std::fs::read_dir(&storage.runtime_control_requests_dir)
-                .expect("runtime control request directory should still exist")
-                .next()
-                .is_none()
-        );
+        assert!(std::fs::read_dir(&storage.runtime_control_requests_dir)
+            .expect("runtime control request directory should still exist")
+            .next()
+            .is_none());
 
-        std::fs::remove_dir_all(&root)
-            .expect("runtime control test root should be removable");
+        std::fs::remove_dir_all(&root).expect("runtime control test root should be removable");
     }
 
     #[test]
@@ -13011,16 +12882,34 @@ mod tests {
             &["idempotency_key", "claim_expires_at_unix_millis"]
         ));
         assert!(index_exists(&connection, "idx_build_targets_repository_id"));
-        assert!(index_exists(&connection, "idx_publish_targets_repository_id"));
-        assert!(index_exists(&connection, "idx_trigger_rules_repository_source"));
-        assert!(index_exists(&connection, "idx_release_runs_repository_status"));
-        assert!(index_exists(&connection, "idx_release_runs_trigger_source_status"));
+        assert!(index_exists(
+            &connection,
+            "idx_publish_targets_repository_id"
+        ));
+        assert!(index_exists(
+            &connection,
+            "idx_trigger_rules_repository_source"
+        ));
+        assert!(index_exists(
+            &connection,
+            "idx_release_runs_repository_status"
+        ));
+        assert!(index_exists(
+            &connection,
+            "idx_release_runs_trigger_source_status"
+        ));
         assert!(index_exists(&connection, "idx_build_runs_release_status"));
         assert!(index_exists(&connection, "idx_artifacts_build_run_id"));
         assert!(index_exists(&connection, "idx_publish_runs_release_status"));
         assert!(index_exists(&connection, "idx_worker_queue_messages_claim"));
-        assert!(index_exists(&connection, "idx_worker_coordination_leases_expiry"));
-        assert!(index_exists(&connection, "idx_worker_idempotency_keys_expiry"));
+        assert!(index_exists(
+            &connection,
+            "idx_worker_coordination_leases_expiry"
+        ));
+        assert!(index_exists(
+            &connection,
+            "idx_worker_idempotency_keys_expiry"
+        ));
         drop(connection);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
@@ -13147,7 +13036,10 @@ mod tests {
         assert_eq!(repository_row.2, "https://example.com/red-horizon.git");
         assert_eq!(repository_row.3.as_deref(), Some("main"));
         assert_eq!(repository_row.4.as_deref(), Some("C:/builds/red-horizon"));
-        assert_eq!(repository_row.5.as_deref(), Some("C:/workspaces/red-horizon"));
+        assert_eq!(
+            repository_row.5.as_deref(),
+            Some("C:/workspaces/red-horizon")
+        );
         assert_eq!(repository_row.6, 300);
         assert_eq!(repository_row.7, "unity");
         assert_eq!(repository_row.8, 1);
@@ -13168,7 +13060,9 @@ mod tests {
             .expect("credential row should exist");
         assert_eq!(credential_row.0, "Red Horizon/origin");
         assert_eq!(credential_row.1, KIND_GIT_HTTP_BASIC);
-        assert!(credential_row.2.contains("keyring://handy-games-publisher/"));
+        assert!(credential_row
+            .2
+            .contains("keyring://handy-games-publisher/"));
 
         let trigger_rule_count: i64 = connection
             .query_row(
@@ -13229,12 +13123,18 @@ mod tests {
             })
         );
 
-        let build_targets = list_build_target_runtime_settings(&layout)
-            .expect("build targets should load");
+        let build_targets =
+            list_build_target_runtime_settings(&layout).expect("build targets should load");
         assert_eq!(build_targets.len(), 2);
-        assert!(build_targets.iter().all(|target| target.repository_id == created.repository_id));
-        assert!(build_targets.iter().all(|target| target.runner_type == DEFAULT_HOST_NATIVE_RUNNER_TYPE));
-        assert!(build_targets.iter().all(|target| target.config_json.contains("unity_executable_path")));
+        assert!(build_targets
+            .iter()
+            .all(|target| target.repository_id == created.repository_id));
+        assert!(build_targets
+            .iter()
+            .all(|target| target.runner_type == DEFAULT_HOST_NATIVE_RUNNER_TYPE));
+        assert!(build_targets
+            .iter()
+            .all(|target| target.config_json.contains("unity_executable_path")));
     }
 
     #[test]
@@ -13325,7 +13225,10 @@ mod tests {
         assert_eq!(repositories.len(), 1);
         assert_eq!(repositories[0].id, created.repository_id);
         assert_eq!(repositories[0].name, "New Banner");
-        assert_eq!(repositories[0].repo_url, "https://example.com/new-banner.git");
+        assert_eq!(
+            repositories[0].repo_url,
+            "https://example.com/new-banner.git"
+        );
         assert_eq!(repositories[0].default_branch.as_deref(), Some("release"));
         assert_eq!(repositories[0].artifacts_root_override, None);
         assert_eq!(
@@ -13370,30 +13273,32 @@ mod tests {
         assert_eq!(repository_row.2, "https://example.com/new-banner.git");
         assert_eq!(repository_row.3.as_deref(), Some("release"));
         assert_eq!(repository_row.4, None);
-        assert_eq!(repository_row.5.as_deref(), Some("D:/workspaces/new-banner"));
+        assert_eq!(
+            repository_row.5.as_deref(),
+            Some("D:/workspaces/new-banner")
+        );
         assert_eq!(repository_row.6, 30);
         assert_eq!(repository_row.7, 0);
 
-        let build_target_row: (String, String, String) =
-            connection
-                .query_row(
-                    "
+        let build_target_row: (String, String, String) = connection
+            .query_row(
+                "
                     SELECT build_kind,
                            contract_json,
                            config_json
                     FROM build_targets
                     WHERE id = ?
                     ",
-                    [created.build_target_ids[0]],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )
-                .expect("updated build target should reload");
+                [created.build_target_ids[0]],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .expect("updated build target should reload");
         assert_eq!(build_target_row.0, "player");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&build_target_row.1)
@@ -13497,10 +13402,7 @@ mod tests {
         drop(connection);
 
         coordinator
-            .update_repository_credentials_binding(
-                created.repository_id,
-                Some(credentials_id),
-            )
+            .update_repository_credentials_binding(created.repository_id, Some(credentials_id))
             .expect("repository credentials should bind");
 
         let bound = coordinator
@@ -13545,10 +13447,7 @@ mod tests {
             .expect("private repository auth state should re-enter required binding flow");
 
         coordinator
-            .update_repository_credentials_binding(
-                created.repository_id,
-                Some(credentials_id),
-            )
+            .update_repository_credentials_binding(created.repository_id, Some(credentials_id))
             .expect("repository credentials should rebind after private recheck");
 
         coordinator
@@ -13637,10 +13536,7 @@ mod tests {
         drop(connection);
 
         coordinator
-            .update_repository_credentials_binding(
-                created.repository_id,
-                Some(credentials_id),
-            )
+            .update_repository_credentials_binding(created.repository_id, Some(credentials_id))
             .expect("repository credentials should bind");
 
         coordinator
@@ -13923,18 +13819,12 @@ mod tests {
 
     #[test]
     fn resolve_build_target_read_model_projection_rejects_missing_contract_values() {
-        let error = resolve_build_target_read_model_projection(
-            "unity",
-            "player",
-            "{}",
-        )
-        .expect_err("read model projection should require a Unity contract");
+        let error = resolve_build_target_read_model_projection("unity", "player", "{}")
+            .expect_err("read model projection should require a Unity contract");
 
-        assert!(
-            error
-                .to_string()
-                .contains("contract_json must define contract.unity")
-        );
+        assert!(error
+            .to_string()
+            .contains("contract_json must define contract.unity"));
     }
 
     #[test]
@@ -13976,8 +13866,8 @@ mod tests {
             .expect("secondary build target should disable");
         drop(connection);
 
-        let targets = list_build_target_runtime_settings(&layout)
-            .expect("build target settings should load");
+        let targets =
+            list_build_target_runtime_settings(&layout).expect("build target settings should load");
 
         assert_eq!(targets.len(), 2);
         assert_eq!(
@@ -14128,13 +14018,19 @@ mod tests {
             Some("CI.Build.Perform")
         );
         assert_eq!(record.engine_version.as_deref(), Some("2022.3.20f1"));
-        assert_eq!(record.image_ref.as_deref(), Some(DEFAULT_HOST_NATIVE_RUNNER_TYPE));
+        assert_eq!(
+            record.image_ref.as_deref(),
+            Some(DEFAULT_HOST_NATIVE_RUNNER_TYPE)
+        );
         assert_eq!(record.status, BuildStatus::Succeeded.as_str());
         assert_eq!(
             record.workspace_path.as_deref(),
             Some("C:/runs/build-history")
         );
-        assert_eq!(record.log_path.as_deref(), Some("C:/logs/build-history.log"));
+        assert_eq!(
+            record.log_path.as_deref(),
+            Some("C:/logs/build-history.log")
+        );
         assert_eq!(
             record.artifact_root_path.as_deref(),
             Some("C:/artifacts/build-history")
@@ -14271,8 +14167,8 @@ mod tests {
             .expect("running build metadata should update");
         drop(connection);
 
-        let first_page = list_process_feed_page(&layout, 1, 1)
-            .expect("first process feed page should load");
+        let first_page =
+            list_process_feed_page(&layout, 1, 1).expect("first process feed page should load");
 
         assert!(!first_page.generated_at.is_empty());
         assert_eq!(first_page.page, 1);
@@ -14296,14 +14192,17 @@ mod tests {
         assert_eq!(first_page.items[0].running_build_runs, 1);
         assert_eq!(first_page.items[0].total_build_runs, 1);
 
-        let second_page = list_process_feed_page(&layout, 2, 1)
-            .expect("second process feed page should load");
+        let second_page =
+            list_process_feed_page(&layout, 2, 1).expect("second process feed page should load");
 
         assert_eq!(second_page.page, 2);
         assert!(second_page.has_previous_page);
         assert!(!second_page.has_next_page);
         assert_eq!(second_page.items.len(), 1);
-        assert_eq!(second_page.items[0].release_run_id, completed_release_run_id);
+        assert_eq!(
+            second_page.items[0].release_run_id,
+            completed_release_run_id
+        );
         assert_eq!(second_page.items[0].display_status, "succeeded");
         assert_eq!(second_page.items[0].current_step_label, "Built Windows");
         assert_eq!(second_page.items[0].current_step_status, "succeeded");
@@ -14612,15 +14511,24 @@ mod tests {
         assert_eq!(record.failed_publish_runs, 0);
         assert_eq!(record.canceled_publish_runs, 0);
         assert_eq!(record.publish_runs.len(), 2);
-        assert_eq!(record.publish_runs[0].status, PublishStatus::Queued.as_str());
-        assert_eq!(record.publish_runs[0].publish_target_id, fixture.publish_target_id);
+        assert_eq!(
+            record.publish_runs[0].status,
+            PublishStatus::Queued.as_str()
+        );
+        assert_eq!(
+            record.publish_runs[0].publish_target_id,
+            fixture.publish_target_id
+        );
         assert_eq!(record.publish_runs[0].publish_target_kind, "filesystem");
         assert_eq!(
             record.publish_runs[0].publish_target_name,
             "artifact-inspection-publish"
         );
         assert_eq!(record.publish_runs[0].destination_ref, None);
-        assert_eq!(record.publish_runs[1].status, PublishStatus::Succeeded.as_str());
+        assert_eq!(
+            record.publish_runs[1].status,
+            PublishStatus::Succeeded.as_str()
+        );
         assert_eq!(
             record.publish_runs[1].destination_ref.as_deref(),
             Some("releases/windows/artifact-inspection.zip")
@@ -14658,8 +14566,8 @@ mod tests {
         );
         drop(connection);
 
-        let page = list_process_feed_page(&layout, 1, 10)
-            .expect("queued process feed page should load");
+        let page =
+            list_process_feed_page(&layout, 1, 10).expect("queued process feed page should load");
 
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].release_run_id, release_run_id);
@@ -14721,8 +14629,8 @@ mod tests {
             .expect("running publish metadata should update");
         drop(connection);
 
-        let page = list_process_feed_page(&layout, 1, 10)
-            .expect("publish process feed page should load");
+        let page =
+            list_process_feed_page(&layout, 1, 10).expect("publish process feed page should load");
 
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].release_run_id, release_run_id);
@@ -14749,11 +14657,7 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO credentials (name, kind, config_json) VALUES (?, ?, ?)",
-                params![
-                    "zeta-token",
-                    "git-http-bearer",
-                    r#"{"token":"solidarity"}"#,
-                ],
+                params!["zeta-token", "git-http-bearer", r#"{"token":"solidarity"}"#,],
             )
             .expect("first credentials row should insert");
         let second_id = connection
@@ -14769,8 +14673,8 @@ mod tests {
         let _ = second_id;
         drop(connection);
 
-        let credentials = list_credential_records(&layout)
-            .expect("credential settings should load");
+        let credentials =
+            list_credential_records(&layout).expect("credential settings should load");
 
         assert_eq!(credentials.len(), 2);
         assert_eq!(
@@ -14779,9 +14683,7 @@ mod tests {
                 id: 2,
                 name: String::from("alpha-basic"),
                 kind: String::from("git-http-basic"),
-                config_json: String::from(
-                    r#"{"username":"worker","password":"solidarity"}"#,
-                ),
+                config_json: String::from(r#"{"username":"worker","password":"solidarity"}"#,),
                 created_at: credentials[0].created_at.clone(),
                 updated_at: credentials[0].updated_at.clone(),
             }
@@ -14918,7 +14820,10 @@ mod tests {
             .expect("primary build target binding should exist");
         assert_eq!(consuming.publish_target_id, fixture.publish_target_id);
         assert_eq!(consuming.repository_id, fixture.repository_id);
-        assert_eq!(consuming.build_target_name, "publish-binding-settings-windows");
+        assert_eq!(
+            consuming.build_target_name,
+            "publish-binding-settings-windows"
+        );
         assert!(consuming.enabled);
         assert_eq!(
             consuming.options_json,
@@ -14942,7 +14847,9 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let migration_count: i64 = connection
-            .query_row("SELECT COUNT(1) FROM schema_migrations", [], |row| row.get(0))
+            .query_row("SELECT COUNT(1) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
             .expect("migration count should be readable");
 
         assert_eq!(migration_count, MIGRATIONS.len() as i64);
@@ -14959,8 +14866,8 @@ mod tests {
 
         std::fs::create_dir_all(&directories.state_dir)
             .expect("state directory should create for upgrade fixture");
-        let mut connection = Connection::open(&layout.database_path)
-            .expect("upgrade fixture database should open");
+        let mut connection =
+            Connection::open(&layout.database_path).expect("upgrade fixture database should open");
         apply_pragmas(&connection).expect("pragmas should apply to upgrade fixture");
         ensure_migration_ledger(&connection).expect("migration ledger should create");
 
@@ -15267,11 +15174,7 @@ mod tests {
         assert!(blocked.is_none());
 
         assert!(coordinator
-            .renew_message_lease(
-                first.id,
-                &first.lease_token,
-                Duration::from_millis(80),
-            )
+            .renew_message_lease(first.id, &first.lease_token, Duration::from_millis(80),)
             .expect("renew should succeed"));
         assert!(coordinator
             .release_message(first.id, &first.lease_token)
@@ -15394,7 +15297,8 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let repo = seed_repository_fixture(&connection, "dispatch-build-repo");
-        let release_run_id = insert_release_run(&connection, repo.repository_id, "v3.0.0", "queued");
+        let release_run_id =
+            insert_release_run(&connection, repo.repository_id, "v3.0.0", "queued");
         let build_run_id = insert_build_run(
             &connection,
             release_run_id,
@@ -15440,10 +15344,13 @@ mod tests {
         assert_eq!(decoded["engine_version"], "2022.3.20f1");
         assert_eq!(decoded["image_ref"], DEFAULT_HOST_NATIVE_RUNNER_TYPE);
 
-        let job: BuildDispatchJob =
-            serde_json::from_slice(&claimed.payload).expect("payload should match build job contract");
+        let job: BuildDispatchJob = serde_json::from_slice(&claimed.payload)
+            .expect("payload should match build job contract");
         assert_eq!(job.build_run_id, build_run_id);
-        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 1);
+        assert_eq!(
+            queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME),
+            1
+        );
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -15470,7 +15377,10 @@ mod tests {
             .expect("manual release dispatch should succeed");
         assert_eq!(release.status, ReleaseStatus::Queued.as_str());
         assert_eq!(release.trigger_source, TRIGGER_SOURCE_MANUAL);
-        assert_eq!(queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME), 1);
+        assert_eq!(
+            queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME),
+            1
+        );
 
         let claimed = coordinator
             .claim_next(
@@ -15481,8 +15391,8 @@ mod tests {
             )
             .expect("release claim should succeed")
             .expect("release queue message should be available");
-        let job: ReleaseDispatchJob = serde_json::from_slice(&claimed.payload)
-            .expect("release queue payload should decode");
+        let job: ReleaseDispatchJob =
+            serde_json::from_slice(&claimed.payload).expect("release queue payload should decode");
         assert_eq!(job.release_run_id, release.id);
         assert_eq!(job.repository_id, repo.repository_id);
         assert_eq!(job.git_tag, "v6.0.0");
@@ -15526,7 +15436,10 @@ mod tests {
             })
             .expect_err("duplicate manual release dispatch should fail");
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-        assert_eq!(queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME), 1);
+        assert_eq!(
+            queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME),
+            1
+        );
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -15540,7 +15453,8 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let repo = seed_repository_fixture(&connection, "manual-release-rebuild");
-        let release_run_id = seed_manual_release_for_rebuild(&connection, repo.repository_id, "v7.0.0");
+        let release_run_id =
+            seed_manual_release_for_rebuild(&connection, repo.repository_id, "v7.0.0");
         let workspace_path = root.join("runs").join("build-run-41");
         let artifact_root_path = root.join("artifacts").join("release-v7.0.0");
         std::fs::create_dir_all(workspace_path.join("source"))
@@ -15603,7 +15517,10 @@ mod tests {
         assert_eq!(rebuilt.status, ReleaseStatus::Queued.as_str());
         assert_eq!(rebuilt.git_commit.as_deref(), Some("feedface"));
         assert_eq!(rebuilt.engine_version.as_deref(), Some("2022.3.20f1"));
-        assert_eq!(queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME), 1);
+        assert_eq!(
+            queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME),
+            1
+        );
         assert!(!coordinator
             .claim_idempotency(
                 &release_dispatch_idempotency_key(release_run_id),
@@ -15613,7 +15530,10 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         assert_eq!(build_run_count_for_release(&connection, release_run_id), 0);
-        assert_eq!(publish_run_count_for_release(&connection, release_run_id), 0);
+        assert_eq!(
+            publish_run_count_for_release(&connection, release_run_id),
+            0
+        );
         let persisted = load_release_record(&connection, release_run_id);
         assert_eq!(persisted.id, release_run_id);
         assert_eq!(persisted.status, ReleaseStatus::Queued.as_str());
@@ -15660,8 +15580,14 @@ mod tests {
                 Duration::from_millis(40),
             )
             .expect("release queue consumer should succeed"));
-        assert_eq!(queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME), 0);
-        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 1);
+        assert_eq!(
+            queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME),
+            0
+        );
+        assert_eq!(
+            queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME),
+            1
+        );
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         assert_eq!(build_run_count_for_release(&connection, release_run_id), 2);
@@ -15706,8 +15632,14 @@ mod tests {
                 Duration::from_millis(40),
             )
             .expect("release queue consumer should treat missing enabled targets as a no-op"));
-        assert_eq!(queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME), 0);
-        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 0);
+        assert_eq!(
+            queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME),
+            0
+        );
+        assert_eq!(
+            queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME),
+            0
+        );
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         assert_eq!(build_run_count_for_release(&connection, release_run_id), 0);
@@ -15758,7 +15690,10 @@ mod tests {
                 Duration::from_millis(40),
             )
             .expect("release queue consumer should handle busy repository"));
-        assert_eq!(queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME), 1);
+        assert_eq!(
+            queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME),
+            1
+        );
 
         let claimed = coordinator
             .claim_next(
@@ -15775,7 +15710,10 @@ mod tests {
         drop(claimed);
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
-        assert_eq!(build_run_count_for_release(&connection, second_release_run_id), 0);
+        assert_eq!(
+            build_run_count_for_release(&connection, second_release_run_id),
+            0
+        );
         drop(connection);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
@@ -15809,7 +15747,10 @@ mod tests {
             repo.primary_build_target_id,
             repo.secondary_build_target_id,
         );
-        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 1);
+        assert_eq!(
+            queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME),
+            1
+        );
 
         let limits = RuntimeConcurrencySettings {
             max_concurrent_build_runs: 2,
@@ -15879,7 +15820,10 @@ mod tests {
             second_plan.iter().map(|run| run.id).collect::<Vec<_>>(),
             first_plan.iter().map(|run| run.id).collect::<Vec<_>>(),
         );
-        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 2);
+        assert_eq!(
+            queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME),
+            2
+        );
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -15901,11 +15845,8 @@ mod tests {
         );
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
-        let repo = seed_repository_fixture_with_url(
-            &connection,
-            "planning-repo-unity",
-            &repository_url,
-        );
+        let repo =
+            seed_repository_fixture_with_url(&connection, "planning-repo-unity", &repository_url);
         let release_run_id = insert_release_run(
             &connection,
             repo.repository_id,
@@ -15970,11 +15911,7 @@ mod tests {
         );
         drop(connection);
 
-        let fake_git = FakeGitFixture::install(
-            &root,
-            "planning-secret-token",
-            "2022.3.20f1",
-        );
+        let fake_git = FakeGitFixture::install(&root, "planning-secret-token", "2022.3.20f1");
         let coordinator = LocalCoordinator::new(&layout);
 
         let runs = coordinator
@@ -15984,11 +15921,9 @@ mod tests {
         assert_eq!(runs[0].engine_version.as_deref(), Some("2022.3.20f1"));
         assert_eq!(runs[1].engine_version.as_deref(), Some("2022.3.20f1"));
 
-        let git_log = std::fs::read_to_string(fake_git.log_path())
-            .expect("fake git log should be readable");
-        assert!(git_log.contains(
-            "http.extraHeader=Authorization: Bearer planning-secret-token"
-        ));
+        let git_log =
+            std::fs::read_to_string(fake_git.log_path()).expect("fake git log should be readable");
+        assert!(git_log.contains("http.extraHeader=Authorization: Bearer planning-secret-token"));
         assert!(
             git_log.matches("planning-secret-token").count() >= 2,
             "git auth should be applied to clone and checkout commands"
@@ -16050,7 +15985,10 @@ mod tests {
             runs[1].image_ref.as_deref(),
             Some(crate::DEFAULT_HOST_NATIVE_RUNNER_TYPE)
         );
-        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 1);
+        assert_eq!(
+            queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME),
+            1
+        );
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -16159,15 +16097,12 @@ mod tests {
             .plan_release_builds(release_run_id)
             .expect_err("planning should reject build targets without a Unity contract payload");
 
-        assert!(
-            error
-                .to_string()
-                .contains("missing contract_json.unity for Unity planning")
-        );
+        assert!(error
+            .to_string()
+            .contains("missing contract_json.unity for Unity planning"));
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
-
 
     #[test]
     fn get_build_execution_plan_loads_joined_metadata() {
@@ -16282,9 +16217,7 @@ mod tests {
                 credential_id: None,
                 name: String::from("origin-basic"),
                 kind: String::from("git-http-basic"),
-                config_json: String::from(
-                    r#"{"username":"worker","password":"solidarity"}"#,
-                ),
+                config_json: String::from(r#"{"username":"worker","password":"solidarity"}"#),
             })
             .expect("credential should create");
 
@@ -16297,9 +16230,7 @@ mod tests {
                 credential_id: Some(created.id),
                 name: String::from("origin-rotated"),
                 kind: String::from("git-http-basic"),
-                config_json: String::from(
-                    r#"{"username":"worker","password":"new-secret"}"#,
-                ),
+                config_json: String::from(r#"{"username":"worker","password":"new-secret"}"#),
             })
             .expect("credential should update");
 
@@ -16340,10 +16271,7 @@ mod tests {
 
         let coordinator = LocalCoordinator::new(&layout);
         coordinator
-            .update_repository_credentials_binding(
-                fixture.repository_id,
-                Some(credentials_id),
-            )
+            .update_repository_credentials_binding(fixture.repository_id, Some(credentials_id))
             .expect("repository binding should update");
         coordinator
             .update_publish_target_credentials_binding(
@@ -16355,8 +16283,8 @@ mod tests {
         let repositories = coordinator
             .list_polling_repositories()
             .expect("repositories should load");
-        let publish_targets = list_publish_target_runtime_settings(&layout)
-            .expect("publish targets should load");
+        let publish_targets =
+            list_publish_target_runtime_settings(&layout).expect("publish targets should load");
 
         assert_eq!(repositories.len(), 1);
         assert_eq!(repositories[0].credentials_id, Some(credentials_id));
@@ -16373,8 +16301,8 @@ mod tests {
         let repositories = coordinator
             .list_polling_repositories()
             .expect("repositories should reload");
-        let publish_targets = list_publish_target_runtime_settings(&layout)
-            .expect("publish targets should reload");
+        let publish_targets =
+            list_publish_target_runtime_settings(&layout).expect("publish targets should reload");
 
         assert_eq!(repositories[0].credentials_id, None);
         assert_eq!(publish_targets[0].credentials_id, None);
@@ -16447,7 +16375,10 @@ mod tests {
             .load_release_run_record(fixture.release_run_id)
             .expect("completed release should reload")
             .expect("completed release should exist");
-        assert_eq!(release_after_complete.status, ReleaseStatus::Succeeded.as_str());
+        assert_eq!(
+            release_after_complete.status,
+            ReleaseStatus::Succeeded.as_str()
+        );
         assert_eq!(release_after_complete.finished_at, completed.finished_at);
         assert!(release_after_complete.error_message.is_none());
 
@@ -16562,7 +16493,10 @@ mod tests {
         assert_eq!(repositories.len(), 1);
         assert_eq!(repositories[0].id, managed.repository_id);
         assert_eq!(repositories[0].name, "managed-poll");
-        assert_eq!(repositories[0].repo_url, "https://example.com/managed-poll.git");
+        assert_eq!(
+            repositories[0].repo_url,
+            "https://example.com/managed-poll.git"
+        );
         assert!(!repositories[0].has_release_history);
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
@@ -16749,7 +16683,8 @@ mod tests {
         initialize_database(&source_layout).expect("source database bootstrap should succeed");
         initialize_database(&target_layout).expect("target database bootstrap should succeed");
 
-        let source = open_connection(&source_layout.database_path).expect("source connection should open");
+        let source =
+            open_connection(&source_layout.database_path).expect("source connection should open");
         source
             .execute(
                 "
@@ -16815,7 +16750,13 @@ mod tests {
                 INSERT INTO trigger_rules (repository_id, name, source, enabled, config_json)
                 VALUES (?, ?, ?, ?, ?)
                 ",
-                params![repository_id, "poll-default", "poll", 1, r#"{"interval":300}"#],
+                params![
+                    repository_id,
+                    "poll-default",
+                    "poll",
+                    1,
+                    r#"{"interval":300}"#
+                ],
             )
             .expect("source trigger rule should insert");
         source
@@ -16916,13 +16857,17 @@ mod tests {
             .expect("repository registration should import");
 
         assert_eq!(report.repository_name, "Revolutions");
-        assert_eq!(report.credential_name.as_deref(), Some("revolutions/origin"));
+        assert_eq!(
+            report.credential_name.as_deref(),
+            Some("revolutions/origin")
+        );
         assert_eq!(report.trigger_rule_count, 1);
         assert_eq!(report.build_target_count, 1);
         assert_eq!(report.publish_target_count, 1);
         assert_eq!(report.binding_count, 1);
 
-        let target = open_connection(&target_layout.database_path).expect("target connection should open");
+        let target =
+            open_connection(&target_layout.database_path).expect("target connection should open");
         let repository_row: (Option<String>, Option<String>, Option<String>) = target
             .query_row(
                 "
@@ -17053,7 +16998,9 @@ mod tests {
                     workspace_path: String::new(),
                     log_path: String::new(),
                     artifact_root_path: String::new(),
-                    error_message: String::from("timeout: host-native unity runner exceeded 1s timeout"),
+                    error_message: String::from(
+                        "timeout: host-native unity runner exceeded 1s timeout",
+                    ),
                 },
             )
             .expect("build run should cancel");
@@ -17076,8 +17023,12 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let repo = seed_repository_fixture(&connection, "release-cancel-all-repo");
-        let release_run_id =
-            insert_release_run(&connection, repo.repository_id, "v8.0.0", ReleaseStatus::Running.as_str());
+        let release_run_id = insert_release_run(
+            &connection,
+            repo.repository_id,
+            "v8.0.0",
+            ReleaseStatus::Running.as_str(),
+        );
         let running_build_run_id = insert_build_run(
             &connection,
             release_run_id,
@@ -17106,9 +17057,7 @@ mod tests {
             .cancel_release_run(
                 release_run_id,
                 CancelReleaseRunInput {
-                    error_message: String::from(
-                        "Canceled by operator while process was on hold.",
-                    ),
+                    error_message: String::from("Canceled by operator while process was on hold."),
                 },
             )
             .expect("release run should cancel");
@@ -17138,7 +17087,10 @@ mod tests {
         assert_eq!(publish.status, PublishStatus::Canceled.as_str());
         assert!(publish.finished_at.is_some());
 
-        assert_eq!(queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME), 0);
+        assert_eq!(
+            queue_message_count(&layout.database_path, BUILD_RUN_QUEUE_NAME),
+            0
+        );
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -17213,7 +17165,8 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let repo = seed_repository_fixture(&connection, "publish-plan-repo");
-        let release_run_id = insert_release_run(&connection, repo.repository_id, "v7.0.0", "queued");
+        let release_run_id =
+            insert_release_run(&connection, repo.repository_id, "v7.0.0", "queued");
         let build_run_id = insert_build_run(
             &connection,
             release_run_id,
@@ -17236,7 +17189,9 @@ mod tests {
             .expect("publish planning should succeed");
 
         assert_eq!(runs.len(), 2);
-        assert!(runs.iter().all(|run| run.status == PublishStatus::Queued.as_str()));
+        assert!(runs
+            .iter()
+            .all(|run| run.status == PublishStatus::Queued.as_str()));
         assert_eq!(runs[0].artifact_id, Some(first_artifact_id));
         assert_eq!(runs[1].artifact_id, Some(second_artifact_id));
 
@@ -17291,7 +17246,8 @@ mod tests {
             true,
         );
 
-        let release_run_id = insert_release_run(&connection, repo.repository_id, "v8.0.0", "queued");
+        let release_run_id =
+            insert_release_run(&connection, repo.repository_id, "v8.0.0", "queued");
         let build_run_id = insert_build_run(
             &connection,
             release_run_id,
@@ -17376,7 +17332,8 @@ mod tests {
             )
             .expect("second consuming binding should update");
 
-        let release_run_id = insert_release_run(&connection, repo.repository_id, "v8.1.0", "queued");
+        let release_run_id =
+            insert_release_run(&connection, repo.repository_id, "v8.1.0", "queued");
         let build_run_id = insert_build_run(
             &connection,
             release_run_id,
@@ -17405,12 +17362,12 @@ mod tests {
         initialize_database(&layout).expect("database bootstrap should succeed");
 
         let artifact_root = root.join("artifacts").join("revolutions.v9.0.0");
-        std::fs::create_dir_all(artifact_root.join("nested"))
-            .expect("artifact root should create");
+        std::fs::create_dir_all(artifact_root.join("nested")).expect("artifact root should create");
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let repo = seed_repository_fixture(&connection, "publish-plan-repo");
-        let release_run_id = insert_release_run(&connection, repo.repository_id, "v9.0.0", "queued");
+        let release_run_id =
+            insert_release_run(&connection, repo.repository_id, "v9.0.0", "queued");
         let build_run_id = insert_build_run(
             &connection,
             release_run_id,
@@ -17441,9 +17398,15 @@ mod tests {
         assert_eq!(plan.publish_target_kind, "filesystem");
         assert_eq!(plan.artifact_path, "artifacts/nested/game.zip");
         assert_eq!(plan.artifact_active_location_kind, "runtime_artifact");
-        assert_eq!(plan.artifact_active_location_ref, "artifacts/nested/game.zip");
+        assert_eq!(
+            plan.artifact_active_location_ref,
+            "artifacts/nested/game.zip"
+        );
         assert_eq!(plan.execution_contract_json, "{}");
-        assert!(plan.source_path.ends_with("nested\\game.zip") || plan.source_path.ends_with("nested/game.zip"));
+        assert!(
+            plan.source_path.ends_with("nested\\game.zip")
+                || plan.source_path.ends_with("nested/game.zip")
+        );
 
         let running = coordinator
             .start_publish_run(publish_run_id, StartPublishRunInput::default())
@@ -17454,13 +17417,18 @@ mod tests {
             .load_release_run_record(release_run_id)
             .expect("publish-started release should reload")
             .expect("publish-started release should exist");
-        assert_eq!(release_after_publish_start.status, ReleaseStatus::Running.as_str());
+        assert_eq!(
+            release_after_publish_start.status,
+            ReleaseStatus::Running.as_str()
+        );
 
         let completed = coordinator
             .complete_publish_run(
                 publish_run_id,
                 CompletePublishRunInput {
-                    destination_ref: String::from("C:/published/revolutions/v9.0.0/nested/game.zip"),
+                    destination_ref: String::from(
+                        "C:/published/revolutions/v9.0.0/nested/game.zip",
+                    ),
                     artifact_active_location_kind: None,
                     artifact_active_location_ref: None,
                 },
@@ -17494,11 +17462,7 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let fixture = seed_build_execution_fixture(&connection, "complete-publish-active-location");
-        let artifact_id = insert_artifact(
-            &connection,
-            fixture.build_run_id,
-            "players/game.zip",
-        );
+        let artifact_id = insert_artifact(&connection, fixture.build_run_id, "players/game.zip");
         let publish_target_id: i64 = connection
             .query_row(
                 "SELECT id FROM publish_targets WHERE repository_id = ? ORDER BY id ASC LIMIT 1",
@@ -17621,7 +17585,8 @@ mod tests {
                 ],
             )
             .expect("binding options should update");
-        let release_run_id = insert_release_run(&connection, repo.repository_id, "v1.2.3", "queued");
+        let release_run_id =
+            insert_release_run(&connection, repo.repository_id, "v1.2.3", "queued");
         let build_run_id = insert_build_run(
             &connection,
             release_run_id,
@@ -17650,8 +17615,14 @@ mod tests {
             })
             .to_string()
         );
-        assert_eq!(snapshot["artifact_active_location_kind"], "runtime_artifact");
-        assert_eq!(snapshot["artifact_active_location_ref"], "artifacts/game.zip");
+        assert_eq!(
+            snapshot["artifact_active_location_kind"],
+            "runtime_artifact"
+        );
+        assert_eq!(
+            snapshot["artifact_active_location_ref"],
+            "artifacts/game.zip"
+        );
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -17736,7 +17707,8 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let repo = seed_repository_fixture(&connection, "publish-active-location-repo");
-        let release_run_id = insert_release_run(&connection, repo.repository_id, "v9.0.1", "queued");
+        let release_run_id =
+            insert_release_run(&connection, repo.repository_id, "v9.0.1", "queued");
         let build_run_id = insert_build_run(
             &connection,
             release_run_id,
@@ -17776,7 +17748,10 @@ mod tests {
             .expect("publish execution plan should load");
 
         assert_eq!(plan.artifact_active_location_kind, "filesystem_absolute");
-        assert_eq!(plan.artifact_active_location_ref, moved_path.display().to_string());
+        assert_eq!(
+            plan.artifact_active_location_ref,
+            moved_path.display().to_string()
+        );
         assert_eq!(plan.source_path, moved_path.display().to_string());
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
@@ -17799,7 +17774,8 @@ mod tests {
             BuildStatus::Succeeded.as_str(),
         );
 
-        let active_release = insert_release_run(&connection, repo.repository_id, "v1.1.0", "queued");
+        let active_release =
+            insert_release_run(&connection, repo.repository_id, "v1.1.0", "queued");
         insert_build_run(
             &connection,
             active_release,
@@ -17813,7 +17789,8 @@ mod tests {
             BuildStatus::Queued.as_str(),
         );
 
-        let blocked_release = insert_release_run(&connection, repo.repository_id, "v1.2.0", "queued");
+        let blocked_release =
+            insert_release_run(&connection, repo.repository_id, "v1.2.0", "queued");
         let blocked_run = insert_build_run(
             &connection,
             blocked_release,
@@ -17974,7 +17951,8 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let repo = seed_repository_fixture(&connection, "publish-repo");
-        let release_run_id = insert_release_run(&connection, repo.repository_id, "v2.0.0", "queued");
+        let release_run_id =
+            insert_release_run(&connection, repo.repository_id, "v2.0.0", "queued");
         let build_run_id = insert_build_run(
             &connection,
             release_run_id,
@@ -18039,7 +18017,8 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let repo = seed_repository_fixture(&connection, "publish-claim-order-repo");
-        let release_run_id = insert_release_run(&connection, repo.repository_id, "v2.1.0", "queued");
+        let release_run_id =
+            insert_release_run(&connection, repo.repository_id, "v2.1.0", "queued");
         let build_run_id = insert_build_run(
             &connection,
             release_run_id,
@@ -18126,7 +18105,8 @@ mod tests {
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
         let repo = seed_repository_fixture(&connection, "dispatch-publish-repo");
-        let release_run_id = insert_release_run(&connection, repo.repository_id, "v4.0.0", "queued");
+        let release_run_id =
+            insert_release_run(&connection, repo.repository_id, "v4.0.0", "queued");
         let build_run_id = insert_build_run(
             &connection,
             release_run_id,
@@ -18179,7 +18159,10 @@ mod tests {
             .expect("payload should match publish job contract");
         assert_eq!(job.publish_run_id, publish_run_id);
         assert_eq!(job.artifact_id, Some(artifact_id));
-        assert_eq!(queue_message_count(&layout.database_path, PUBLISH_RUN_QUEUE_NAME), 1);
+        assert_eq!(
+            queue_message_count(&layout.database_path, PUBLISH_RUN_QUEUE_NAME),
+            1
+        );
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -18201,11 +18184,7 @@ mod tests {
             .expect("contended acquisition should succeed")
             .is_none());
         assert!(coordinator
-            .renew_lock(
-                "release:v1.2.3",
-                &first.token,
-                Duration::from_millis(5_000),
-            )
+            .renew_lock("release:v1.2.3", &first.token, Duration::from_millis(5_000),)
             .expect("renew lock should succeed"));
         assert!(coordinator
             .release_lock("release:v1.2.3", &first.token)
@@ -18337,8 +18316,8 @@ mod tests {
             Option<String>,
             Option<String>,
         ) = connection
-                .query_row(
-                    "
+            .query_row(
+                "
                     SELECT status,
                            workspace_path,
                            log_path,
@@ -18350,21 +18329,21 @@ mod tests {
                     FROM build_runs
                     WHERE id = ?
                     ",
-                    [build_run_id],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                            row.get(5)?,
-                            row.get(6)?,
-                            row.get(7)?,
-                        ))
-                    },
-                )
-                .expect("requeued build run should load");
+                [build_run_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .expect("requeued build run should load");
         assert_eq!(build_row.0, BuildStatus::Queued.as_str());
         assert!(build_row.1.is_none());
         assert!(build_row.2.is_none());
@@ -18842,10 +18821,7 @@ mod tests {
                 .strip_prefix(r"\\?\")
                 .unwrap_or(&normalized_path)
                 .replace('\\', "/");
-            format!(
-                "file:///{}",
-                normalized_path
-            )
+            format!("file:///{}", normalized_path)
         } else {
             canonical_path.display().to_string()
         }
@@ -18864,8 +18840,7 @@ mod tests {
                 .lock()
                 .expect("test environment lock should acquire");
             let bin_dir = root.join("fake-git-bin");
-            std::fs::create_dir_all(&bin_dir)
-                .expect("fake git binary directory should create");
+            std::fs::create_dir_all(&bin_dir).expect("fake git binary directory should create");
             let log_path = root.join("fake-git.log");
             let script_path = if cfg!(windows) {
                 bin_dir.join("git.bat")
@@ -18900,10 +18875,7 @@ mod tests {
                 path_value.push(existing_path);
             }
             std::env::set_var("PATH", &path_value);
-            std::env::set_var(
-                "HANDY_GAMES_PUBLISHER_TEST_GIT_EXECUTABLE",
-                &script_path,
-            );
+            std::env::set_var("HANDY_GAMES_PUBLISHER_TEST_GIT_EXECUTABLE", &script_path);
 
             Self {
                 _env_lock: env_lock,
@@ -19005,25 +18977,15 @@ mod tests {
                 "fi\n",
                 "exit 0\n"
             ),
-            log_path,
-            required_token,
-            unity_version,
+            log_path, required_token, unity_version,
         )
     }
 
-    fn insert_git_bearer_credentials(
-        connection: &Connection,
-        name: &str,
-        token: &str,
-    ) -> i64 {
+    fn insert_git_bearer_credentials(connection: &Connection, name: &str, token: &str) -> i64 {
         connection
             .execute(
                 "INSERT INTO credentials (name, kind, config_json) VALUES (?, ?, ?)",
-                params![
-                    name,
-                    "git-http-bearer",
-                    format!(r#"{{"token":"{token}"}}"#),
-                ],
+                params![name, "git-http-bearer", format!(r#"{{"token":"{token}"}}"#),],
             )
             .expect("credential should insert");
 
@@ -19427,7 +19389,14 @@ mod tests {
                     dequeue_count
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 ",
-                params!["builds", br#"{"build_run_id":1}"#, "worker-a", "token-a", 9_999_999_999_i64, 1],
+                params![
+                    "builds",
+                    br#"{"build_run_id":1}"#,
+                    "worker-a",
+                    "token-a",
+                    9_999_999_999_i64,
+                    1
+                ],
             )
             .expect("queue message should insert");
         connection
@@ -19452,4 +19421,4 @@ mod tests {
             std::process::id()
         ))
     }
-    }
+}

@@ -34,19 +34,16 @@ pub const WORKER_LOOP_INTERVAL_MILLIS_ENV: &str =
 pub const MAX_HEARTBEATS_ENV: &str = "HANDY_GAMES_PUBLISHER_RUNTIME_MAX_HEARTBEATS";
 
 /// Forces a recoverable crash after the configured heartbeat count when set.
-pub const CRASH_AFTER_HEARTBEATS_ENV: &str =
-    "HANDY_GAMES_PUBLISHER_RUNTIME_CRASH_AFTER_HEARTBEATS";
+pub const CRASH_AFTER_HEARTBEATS_ENV: &str = "HANDY_GAMES_PUBLISHER_RUNTIME_CRASH_AFTER_HEARTBEATS";
 
 /// Limits recoverable crash injection to the first N supervision attempts.
 pub const CRASH_ATTEMPTS_ENV: &str = "HANDY_GAMES_PUBLISHER_RUNTIME_CRASH_ATTEMPTS";
 
 /// Exposes the current supervision attempt to the child runtime process.
-pub const SUPERVISION_ATTEMPT_ENV: &str =
-    "HANDY_GAMES_PUBLISHER_RUNTIME_SUPERVISION_ATTEMPT";
+pub const SUPERVISION_ATTEMPT_ENV: &str = "HANDY_GAMES_PUBLISHER_RUNTIME_SUPERVISION_ATTEMPT";
 
 /// Overrides the number of supervisor restarts allowed after recoverable exits.
-pub const SUPERVISION_MAX_RESTARTS_ENV: &str =
-    "HANDY_GAMES_PUBLISHER_RUNTIME_MAX_RESTARTS";
+pub const SUPERVISION_MAX_RESTARTS_ENV: &str = "HANDY_GAMES_PUBLISHER_RUNTIME_MAX_RESTARTS";
 
 /// Overrides the restart backoff between recoverable supervisor retries.
 pub const SUPERVISION_BACKOFF_MILLIS_ENV: &str =
@@ -190,14 +187,8 @@ pub struct RuntimeLoopConfig {
 impl RuntimeLoopConfig {
     fn load() -> io::Result<Self> {
         Ok(Self {
-            worker_loop_interval_millis: parse_env_u64(
-                WORKER_LOOP_INTERVAL_MILLIS_ENV,
-                1_000,
-            )?,
-            heartbeat_interval_millis: parse_env_u64(
-                HEARTBEAT_INTERVAL_MILLIS_ENV,
-                5_000,
-            )?,
+            worker_loop_interval_millis: parse_env_u64(WORKER_LOOP_INTERVAL_MILLIS_ENV, 1_000)?,
+            heartbeat_interval_millis: parse_env_u64(HEARTBEAT_INTERVAL_MILLIS_ENV, 5_000)?,
             max_heartbeats: parse_optional_env_u32(MAX_HEARTBEATS_ENV)?,
             crash_after_heartbeats: parse_optional_env_u32(CRASH_AFTER_HEARTBEATS_ENV)?,
             crash_attempts: parse_env_u32(CRASH_ATTEMPTS_ENV, 0)?,
@@ -228,10 +219,7 @@ impl RuntimeSupervisionSettings {
         Ok(Self {
             max_restarts: parse_env_u32(SUPERVISION_MAX_RESTARTS_ENV, 3)?,
             restart_backoff_millis: parse_env_u64(SUPERVISION_BACKOFF_MILLIS_ENV, 1_000)?,
-            recoverable_exit_code: parse_env_i32(
-                SUPERVISION_RECOVERABLE_EXIT_CODE_ENV,
-                75,
-            )?,
+            recoverable_exit_code: parse_env_i32(SUPERVISION_RECOVERABLE_EXIT_CODE_ENV, 75)?,
         })
     }
 
@@ -354,7 +342,9 @@ impl RuntimeConfig {
 
 fn parse_env_u64(variable_name: &str, default_value: u64) -> io::Result<u64> {
     match env::var(variable_name) {
-        Ok(value) => value.parse().map_err(|_| invalid_env_error(variable_name, &value)),
+        Ok(value) => value
+            .parse()
+            .map_err(|_| invalid_env_error(variable_name, &value)),
         Err(env::VarError::NotPresent) => Ok(default_value),
         Err(env::VarError::NotUnicode(_)) => Err(invalid_env_error(variable_name, "<non-unicode>")),
     }
@@ -362,7 +352,9 @@ fn parse_env_u64(variable_name: &str, default_value: u64) -> io::Result<u64> {
 
 fn parse_env_u32(variable_name: &str, default_value: u32) -> io::Result<u32> {
     match env::var(variable_name) {
-        Ok(value) => value.parse().map_err(|_| invalid_env_error(variable_name, &value)),
+        Ok(value) => value
+            .parse()
+            .map_err(|_| invalid_env_error(variable_name, &value)),
         Err(env::VarError::NotPresent) => Ok(default_value),
         Err(env::VarError::NotUnicode(_)) => Err(invalid_env_error(variable_name, "<non-unicode>")),
     }
@@ -370,7 +362,9 @@ fn parse_env_u32(variable_name: &str, default_value: u32) -> io::Result<u32> {
 
 fn parse_env_i32(variable_name: &str, default_value: i32) -> io::Result<i32> {
     match env::var(variable_name) {
-        Ok(value) => value.parse().map_err(|_| invalid_env_error(variable_name, &value)),
+        Ok(value) => value
+            .parse()
+            .map_err(|_| invalid_env_error(variable_name, &value)),
         Err(env::VarError::NotPresent) => Ok(default_value),
         Err(env::VarError::NotUnicode(_)) => Err(invalid_env_error(variable_name, "<non-unicode>")),
     }
@@ -417,11 +411,9 @@ fn resolve_default_root(
             .ok_or_else(|| missing_variable_error("XDG_DATA_HOME or HOME"))?,
     };
 
-    Ok(
-        base_dir
-            .join(runtime_environment.product_directory_name())
-            .join("runtime"),
-    )
+    Ok(base_dir
+        .join(runtime_environment.product_directory_name())
+        .join("runtime"))
 }
 
 fn missing_variable_error(variable_name: &str) -> io::Error {
@@ -441,9 +433,8 @@ fn invalid_env_error(variable_name: &str, value: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_default_root, HostEnvironment, HostPlatform, RuntimeConfig,
+        resolve_default_root, HostEnvironment, HostPlatform, RuntimeConfig, RuntimeDirectories,
         RuntimeEnvironment,
-        RuntimeDirectories,
     };
     use std::path::PathBuf;
 
@@ -457,10 +448,7 @@ mod tests {
             directories.artifacts_dir,
             PathBuf::from("/tmp/runtime/artifacts")
         );
-        assert_eq!(
-            directories.runs_dir,
-            PathBuf::from("/tmp/runtime/runs")
-        );
+        assert_eq!(directories.runs_dir, PathBuf::from("/tmp/runtime/runs"));
     }
 
     #[test]
@@ -477,7 +465,7 @@ mod tests {
             &environment,
             RuntimeEnvironment::Production,
         )
-            .expect("windows root should resolve");
+        .expect("windows root should resolve");
 
         assert_eq!(
             root,
@@ -589,7 +577,7 @@ mod tests {
             &environment,
             RuntimeEnvironment::Production,
         )
-            .expect("linux root should resolve");
+        .expect("linux root should resolve");
 
         assert_eq!(
             root,

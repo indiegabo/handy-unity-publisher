@@ -40,28 +40,23 @@ pub(crate) fn execute_command_with_timeout(
         exit_status: None,
     })?;
 
-    let (status, timed_out) = match wait_for_child(
-        &mut child,
-        command_label,
-        timeout,
-        log_path,
-        reporter,
-    ) {
-        Ok(result) => result,
-        Err(error) => {
-            return Err(CommandExecutionError {
-                output: read_command_log(
-                    command_label,
-                    log_path,
-                    log_preamble,
-                    fallback_log_path,
-                    fallback_log_label,
-                ),
-                error,
-                exit_status: None,
-            });
-        }
-    };
+    let (status, timed_out) =
+        match wait_for_child(&mut child, command_label, timeout, log_path, reporter) {
+            Ok(result) => result,
+            Err(error) => {
+                return Err(CommandExecutionError {
+                    output: read_command_log(
+                        command_label,
+                        log_path,
+                        log_preamble,
+                        fallback_log_path,
+                        fallback_log_label,
+                    ),
+                    error,
+                    exit_status: None,
+                });
+            }
+        };
     let output = read_command_log(
         command_label,
         log_path,
@@ -120,9 +115,8 @@ fn read_command_log(
         );
         if let Some(tail) = read_log_tail(fallback_log_path, 32 * 1024) {
             if contains_visible_text(&tail) {
-                output.extend_from_slice(
-                    format!("\n--- {fallback_log_label} tail ---\n").as_bytes(),
-                );
+                output
+                    .extend_from_slice(format!("\n--- {fallback_log_label} tail ---\n").as_bytes());
                 output.extend_from_slice(&tail);
                 return output;
             }

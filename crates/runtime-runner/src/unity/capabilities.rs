@@ -120,9 +120,7 @@ impl CapabilityInspectionInput {
 }
 
 /// Inspects one host-native runner config without exposing environment values.
-pub fn diagnose_host_native_runner_config(
-    config_json: &str,
-) -> HostNativeRunnerDiagnostics {
+pub fn diagnose_host_native_runner_config(config_json: &str) -> HostNativeRunnerDiagnostics {
     match super::parse_host_native_runner_config(config_json) {
         Ok(config) => super::build_host_native_runner_diagnostics(&config),
         Err(error) => HostNativeRunnerDiagnostics {
@@ -146,8 +144,7 @@ pub(crate) fn inspect_host_capability_profile_with_input(
     let platform_prerequisites =
         super::detect_platform_prerequisites(platform, &input.path_entries);
     let unity_license = super::detect_unity_license(&input.unity_license_paths);
-    let discovered_editors =
-        super::discover_unity_editors(platform, &input.discovery_roots);
+    let discovered_editors = super::discover_unity_editors(platform, &input.discovery_roots);
     let runner_selection = super::select_runner_family(
         platform,
         input.inside_wsl,

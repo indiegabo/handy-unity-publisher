@@ -155,7 +155,10 @@ fn relay_pending_runtime_events<R: Runtime>(
             .emit_to(MAIN_WINDOW_LABEL, RUNTIME_EVENT_NAME, event.clone())
             .map_err(|error| io::Error::other(error.to_string()))?;
         if let Err(error) = maybe_notify_native_runtime_event(app_handle, &event) {
-            eprintln!("failed to show native notification for {}: {error}", event.event_id);
+            eprintln!(
+                "failed to show native notification for {}: {error}",
+                event.event_id
+            );
         }
         remember_runtime_event_id(recent_event_ids, &event.event_id);
     }
@@ -250,32 +253,18 @@ fn native_notification_content(event: &RuntimeEventRecord) -> (String, String) {
             format!("{} build started", notification_release_mode_label(event))
         }
         "build.run_finished" => match build_status_from_event(event) {
-            Some("failed") => format!(
-                "{} build failed",
-                notification_release_mode_label(event)
-            ),
-            Some("canceled") | Some("cancelled") => format!(
-                "{} build canceled",
-                notification_release_mode_label(event)
-            ),
-            _ => format!(
-                "{} build finished",
-                notification_release_mode_label(event)
-            ),
+            Some("failed") => format!("{} build failed", notification_release_mode_label(event)),
+            Some("canceled") | Some("cancelled") => {
+                format!("{} build canceled", notification_release_mode_label(event))
+            }
+            _ => format!("{} build finished", notification_release_mode_label(event)),
         },
-        "build.run_on_hold" => format!(
-            "{} build on hold",
-            notification_release_mode_label(event)
-        ),
-        "publish.run_started" => format!(
-            "{} publish started",
-            notification_release_mode_label(event)
-        ),
+        "build.run_on_hold" => format!("{} build on hold", notification_release_mode_label(event)),
+        "publish.run_started" => {
+            format!("{} publish started", notification_release_mode_label(event))
+        }
         "publish.run_finished" => match build_status_from_event(event) {
-            Some("failed") => format!(
-                "{} publish failed",
-                notification_release_mode_label(event)
-            ),
+            Some("failed") => format!("{} publish failed", notification_release_mode_label(event)),
             Some("canceled") | Some("cancelled") => format!(
                 "{} publish canceled",
                 notification_release_mode_label(event)
@@ -292,7 +281,10 @@ fn native_notification_content(event: &RuntimeEventRecord) -> (String, String) {
 }
 
 fn build_status_from_event(event: &RuntimeEventRecord) -> Option<&str> {
-    event.payload.get("status").and_then(serde_json::Value::as_str)
+    event
+        .payload
+        .get("status")
+        .and_then(serde_json::Value::as_str)
 }
 
 fn notification_release_mode_label(event: &RuntimeEventRecord) -> &'static str {
@@ -346,10 +338,7 @@ fn seed_runtime_event_cursor(
     Ok(cursor)
 }
 
-fn persist_runtime_event_cursor(
-    cursor_path: &Path,
-    cursor: &RuntimeEventCursor,
-) -> io::Result<()> {
+fn persist_runtime_event_cursor(cursor_path: &Path, cursor: &RuntimeEventCursor) -> io::Result<()> {
     if let Some(parent) = cursor_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -536,7 +525,9 @@ mod tests {
 
     #[test]
     fn notification_visibility_policy_always_shows_native_runtime_events() {
-        assert!(should_show_native_notification(NativeNotificationPolicy::Always));
+        assert!(should_show_native_notification(
+            NativeNotificationPolicy::Always
+        ));
     }
 
     #[test]
@@ -558,11 +549,17 @@ mod tests {
             "Automatic build failed"
         );
         assert_eq!(
-            native_notification_content(&test_event("build.run_finished", false, Some("canceled"))).0,
+            native_notification_content(&test_event("build.run_finished", false, Some("canceled")))
+                .0,
             "Automatic build canceled"
         );
         assert_eq!(
-            native_notification_content(&test_event("build.run_finished", false, Some("succeeded"))).0,
+            native_notification_content(&test_event(
+                "build.run_finished",
+                false,
+                Some("succeeded")
+            ))
+            .0,
             "Automatic build finished"
         );
         assert_eq!(
@@ -574,15 +571,26 @@ mod tests {
             "Automatic publish started"
         );
         assert_eq!(
-            native_notification_content(&test_event("publish.run_finished", false, Some("failed"))).0,
+            native_notification_content(&test_event("publish.run_finished", false, Some("failed")))
+                .0,
             "Automatic publish failed"
         );
         assert_eq!(
-            native_notification_content(&test_event("publish.run_finished", false, Some("cancelled"))).0,
+            native_notification_content(&test_event(
+                "publish.run_finished",
+                false,
+                Some("cancelled")
+            ))
+            .0,
             "Automatic publish canceled"
         );
         assert_eq!(
-            native_notification_content(&test_event("publish.run_finished", false, Some("succeeded"))).0,
+            native_notification_content(&test_event(
+                "publish.run_finished",
+                false,
+                Some("succeeded")
+            ))
+            .0,
             "Automatic publish finished"
         );
     }

@@ -1,9 +1,8 @@
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
 use runtime_config::RuntimeConfig;
 use runtime_store::{
-    open_connection, BuildDispatchJob, PublishDispatchJob, ReleaseDispatchJob,
-    StorageLayout,
+    open_connection, BuildDispatchJob, PublishDispatchJob, ReleaseDispatchJob, StorageLayout,
 };
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::io::{self, ErrorKind};

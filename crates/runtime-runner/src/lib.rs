@@ -11,8 +11,7 @@ pub use engine::{BuildExecutionAdapter, EngineAdapterRegistry};
 
 use runtime_config::RuntimeDirectories;
 use runtime_git::{
-    GitAuthOptions, GitProgressReporter, GitWorkspaceSyncRefRequest,
-    GitWorkspaceSyncer,
+    GitAuthOptions, GitProgressReporter, GitWorkspaceSyncRefRequest, GitWorkspaceSyncer,
 };
 use std::fs;
 use std::io;
@@ -216,7 +215,10 @@ impl WorkspacePreparer {
         }
 
         if input.release_run_id <= 0 {
-            return Err(io::Error::new(ErrorKind::InvalidInput, "release run id must be greater than zero"));
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "release run id must be greater than zero",
+            ));
         }
         let process_name = format!("release-run-{}", input.release_run_id);
         let build_workspace_name = build_workspace_name(input.build_run_id, &input.attempt_token);
@@ -273,7 +275,10 @@ impl WorkspacePreparer {
     }
 
     /// Creates isolated directories and checks out the requested repository tag.
-    pub fn prepare_process(&self, input: &WorkspacePreparationInput) -> io::Result<PreparedWorkspace> {
+    pub fn prepare_process(
+        &self,
+        input: &WorkspacePreparationInput,
+    ) -> io::Result<PreparedWorkspace> {
         let mut reporter = NoopExecutionProgressReporter;
         self.prepare_process_with_reporter(input, &mut reporter)
     }
@@ -398,7 +403,10 @@ impl WorkspacePreparer {
     }
 
     /// Creates the per-build workspace only after the release process checkout exists.
-    pub fn prepare_build(&self, input: &WorkspacePreparationInput) -> io::Result<PreparedWorkspace> {
+    pub fn prepare_build(
+        &self,
+        input: &WorkspacePreparationInput,
+    ) -> io::Result<PreparedWorkspace> {
         let mut reporter = NoopExecutionProgressReporter;
         self.prepare_build_with_reporter(input, &mut reporter)
     }
@@ -456,13 +464,15 @@ impl WorkspacePreparer {
     }
 
     fn resolve_runs_root(&self, input: &WorkspacePreparationInput) -> io::Result<PathBuf> {
-        Ok(match normalize_override_path(
-            input.workspace_root_override.as_deref(),
-            "workspace root override",
-        )? {
-            Some(workspace_root) => workspace_root.join("runs"),
-            None => self.directories.runs_dir.clone(),
-        })
+        Ok(
+            match normalize_override_path(
+                input.workspace_root_override.as_deref(),
+                "workspace root override",
+            )? {
+                Some(workspace_root) => workspace_root.join("runs"),
+                None => self.directories.runs_dir.clone(),
+            },
+        )
     }
 }
 
@@ -585,7 +595,11 @@ fn artifact_output_extension(plan: &ExecutionPlan) -> String {
     }
 
     normalized_optional_string(&plan.output_path_template)
-        .and_then(|output_path_template| Path::new(&output_path_template).extension().map(|value| value.to_string_lossy().to_string()))
+        .and_then(|output_path_template| {
+            Path::new(&output_path_template)
+                .extension()
+                .map(|value| value.to_string_lossy().to_string())
+        })
         .map(|extension| format!(".{}", extension.to_ascii_lowercase()))
         .unwrap_or_default()
 }
@@ -598,12 +612,8 @@ fn detect_artifact_kind(path: &str) -> String {
         .to_ascii_lowercase()
         .as_str()
     {
-        "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" => {
-            String::from("archive")
-        }
-        "apk" | "aab" | "ipa" | "exe" | "appimage" | "pkg" | "dmg" => {
-            String::from("binary")
-        }
+        "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" => String::from("archive"),
+        "apk" | "aab" | "ipa" | "exe" | "appimage" | "pkg" | "dmg" => String::from("binary"),
         _ => String::from("file"),
     }
 }
@@ -718,7 +728,10 @@ fn resolve_artifact_output_path(
         ));
     }
 
-    let Some(relative_path) = output_path_template.map(str::trim).filter(|path| !path.is_empty()) else {
+    let Some(relative_path) = output_path_template
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
         return Ok(artifact_root_path.to_path_buf());
     };
 
@@ -780,22 +793,17 @@ fn normalized_optional_string(value: &Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        artifact_output_relative_path,
-        discover_artifacts,
-        process_checkout_marker_path,
-        ExecutionPlan, ExecutionProgress, ExecutionProgressReporter,
-        WorkspacePreparationInput, WorkspacePreparationSource,
-        WorkspacePreparer,
-    };
     use super::unity::{
         classify_execution_error, diagnose_host_native_runner_config,
-        inspect_host_capability_profile_with_input,
-        resolve_host_native_unity_execution_plan, selected_host_runner_family,
-        CapabilityInspectionInput, DiscoveredUnityEditor, HostCapabilityProfile,
-        HostNativeUnityExecutor, HostToolCapability,
-        RunnerSelectionDiagnostics, UnityBuildExecutionProcessor,
-        UnityLicenseDiagnostics,
+        inspect_host_capability_profile_with_input, resolve_host_native_unity_execution_plan,
+        selected_host_runner_family, CapabilityInspectionInput, DiscoveredUnityEditor,
+        HostCapabilityProfile, HostNativeUnityExecutor, HostToolCapability,
+        RunnerSelectionDiagnostics, UnityBuildExecutionProcessor, UnityLicenseDiagnostics,
+    };
+    use super::{
+        artifact_output_relative_path, discover_artifacts, process_checkout_marker_path,
+        ExecutionPlan, ExecutionProgress, ExecutionProgressReporter, WorkspacePreparationInput,
+        WorkspacePreparationSource, WorkspacePreparer,
     };
     use runtime_config::{HostPlatform, RuntimeDirectories};
     use runtime_git::GitAuthOptions;
@@ -841,7 +849,9 @@ mod tests {
     fn workspace_preparer_creates_isolated_run_directories() {
         let root = test_root("prepare-workspace");
         let directories = RuntimeDirectories::from_root(&root);
-        directories.ensure_exists().expect("runtime directories should create");
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
         let repository_path = create_tagged_unity_repository(
             &root.join("workspace-source-repo"),
             "2022.3.14f1",
@@ -861,16 +871,12 @@ mod tests {
             })
             .expect("workspace preparation should succeed");
 
-        let expected_root = directories
-            .runs_dir
-            .join("release-run-24");
+        let expected_root = directories.runs_dir.join("release-run-24");
         assert_eq!(prepared.root_path, expected_root);
         assert_eq!(prepared.host_root_path, prepared.root_path);
         assert_eq!(
             prepared.build_root_path,
-            expected_root
-                .join("builds")
-                .join("build-run-42-attempt-42")
+            expected_root.join("builds").join("build-run-42-attempt-42")
         );
         assert_eq!(prepared.host_build_root_path, prepared.build_root_path);
 
@@ -894,8 +900,14 @@ mod tests {
                 .join("logs")
                 .join("unity-build.log")
         );
-        assert_eq!(prepared.artifact_root_path, prepared.build_root_path.join("outputs"));
-        assert_eq!(prepared.host_artifact_root_path, prepared.artifact_root_path);
+        assert_eq!(
+            prepared.artifact_root_path,
+            prepared.build_root_path.join("outputs")
+        );
+        assert_eq!(
+            prepared.host_artifact_root_path,
+            prepared.artifact_root_path
+        );
 
         fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -904,7 +916,9 @@ mod tests {
     fn workspace_preparer_plan_matches_prepared_layout() {
         let root = test_root("plan-workspace");
         let directories = RuntimeDirectories::from_root(&root);
-        directories.ensure_exists().expect("runtime directories should create");
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
         let repository_path = create_tagged_unity_repository(
             &root.join("workspace-plan-source-repo"),
             "2022.3.14f1",
@@ -921,8 +935,12 @@ mod tests {
             artifacts_root_override: None,
         };
 
-        let planned = preparer.plan(&input).expect("workspace plan should resolve");
-        let prepared = preparer.prepare(&input).expect("workspace preparation should succeed");
+        let planned = preparer
+            .plan(&input)
+            .expect("workspace plan should resolve");
+        let prepared = preparer
+            .prepare(&input)
+            .expect("workspace preparation should succeed");
 
         assert_eq!(planned, prepared);
 
@@ -933,7 +951,9 @@ mod tests {
     fn workspace_preparer_syncs_process_checkout_only_once() {
         let root = test_root("prepare-process-once");
         let directories = RuntimeDirectories::from_root(&root);
-        directories.ensure_exists().expect("runtime directories should create");
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
         let repository_path = create_tagged_unity_repository(
             &root.join("process-once-source-repo"),
             "2022.3.14f1",
@@ -984,7 +1004,9 @@ mod tests {
     fn workspace_preparer_prepare_build_requires_existing_process_checkout() {
         let root = test_root("prepare-build-requires-process-checkout");
         let directories = RuntimeDirectories::from_root(&root);
-        directories.ensure_exists().expect("runtime directories should create");
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
         let repository_path = create_tagged_unity_repository(
             &root.join("prepare-build-requires-process-checkout-source-repo"),
             "2022.3.14f1",
@@ -1015,7 +1037,9 @@ mod tests {
     fn workspace_preparer_uses_workspace_root_override_and_keeps_outputs_in_process() {
         let root = test_root("prepare-workspace-overrides");
         let directories = RuntimeDirectories::from_root(&root.join("runtime-root"));
-        directories.ensure_exists().expect("runtime directories should create");
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
         let repository_path = create_tagged_unity_repository(
             &root.join("workspace-override-source-repo"),
             "2022.3.14f1",
@@ -1032,20 +1056,14 @@ mod tests {
                 attempt_token: String::from("attempt-53"),
                 repository_name: String::from("revolutions"),
                 source: git_source(&repository_path, "v5.2.0"),
-                workspace_root_override: Some(
-                    workspace_root_override.display().to_string(),
-                ),
-                artifacts_root_override: Some(
-                    build_output_override.display().to_string(),
-                ),
+                workspace_root_override: Some(workspace_root_override.display().to_string()),
+                artifacts_root_override: Some(build_output_override.display().to_string()),
             })
             .expect("workspace preparation with overrides should succeed");
 
         assert_eq!(
             prepared.root_path,
-            workspace_root_override
-                .join("runs")
-                .join("release-run-26")
+            workspace_root_override.join("runs").join("release-run-26")
         );
         assert_eq!(
             prepared.log_path,
@@ -1057,9 +1075,15 @@ mod tests {
                 .join("logs")
                 .join("unity-build.log")
         );
-        assert_eq!(prepared.artifact_root_path, prepared.build_root_path.join("outputs"));
+        assert_eq!(
+            prepared.artifact_root_path,
+            prepared.build_root_path.join("outputs")
+        );
         assert_eq!(build_output_override, root.join("build-output"));
-        assert!(prepared.source_path.join(PROJECT_VERSION_FILE_PATH).is_file());
+        assert!(prepared
+            .source_path
+            .join(PROJECT_VERSION_FILE_PATH)
+            .is_file());
 
         fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -1068,7 +1092,9 @@ mod tests {
     fn execution_processor_prepare_workspace_reports_checkout_progress() {
         let root = test_root("prepare-workspace-progress");
         let directories = RuntimeDirectories::from_root(&root);
-        directories.ensure_exists().expect("runtime directories should create");
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
         let repository_path = create_tagged_unity_repository(
             &root.join("workspace-progress-source-repo"),
             "2022.3.14f1",
@@ -1095,24 +1121,30 @@ mod tests {
             .source_path
             .join(PROJECT_VERSION_FILE_PATH)
             .is_file());
-        assert!(reporter.messages.iter().any(|message| {
-            message.contains("Resetting build workspace root")
-        }));
-        assert!(reporter.messages.iter().any(|message| {
-            message.contains("Creating process workspace directories")
-        }));
-        assert!(reporter.messages.iter().any(|message| {
-            message.contains("Cloning repository metadata")
-        }));
-        assert!(reporter.messages.iter().any(|message| {
-            message.contains("Fetching ref 'v5.3.0'")
-        }));
-        assert!(reporter.messages.iter().any(|message| {
-            message.contains("Checking out fetched ref 'v5.3.0'")
-        }));
-        assert!(reporter.messages.iter().any(|message| {
-            message.contains("Repository ref 'v5.3.0' is ready")
-        }));
+        assert!(reporter
+            .messages
+            .iter()
+            .any(|message| { message.contains("Resetting build workspace root") }));
+        assert!(reporter
+            .messages
+            .iter()
+            .any(|message| { message.contains("Creating process workspace directories") }));
+        assert!(reporter
+            .messages
+            .iter()
+            .any(|message| { message.contains("Cloning repository metadata") }));
+        assert!(reporter
+            .messages
+            .iter()
+            .any(|message| { message.contains("Fetching ref 'v5.3.0'") }));
+        assert!(reporter
+            .messages
+            .iter()
+            .any(|message| { message.contains("Checking out fetched ref 'v5.3.0'") }));
+        assert!(reporter
+            .messages
+            .iter()
+            .any(|message| { message.contains("Repository ref 'v5.3.0' is ready") }));
 
         fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -1280,9 +1312,7 @@ mod tests {
             .expect_err("plan should fail when the requested version was not discovered");
 
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error
-            .to_string()
-            .contains("2022.3.30f1"));
+        assert!(error.to_string().contains("2022.3.30f1"));
     }
 
     #[test]
@@ -1294,15 +1324,11 @@ mod tests {
         let bin_dir = root.join("bin");
         fs::create_dir_all(&bin_dir).expect("bin directory should create");
         for command_name in required_test_commands(platform) {
-            fs::write(bin_dir.join(command_name), b"tool")
-                .expect("fake tool should write");
+            fs::write(bin_dir.join(command_name), b"tool").expect("fake tool should write");
         }
 
-        let discovery_root = create_discovered_unity_install(
-            &root.join("unity-root"),
-            platform,
-            "2022.3.14f1",
-        );
+        let discovery_root =
+            create_discovered_unity_install(&root.join("unity-root"), platform, "2022.3.14f1");
         let license_path = root.join("licenses").join("Unity_lic.ulf");
         fs::create_dir_all(
             license_path
@@ -1357,15 +1383,11 @@ mod tests {
         let bin_dir = root.join("bin");
         fs::create_dir_all(&bin_dir).expect("bin directory should create");
         for command_name in required_test_commands(platform) {
-            fs::write(bin_dir.join(command_name), b"tool")
-                .expect("fake tool should write");
+            fs::write(bin_dir.join(command_name), b"tool").expect("fake tool should write");
         }
 
-        let discovery_root = create_discovered_unity_install(
-            &root.join("unity-root"),
-            platform,
-            "2022.3.15f1",
-        );
+        let discovery_root =
+            create_discovered_unity_install(&root.join("unity-root"), platform, "2022.3.15f1");
 
         let profile = inspect_host_capability_profile_with_input(
             platform,
@@ -1385,7 +1407,10 @@ mod tests {
             profile.runner_selection.selected_runner_family.as_deref(),
             Some(selected_host_runner_family(platform))
         );
-        assert_eq!(profile.runner_selection.status, "warning_license_unconfirmed");
+        assert_eq!(
+            profile.runner_selection.status,
+            "warning_license_unconfirmed"
+        );
 
         fs::remove_dir_all(root).expect("test root should be removable");
     }
@@ -1394,7 +1419,9 @@ mod tests {
     fn workspace_preparer_groups_artifacts_by_repository_and_tag() {
         let root = test_root("prepare-workspace-grouping");
         let directories = RuntimeDirectories::from_root(&root);
-        directories.ensure_exists().expect("runtime directories should create");
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
         let repository_path = create_tagged_unity_repository(
             &root.join("workspace-grouping-source-repo"),
             "2021.3.18f1",
@@ -1442,10 +1469,8 @@ mod tests {
     fn discover_artifacts_lists_regular_files_in_sorted_order() {
         let root = test_root("discover-artifacts");
         let artifact_root = root.join("artifacts");
-        fs::create_dir_all(artifact_root.join("nested"))
-            .expect("artifact directory should create");
-        fs::write(artifact_root.join("game.zip"), "artifact")
-            .expect("root artifact should write");
+        fs::create_dir_all(artifact_root.join("nested")).expect("artifact directory should create");
+        fs::write(artifact_root.join("game.zip"), "artifact").expect("root artifact should write");
         fs::write(artifact_root.join("nested").join("notes.txt"), "notes")
             .expect("nested artifact should write");
 
@@ -1479,7 +1504,9 @@ mod tests {
     fn execution_processor_runs_host_native_command_and_writes_log() {
         let root = test_root("host-native-success");
         let directories = RuntimeDirectories::from_root(&root);
-        directories.ensure_exists().expect("runtime directories should create");
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
         let repository_path = create_tagged_unity_repository(
             &root.join("host-native-success-source-repo"),
             "2022.3.14f1",
@@ -1525,8 +1552,8 @@ mod tests {
             .expect("host-native execution should process");
 
         assert!(outcome.error.is_none());
-        let contents = fs::read_to_string(&outcome.result.log_path)
-            .expect("execution log should exist");
+        let contents =
+            fs::read_to_string(&outcome.result.log_path).expect("execution log should exist");
         assert!(contents.contains("-batchmode"));
         assert!(contents.contains("-buildTarget webgl"));
         assert!(contents.contains("-executeMethod Builder.PerformWebGL"));
@@ -1554,7 +1581,9 @@ mod tests {
     fn execution_processor_persists_preamble_when_host_native_command_writes_no_log() {
         let root = test_root("host-native-missing-log");
         let directories = RuntimeDirectories::from_root(&root);
-        directories.ensure_exists().expect("runtime directories should create");
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
         let repository_path = create_tagged_unity_repository(
             &root.join("host-native-missing-log-source-repo"),
             "2022.3.14f1",
@@ -1631,7 +1660,9 @@ mod tests {
     fn execution_processor_enriches_failure_and_preserves_paths() {
         let root = test_root("host-native-failure");
         let directories = RuntimeDirectories::from_root(&root);
-        directories.ensure_exists().expect("runtime directories should create");
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
         let repository_path = create_tagged_unity_repository(
             &root.join("host-native-failure-source-repo"),
             "2022.3.14f1",
@@ -1684,7 +1715,9 @@ mod tests {
             .contains("No valid Unity Editor license found. Please activate your license."));
         let contents = fs::read_to_string(&outcome.result.log_path)
             .expect("failed execution log should exist");
-        assert!(contents.contains("No valid Unity Editor license found. Please activate your license."));
+        assert!(
+            contents.contains("No valid Unity Editor license found. Please activate your license.")
+        );
         assert!(outcome.result.workspace_path.is_dir());
 
         fs::remove_dir_all(root).expect("temporary runtime root should be removable");
@@ -1694,7 +1727,9 @@ mod tests {
     fn execution_processor_times_out_host_native_command_and_reports_cancellation() {
         let root = test_root("host-native-timeout");
         let directories = RuntimeDirectories::from_root(&root);
-        directories.ensure_exists().expect("runtime directories should create");
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
         let repository_path = create_tagged_unity_repository(
             &root.join("host-native-timeout-source-repo"),
             "2022.3.14f1",
@@ -1739,7 +1774,9 @@ mod tests {
 
         let error = outcome.error.expect("timed out execution should fail");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(error.to_string().contains("timeout: host-native unity runner exceeded 1s timeout"));
+        assert!(error
+            .to_string()
+            .contains("timeout: host-native unity runner exceeded 1s timeout"));
         assert!(!outcome
             .result
             .artifact_root_path

@@ -21,8 +21,7 @@ pub const KIND_GIT_HTTP_BASIC: &str = "git-http-basic";
 pub const KIND_GIT_HTTP_BEARER: &str = "git-http-bearer";
 
 /// Identifies GitHub credentials delegated to the host Git credential helper.
-pub const KIND_GIT_HTTP_GITHUB_HOST_LOGIN: &str =
-    "git-http-github-host-login";
+pub const KIND_GIT_HTTP_GITHUB_HOST_LOGIN: &str = "git-http-github-host-login";
 
 const GIT_TERMINAL_PROMPT_ENV: &str = "GIT_TERMINAL_PROMPT";
 const GIT_TERMINAL_PROMPT_DISABLED: &str = "0";
@@ -51,8 +50,7 @@ const REPOSITORY_AUTH_STATUS_REQUIRED_UNBOUND: &str = "required_unbound";
 const REPOSITORY_AUTH_STATUS_UNSUPPORTED: &str = "unsupported";
 const REPOSITORY_AUTH_STATUS_UNKNOWN: &str = "unknown";
 #[cfg(test)]
-const TEST_GIT_EXECUTABLE_ENV: &str =
-    "HANDY_GAMES_PUBLISHER_TEST_GIT_EXECUTABLE";
+const TEST_GIT_EXECUTABLE_ENV: &str = "HANDY_GAMES_PUBLISHER_TEST_GIT_EXECUTABLE";
 
 /// Lists the Git transport strategy supported by the runtime scaffold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,8 +322,7 @@ where
             }
 
             let config: GithubHostLoginConfig = decode_auth_config(config_json)?;
-            let provider =
-                require_non_empty(&config.provider, "GitHub host login provider")?;
+            let provider = require_non_empty(&config.provider, "GitHub host login provider")?;
             if !provider.eq_ignore_ascii_case("github") {
                 return Err(io::Error::new(
                     ErrorKind::InvalidInput,
@@ -357,10 +354,7 @@ fn resolve_github_host_login_auth_header(
     instance_url: &str,
     login: Option<&str>,
 ) -> io::Result<String> {
-    let instance_url = require_non_empty(
-        instance_url,
-        "GitHub host login instance URL",
-    )?;
+    let instance_url = require_non_empty(instance_url, "GitHub host login instance URL")?;
     let login = normalized_optional_string(login);
     let cache_key = github_host_login_cache_key(&instance_url, login.as_deref());
 
@@ -373,10 +367,8 @@ fn resolve_github_host_login_auth_header(
         }
     }
 
-    let (username, password) = request_github_host_login_credentials(
-        &instance_url,
-        login.as_deref(),
-    )?;
+    let (username, password) =
+        request_github_host_login_credentials(&instance_url, login.as_deref())?;
     let auth_header = build_basic_authorization_header(&username, &password);
 
     github_host_login_header_cache()
@@ -408,9 +400,9 @@ fn request_github_host_login_credentials(
     let (protocol, host) = credential_context_from_instance_url(instance_url)?;
     let (preview, mut command) = prepare_github_credential_fill_command();
 
-    let mut child = command.spawn().map_err(|error| {
-        io::Error::other(format!("spawn git {preview}: {error}"))
-    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| io::Error::other(format!("spawn git {preview}: {error}")))?;
     let input = git_credential_fill_input(&protocol, &host, login);
     {
         use std::io::Write as _;
@@ -427,13 +419,12 @@ fn request_github_host_login_credentials(
         })?;
     }
 
-    let output = child.wait_with_output().map_err(|error| {
-        io::Error::other(format!("wait for git {preview}: {error}"))
-    })?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| io::Error::other(format!("wait for git {preview}: {error}")))?;
     if !output.status.success() {
         return Err(io::Error::other(format_git_command_failure(
-            &preview,
-            &output,
+            &preview, &output,
         )));
     }
 
@@ -449,9 +440,7 @@ fn prepare_github_credential_fill_command() -> (String, Command) {
         .arg("-c")
         .arg(GIT_CREDENTIAL_HELPER_RESET)
         .arg("-c")
-        .arg(format!(
-            "credential.helper={GIT_CREDENTIAL_MANAGER_HELPER}"
-        ))
+        .arg(format!("credential.helper={GIT_CREDENTIAL_MANAGER_HELPER}"))
         .arg("credential")
         .arg("fill")
         .stdin(Stdio::piped())
@@ -463,10 +452,7 @@ fn prepare_github_credential_fill_command() -> (String, Command) {
 }
 
 fn credential_context_from_instance_url(instance_url: &str) -> io::Result<(String, String)> {
-    let trimmed = require_non_empty(
-        instance_url,
-        "GitHub host login instance URL",
-    )?;
+    let trimmed = require_non_empty(instance_url, "GitHub host login instance URL")?;
     let (protocol, remainder) = if let Some(rest) = trimmed.strip_prefix("https://") {
         ("https", rest)
     } else if let Some(rest) = trimmed.strip_prefix("http://") {
@@ -482,9 +468,7 @@ fn credential_context_from_instance_url(instance_url: &str) -> io::Result<(Strin
         .ok_or_else(|| {
             io::Error::new(
                 ErrorKind::InvalidInput,
-                format!(
-                    "GitHub host login instance URL {trimmed:?} does not contain a host"
-                ),
+                format!("GitHub host login instance URL {trimmed:?} does not contain a host"),
             )
         })?;
 
@@ -582,10 +566,8 @@ fn normalize_repository_url(repository_url: &str) -> io::Result<NormalizedReposi
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
-    let requires_owner_and_repository = matches!(
-        host.as_str(),
-        "github.com" | "gitlab.com" | "bitbucket.org"
-    );
+    let requires_owner_and_repository =
+        matches!(host.as_str(), "github.com" | "gitlab.com" | "bitbucket.org");
     if requires_owner_and_repository && segments.len() < 2 {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -602,9 +584,7 @@ fn normalize_repository_url(repository_url: &str) -> io::Result<NormalizedReposi
     })
 }
 
-fn detect_repository_provider(
-    normalized: &NormalizedRepositoryUrl,
-) -> DetectedRepositoryProvider {
+fn detect_repository_provider(normalized: &NormalizedRepositoryUrl) -> DetectedRepositoryProvider {
     let (provider_id, provider_label, supports_interactive_login) =
         if normalized.host.eq_ignore_ascii_case("github.com") {
             (REPOSITORY_PROVIDER_GITHUB, "GitHub", true)
@@ -655,7 +635,10 @@ fn classify_anonymous_probe_failure(error: &io::Error) -> AnonymousProbeClassifi
         "403 forbidden",
         "401 unauthorized",
     ];
-    if auth_indicators.iter().any(|indicator| message.contains(indicator)) {
+    if auth_indicators
+        .iter()
+        .any(|indicator| message.contains(indicator))
+    {
         return AnonymousProbeClassification::AuthRequired;
     }
 
@@ -799,12 +782,15 @@ impl GitWorkspaceSyncer {
         request: &GitWorkspaceSyncRequest,
         reporter: &mut dyn GitProgressReporter,
     ) -> io::Result<()> {
-        self.sync_ref_with_progress(&GitWorkspaceSyncRefRequest {
-            repository_url: request.repository_url.clone(),
-            workspace_path: request.workspace_path.clone(),
-            git_ref: request.git_tag.clone(),
-            auth: request.auth.clone(),
-        }, reporter)
+        self.sync_ref_with_progress(
+            &GitWorkspaceSyncRefRequest {
+                repository_url: request.repository_url.clone(),
+                workspace_path: request.workspace_path.clone(),
+                git_ref: request.git_tag.clone(),
+                auth: request.auth.clone(),
+            },
+            reporter,
+        )
     }
 
     /// Clones or refreshes one local workspace and checks out the requested ref in detached HEAD state.
@@ -852,9 +838,9 @@ impl GitWorkspaceSyncer {
                 request.auth.credential_helper.as_deref(),
                 request.auth.preserve_credential_helper,
             )
-            .map_err(|error| io::Error::other(format!(
-                "clone repository into workspace: {error}"
-            )))?;
+            .map_err(|error| {
+                io::Error::other(format!("clone repository into workspace: {error}"))
+            })?;
         } else {
             reporter.report(&format!(
                 "Refreshing Git remote configuration for existing workspace '{}'.",
@@ -871,9 +857,7 @@ impl GitWorkspaceSyncer {
                 None,
                 false,
             )
-            .map_err(|error| io::Error::other(format!(
-                "set workspace remote origin: {error}"
-            )))?;
+            .map_err(|error| io::Error::other(format!("set workspace remote origin: {error}")))?;
         }
 
         reporter.report(&format!(
@@ -886,8 +870,7 @@ impl GitWorkspaceSyncer {
 
         reporter.report(&format!(
             "Fetching ref '{}' from origin into '{}'.",
-            git_ref,
-            workspace_display,
+            git_ref, workspace_display,
         ));
         run_git_command(
             Some(&workspace_path),
@@ -901,9 +884,7 @@ impl GitWorkspaceSyncer {
             request.auth.credential_helper.as_deref(),
             request.auth.preserve_credential_helper,
         )
-        .map_err(|error| io::Error::other(format!(
-            "fetch repository ref {git_ref:?}: {error}"
-        )))?;
+        .map_err(|error| io::Error::other(format!("fetch repository ref {git_ref:?}: {error}")))?;
 
         reporter.report(&format!(
             "Checking out fetched ref '{}' in detached HEAD mode.",
@@ -920,9 +901,9 @@ impl GitWorkspaceSyncer {
             None,
             false,
         )
-        .map_err(|error| io::Error::other(format!(
-            "checkout repository ref {git_ref:?}: {error}"
-        )))?;
+        .map_err(|error| {
+            io::Error::other(format!("checkout repository ref {git_ref:?}: {error}"))
+        })?;
 
         reporter.report(&format!(
             "Cleaning untracked files in '{}'.",
@@ -934,14 +915,11 @@ impl GitWorkspaceSyncer {
             None,
             false,
         )
-        .map_err(|error| io::Error::other(format!(
-            "clean workspace after checkout: {error}"
-        )))?;
+        .map_err(|error| io::Error::other(format!("clean workspace after checkout: {error}")))?;
 
         reporter.report(&format!(
             "Repository ref '{}' is ready at '{}'.",
-            git_ref,
-            workspace_display,
+            git_ref, workspace_display,
         ));
 
         Ok(())
@@ -965,7 +943,10 @@ where
     T: for<'de> Deserialize<'de>,
 {
     serde_json::from_str(config_json.trim()).map_err(|error| {
-        io::Error::new(ErrorKind::InvalidData, format!("decode auth config: {error}"))
+        io::Error::new(
+            ErrorKind::InvalidData,
+            format!("decode auth config: {error}"),
+        )
     })
 }
 
@@ -1016,24 +997,22 @@ fn run_git_command_with_output(
     credential_helper: Option<&str>,
     preserve_credential_helper: bool,
 ) -> io::Result<String> {
-    let (preview, mut command) =
-        prepare_git_command(
-            working_dir,
-            args,
-            credential_helper,
-            preserve_credential_helper,
-        );
+    let (preview, mut command) = prepare_git_command(
+        working_dir,
+        args,
+        credential_helper,
+        preserve_credential_helper,
+    );
 
-    let output = command.output().map_err(|error| {
-        io::Error::other(format!("spawn git {preview}: {error}"))
-    })?;
+    let output = command
+        .output()
+        .map_err(|error| io::Error::other(format!("spawn git {preview}: {error}")))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
 
     Err(io::Error::other(format_git_command_failure(
-        &preview,
-        &output,
+        &preview, &output,
     )))
 }
 
@@ -1043,11 +1022,7 @@ fn prepare_git_command(
     credential_helper: Option<&str>,
     preserve_credential_helper: bool,
 ) -> (String, Command) {
-    let args = platform_git_command_args(
-        args,
-        credential_helper,
-        preserve_credential_helper,
-    );
+    let args = platform_git_command_args(args, credential_helper, preserve_credential_helper);
     let preview = args.join(" ");
     let mut command = git_command();
     command.args(args.iter().map(String::as_str));
@@ -1062,9 +1037,9 @@ fn prepare_git_command(
 fn configure_non_interactive_git_command(command: &mut Command) {
     command
         .env(GIT_TERMINAL_PROMPT_ENV, GIT_TERMINAL_PROMPT_DISABLED)
-    .env(GCM_INTERACTIVE_ENV, GCM_INTERACTIVE_NEVER)
-    .env_remove(GIT_ASKPASS_ENV)
-    .env_remove(SSH_ASKPASS_ENV);
+        .env(GCM_INTERACTIVE_ENV, GCM_INTERACTIVE_NEVER)
+        .env_remove(GIT_ASKPASS_ENV)
+        .env_remove(SSH_ASKPASS_ENV);
 }
 
 fn git_command() -> Command {
@@ -1151,12 +1126,18 @@ fn parse_git_tags(output: &str) -> io::Result<Vec<GitTag>> {
         }
 
         let mut fields = trimmed.split_whitespace();
-        let commit = fields
-            .next()
-            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "git ls-remote output is missing commit"))?;
-        let reference = fields
-            .next()
-            .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "git ls-remote output is missing ref"))?;
+        let commit = fields.next().ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                "git ls-remote output is missing commit",
+            )
+        })?;
+        let reference = fields.next().ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                "git ls-remote output is missing ref",
+            )
+        })?;
         if fields.next().is_some() {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
@@ -1226,15 +1207,12 @@ fn parse_remote_head_ref(output: &str) -> io::Result<String> {
 mod tests {
     use super::prepare_github_credential_fill_command;
     use super::{
-        assess_repository_access,
-        detect_repository_provider_from_url,
+        assess_repository_access, detect_repository_provider, detect_repository_provider_from_url,
         format_git_command_failure, git_auth_options_from_credentials,
-        git_auth_options_from_credentials_with_github_header_resolver,
-        normalize_repository_url, detect_repository_provider,
-        parse_git_credential_fill_output, platform_git_command_args,
-        prepare_git_command, GitAuthOptions, GitRemoteHeadRefRequest,
-        GitRemoteHeadRefResolver, GitTagListRequest, GitTagLister,
-        GitWorkspaceSyncRefRequest, GitWorkspaceSyncRequest, GitWorkspaceSyncer,
+        git_auth_options_from_credentials_with_github_header_resolver, normalize_repository_url,
+        parse_git_credential_fill_output, platform_git_command_args, prepare_git_command,
+        GitAuthOptions, GitRemoteHeadRefRequest, GitRemoteHeadRefResolver, GitTagListRequest,
+        GitTagLister, GitWorkspaceSyncRefRequest, GitWorkspaceSyncRequest, GitWorkspaceSyncer,
         KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER, KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
     };
     use std::ffi::OsStr;
@@ -1267,11 +1245,9 @@ mod tests {
 
     #[test]
     fn git_auth_options_from_bearer_credentials_builds_authorization_header() {
-        let auth = git_auth_options_from_credentials(
-            KIND_GIT_HTTP_BEARER,
-            r#"{"token":"red-banner"}"#,
-        )
-        .expect("bearer credentials should parse");
+        let auth =
+            git_auth_options_from_credentials(KIND_GIT_HTTP_BEARER, r#"{"token":"red-banner"}"#)
+                .expect("bearer credentials should parse");
 
         assert_eq!(
             auth,
@@ -1342,24 +1318,24 @@ mod tests {
             .expect("GitHub url should normalize");
         let gitlab = normalize_repository_url("https://gitlab.com/collective/hgp.git")
             .expect("GitLab url should normalize");
-        let bitbucket =
-            normalize_repository_url("https://bitbucket.org/collective/hgp.git")
-                .expect("Bitbucket url should normalize");
+        let bitbucket = normalize_repository_url("https://bitbucket.org/collective/hgp.git")
+            .expect("Bitbucket url should normalize");
         let unknown = normalize_repository_url("https://forge.example.com/collective/hgp.git")
             .expect("unknown host url should normalize");
 
         assert_eq!(detect_repository_provider(&github).provider_id, "github");
         assert_eq!(detect_repository_provider(&gitlab).provider_id, "gitlab");
-        assert_eq!(detect_repository_provider(&bitbucket).provider_id, "bitbucket");
+        assert_eq!(
+            detect_repository_provider(&bitbucket).provider_id,
+            "bitbucket"
+        );
         assert_eq!(detect_repository_provider(&unknown).provider_id, "unknown");
     }
 
     #[test]
     fn detect_repository_provider_from_url_returns_normalized_provider_metadata() {
-        let detection = detect_repository_provider_from_url(
-            "https://github.com/indiegabo/hgp.git",
-        )
-        .expect("GitHub provider detection should succeed");
+        let detection = detect_repository_provider_from_url("https://github.com/indiegabo/hgp.git")
+            .expect("GitHub provider detection should succeed");
 
         assert_eq!(detection.provider_id, "github");
         assert_eq!(detection.provider_label, "GitHub");
@@ -1404,7 +1380,8 @@ mod tests {
     fn assess_repository_access_reports_private_repository_when_auth_is_required() {
         let root = test_root("access-assessment-private");
         if root.exists() {
-            fs::remove_dir_all(&root).expect("existing private assessment root should be removable");
+            fs::remove_dir_all(&root)
+                .expect("existing private assessment root should be removable");
         }
 
         let project_root = root.join("http-root");
@@ -1419,10 +1396,8 @@ mod tests {
             r#"{"username":"comrade","password":"sickle"}"#,
         )
         .expect("basic credentials should parse");
-        let server = AuthenticatedGitHttpServer::start(
-            &project_root,
-            authorization_header_value(&auth),
-        );
+        let server =
+            AuthenticatedGitHttpServer::start(&project_root, authorization_header_value(&auth));
 
         let assessment = assess_repository_access(&server.repository_url("private-tags.git"))
             .expect("private repository assessment should classify auth requirement");
@@ -1440,7 +1415,8 @@ mod tests {
     fn assess_repository_access_reports_invalid_repository_for_missing_remote() {
         let root = test_root("access-assessment-invalid");
         if root.exists() {
-            fs::remove_dir_all(&root).expect("existing invalid assessment root should be removable");
+            fs::remove_dir_all(&root)
+                .expect("existing invalid assessment root should be removable");
         }
 
         let project_root = root.join("http-root");
@@ -1579,10 +1555,8 @@ mod tests {
             r#"{"username":"comrade","password":"sickle"}"#,
         )
         .expect("basic credentials should parse");
-        let server = AuthenticatedGitHttpServer::start(
-            &project_root,
-            authorization_header_value(&auth),
-        );
+        let server =
+            AuthenticatedGitHttpServer::start(&project_root, authorization_header_value(&auth));
 
         let tags = GitTagLister::new()
             .list_tags(&GitTagListRequest {
@@ -1657,10 +1631,8 @@ mod tests {
             r#"{"username":"comrade","password":"sickle"}"#,
         )
         .expect("basic credentials should parse");
-        let server = AuthenticatedGitHttpServer::start(
-            &project_root,
-            authorization_header_value(&auth),
-        );
+        let server =
+            AuthenticatedGitHttpServer::start(&project_root, authorization_header_value(&auth));
         let workspace_path = root.join("workspace");
 
         GitWorkspaceSyncer::new()
@@ -1735,11 +1707,8 @@ mod tests {
 
     #[test]
     fn platform_git_command_args_can_override_credential_helper() {
-        let args = platform_git_command_args(
-            vec![String::from("ls-remote")],
-            Some("manager"),
-            false,
-        );
+        let args =
+            platform_git_command_args(vec![String::from("ls-remote")], Some("manager"), false);
 
         assert_eq!(args[0], "-c");
         assert_eq!(args[1], "core.askPass=");
@@ -1758,12 +1727,7 @@ mod tests {
 
     #[test]
     fn prepare_git_command_disables_interactive_authentication() {
-        let (_, command) = prepare_git_command(
-            None,
-            vec![String::from("ls-remote")],
-            None,
-            false,
-        );
+        let (_, command) = prepare_git_command(None, vec![String::from("ls-remote")], None, false);
 
         assert_eq!(
             command_env_value(&command, "GIT_TERMINAL_PROMPT").as_deref(),
@@ -1835,10 +1799,7 @@ mod tests {
 
     impl AuthenticatedGitHttpServer {
         fn start(project_root: &Path, expected_authorization_value: String) -> Self {
-            Self::start_with_optional_auth(
-                project_root,
-                Some(expected_authorization_value),
-            )
+            Self::start_with_optional_auth(project_root, Some(expected_authorization_value))
         }
 
         fn start_public(project_root: &Path) -> Self {
@@ -1849,8 +1810,8 @@ mod tests {
             project_root: &Path,
             expected_authorization_value: Option<String>,
         ) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0")
-                .expect("git http test listener should bind");
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("git http test listener should bind");
             let address = listener
                 .local_addr()
                 .expect("git http test listener should expose an address");
@@ -1978,9 +1939,7 @@ mod tests {
             return Ok(());
         };
 
-        if let Some(expected_authorization_value) =
-            config.expected_authorization_value.as_deref()
-        {
+        if let Some(expected_authorization_value) = config.expected_authorization_value.as_deref() {
             let Some(authorization) = request.header("authorization") else {
                 return write_forbidden_response(stream);
             };
@@ -2049,8 +2008,7 @@ mod tests {
         }
 
         let expect_continue = headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("expect")
-                && value.eq_ignore_ascii_case("100-continue")
+            name.eq_ignore_ascii_case("expect") && value.eq_ignore_ascii_case("100-continue")
         });
         let content_length = headers
             .iter()
@@ -2123,10 +2081,7 @@ mod tests {
         target.split_once('?').unwrap_or((target, ""))
     }
 
-    fn write_git_http_backend_response(
-        stream: &mut TcpStream,
-        output: &Output,
-    ) -> io::Result<()> {
+    fn write_git_http_backend_response(stream: &mut TcpStream, output: &Output) -> io::Result<()> {
         if !output.status.success() {
             let body = format_git_command_failure("git-http-backend", output);
             return write_http_response(
@@ -2256,11 +2211,7 @@ mod tests {
         PathBuf::from(exec_path).join(executable)
     }
 
-    fn create_repository_with_tags(
-        repository_path: &Path,
-        unity_version: &str,
-        tags: &[&str],
-    ) {
+    fn create_repository_with_tags(repository_path: &Path, unity_version: &str, tags: &[&str]) {
         if repository_path.exists() {
             fs::remove_dir_all(repository_path)
                 .expect("existing git test repository should be removable");
@@ -2269,13 +2220,18 @@ mod tests {
         fs::create_dir_all(repository_path.join("ProjectSettings"))
             .expect("project settings directory should create");
         fs::write(
-            repository_path.join("ProjectSettings").join("ProjectVersion.txt"),
+            repository_path
+                .join("ProjectSettings")
+                .join("ProjectVersion.txt"),
             format!("m_EditorVersion: {unity_version}\n"),
         )
         .expect("project version file should write");
 
         run_git_test_command(repository_path, &["init"]);
-        run_git_test_command(repository_path, &["config", "user.name", "runtime-git-tests"]);
+        run_git_test_command(
+            repository_path,
+            &["config", "user.name", "runtime-git-tests"],
+        );
         run_git_test_command(
             repository_path,
             &["config", "user.email", "runtime-git-tests@example.com"],

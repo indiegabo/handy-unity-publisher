@@ -71,10 +71,8 @@ mod tests {
             .expect_err("unimplemented engines should be rejected by the registry");
 
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported repository engine_kind \"godot\"")
-        );
+        assert!(error
+            .to_string()
+            .contains("unsupported repository engine_kind \"godot\""));
     }
 }

@@ -33,9 +33,7 @@ impl ManifestCompatibility {
     /// Returns the active manifest-loading contract for the scaffold.
     pub const fn description(self) -> &'static str {
         match self {
-            Self::FileSystem => {
-                "repository-root pipelines directory preserved during migration"
-            }
+            Self::FileSystem => "repository-root pipelines directory preserved during migration",
         }
     }
 }
@@ -430,7 +428,9 @@ impl Manifest {
                 return Err(String::from("spec.build.targets[].name must not be empty"));
             }
             if !build_targets.insert(name.to_owned()) {
-                return Err(format!("spec.build.targets contains duplicate name {name:?}"));
+                return Err(format!(
+                    "spec.build.targets contains duplicate name {name:?}"
+                ));
             }
             let build_kind = if target.build_kind.trim().is_empty() {
                 DEFAULT_BUILD_KIND
@@ -460,14 +460,17 @@ impl Manifest {
                 ));
             }
             if target.output.kind.trim().is_empty() {
-                return Err(format!("spec.build.targets[{name:?}].output.kind must not be empty"));
+                return Err(format!(
+                    "spec.build.targets[{name:?}].output.kind must not be empty"
+                ));
             }
             if target.output.path.trim().is_empty() {
-                return Err(format!("spec.build.targets[{name:?}].output.path must not be empty"));
+                return Err(format!(
+                    "spec.build.targets[{name:?}].output.path must not be empty"
+                ));
             }
-            validate_requested_output_path(&target.output.kind, &target.output.path).map_err(
-                |error| format!("spec.build.targets[{name:?}].output.path: {error}"),
-            )?;
+            validate_requested_output_path(&target.output.kind, &target.output.path)
+                .map_err(|error| format!("spec.build.targets[{name:?}].output.path: {error}"))?;
             if target.runner.timeout_seconds < 0 {
                 return Err(format!(
                     "spec.build.targets[{name:?}].runner.timeoutSeconds must not be negative"
@@ -479,13 +482,19 @@ impl Manifest {
         for target in &self.spec.publish.targets {
             let name = target.name.trim();
             if name.is_empty() {
-                return Err(String::from("spec.publish.targets[].name must not be empty"));
+                return Err(String::from(
+                    "spec.publish.targets[].name must not be empty",
+                ));
             }
             if !publish_targets.insert(name.to_owned()) {
-                return Err(format!("spec.publish.targets contains duplicate name {name:?}"));
+                return Err(format!(
+                    "spec.publish.targets contains duplicate name {name:?}"
+                ));
             }
             if target.kind.trim().is_empty() {
-                return Err(format!("spec.publish.targets[{name:?}].kind must not be empty"));
+                return Err(format!(
+                    "spec.publish.targets[{name:?}].kind must not be empty"
+                ));
             }
             if !target.credentials.trim().is_empty()
                 && !credentials_by_name.contains(target.credentials.trim())
@@ -537,7 +546,9 @@ impl ValueSource {
         }
 
         if count != 1 {
-            return Err(String::from("exactly one of value, env, or file must be set"));
+            return Err(String::from(
+                "exactly one of value, env, or file must be set",
+            ));
         }
 
         Ok(())
@@ -707,8 +718,7 @@ pub fn load_dir(dir: impl AsRef<Path>) -> io::Result<LoadResult> {
                 path: manifest.path.display().to_string(),
                 error: format!(
                     "duplicate metadata.name {:?} already declared by {}",
-                    manifest.metadata.name,
-                    first_path
+                    manifest.metadata.name, first_path
                 ),
             });
             continue;
@@ -778,18 +788,16 @@ fn apply_manifest(
 ) -> Result<StoredRepository, String> {
     let mut credential_ids = HashMap::with_capacity(manifest.spec.credentials.len());
     for credential_spec in &manifest.spec.credentials {
-        let record = upsert_credential(transaction, manifest, credential_spec, credentials_by_name)?;
+        let record =
+            upsert_credential(transaction, manifest, credential_spec, credentials_by_name)?;
         credential_ids.insert(credential_spec.name.trim().to_owned(), record.id);
     }
 
-    let repository = upsert_repository(
-        transaction,
-        manifest,
-        repositories_by_name,
-        &credential_ids,
-    )?;
+    let repository =
+        upsert_repository(transaction, manifest, repositories_by_name, &credential_ids)?;
     let build_targets = sync_build_targets(transaction, manifest, &repository)?;
-    let publish_targets = sync_publish_targets(transaction, manifest, &repository, &credential_ids)?;
+    let publish_targets =
+        sync_publish_targets(transaction, manifest, &repository, &credential_ids)?;
     sync_bindings(transaction, manifest, &build_targets, &publish_targets)?;
 
     Ok(repository)
@@ -804,8 +812,7 @@ fn upsert_credential(
     let config_json = build_credential_config_json(credential_spec).map_err(|error| {
         format!(
             "sync credential {:?} in pipeline {:?}: {error}",
-            credential_spec.name,
-            manifest.metadata.name
+            credential_spec.name, manifest.metadata.name
         )
     })?;
     let record_name = credential_record_name(&manifest.metadata.name, &credential_spec.name);
@@ -823,8 +830,13 @@ fn upsert_credential(
         return Ok(updated);
     }
 
-    let created = create_credential(transaction, &record_name, &credential_spec.kind, &config_json)
-        .map_err(|error| format!("create credential {record_name:?}: {error}"))?;
+    let created = create_credential(
+        transaction,
+        &record_name,
+        &credential_spec.kind,
+        &config_json,
+    )
+    .map_err(|error| format!("create credential {record_name:?}: {error}"))?;
     credentials_by_name.insert(record_name, created.clone());
     Ok(created)
 }
@@ -896,8 +908,12 @@ fn sync_build_targets(
     repository: &StoredRepository,
 ) -> Result<HashMap<String, StoredBuildTarget>, String> {
     let repository_engine = manifest.spec.repository.engine.trim().to_ascii_lowercase();
-    let existing_targets = list_build_targets(transaction, repository.id)
-        .map_err(|error| format!("list build targets for repository {:?}: {error}", repository.name))?;
+    let existing_targets = list_build_targets(transaction, repository.id).map_err(|error| {
+        format!(
+            "list build targets for repository {:?}: {error}",
+            repository.name
+        )
+    })?;
     let existing_by_name = existing_targets
         .iter()
         .cloned()
@@ -919,14 +935,14 @@ fn sync_build_targets(
                 target_spec.name
             )
         })?;
-        let config_json = marshal_json_object(&target_spec.config)
-            .map_err(|error| format!("marshal build target {:?} config: {error}", target_spec.name))?;
+        let config_json = marshal_json_object(&target_spec.config).map_err(|error| {
+            format!(
+                "marshal build target {:?} config: {error}",
+                target_spec.name
+            )
+        })?;
         let enabled = bool_value(target_spec.enabled, true);
-        validate_build_target_contract(
-            repository_engine.as_str(),
-            &build_kind,
-            &contract_json,
-        )?;
+        validate_build_target_contract(repository_engine.as_str(), &build_kind, &contract_json)?;
 
         let target = if let Some(existing) = existing_by_name.get(target_spec.name.trim()) {
             update_build_target(
@@ -1012,21 +1028,26 @@ fn sync_publish_targets(
 
     for target_spec in &manifest.spec.publish.targets {
         let config_json = marshal_json_object(&target_spec.config).map_err(|error| {
-            format!("marshal publish target {:?} config: {error}", target_spec.name)
+            format!(
+                "marshal publish target {:?} config: {error}",
+                target_spec.name
+            )
         })?;
 
         let mut credentials_id = None;
         if !target_spec.credentials.trim().is_empty() {
-            credentials_id = Some(*credential_ids.get(target_spec.credentials.trim()).ok_or_else(
-                || {
-                    format!(
+            credentials_id = Some(
+                *credential_ids
+                    .get(target_spec.credentials.trim())
+                    .ok_or_else(|| {
+                        format!(
                         "pipeline {:?} references unknown publish credential {:?} for target {:?}",
                         manifest.metadata.name,
                         target_spec.credentials.trim(),
                         target_spec.name
                     )
-                },
-            )?);
+                    })?,
+            );
         }
 
         let enabled = bool_value(target_spec.enabled, true);
@@ -1089,10 +1110,12 @@ fn sync_bindings(
     let mut existing_bindings = HashMap::new();
 
     for target in build_targets.values() {
-        let bindings = list_bindings(transaction, target.id)
-            .map_err(|error| format!("list bindings for build target {:?}: {error}", target.name))?;
+        let bindings = list_bindings(transaction, target.id).map_err(|error| {
+            format!("list bindings for build target {:?}: {error}", target.name)
+        })?;
         for binding in bindings {
-            let publish_name = publish_target_name_by_id(publish_targets, binding.publish_target_id);
+            let publish_name =
+                publish_target_name_by_id(publish_targets, binding.publish_target_id);
             if publish_name.is_empty() {
                 continue;
             }
@@ -1121,8 +1144,7 @@ fn sync_bindings(
         let options_json = marshal_json_object(&binding_spec.options).map_err(|error| {
             format!(
                 "marshal binding {:?} -> {:?} options: {error}",
-                binding_spec.build_target,
-                binding_spec.publish_target
+                binding_spec.build_target, binding_spec.publish_target
             )
         })?;
         let key = binding_key(&binding_spec.build_target, &binding_spec.publish_target);
@@ -1201,7 +1223,8 @@ fn disable_removed_repositories(
 
 fn open_connection(database_path: &Path) -> io::Result<Connection> {
     let connection = Connection::open(database_path).map_err(sqlite_error)?;
-    connection.busy_timeout(std::time::Duration::from_millis(SQLITE_BUSY_TIMEOUT_MILLIS))
+    connection
+        .busy_timeout(std::time::Duration::from_millis(SQLITE_BUSY_TIMEOUT_MILLIS))
         .map_err(sqlite_error)?;
     connection
         .execute_batch("PRAGMA foreign_keys = ON;")
@@ -1866,7 +1889,10 @@ fn validate_build_target_contract(
     }
 }
 
-fn validate_requested_output_path(output_kind: &str, output_path_template: &str) -> Result<(), String> {
+fn validate_requested_output_path(
+    output_kind: &str,
+    output_path_template: &str,
+) -> Result<(), String> {
     let trimmed_kind = output_kind.trim();
     let trimmed_path = output_path_template.trim();
     if trimmed_kind.is_empty() || trimmed_path.is_empty() {
@@ -1895,7 +1921,11 @@ fn credential_record_name(pipeline_name: &str, credential_name: &str) -> String 
 }
 
 fn binding_key(build_target_name: &str, publish_target_name: &str) -> String {
-    format!("{}->{}", build_target_name.trim(), publish_target_name.trim())
+    format!(
+        "{}->{}",
+        build_target_name.trim(),
+        publish_target_name.trim()
+    )
 }
 
 fn publish_target_name_by_id(
@@ -1970,7 +2000,9 @@ fn bool_to_int(value: bool) -> i64 {
     }
 }
 
-fn collect_rows<T>(rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>) -> io::Result<Vec<T>> {
+fn collect_rows<T>(
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
+) -> io::Result<Vec<T>> {
     let mut collected = Vec::new();
     for row in rows {
         collected.push(row.map_err(sqlite_error)?);
@@ -1994,9 +2026,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use rusqlite::{params, Connection};
     use runtime_config::RuntimeConfig;
     use runtime_store::{initialize_database, StorageLayout};
+    use rusqlite::{params, Connection};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -2084,7 +2116,10 @@ mod tests {
             .expect("credential record should exist");
         assert_eq!(credential.0, "revolutions/origin");
         assert_eq!(credential.1, "git-http-basic");
-        assert_eq!(credential.2, r#"{"password":"secret-token","username":"git"}"#);
+        assert_eq!(
+            credential.2,
+            r#"{"password":"secret-token","username":"git"}"#
+        );
 
         let repository_id = connection
             .query_row(
@@ -2252,12 +2287,7 @@ mod tests {
             .query_row(
                 "SELECT enabled, contract_json FROM build_targets WHERE name = ?",
                 ["linux64"],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )
             .expect("build target should exist");
         assert_eq!(build_target.0, 0);
@@ -2303,7 +2333,9 @@ mod tests {
         let load_result = load_dir(&pipelines_dir).expect("manifest load should succeed");
         assert!(load_result.manifests.is_empty());
         assert_eq!(load_result.issues.len(), 1);
-        assert!(load_result.issues[0].error.contains("remove the .zip suffix"));
+        assert!(load_result.issues[0]
+            .error
+            .contains("remove the .zip suffix"));
     }
 
     #[test]
@@ -2312,8 +2344,7 @@ mod tests {
         let pipelines_dir = root.join("pipelines");
         fs::create_dir_all(&pipelines_dir).expect("pipelines directory should exist");
         let token_path = root.join("token.txt");
-        fs::write(&token_path, " revolution-token\n")
-            .expect("token file should be written");
+        fs::write(&token_path, " revolution-token\n").expect("token file should be written");
         write_manifest(
             &pipelines_dir.join("alpha.yml"),
             format!(
@@ -2389,7 +2420,9 @@ mod tests {
         let load_result = load_dir(&pipelines_dir).expect("manifest load should succeed");
         assert!(load_result.manifests.is_empty());
         assert_eq!(load_result.issues.len(), 1);
-        assert!(load_result.issues[0].error.contains("only \"unity\" is accepted"));
+        assert!(load_result.issues[0]
+            .error
+            .contains("only \"unity\" is accepted"));
     }
 
     #[test]
@@ -2428,7 +2461,9 @@ mod tests {
         let load_result = load_dir(&pipelines_dir).expect("manifest load should succeed");
         assert!(load_result.manifests.is_empty());
         assert_eq!(load_result.issues.len(), 1);
-        assert!(load_result.issues[0].error.contains("only \"player\" is accepted"));
+        assert!(load_result.issues[0]
+            .error
+            .contains("only \"player\" is accepted"));
     }
 
     fn initialize_test_database(root: &Path) -> StorageLayout {
@@ -2452,9 +2487,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after unix epoch")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "runtime-manifests-{label}-{now}-{token}"
-        ));
+        let root = std::env::temp_dir().join(format!("runtime-manifests-{label}-{now}-{token}"));
         fs::create_dir_all(&root).expect("test root should be created");
         root
     }

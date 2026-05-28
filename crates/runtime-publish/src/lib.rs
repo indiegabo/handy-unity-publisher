@@ -306,7 +306,11 @@ fn require_filesystem_move_binding_options(
     plan: &ExecutionPlan,
 ) -> io::Result<FilesystemBindingOptions> {
     let binding_options = parse_filesystem_binding_options(plan)?;
-    if !binding_options.operation.trim().eq_ignore_ascii_case("move") {
+    if !binding_options
+        .operation
+        .trim()
+        .eq_ignore_ascii_case("move")
+    {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
             "filesystem publish bindings must use the move operation",
@@ -348,8 +352,8 @@ fn parse_itch_credential_config(
         ));
     }
 
-    let config: ItchCredentialConfig = serde_json::from_str(raw)
-        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+    let config: ItchCredentialConfig =
+        serde_json::from_str(raw).map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
     if config.api_key.trim().is_empty() {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -375,9 +379,7 @@ fn resolve_itch_butler_executable_with_sidecar(
 ) -> String {
     let trimmed = configured_path.trim();
     if trimmed.is_empty() {
-        if let Some(sidecar_path) =
-            shell_sidecar_path.filter(|value| !value.is_empty())
-        {
+        if let Some(sidecar_path) = shell_sidecar_path.filter(|value| !value.is_empty()) {
             return PathBuf::from(sidecar_path).display().to_string();
         }
 
@@ -476,7 +478,10 @@ fn require_existing_source_path(source_path: &str) -> io::Result<PathBuf> {
     if !metadata.is_file() && !metadata.is_dir() {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
-            format!("publish source {:?} is not a file or directory", path.display()),
+            format!(
+                "publish source {:?} is not a file or directory",
+                path.display()
+            ),
         ));
     }
 
@@ -488,7 +493,10 @@ fn copy_regular_file(source_path: &Path, destination_path: &Path) -> io::Result<
     if !source_metadata.is_file() {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
-            format!("publish source {:?} is not a regular file", source_path.display()),
+            format!(
+                "publish source {:?} is not a regular file",
+                source_path.display()
+            ),
         ));
     }
 
@@ -519,8 +527,8 @@ fn move_regular_file(source_path: &Path, destination_path: &Path) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_destination_path, resolve_itch_butler_executable_with_sidecar,
-        ExecutionPlan, ExecutionProcessor, HGP_BUTLER_PATH_ENV, Processor,
+        resolve_destination_path, resolve_itch_butler_executable_with_sidecar, ExecutionPlan,
+        ExecutionProcessor, Processor, HGP_BUTLER_PATH_ENV,
     };
     use serde_json::json;
     use std::fs;
@@ -745,13 +753,9 @@ mod tests {
     #[test]
     fn resolve_itch_butler_executable_reads_shell_environment_variable() {
         let sidecar = if cfg!(windows) {
-            std::ffi::OsString::from(
-                "C:/repo/src-tauri/bin/hgp-butler-x86_64-pc-windows-msvc.exe",
-            )
+            std::ffi::OsString::from("C:/repo/src-tauri/bin/hgp-butler-x86_64-pc-windows-msvc.exe")
         } else {
-            std::ffi::OsString::from(
-                "/repo/src-tauri/bin/hgp-butler-x86_64-unknown-linux-gnu",
-            )
+            std::ffi::OsString::from("/repo/src-tauri/bin/hgp-butler-x86_64-unknown-linux-gnu")
         };
 
         assert_eq!(HGP_BUTLER_PATH_ENV, "HGP_BUTLER_PATH");
@@ -839,5 +843,4 @@ mod tests {
             std::process::id()
         ))
     }
-
 }

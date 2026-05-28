@@ -1,9 +1,9 @@
-use rusqlite::OptionalExtension;
 use runtime_config::RuntimeConfig;
 use runtime_store::{
     open_connection, store_host_secret, LocalCoordinator, StorageLayout,
     UpsertCredentialRecordInput, HOST_KEYRING_SERVICE, KEYRING_SECRET_REF_PREFIX,
 };
+use rusqlite::OptionalExtension;
 use serde_json::Value;
 use std::io::{self, ErrorKind, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
