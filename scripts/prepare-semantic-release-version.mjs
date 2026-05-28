@@ -33,3 +33,17 @@ const syncResult = spawnSync(npmCommand, ["run", "version:sync"], {
 if (syncResult.status !== 0) {
     throw new Error("npm run version:sync failed during semantic release preparation.");
 }
+
+const cargoCommand = process.platform === "win32" ? "cargo.exe" : "cargo";
+const lockfileResult = spawnSync(
+    cargoCommand,
+    ["check", "-p", "runtime-bin"],
+    {
+        cwd: repositoryRoot,
+        stdio: "inherit",
+    },
+);
+
+if (lockfileResult.status !== 0) {
+    throw new Error("cargo check -p runtime-bin failed during semantic release preparation.");
+}

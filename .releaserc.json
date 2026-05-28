@@ -17,6 +17,7 @@
       {
         "assets": [
           "Cargo.toml",
+          "Cargo.lock",
           "package-lock.json",
           "src-react/package.json",
           "src-react/package-lock.json",
