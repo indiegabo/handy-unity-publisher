@@ -49,6 +49,23 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Resolve Cargo target directories
+        id: windows-targets
+        shell: pwsh
+        run: |
+          $targetDir = (& cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
+          if (-not $targetDir) {
+              throw "cargo metadata did not report a target directory"
+          }
+
+          $bundleRoot = Join-Path $targetDir "$env:TARGET_TRIPLE/release/bundle"
+          $targetDirGlob = $targetDir -replace '\\', '/'
+
+          "TARGET_DIR=$targetDir" >> $env:GITHUB_ENV
+          "BUNDLE_ROOT=$bundleRoot" >> $env:GITHUB_ENV
+          "BUNDLE_ROOT_GLOB=$targetDirGlob/$env:TARGET_TRIPLE/release/bundle" >> $env:GITHUB_ENV
+          "bundle_root_glob=$targetDirGlob/$env:TARGET_TRIPLE/release/bundle" >> $env:GITHUB_OUTPUT
+
       - name: Install desktop UI dependencies
         shell: bash
         run: npm ci --prefix src-react
@@ -61,18 +78,14 @@ jobs:
         shell: bash
         run: node ./scripts/prepare-butler-sidecar.mjs --target "$TARGET_TRIPLE"
 
-      - name: Install Tauri CLI
-        shell: bash
-        run: cargo install tauri-cli --version '^2' --locked
-
       - name: Build Windows desktop bundle
         shell: bash
-        run: cargo tauri build --manifest-path src-tauri/Cargo.toml --config src-tauri/tauri.release.conf.json --target "$TARGET_TRIPLE" --bundles msi,nsis
+        run: npm exec --yes --package @tauri-apps/cli@^2 -- tauri build --config src-tauri/tauri.release.conf.json --target "$TARGET_TRIPLE" --bundles msi,nsis
 
       - name: Generate bundle checksums
         shell: pwsh
         run: |
-          $bundleRoot = Join-Path $PWD "target/$env:TARGET_TRIPLE/release/bundle"
+          $bundleRoot = $env:BUNDLE_ROOT
           if (-not (Test-Path $bundleRoot)) {
               throw "bundle output directory was not found at $bundleRoot"
           }
@@ -97,9 +110,9 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
-            target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.msi
-            target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.exe
-            target/${{ env.TARGET_TRIPLE }}/release/bundle/SHA256SUMS.txt
+            ${{ steps.windows-targets.outputs.bundle_root_glob }}/**/*.msi
+            ${{ steps.windows-targets.outputs.bundle_root_glob }}/**/*.exe
+            ${{ steps.windows-targets.outputs.bundle_root_glob }}/SHA256SUMS.txt
 
       - name: Validate Itch publish settings
         shell: pwsh
@@ -125,7 +138,7 @@ jobs:
               throw "Butler sidecar was not found at $butlerPath"
           }
 
-          $bundleRoot = Join-Path $PWD "target/$env:TARGET_TRIPLE/release/bundle"
+          $bundleRoot = $env:BUNDLE_ROOT
           $exeAsset = Get-ChildItem -Path $bundleRoot -Recurse -File | Where-Object { $_.Extension -eq '.exe' } | Select-Object -First 1
           $msiAsset = Get-ChildItem -Path $bundleRoot -Recurse -File | Where-Object { $_.Extension -eq '.msi' } | Select-Object -First 1
 
@@ -191,6 +204,24 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Resolve Cargo target directories
+        id: linux-targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_dir="$(cargo metadata --format-version 1 --no-deps | node -e "const fs = require('fs'); const metadata = JSON.parse(fs.readFileSync(0, 'utf8')); process.stdout.write(metadata.target_directory || '');")"
+          if [[ -z "$target_dir" ]]; then
+            echo "cargo metadata did not report a target directory" >&2
+            exit 1
+          fi
+
+          bundle_root="$target_dir/$TARGET_TRIPLE/release/bundle"
+
+          echo "TARGET_DIR=$target_dir" >> "$GITHUB_ENV"
+          echo "BUNDLE_ROOT=$bundle_root" >> "$GITHUB_ENV"
+          echo "BUNDLE_ROOT_GLOB=$bundle_root" >> "$GITHUB_ENV"
+          echo "bundle_root_glob=$bundle_root" >> "$GITHUB_OUTPUT"
+
       - name: Install desktop UI dependencies
         shell: bash
         run: npm ci --prefix src-react
@@ -201,26 +232,22 @@ jobs:
           set -euo pipefail
           cargo build --locked --release --package runtime-bin --target "$TARGET_TRIPLE"
           mkdir -p src-tauri/bin
-          cp "target/$TARGET_TRIPLE/release/hgp-runtime" "src-tauri/bin/hgp-runtime-$TARGET_TRIPLE"
+          cp "$TARGET_DIR/$TARGET_TRIPLE/release/hgp-runtime" "src-tauri/bin/hgp-runtime-$TARGET_TRIPLE"
           chmod +x "src-tauri/bin/hgp-runtime-$TARGET_TRIPLE"
 
       - name: Prepare packaged Butler sidecar
         shell: bash
         run: node ./scripts/prepare-butler-sidecar.mjs --target "$TARGET_TRIPLE"
 
-      - name: Install Tauri CLI
-        shell: bash
-        run: cargo install tauri-cli --version '^2' --locked
-
       - name: Build Linux desktop bundle
         shell: bash
-        run: cargo tauri build --manifest-path src-tauri/Cargo.toml --config src-tauri/tauri.release.conf.json --target "$TARGET_TRIPLE" --bundles appimage
+        run: npm exec --yes --package @tauri-apps/cli@^2 -- tauri build --config src-tauri/tauri.release.conf.json --target "$TARGET_TRIPLE" --bundles appimage
 
       - name: Generate bundle checksums
         shell: bash
         run: |
           set -euo pipefail
-          bundle_root="target/$TARGET_TRIPLE/release/bundle"
+          bundle_root="$BUNDLE_ROOT"
           if [[ ! -d "$bundle_root" ]]; then
             echo "bundle output directory was not found at $bundle_root" >&2
             exit 1
@@ -243,8 +270,8 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
-            target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.AppImage
-            target/${{ env.TARGET_TRIPLE }}/release/bundle/SHA256SUMS-linux.txt
+            ${{ steps.linux-targets.outputs.bundle_root_glob }}/**/*.AppImage
+            ${{ steps.linux-targets.outputs.bundle_root_glob }}/SHA256SUMS-linux.txt
 
       - name: Validate Linux Itch publish settings
         shell: bash
@@ -261,7 +288,7 @@ jobs:
           butler_path="src-tauri/bin/hgp-butler-$TARGET_TRIPLE"
           [[ -x "$butler_path" ]] || { echo "Butler sidecar not found at $butler_path" >&2; exit 1; }
 
-          bundle_root="target/$TARGET_TRIPLE/release/bundle"
+          bundle_root="$BUNDLE_ROOT"
           appimage_path="$(find "$bundle_root" -type f -name '*.AppImage' | head -n 1 || true)"
 
           [[ -n "$appimage_path" ]] || { echo "No AppImage installer found for Itch publish." >&2; exit 1; }
