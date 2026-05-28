@@ -206,7 +206,7 @@ jobs:
 
       - name: Build Linux desktop bundle
         shell: bash
-        run: cargo tauri build --manifest-path src-tauri/Cargo.toml --config src-tauri/tauri.release.conf.json --target "$TARGET_TRIPLE" --bundles appimage,deb
+        run: cargo tauri build --manifest-path src-tauri/Cargo.toml --config src-tauri/tauri.release.conf.json --target "$TARGET_TRIPLE" --bundles appimage
 
       - name: Generate bundle checksums
         shell: bash
@@ -218,7 +218,7 @@ jobs:
             exit 1
           fi
 
-          mapfile -t assets < <(find "$bundle_root" -type f \( -name '*.AppImage' -o -name '*.deb' \) | sort)
+          mapfile -t assets < <(find "$bundle_root" -type f -name '*.AppImage' | sort)
           if [[ ${#assets[@]} -eq 0 ]]; then
             echo "no Linux release assets were produced under $bundle_root" >&2
             exit 1
@@ -236,7 +236,6 @@ jobs:
           tag_name: ${{ github.event.release.tag_name }}
           files: |
             target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.AppImage
-            target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.deb
             target/${{ env.TARGET_TRIPLE }}/release/bundle/SHA256SUMS-linux.txt
 
       - name: Validate Linux Itch publish settings
@@ -256,13 +255,7 @@ jobs:
 
           bundle_root="target/$TARGET_TRIPLE/release/bundle"
           appimage_path="$(find "$bundle_root" -type f -name '*.AppImage' | head -n 1 || true)"
-          deb_path="$(find "$bundle_root" -type f -name '*.deb' | head -n 1 || true)"
 
-          asset_path="$appimage_path"
-          if [[ -z "$asset_path" ]]; then
-            asset_path="$deb_path"
-          fi
+          [[ -n "$appimage_path" ]] || { echo "No AppImage installer found for Itch publish." >&2; exit 1; }
 
-          [[ -n "$asset_path" ]] || { echo "No Linux installer found for Itch publish." >&2; exit 1; }
-
-          "$butler_path" push "$asset_path" "$ITCH_PROJECT:$ITCH_CHANNEL_LINUX" --userversion "$GITHUB_REF_NAME"
+          "$butler_path" push "$appimage_path" "$ITCH_PROJECT:$ITCH_CHANNEL_LINUX" --userversion "$GITHUB_REF_NAME"
