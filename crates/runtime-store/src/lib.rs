@@ -15757,11 +15757,12 @@ mod tests {
             max_concurrent_publish_runs: 1,
             max_active_releases_per_repository: 1,
         };
+        let queue_lease_ttl = Duration::from_secs(30);
         let first_claim = coordinator
             .claim_next_build_job(
                 "planner-worker-a",
                 Duration::ZERO,
-                Duration::from_millis(400),
+                queue_lease_ttl,
                 &limits,
             )
             .expect("first queued build should claim")
@@ -15770,7 +15771,7 @@ mod tests {
             .claim_next_build_job(
                 "planner-worker-b",
                 Duration::ZERO,
-                Duration::from_millis(400),
+                queue_lease_ttl,
                 &limits,
             )
             .expect("second queued build lookup should succeed");
@@ -15804,7 +15805,7 @@ mod tests {
             .claim_next_build_job(
                 "planner-worker-b",
                 Duration::ZERO,
-                Duration::from_millis(400),
+                queue_lease_ttl,
                 &limits,
             )
             .expect("second queued build should claim after the first terminal build")
