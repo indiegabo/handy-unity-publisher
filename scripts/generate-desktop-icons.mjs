@@ -13,7 +13,7 @@ const iconsDirectoryPath = path.join(
     "src-tauri",
     "icons",
 );
-const appIconSourcePath = path.join(iconsDirectoryPath, "app-icon-source.png");
+const appIconSourcePath = path.join(iconsDirectoryPath, "hgp-logo.png");
 
 function runCommand(command, cwd) {
     return new Promise((resolve, reject) => {

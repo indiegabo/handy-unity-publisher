@@ -92,7 +92,7 @@ const BUILD_EXECUTION_REPORT_FILE_NAME: &str = "execution-report.json";
 const BUILD_EXECUTION_LOG_ARCHIVE_FILE_NAME: &str = "execution-logs.zip";
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ICON_ID: &str = "hgp-tray";
-const TRAY_ICON_SOURCE_FILE_NAME: &str = "tray-icon-source.png";
+const APP_LOGO_SOURCE_FILE_NAME: &str = "hgp-logo.png";
 const TRAY_MENU_OPEN_ID: &str = "tray-open";
 const TRAY_MENU_QUIT_ID: &str = "tray-quit";
 const POPUP_WINDOW_WIDTH: u32 = 480;
@@ -1158,7 +1158,7 @@ fn initialize_tray(app: &tauri::App) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let tray_icon_source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("icons")
-        .join(TRAY_ICON_SOURCE_FILE_NAME);
+        .join(APP_LOGO_SOURCE_FILE_NAME);
     let icon = if tray_icon_source_path.is_file() {
         tauri::image::Image::from_path(&tray_icon_source_path).map_err(|error| {
             format!(

@@ -52,14 +52,12 @@ feed plus focus-screen working views, managed overlays, and staged flows.
 
 ## Desktop Icons
 
-The desktop shell supports separate icon sources for the bundled app and the
-tray surface.
+The desktop shell now uses a single logo source for both the bundled app icons
+and the runtime tray surface.
 
-- `src-tauri/icons/app-icon-source.png` is the source image used
-  to regenerate the packaged app icons declared in the Tauri bundle config.
-- `src-tauri/icons/tray-icon-source.png` is an optional dedicated
-  PNG used by the runtime tray icon. When it is absent, the tray falls back to
-  the default app icon.
+- `src-tauri/icons/hgp-logo.png` is the shared source image used
+  to regenerate the packaged app icons declared in the Tauri bundle config and
+  to load the runtime tray icon.
 
 Regenerate the bundled app icon set with `npm run icons:generate`. Tauri dev
 and build commands now run that step automatically before launching the shell.
@@ -230,6 +228,10 @@ Itch publish automation in `.github/workflows/release-bundle.yml` requires:
 - repository variable `ITCH_CHANNEL_WINDOWS_EXE`
 - repository variable `ITCH_CHANNEL_WINDOWS_MSI`
 - repository variable `ITCH_CHANNEL_LINUX`
+
+Storefront assets that support the Itch release surface should live under
+`.github/assets/itch/`. The current project cover image is stored at
+`.github/assets/itch/itch-cover.png`.
 
 ## Operator Expectations
 
