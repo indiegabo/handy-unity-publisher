@@ -405,17 +405,17 @@ It should stop implying:
 
 ### Desktop UI
 
-- `apps/desktop/ui/src/components/CreateProjectWizard.tsx`
-- `apps/desktop/ui/src/components/RepositoryProjectDetail.tsx`
-- `apps/desktop/ui/src/components/AuthProvidersFocusScreen.tsx`
-- `apps/desktop/ui/src/services/auth.ts`
-- `apps/desktop/ui/src/services/projects.ts`
+- `src-react/src/components/CreateProjectWizard.tsx`
+- `src-react/src/components/RepositoryProjectDetail.tsx`
+- `src-react/src/components/AuthProvidersFocusScreen.tsx`
+- `src-react/src/services/auth.ts`
+- `src-react/src/services/projects.ts`
 - one new repository-access service module if the existing services become too
   crowded
 
 ### Desktop Shell
 
-- `apps/desktop/src-tauri/src/lib.rs`
+- `src-tauri/src/lib.rs`
 
 ### Runtime Git And Automation
 
@@ -547,7 +547,7 @@ It should stop implying:
 
 ### Phase 7 - Validation And Documentation
 
-- [x] validate the desktop UI with `npm run build --prefix apps/desktop/ui`
+- [x] validate the desktop UI with `npm run build --prefix src-react`
 - [x] validate the desktop shell and Rust auth changes with focused tests under
       the desktop shell and runtime Git crates
 - [x] update architecture and operator documentation once the implementation

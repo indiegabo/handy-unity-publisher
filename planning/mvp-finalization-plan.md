@@ -75,13 +75,13 @@ Out of scope for this mission:
 The current baseline already includes:
 
 - the shell route for `settings`, but it currently renders only a title inside
-  `apps/desktop/ui/src/App.tsx`
+  `src-react/src/App.tsx`
 - the create-project wizard option for a local workspace project, but the
   source adapter is still marked unsupported in
-  `apps/desktop/ui/src/components/CreateProjectWizard.tsx`
+  `src-react/src/components/CreateProjectWizard.tsx`
 - reusable secret credential loading and persistence through
   `secret_settings` and `save_secret_credential` in
-  `apps/desktop/src-tauri/src/lib.rs`
+  `src-tauri/src/lib.rs`
 - support for `itch-api-key` in both the Tauri secret settings contract and the
   frontend service layer
 - Itch publication runtime behavior and tests under `crates/runtime-publish`
@@ -206,7 +206,7 @@ Consequences:
 
 The MVP has accumulated too much decision-making inside a few oversized files,
 including `crates/runtime-store/src/lib.rs` at roughly 18k lines,
-`apps/desktop/src-tauri/src/lib.rs` above 8k lines, and
+`src-tauri/src/lib.rs` above 8k lines, and
 `crates/runtime-bin/src/main.rs` above 6k lines.
 
 Consequences:
@@ -575,7 +575,7 @@ maintainable by humans.
 
 Why this matters:
 Shipping the beta with critical logic still concentrated in files such as
-`crates/runtime-store/src/lib.rs`, `apps/desktop/src-tauri/src/lib.rs`, and
+`crates/runtime-store/src/lib.rs`, `src-tauri/src/lib.rs`, and
 `crates/runtime-bin/src/main.rs` would preserve delivery speed in the short
 term while making the product harder to review, debug, and evolve safely.
 
@@ -627,7 +627,7 @@ Definition of done:
 - tests for dispatch, rebuild, and planning sit near the owning slice whenever
   practical
 
-#### 8.2 `apps/desktop/src-tauri/src/lib.rs`
+#### 8.2 `src-tauri/src/lib.rs`
 
 Primary boundary:
 Keep Tauri setup and command registration in the root shell file, but move
@@ -690,14 +690,14 @@ the same MVP window if they continue absorbing unrelated responsibilities.
 
 Concrete subtasks:
 
-- [ ] split `apps/desktop/ui/src/components/RepositoryProjectDetail.tsx` by
+- [ ] split `src-react/src/components/RepositoryProjectDetail.tsx` by
       operator surface, separating project summary, build target editing,
       publish target editing, and release-history interaction zones where the
       current file keeps growing
-- [ ] split `apps/desktop/ui/src/components/CreateProjectWizard.tsx` by flow
+- [ ] split `src-react/src/components/CreateProjectWizard.tsx` by flow
       step or source-mode concern so repository and local-workspace creation do
       not keep accreting in one component
-- [ ] split `apps/desktop/ui/src/components/PublishDestinationsEditor.tsx`
+- [ ] split `src-react/src/components/PublishDestinationsEditor.tsx`
       further if credential binding, destination editing, and validation copy
       continue to expand in the same file
 
@@ -773,8 +773,8 @@ Focused validation commands executed during gate:
 
 - `cargo test -p runtime-bin`
 - `RUST_TEST_THREADS=1 cargo test -p runtime-store`
-- `npm --prefix apps/desktop/ui run test`
-- `npm --prefix apps/desktop/ui run test:e2e`
+- `npm --prefix src-react run test`
+- `npm --prefix src-react run test:e2e`
 - `npm run smoke:runtime`
 - `cargo build --package desktop-shell`
 
@@ -784,8 +784,8 @@ Latest gate evidence snapshot (`2026-05-23 15:40:04 -03:00`):
 | ------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------ |
 | `cargo test -p runtime-bin`                       | PASS   | Unit + e2e runtime-bin coverage green (`68 + 4 + 3` tests)                                       |
 | `RUST_TEST_THREADS=1 cargo test -p runtime-store` | PASS   | Runtime-store suite green (`76` tests); serialized mode avoids transient Windows lock contention |
-| `npm --prefix apps/desktop/ui run test`           | PASS   | UI unit/integration suite green (`31` files, `172` tests)                                        |
-| `npm --prefix apps/desktop/ui run test:e2e`       | PASS   | Playwright shell flow suite green (`4` tests) after locale-resilient selector updates            |
+| `npm --prefix src-react run test`           | PASS   | UI unit/integration suite green (`31` files, `172` tests)                                        |
+| `npm --prefix src-react run test:e2e`       | PASS   | Playwright shell flow suite green (`4` tests) after locale-resilient selector updates            |
 | `npm run smoke:runtime`                           | PASS   | Runtime smoke green (interrupted cleanup + publish destination e2e paths)                        |
 | `cargo build --package desktop-shell`             | PASS   | Desktop shell build green with dependent desktop UI production build                             |
 

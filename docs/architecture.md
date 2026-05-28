@@ -28,16 +28,16 @@ product model into a Windows-only design.
 
 ### Desktop Shell
 
-`apps/desktop/src-tauri` hosts the Tauri desktop shell.
+`src-tauri` hosts the Tauri desktop shell.
 
 The shell is responsible for:
 
 - launching or reconnecting to the bundled runtime process
 - creating the tray icon and compact popup window lifecycle
 - exposing thin Tauri commands for operator-facing diagnostics and management
-- loading the Vite-built popup UI from `apps/desktop/ui/dist`
+- loading the Vite-built popup UI from `src-react/dist`
 - composing that popup UI from reusable React primitives under
-  `apps/desktop/ui/src/components`
+  `src-react/src/components`
 - anchoring the popup window to the lower-right corner of the primary monitor
 - hiding the window to tray on close while keeping the runtime alive
 - executing the full shutdown path only when the tray `Quit` action is chosen
@@ -46,7 +46,7 @@ The shell remains intentionally thin. Orchestration rules belong in runtime
 crates, not in window bindings.
 
 The current visible UI is a compact React + TypeScript + Vite desktop shell
-built from reusable dark-theme primitives under `apps/desktop/ui/src/components`.
+built from reusable dark-theme primitives under `src-react/src/components`.
 It now uses a dispatch-board main feed plus focus-screen working views,
 managed overlays, and staged transactions instead of the earlier placeholder
 framing.

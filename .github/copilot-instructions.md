@@ -23,7 +23,7 @@ The working technology stack for this repository is:
 - **Rust** for runtime services, orchestration logic, and non-UI application
   code.
 - **Tauri** for the desktop shell.
-- **React + TypeScript + Vite** for the desktop UI under `apps/desktop/ui`.
+- **React + TypeScript + Vite** for the desktop UI under `src-react`.
 - **SQLite** for durable local state.
 - **Host-native Unity execution** through locally installed editors.
 - **Git** for version control, following the commit workflow described in
@@ -38,7 +38,7 @@ Supporting project files may also use:
 - **CSS** for the desktop UI theme and component styling.
 
 Runtime and orchestration logic must be implemented in **Rust**.
-Files under `apps/desktop/ui` must use the approved
+Files under `src-react` must use the approved
 **React + TypeScript + Vite** toolchain.
 Use **SQL** for migrations, **YAML** for manifests and runtime configuration,
 **Shell** for narrow operational scripts, and **CSS** for UI styling.
@@ -185,14 +185,14 @@ existing snippet".
 
 ### 3.5.1 Desktop UI implementation standards
 
-- The desktop UI under `apps/desktop/ui` uses **React + TypeScript + Vite**.
+- The desktop UI under `src-react` uses **React + TypeScript + Vite**.
 - Prefer extending the shared primitives under
-  `apps/desktop/ui/src/components` before creating ad hoc buttons, inputs,
+  `src-react/src/components` before creating ad hoc buttons, inputs,
   panels, badges, or icons.
 - Treat the main feed as a dispatch board rather than another focus screen;
   preserve its accepted baseline while changing shell routing or quick actions.
 - For any new or refactored screen, overlay, or staged flow under
-  `apps/desktop/ui`, follow `docs/focus-screen-development-guide.md`.
+  `src-react`, follow `docs/focus-screen-development-guide.md`.
 - New route-level working surfaces should adopt `ScreenScaffold`, managed
   overlays, typed `openOverlay` results, and `StepFlow` before inventing local
   page-shell or dialog patterns.
@@ -201,7 +201,7 @@ existing snippet".
 - Preserve the established dark monochrome theme with black and gray surfaces,
   subtle contrast, and `5px` border radii for buttons, inputs, and containers
   unless a deliberate exception is required.
-- Locale packs under `apps/desktop/src-tauri/localizations` must treat
+- Locale packs under `src-tauri/localizations` must treat
   `en.json` as the canonical key catalog. When adding or translating localized
   strings, update `en.json` first, sync non-English packs from it, and only
   then translate the target locale values. Do not add locale-only keys or let
@@ -259,8 +259,8 @@ existing snippet".
 - Validate the narrowest affected surface first before running broader test
   suites.
 - Use existing project commands when naming validation work: `cargo test -p
-<crate>` for focused Rust checks, `npm --prefix apps/desktop/ui run test`
-  for UI unit tests, `npm --prefix apps/desktop/ui run test:e2e` for UI
+<crate>` for focused Rust checks, `npm --prefix src-react run test`
+  for UI unit tests, `npm --prefix src-react run test:e2e` for UI
   end-to-end checks, `cargo build --package desktop-shell` for shell-visible
   desktop changes, and `npm run smoke:runtime` for runtime smoke validation.
 - A task is only considered ready when the related unit and end-to-end checks

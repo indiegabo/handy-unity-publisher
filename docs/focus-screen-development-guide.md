@@ -6,7 +6,7 @@ This document tells contributors and AI agents how to extend or refactor the
 HGP desktop UI now that the focus-screen delivery program has landed and passed
 its native Tauri close-out checks.
 
-Use this guide for work under `apps/desktop/ui` that touches:
+Use this guide for work under `src-react` that touches:
 
 - route-level screens
 - shell navigation in `App.tsx`
@@ -129,7 +129,7 @@ Treat every UI slice as incomplete until validation has passed.
 Start narrow and escalate only when the surface requires it.
 
 1. Run the focused component or screen integration test for the touched slice.
-2. Run `npm run build --prefix apps/desktop/ui`.
+2. Run `npm run build --prefix src-react`.
 3. Run the relevant browser-backed Playwright flow when shell routing or a
    critical overlay path changed.
 

@@ -35,7 +35,7 @@ Examples already in the repository:
 Command:
 
 ```bash
-npm run test --prefix apps/desktop/ui
+npm run test --prefix src-react
 ```
 
 ### 2. Screen integration tests
@@ -61,12 +61,12 @@ This is the correct layer for statements such as:
 
 Examples already in the repository:
 
-- `apps/desktop/ui/src/App.test.tsx`
+- `src-react/src/App.test.tsx`
 
 Command:
 
 ```bash
-npm run test --prefix apps/desktop/ui
+npm run test --prefix src-react
 ```
 
 ### 3. Browser-backed UI E2E
@@ -90,8 +90,8 @@ runtime process, or OS-native dialogs for every test run.
 Commands:
 
 ```bash
-npm run test:e2e --prefix apps/desktop/ui
-npm run test:e2e:headed --prefix apps/desktop/ui
+npm run test:e2e --prefix src-react
+npm run test:e2e:headed --prefix src-react
 ```
 
 ## Future testing layer
@@ -192,9 +192,9 @@ For most UI work in this repository, validate in this order:
 Commands:
 
 ```bash
-npm run test --prefix apps/desktop/ui
-npm run build --prefix apps/desktop/ui
-npm run test:e2e --prefix apps/desktop/ui
+npm run test --prefix src-react
+npm run build --prefix src-react
+npm run test:e2e --prefix src-react
 ```
 
 ## Initial Playwright scope in this repository

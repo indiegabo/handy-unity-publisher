@@ -1,6 +1,6 @@
 # Component Kit Reference
 
-The current desktop UI kit lives under `apps/desktop/ui/src/components`.
+The current desktop UI kit lives under `src-react/src/components`.
 
 ## Shared Primitives
 
@@ -14,7 +14,7 @@ The current desktop UI kit lives under `apps/desktop/ui/src/components`.
 
 ## Theme Rules
 
-- Theme tokens live in `apps/desktop/ui/src/styles.css`
+- Theme tokens live in `src-react/src/styles.css`
 - The palette is dark monochrome: black and gray surfaces with restrained
   contrast
 - Buttons, inputs, and containers default to `5px` border radii
@@ -23,6 +23,6 @@ The current desktop UI kit lives under `apps/desktop/ui/src/components`.
 
 ## Validation
 
-- Build the frontend with `npm run build --prefix apps/desktop/ui`
+- Build the frontend with `npm run build --prefix src-react`
 - If shell bindings or frontend asset wiring changed, rerun
   `cargo check -p desktop-shell -j 1 -q`

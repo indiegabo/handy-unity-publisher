@@ -24,7 +24,7 @@ minimum validation step required before the next package starts.
 - prefer extending shared primitives before adding one-off wrappers
 - keep the compact dark operator-facing style
 - do not widen the work package once implementation has started
-- validate each package with `npm run build --prefix apps/desktop/ui`
+- validate each package with `npm run build --prefix src-react`
 - when a package introduces a new overlay contract, add focused automated
   coverage if the surrounding test harness allows it
 
@@ -79,13 +79,13 @@ Stabilize the primitives that all later screens depend on.
 
 ### Target files
 
-- `apps/desktop/ui/src/components/OverlayManager.tsx`
-- `apps/desktop/ui/src/components/FullScreenModal.tsx`
-- `apps/desktop/ui/src/components/ScreenScaffold.tsx`
-- `apps/desktop/ui/src/components/InputWithPicker.tsx`
-- `apps/desktop/ui/src/components/FullScreenFileBrowser.tsx`
-- `apps/desktop/ui/src/components/OverlayManager.test.tsx`
-- `apps/desktop/ui/src/components/FullScreenModal.test.tsx`
+- `src-react/src/components/OverlayManager.tsx`
+- `src-react/src/components/FullScreenModal.tsx`
+- `src-react/src/components/ScreenScaffold.tsx`
+- `src-react/src/components/InputWithPicker.tsx`
+- `src-react/src/components/FullScreenFileBrowser.tsx`
+- `src-react/src/components/OverlayManager.test.tsx`
+- `src-react/src/components/FullScreenModal.test.tsx`
 
 ### Tasks
 
@@ -109,7 +109,7 @@ Stabilize the primitives that all later screens depend on.
 
 ### Validation
 
-- `npm run build --prefix apps/desktop/ui`
+- `npm run build --prefix src-react`
 - relevant unit tests for overlay foundations
 
 ## Work package 2 - Shell overlay governance and back precedence
@@ -120,7 +120,7 @@ Make dismissal rules deterministic at the shell root.
 
 ### Target files
 
-- `apps/desktop/ui/src/App.tsx`
+- `src-react/src/App.tsx`
 - any shell-level navigation helpers or overlay host glue used by `App.tsx`
 
 ### Tasks
@@ -145,7 +145,7 @@ Make dismissal rules deterministic at the shell root.
 
 ### Validation
 
-- `npm run build --prefix apps/desktop/ui`
+- `npm run build --prefix src-react`
 - focused integration coverage for Back-closes-overlay-first behavior when the
   test harness makes it practical
 
@@ -158,9 +158,9 @@ improves scan speed without reducing density.
 
 ### Target files
 
-- `apps/desktop/ui/src/components/ProjectsFocusScreen.tsx`
-- shared project-list child components under `apps/desktop/ui/src/components`
-- `apps/desktop/ui/src/styles.css` only if shared tokens still need extension
+- `src-react/src/components/ProjectsFocusScreen.tsx`
+- shared project-list child components under `src-react/src/components`
+- `src-react/src/styles.css` only if shared tokens still need extension
 
 ### Tasks
 
@@ -183,7 +183,7 @@ improves scan speed without reducing density.
 
 ### Validation
 
-- `npm run build --prefix apps/desktop/ui`
+- `npm run build --prefix src-react`
 - focused test or manual QA path covering at least one overlay-return flow
 
 ## Work package 4 - Repository editor and publish destination ergonomics
@@ -195,11 +195,11 @@ publish destination editing where inline complexity is currently highest.
 
 ### Target files
 
-- `apps/desktop/ui/src/components/RepositoryProjectDetail.tsx`
-- `apps/desktop/ui/src/components/PathPickerField.tsx`
-- `apps/desktop/ui/src/components/PublishDestinationsEditor.tsx`
-- `apps/desktop/ui/src/components/RepositoryCredentialComposer.tsx`
-- new supporting form components under `apps/desktop/ui/src/components/forms`
+- `src-react/src/components/RepositoryProjectDetail.tsx`
+- `src-react/src/components/PathPickerField.tsx`
+- `src-react/src/components/PublishDestinationsEditor.tsx`
+- `src-react/src/components/RepositoryCredentialComposer.tsx`
+- new supporting form components under `src-react/src/components/forms`
 
 ### Tasks
 
@@ -222,7 +222,7 @@ publish destination editing where inline complexity is currently highest.
 
 ### Validation
 
-- `npm run build --prefix apps/desktop/ui`
+- `npm run build --prefix src-react`
 - focused form or integration tests for save behavior if present
 - manual QA for long-form keyboard navigation and cancel safety
 
@@ -234,10 +234,10 @@ Make staged flows explicit, recoverable, and overlay-aware.
 
 ### Target files
 
-- `apps/desktop/ui/src/components/CreateProjectWizard.tsx`
-- `apps/desktop/ui/src/components/AuthProvidersFocusScreen.tsx`
-- new flow helpers under `apps/desktop/ui/src/components/wizard`
-- new auth overlays under `apps/desktop/ui/src/components/auth`
+- `src-react/src/components/CreateProjectWizard.tsx`
+- `src-react/src/components/AuthProvidersFocusScreen.tsx`
+- new flow helpers under `src-react/src/components/wizard`
+- new auth overlays under `src-react/src/components/auth`
 
 ### Tasks
 
@@ -258,7 +258,7 @@ Make staged flows explicit, recoverable, and overlay-aware.
 
 ### Validation
 
-- `npm run build --prefix apps/desktop/ui`
+- `npm run build --prefix src-react`
 - focused integration coverage for one successful auth or credential return path
 - manual QA for step transitions and dismiss behavior
 
@@ -271,8 +271,8 @@ whole and which status belongs to a specific worker or project group.
 
 ### Target files
 
-- `apps/desktop/ui/src/components/ProjectWorkersFocusScreen.tsx`
-- supporting worker components under `apps/desktop/ui/src/components/workers`
+- `src-react/src/components/ProjectWorkersFocusScreen.tsx`
+- supporting worker components under `src-react/src/components/workers`
 
 ### Tasks
 
@@ -293,7 +293,7 @@ whole and which status belongs to a specific worker or project group.
 
 ### Validation
 
-- `npm run build --prefix apps/desktop/ui`
+- `npm run build --prefix src-react`
 - focused manual QA for destructive-action cancellation and successful bulk
   action flow
 
@@ -306,9 +306,9 @@ outcome screen.
 
 ### Target files
 
-- `apps/desktop/ui/src/components/ProcessDetailFocusScreen.tsx`
-- new modules under `apps/desktop/ui/src/components/process`
-- `apps/desktop/ui/src/components/LogViewerModal.tsx`
+- `src-react/src/components/ProcessDetailFocusScreen.tsx`
+- new modules under `src-react/src/components/process`
+- `src-react/src/components/LogViewerModal.tsx`
 
 ### Tasks
 
@@ -330,7 +330,7 @@ outcome screen.
 
 ### Validation
 
-- `npm run build --prefix apps/desktop/ui`
+- `npm run build --prefix src-react`
 - focused manual QA for copy, select, download, and dismiss behavior
 
 ## Work package 8 - Consistency, accessibility, and test sweep
@@ -341,7 +341,7 @@ Remove leftover divergence after the screen-specific slices land.
 
 ### Target files
 
-- `apps/desktop/ui/src/styles.css`
+- `src-react/src/styles.css`
 - any touched focus-screen component that still diverges from the shared model
 - overlay or screen tests that still miss critical behavior
 
@@ -365,7 +365,7 @@ Remove leftover divergence after the screen-specific slices land.
 
 ### Validation
 
-- `npm run build --prefix apps/desktop/ui`
+- `npm run build --prefix src-react`
 - relevant unit and integration tests
 - concise manual QA checklist for keyboard, contrast, density, and dismiss
   behavior

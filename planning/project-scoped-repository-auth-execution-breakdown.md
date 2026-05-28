@@ -81,7 +81,7 @@ the first root-cause removal.
 
 ### Target Files
 
-- `apps/desktop/src-tauri/src/lib.rs`
+- `src-tauri/src/lib.rs`
 
 ### Tasks
 
@@ -117,8 +117,8 @@ families independently from login workflows.
 
 ### Target Files
 
-- `apps/desktop/src-tauri/src/lib.rs` or one extracted module under
-  `apps/desktop/src-tauri/src/`
+- `src-tauri/src/lib.rs` or one extracted module under
+  `src-tauri/src/`
 - `crates/runtime-git/src/lib.rs` or one extracted module under
   `crates/runtime-git/src/`
 
@@ -154,9 +154,9 @@ public versus private state.
 
 ### Target Files
 
-- `apps/desktop/src-tauri/src/lib.rs`
+- `src-tauri/src/lib.rs`
 - `crates/runtime-git/src/lib.rs`
-- `apps/desktop/ui/src/services/projects.ts` or a new dedicated repository
+- `src-react/src/services/projects.ts` or a new dedicated repository
   access service
 
 ### Tasks
@@ -197,7 +197,7 @@ runtime can reason about access without recomputing everything on every read.
 
 - `crates/runtime-store/migrations/*`
 - `crates/runtime-store/src/models.rs`
-- `apps/desktop/src-tauri/src/lib.rs`
+- `src-tauri/src/lib.rs`
 
 ### Tasks
 
@@ -230,7 +230,7 @@ project.
 
 ### Target Files
 
-- `apps/desktop/src-tauri/src/lib.rs`
+- `src-tauri/src/lib.rs`
 - `crates/runtime-store/src/models.rs` only if new command payloads need shared
   structs
 
@@ -265,10 +265,10 @@ card driven by the assessment contract.
 
 ### Target Files
 
-- `apps/desktop/ui/src/components/CreateProjectWizard.tsx`
-- `apps/desktop/ui/src/services/projects.ts` or the dedicated repository access
+- `src-react/src/components/CreateProjectWizard.tsx`
+- `src-react/src/services/projects.ts` or the dedicated repository access
   service
-- `apps/desktop/ui/src/styles.css` if styling changes are needed
+- `src-react/src/styles.css` if styling changes are needed
 
 ### Tasks
 
@@ -293,7 +293,7 @@ card driven by the assessment contract.
 
 ### Validation
 
-- `npm run build --prefix apps/desktop/ui`
+- `npm run build --prefix src-react`
 
 ## Work Package 7 - Edit Project Access Ownership
 
@@ -304,10 +304,10 @@ wizard.
 
 ### Target Files
 
-- `apps/desktop/ui/src/components/RepositoryProjectDetail.tsx`
-- `apps/desktop/ui/src/services/projects.ts` or the dedicated repository access
+- `src-react/src/components/RepositoryProjectDetail.tsx`
+- `src-react/src/services/projects.ts` or the dedicated repository access
   service
-- `apps/desktop/ui/src/styles.css` if styling changes are needed
+- `src-react/src/styles.css` if styling changes are needed
 
 ### Tasks
 
@@ -328,7 +328,7 @@ wizard.
 
 ### Validation
 
-- `npm run build --prefix apps/desktop/ui`
+- `npm run build --prefix src-react`
 
 ## Work Package 8 - Auth Provider Inventory Repositioning
 
@@ -339,9 +339,9 @@ account inventory and diagnostics surface.
 
 ### Target Files
 
-- `apps/desktop/ui/src/components/AuthProvidersFocusScreen.tsx`
-- `apps/desktop/ui/src/services/auth.ts`
-- `apps/desktop/src-tauri/src/lib.rs`
+- `src-react/src/components/AuthProvidersFocusScreen.tsx`
+- `src-react/src/services/auth.ts`
+- `src-tauri/src/lib.rs`
 
 ### Tasks
 
@@ -363,7 +363,7 @@ account inventory and diagnostics surface.
 
 ### Validation
 
-- `npm run build --prefix apps/desktop/ui`
+- `npm run build --prefix src-react`
 
 ## Work Package 9 - Runtime Non-Interactive Auth Hardening
 
@@ -377,7 +377,7 @@ credentials are stale, missing, or invalid.
 - `crates/runtime-git/src/lib.rs`
 - `crates/runtime-bin/src/workers.rs`
 - `crates/runtime-bin/src/builds.rs`
-- `apps/desktop/src-tauri/src/lib.rs` if repository auth status updates are
+- `src-tauri/src/lib.rs` if repository auth status updates are
   surfaced there
 
 ### Tasks
@@ -432,6 +432,6 @@ then validate the full public/private flow end to end.
 
 ### Validation
 
-- `npm run build --prefix apps/desktop/ui`
+- `npm run build --prefix src-react`
 - focused Rust tests for touched auth slices
 - one manual or scripted smoke run across the full repository-auth flow

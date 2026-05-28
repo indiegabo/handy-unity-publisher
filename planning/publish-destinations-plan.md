@@ -584,7 +584,7 @@ investigation. The task list below remains the original backlog checklist.
 - Focused `runtime-bin` worker test for snapshotted Itch credential execution
   passed.
 - Focused `desktop-shell` inspection test passed.
-- `npm run build --prefix apps/desktop/ui` passed.
+- `npm run build --prefix src-react` passed.
 - `cargo check -p desktop-shell -j 1 -q` passed.
 
 ### Current Code Anchors
@@ -593,10 +593,10 @@ investigation. The task list below remains the original backlog checklist.
 - `crates/runtime-store/src/lib.rs`
 - `crates/runtime-publish/src/lib.rs`
 - `crates/runtime-bin/src/main.rs`
-- `apps/desktop/src-tauri/src/lib.rs`
-- `apps/desktop/ui/src/services/projects.ts`
-- `apps/desktop/ui/src/components/RepositoryProjectDetail.tsx`
-- `apps/desktop/ui/src/components/ProjectsFocusScreen.tsx`
+- `src-tauri/src/lib.rs`
+- `src-react/src/services/projects.ts`
+- `src-react/src/components/RepositoryProjectDetail.tsx`
+- `src-react/src/components/ProjectsFocusScreen.tsx`
 
 ### Remaining Work
 

@@ -56,21 +56,21 @@ Completed in code:
   `unity_version_override`.
 - `crates/runtime-store/src/models.rs` and `crates/runtime-store/src/lib.rs`
   now expose `engine_kind` in repository polling/inspection records.
-- `apps/desktop/src-tauri/src/lib.rs` now exposes engine-aware repository
+- `src-tauri/src/lib.rs` now exposes engine-aware repository
   project command DTOs with `engine_kind` plus build-target
   `contract.unity.target_platform` and rejects non-Unity engine payloads at the
   shell boundary.
 - Repository inspection returned by the desktop shell now includes
   `engine_kind` so the UI can render and edit the actual persisted engine.
-- `apps/desktop/ui/src/services/projects.ts` now matches the engine-aware shell
+- `src-react/src/services/projects.ts` now matches the engine-aware shell
   contract instead of the old Unity-shaped payload.
-- `apps/desktop/ui/src/components/CreateProjectWizard.tsx` now collects
+- `src-react/src/components/CreateProjectWizard.tsx` now collects
   `engine_kind`, emits `contract.unity`, and uses actual Unity targetPlatform
   values instead of the old shorthand platform strings.
-- `apps/desktop/ui/src/components/RepositoryProjectDetail.tsx` now edits the
+- `src-react/src/components/RepositoryProjectDetail.tsx` now edits the
   same engine-aware contract and normalizes persisted Unity targetPlatform
   values back into the form state.
-- `apps/desktop/ui/src/components/ProjectsFocusScreen.tsx` now surfaces the
+- `src-react/src/components/ProjectsFocusScreen.tsx` now surfaces the
   repository engine on the project cards.
 - `crates/runtime-contracts/src/lib.rs` now defines shared `EngineKind` and
   `BuildKind` enums for runtime planning and execution contracts.
@@ -110,7 +110,7 @@ Completed in code:
 - `crates/runtime-bin/src/main.rs` now derives the build-event platform from
   `contract_json` instead of depending on a legacy `platform` field in the
   stored build execution plan.
-- `apps/desktop/src-tauri/src/lib.rs` now consumes Unity host diagnostics and
+- `src-tauri/src/lib.rs` now consumes Unity host diagnostics and
   discovery helpers through `runtime_runner::unity` instead of importing the
   Unity adapter surface from the crate root.
 - `crates/runtime-bin/src/builds.rs` test fixtures now use
@@ -177,7 +177,7 @@ Completed in code:
   process feed: `runtime-store` includes `repository_engine_kind` in the feed
   payload, the process feed UI renders an explicit engine badge, and focused
   process-feed tests prove the backend carries that field.
-- `apps/desktop/src-tauri/src/lib.rs` now includes a focused
+- `src-tauri/src/lib.rs` now includes a focused
   `load_process_feed` shell test so engine identity is proven at the Tauri
   shell boundary, not only in `runtime-store` and the React render layer.
 - `crates/runtime-bin/src/builds.rs` now resolves a generic
@@ -206,10 +206,10 @@ Completed in code:
   `LocalCoordinator::create_repository_project`, dispatches a manual release,
   runs the release planner cycle, and proves the path reaches
   `build run-next` successfully with a Unity target.
-- `apps/desktop/ui/src/components/RepositoryEngineField.tsx` now centralizes
+- `src-react/src/components/RepositoryEngineField.tsx` now centralizes
   the repository engine selector used by both create and edit flows, so the UI
   keeps one authoritative list of visible-but-disabled future engines.
-- `apps/desktop/ui/src/components/RepositoryEngineField.test.tsx` plus the new
+- `src-react/src/components/RepositoryEngineField.test.tsx` plus the new
   Vitest setup now prove that Unity remains selectable while `Unreal`,
   `Godot`, `GameMaker`, `Defold`, and `Cocos Creator` stay visible but
   disabled in the shared selector.
@@ -238,10 +238,10 @@ These validations were executed and passed after the last implementation round:
 - `C:/Users/gabao/.cargo/bin/cargo.exe test -p runtime-bin resolve_build_execution_dispatch_plan_with_profile -- --nocapture`
 - `C:/Users/gabao/.cargo/bin/cargo.exe test -p desktop-shell load_process_feed_reports_repository_engine_identity -- --nocapture`
 - `npm run identity:check`
-- `npm run test --prefix apps/desktop/ui`
-- `npm run build --prefix apps/desktop/ui`
+- `npm run test --prefix src-react`
+- `npm run build --prefix src-react`
 - VS Code task `build desktop shell`, which completed both
-  `npm run build --prefix apps/desktop/ui` and
+  `npm run build --prefix src-react` and
   `cargo build --package desktop-shell`
 
 More specifically, the `runtime-store` validation confirmed that the migration

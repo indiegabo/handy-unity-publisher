@@ -29,9 +29,9 @@ The product is not a Unity gameplay codebase.
 
 ## Active Architecture
 
-- `apps/desktop/src-tauri` is the desktop shell crate.
-- `apps/desktop/ui` contains the React + TypeScript + Vite tray popup surface.
-- `apps/desktop/ui/src/components` contains the reusable React primitives used
+- `src-tauri` is the desktop shell crate.
+- `src-react` contains the React + TypeScript + Vite tray popup surface.
+- `src-react/src/components` contains the reusable React primitives used
   across the desktop shell.
 - `crates/runtime-bin` exposes the bundled runtime commands and supervision
   loop.
@@ -92,7 +92,7 @@ The desktop shell currently ships as a tray-resident popup:
 - the visible UI now uses a dispatch-board main feed plus focus-screen working
   views, shared section grammar, and overlay-driven subtasks built from
   reusable React primitives
-- screen, overlay, and staged-flow work under `apps/desktop/ui` should follow
+- screen, overlay, and staged-flow work under `src-react` should follow
   `docs/focus-screen-development-guide.md`
 
 The shell still exposes Tauri commands for:
@@ -118,15 +118,15 @@ Common validation and development commands:
 cargo run -p runtime-bin -- bootstrap
 cargo run -p runtime-bin -- manifests sync
 cargo run -p runtime-bin -- status
-npm install --prefix apps/desktop/ui
-npm run dev --prefix apps/desktop/ui
-npm run build --prefix apps/desktop/ui
+npm install --prefix src-react
+npm run dev --prefix src-react
+npm run build --prefix src-react
 cargo run --package desktop-shell
 cargo check -p desktop-shell -j 1 -q
 cargo test -p runtime-store -q
 ```
 
-Localization work under `apps/desktop/src-tauri/localizations/` must treat
+Localization work under `src-tauri/localizations/` must treat
 `en.json` as the canonical message catalog. Update the English file first,
 run `npm run localization:sync` to mirror that key set into every non-English
 locale pack, translate the target locale values afterward, and finish with
@@ -135,7 +135,7 @@ English key inventory.
 
 When changing the desktop UI, follow
 `docs/focus-screen-development-guide.md`, validate the touched React +
-TypeScript slice with `npm run build --prefix apps/desktop/ui`, then rerun the
+TypeScript slice with `npm run build --prefix src-react`, then rerun the
 narrow desktop-shell compile check. If the change alters shell-visible
 navigation, overlay precedence, staged flows, or the dense focus-screen
 grammar, also run the relevant native Tauri close-out checks from the guide.
@@ -154,11 +154,11 @@ grammar, also run the relevant native Tauri close-out checks from the guide.
 - Keep Tauri commands thin and delegate orchestration to runtime crates.
 - Treat the desktop shell as the primary operator surface.
 - Prefer the reusable desktop UI primitives under
-  `apps/desktop/ui/src/components` before creating one-off controls.
+  `src-react/src/components` before creating one-off controls.
 - Treat the main feed as a dispatch board rather than another focus screen.
 - Use `ScreenScaffold`, managed overlays, and `StepFlow` before inventing new
   route or dialog patterns.
-- Treat `apps/desktop/src-tauri/localizations/en.json` as the canonical locale
+- Treat `src-tauri/localizations/en.json` as the canonical locale
   schema: update it first, mirror its keys into non-English packs, and only
   then translate localized values.
 - Keep desktop UI work compact, dark, and tool-oriented.
@@ -168,7 +168,7 @@ grammar, also run the relevant native Tauri close-out checks from the guide.
 
 - Read `docs/architecture.md` before broad architectural edits.
 - Read `docs/focus-screen-development-guide.md` before adding or refactoring a
-  screen, overlay, or staged flow under `apps/desktop/ui`.
+  screen, overlay, or staged flow under `src-react`.
 - Read `docs/pipeline-yaml-guide.md` before editing manifests under
   `pipelines/`.
 - Read `docs/unity-adapter-contract.md` before inventing or changing Unity

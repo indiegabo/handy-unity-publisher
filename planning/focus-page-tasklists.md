@@ -56,9 +56,9 @@ When this program is complete, an operator should be able to:
 In scope:
 
 - focus screens and their supporting components under
-  `apps/desktop/ui/src/components`
+  `src-react/src/components`
 - shell-level overlay orchestration and back handling in
-  `apps/desktop/ui/src/App.tsx`
+  `src-react/src/App.tsx`
 - page, section, and item hierarchy across existing focus screens
 - overlay result contracts, staged flows, and heavy-viewer surfaces
 - tests that prove overlay result flow, focus management, and screen-level
@@ -152,47 +152,47 @@ Status in this section should only move when code and validation have both
 landed.
 
 - [x] Implement `OverlayManager` / `OverlayProvider` with `openOverlay` API.
-  - Files: `apps/desktop/ui/src/components/OverlayManager.tsx`
+  - Files: `src-react/src/components/OverlayManager.tsx`
   - Acceptance: `openOverlay(Component, props)` resolves with a typed result or
     `null`, overlays stack predictably, and caller code can await results
     sequentially.
 - [x] Implement `FullScreenModal` base component.
-  - Files: `apps/desktop/ui/src/components/FullScreenModal.tsx`
+  - Files: `src-react/src/components/FullScreenModal.tsx`
   - Acceptance: title bar, close action, focus trap, body scroll lock,
     dismissible contract, and focus restoration on close.
 - [x] Implement `ScreenScaffold` for consistent focus-screen layout.
-  - Files: `apps/desktop/ui/src/components/ScreenScaffold.tsx`
+  - Files: `src-react/src/components/ScreenScaffold.tsx`
   - Acceptance: consistent title, description, action cluster, optional summary
     row, and stable content rhythm.
 - [x] Implement `InputWithPicker` helper and `FullScreenFileBrowser` fallback.
-  - Files: `apps/desktop/ui/src/components/InputWithPicker.tsx`,
-    `apps/desktop/ui/src/components/FullScreenFileBrowser.tsx`
+  - Files: `src-react/src/components/InputWithPicker.tsx`,
+    `src-react/src/components/FullScreenFileBrowser.tsx`
   - Acceptance: desktop fast path stays available while overlay fallback works
     on narrow or embedded flows.
 - [x] Implement `LogViewerModal` for long textual outputs.
-  - Files: `apps/desktop/ui/src/components/LogViewerModal.tsx`
+  - Files: `src-react/src/components/LogViewerModal.tsx`
   - Acceptance: copy, select, download, wrapped and unwrapped reading modes,
     and enough room for future search or filtering.
 - [x] Implement `ConfirmDialog` / `DestructiveConfirmModal`.
-  - Files: `apps/desktop/ui/src/components/ConfirmDialog.tsx`
+  - Files: `src-react/src/components/ConfirmDialog.tsx`
   - Acceptance: one standard destructive confirmation flow with explicit action
     language and keyboard-safe default focus.
 - [x] Implement `ArtifactViewer` overlay.
-  - Files: `apps/desktop/ui/src/components/ArtifactViewer.tsx`
+  - Files: `src-react/src/components/ArtifactViewer.tsx`
   - Acceptance: preview metadata, open or download actions, and graceful
     fallback for unsupported previews.
 - [x] Implement `CredentialComposerModal`.
   - Files:
-    `apps/desktop/ui/src/components/forms/CredentialComposerModal.tsx`
+    `src-react/src/components/forms/CredentialComposerModal.tsx`
   - Acceptance: returns credential or config payload through overlay result
     rather than hidden local mutation.
 - [x] Implement `StepFlow` primitive for staged flows.
-  - Files: `apps/desktop/ui/src/components/wizard/StepFlow.tsx`
+  - Files: `src-react/src/components/wizard/StepFlow.tsx`
   - Acceptance: step transitions, validation gating, back or close safety, and
     typed final result.
 - [x] Add unit tests for `OverlayManager` and `FullScreenModal`.
-  - Files: `apps/desktop/ui/src/components/OverlayManager.test.tsx`,
-    `apps/desktop/ui/src/components/FullScreenModal.test.tsx`
+  - Files: `src-react/src/components/OverlayManager.test.tsx`,
+    `src-react/src/components/FullScreenModal.test.tsx`
   - Acceptance: focus trap, promise resolution, dismissal, and focus
     restoration are covered.
 - [x] Add at least one screen-level integration test that opens an overlay and
@@ -202,7 +202,7 @@ landed.
 
 ## Delivery tracks by screen
 
-### 1. Main shell and process feed (`apps/desktop/ui/src/App.tsx`)
+### 1. Main shell and process feed (`src-react/src/App.tsx`)
 
 Mission:
 Keep the accepted main-feed visual baseline, but make shell-level overlay and
@@ -242,7 +242,7 @@ Acceptance snapshot:
 - The shell behaves consistently whether the operator presses close, Escape, or
   Back.
 
-### 2. Projects list (`apps/desktop/ui/src/components/ProjectsFocusScreen.tsx`)
+### 2. Projects list (`src-react/src/components/ProjectsFocusScreen.tsx`)
 
 Mission:
 Turn the projects list into the clearest proof that the new focus-screen
@@ -272,7 +272,7 @@ Acceptance snapshot:
 - Refresh, quick actions, and selection flows feel like part of one page rather
   than separate widgets.
 
-### 3. Project detail / repository editor (`apps/desktop/ui/src/components/RepositoryProjectDetail.tsx`)
+### 3. Project detail / repository editor (`src-react/src/components/RepositoryProjectDetail.tsx`)
 
 Mission:
 Make the largest editing surface readable, decomposed, and overlay-capable
@@ -322,7 +322,7 @@ Acceptance snapshot:
 - Nested target editors are obviously children of their parent sections, not
   competing peers.
 
-### 4. Create project wizard (`apps/desktop/ui/src/components/CreateProjectWizard.tsx`)
+### 4. Create project wizard (`src-react/src/components/CreateProjectWizard.tsx`)
 
 Mission:
 Turn the wizard into a staged transaction with explicit step ownership, not a
@@ -383,7 +383,7 @@ Acceptance snapshot:
 - Support callouts no longer compete with the current step.
 - Review is a final checkpoint, not just another accordion of facts.
 
-### 5. Project workers (`apps/desktop/ui/src/components/ProjectWorkersFocusScreen.tsx`)
+### 5. Project workers (`src-react/src/components/ProjectWorkersFocusScreen.tsx`)
 
 Mission:
 Preserve operational density while separating runtime-wide state from per-
@@ -428,7 +428,7 @@ Acceptance snapshot:
 - Mass actions are deliberate and reversible where possible.
 - Dense worker inventories remain scannable under load.
 
-### 6. Process detail (`apps/desktop/ui/src/components/ProcessDetailFocusScreen.tsx`)
+### 6. Process detail (`src-react/src/components/ProcessDetailFocusScreen.tsx`)
 
 Mission:
 Make process inspection workable for large outputs by moving heavy reading
@@ -473,7 +473,7 @@ Acceptance snapshot:
 - The screen remains useful even when a process has many retained artifacts and
   logs.
 
-### 7. Auth providers (`apps/desktop/ui/src/components/AuthProvidersFocusScreen.tsx`)
+### 7. Auth providers (`src-react/src/components/AuthProvidersFocusScreen.tsx`)
 
 Mission:
 Make provider binding feel like a guided credential flow rather than a set of
@@ -509,7 +509,7 @@ Acceptance snapshot:
 - Provider cards communicate state without badge spam.
 - Credential acquisition behaves like a first-class flow, not a side effect.
 
-### 8. Publish destinations editor (`apps/desktop/ui/src/components/PublishDestinationsEditor.tsx`)
+### 8. Publish destinations editor (`src-react/src/components/PublishDestinationsEditor.tsx`)
 
 Mission:
 Separate destination identity, target binding, and credential composition into
@@ -712,7 +712,7 @@ Current status:
       logic is non-trivial.
 - [x] Add at least one integration test per major overlay family: picker,
       confirm, viewer, and staged flow.
-- [x] Run `npm run build --prefix apps/desktop/ui` after each delivery package.
+- [x] Run `npm run build --prefix src-react` after each delivery package.
 - [x] Maintain a short manual QA checklist covering keyboard, contrast,
       density, and overlay dismissal.
 
@@ -761,17 +761,17 @@ Current status:
 - The latest runtime-event App integration slice reran the focused owner suite
   for `App`, then reran the full desktop-UI automated suite with 135 passing
   tests.
-- `npm run build --prefix apps/desktop/ui` was rerun after the latest
+- `npm run build --prefix src-react` was rerun after the latest
   artifact-summary and motion-consistency slice and is passing.
-- `npm run build --prefix apps/desktop/ui` was rerun after the latest
+- `npm run build --prefix src-react` was rerun after the latest
   process-detail summary and motion-token cleanup slice and is passing.
-- `npm run build --prefix apps/desktop/ui` was rerun after the latest
+- `npm run build --prefix src-react` was rerun after the latest
   auth-provider and project-summary normalization slice and is passing.
-- `npm run build --prefix apps/desktop/ui` was rerun after the latest
+- `npm run build --prefix src-react` was rerun after the latest
   non-wizard summary-normalization slice and is passing.
-- `npm run build --prefix apps/desktop/ui` was rerun after the latest
+- `npm run build --prefix src-react` was rerun after the latest
   process-feed and log-viewer normalization slice and is passing.
-- `npm run build --prefix apps/desktop/ui` was rerun after the latest
+- `npm run build --prefix src-react` was rerun after the latest
   detail-and-publish summary cleanup slice and is passing.
 - `cargo build --package desktop-shell` was rerun after the latest shell
   transition changes and is passing.
@@ -897,7 +897,7 @@ Expected outcome:
 
 #### File checklist
 
-`apps/desktop/ui/src/components/OverlayManager.tsx`
+`src-react/src/components/OverlayManager.tsx`
 
 - [x] Extend the overlay context so shell consumers can inspect whether an
       overlay is open.
@@ -906,7 +906,7 @@ Expected outcome:
 - [x] Ensure dismissing the top-most overlay still restores focus correctly.
 - [x] Avoid introducing overlay-specific business logic into the manager.
 
-`apps/desktop/ui/src/components/OverlayManager.test.tsx`
+`src-react/src/components/OverlayManager.test.tsx`
 
 - [x] Add coverage proving the manager can dismiss the top-most overlay through
       the new public API.
@@ -914,7 +914,7 @@ Expected outcome:
 - [x] Keep the existing promise-resolution and focus-restoration assertions
       passing.
 
-`apps/desktop/ui/src/App.tsx`
+`src-react/src/App.tsx`
 
 - [x] Audit all shell-level overlay entry points and local popover state.
 - [x] Route shell-level `Escape` handling through overlay precedence first.
@@ -927,7 +927,7 @@ Expected outcome:
 - [x] Keep runtime actions, feed loading, and screen transitions behaviorally
       unchanged.
 
-`apps/desktop/ui/src/components/WorkerStatusIndicator.tsx`
+`src-react/src/components/WorkerStatusIndicator.tsx`
 
 - [x] Verify the indicator remains a dumb trigger component.
 - [x] Add only the trigger semantics needed for the governed quick surface.
@@ -936,7 +936,7 @@ Expected outcome:
 Optional extraction if `App.tsx` remains too fat after the first pass:
 
 - [x] Extract the current worker quick-view content into a dedicated shell
-      overlay or popover component under `apps/desktop/ui/src/components`.
+      overlay or popover component under `src-react/src/components`.
 - [x] Keep the extracted component presentational and driven by props from
       `App.tsx`.
 
@@ -944,7 +944,7 @@ Optional extraction if `App.tsx` remains too fat after the first pass:
 
 Automated:
 
-- [x] Run `npm run build --prefix apps/desktop/ui`.
+- [x] Run `npm run build --prefix src-react`.
 - [x] Run the overlay manager unit tests.
 - [x] Add or update one focused shell interaction test if the current harness
       supports it cleanly.

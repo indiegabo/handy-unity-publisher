@@ -221,7 +221,7 @@ config parsing, and host capability checks.
 - `crates/runtime-publish/src/lib.rs`
 - `crates/runtime-bin/src/main.rs`
 - `crates/runtime-store/src/models.rs` only if shared DTOs need extension
-- `apps/desktop/src-tauri/src/lib.rs` only if capability diagnostics must be
+- `src-tauri/src/lib.rs` only if capability diagnostics must be
   exposed in the same slice
 
 ### Tasks
@@ -257,9 +257,9 @@ Add one dedicated `Publish Destinations` step to the create-project wizard.
 
 ### Target Files
 
-- `apps/desktop/ui/src/components/CreateProjectWizard.tsx`
-- `apps/desktop/ui/src/services/projects.ts`
-- `apps/desktop/src-tauri/src/lib.rs`
+- `src-react/src/components/CreateProjectWizard.tsx`
+- `src-react/src/services/projects.ts`
+- `src-tauri/src/lib.rs`
 
 ### Tasks
 
@@ -292,9 +292,9 @@ Add one dedicated destination-management section to repository detail.
 
 ### Target Files
 
-- `apps/desktop/ui/src/components/RepositoryProjectDetail.tsx`
-- `apps/desktop/ui/src/services/projects.ts`
-- `apps/desktop/src-tauri/src/lib.rs`
+- `src-react/src/components/RepositoryProjectDetail.tsx`
+- `src-react/src/services/projects.ts`
+- `src-tauri/src/lib.rs`
 
 ### Tasks
 
@@ -331,9 +331,9 @@ and runtime diagnostics.
 - `crates/runtime-store/src/lib.rs`
 - `crates/runtime-store/src/models.rs`
 - `crates/runtime-bin/src/main.rs`
-- `apps/desktop/src-tauri/src/lib.rs`
-- `apps/desktop/ui/src/components/ProjectsFocusScreen.tsx`
-- `apps/desktop/ui/src/components/ProcessDetailFocusScreen.tsx`
+- `src-tauri/src/lib.rs`
+- `src-react/src/components/ProjectsFocusScreen.tsx`
+- `src-react/src/components/ProcessDetailFocusScreen.tsx`
 
 ### Tasks
 
