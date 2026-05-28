@@ -32,14 +32,14 @@ jobs:
 
     steps:
       - name: Checkout validated main branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: main
           token: ${{ github.token }}
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
 
