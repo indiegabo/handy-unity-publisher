@@ -4,6 +4,12 @@ on:
   release:
     types:
       - published
+  workflow_call:
+    inputs:
+      tag_name:
+        description: Release tag to build, upload, and publish.
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -11,10 +17,11 @@ permissions:
 jobs:
   windows-bundle:
     name: Windows Bundle
-    if: startsWith(github.event.release.tag_name, 'v')
+    if: startsWith(inputs.tag_name || github.event.release.tag_name, 'v')
     runs-on: windows-latest
 
     env:
+      RELEASE_TAG: ${{ inputs.tag_name || github.event.release.tag_name }}
       TARGET_TRIPLE: x86_64-pc-windows-msvc
       ITCH_PROJECT: ${{ vars.ITCH_PROJECT }}
       ITCH_CHANNEL_WINDOWS_EXE: ${{ vars.ITCH_CHANNEL_WINDOWS_EXE }}
@@ -25,7 +32,7 @@ jobs:
       - name: Checkout tagged source
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
       - name: Install Rust toolchain
@@ -88,7 +95,7 @@ jobs:
       - name: Upload bundle assets to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.msi
             target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.exe
@@ -129,22 +136,23 @@ jobs:
               throw "No Windows .msi installer was produced under $bundleRoot"
           }
 
-          & $butlerPath push $exeAsset.FullName "$env:ITCH_PROJECT`:$env:ITCH_CHANNEL_WINDOWS_EXE" --userversion $env:GITHUB_REF_NAME
+            & $butlerPath push $exeAsset.FullName "$env:ITCH_PROJECT`:$env:ITCH_CHANNEL_WINDOWS_EXE" --userversion $env:RELEASE_TAG
           if ($LASTEXITCODE -ne 0) {
               throw "Butler publish failed for Windows EXE channel."
           }
 
-          & $butlerPath push $msiAsset.FullName "$env:ITCH_PROJECT`:$env:ITCH_CHANNEL_WINDOWS_MSI" --userversion $env:GITHUB_REF_NAME
+            & $butlerPath push $msiAsset.FullName "$env:ITCH_PROJECT`:$env:ITCH_CHANNEL_WINDOWS_MSI" --userversion $env:RELEASE_TAG
           if ($LASTEXITCODE -ne 0) {
               throw "Butler publish failed for Windows MSI channel."
           }
 
   linux-bundle:
     name: Linux Bundle
-    if: startsWith(github.event.release.tag_name, 'v')
+    if: startsWith(inputs.tag_name || github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
 
     env:
+      RELEASE_TAG: ${{ inputs.tag_name || github.event.release.tag_name }}
       TARGET_TRIPLE: x86_64-unknown-linux-gnu
       ITCH_PROJECT: ${{ vars.ITCH_PROJECT }}
       ITCH_CHANNEL_LINUX: ${{ vars.ITCH_CHANNEL_LINUX }}
@@ -154,7 +162,7 @@ jobs:
       - name: Checkout tagged source
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
       - name: Install Linux bundle dependencies
@@ -233,7 +241,7 @@ jobs:
       - name: Upload Linux assets to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.AppImage
             target/${{ env.TARGET_TRIPLE }}/release/bundle/SHA256SUMS-linux.txt
@@ -258,4 +266,4 @@ jobs:
 
           [[ -n "$appimage_path" ]] || { echo "No AppImage installer found for Itch publish." >&2; exit 1; }
 
-          "$butler_path" push "$appimage_path" "$ITCH_PROJECT:$ITCH_CHANNEL_LINUX" --userversion "$GITHUB_REF_NAME"
+          "$butler_path" push "$appimage_path" "$ITCH_PROJECT:$ITCH_CHANNEL_LINUX" --userversion "$RELEASE_TAG"
