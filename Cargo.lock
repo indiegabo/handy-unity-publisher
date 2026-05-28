@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-shell"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "notify",
  "rfd",
@@ -3142,7 +3142,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-bin"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "runtime-config",
  "runtime-contracts",
@@ -3161,18 +3161,18 @@ dependencies = [
 
 [[package]]
 name = "runtime-config"
-version = "1.0.0"
+version = "1.0.1"
 
 [[package]]
 name = "runtime-contracts"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "runtime-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "runtime-config",
  "runtime-store",
@@ -3182,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-git"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -3191,7 +3191,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-manifests"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "runtime-config",
  "runtime-store",
@@ -3203,7 +3203,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-publish"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3211,7 +3211,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-runner"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "runtime-config",
  "runtime-contracts",
@@ -3223,7 +3223,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-store"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "keyring",
  "runtime-config",
