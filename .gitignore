@@ -11,3 +11,4 @@ src-react/dist/
 src-react/node_modules/
 src-tauri/gen/
 src-tauri/bin/
+releases/
