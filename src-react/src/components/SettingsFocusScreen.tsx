@@ -154,8 +154,12 @@ export function SettingsFocusScreen() {
     },
   );
 
-  const localizationOptions = buildLocalizationOptions(
+  const primaryLocalizationOptions = buildLocalizationOptions(
     snapshot.localizationSettings,
+  );
+  const fallbackLocalizationOptions = buildLocalizationOptions(
+    snapshot.localizationSettings,
+    true,
   );
 
   return (
@@ -183,9 +187,7 @@ export function SettingsFocusScreen() {
           <p className="feed-banner feed-banner--error">{actionError}</p>
         ) : null}
 
-        <SurfacePanel
-          title={t("settings.localization.title", "Localization")}
-        >
+        <SurfacePanel title={t("settings.localization.title", "Localization")}>
           {snapshot.localizationSettingsError ? (
             <p className="feed-banner feed-banner--error">
               {snapshot.localizationSettingsError}
@@ -204,7 +206,7 @@ export function SettingsFocusScreen() {
                   onChange={(event) =>
                     void handlePrimaryLocaleChange(event.currentTarget.value)
                   }
-                  options={localizationOptions}
+                  options={primaryLocalizationOptions}
                   value={snapshot.localizationSettings.primary_locale}
                 />
                 <SelectField
@@ -216,7 +218,7 @@ export function SettingsFocusScreen() {
                   onChange={(event) =>
                     void handleFallbackLocaleChange(event.currentTarget.value)
                   }
-                  options={localizationOptions}
+                  options={fallbackLocalizationOptions}
                   value={snapshot.localizationSettings.fallback_locale}
                 />
               </div>
@@ -234,16 +236,19 @@ export function SettingsFocusScreen() {
 
 function buildLocalizationOptions(
   localizationSettings: RuntimeLocalizationSettings | null,
+  officialOnly = false,
 ) {
   if (!localizationSettings) {
     return [];
   }
 
-  return localizationSettings.available_locales.map((locale) => ({
-    label: `${locale.native_name} (${locale.code})`,
-    title: locale.display_name,
-    value: locale.code,
-  }));
+  return localizationSettings.available_locales
+    .filter((locale) => !officialOnly || locale.is_official)
+    .map((locale) => ({
+      label: `${locale.native_name} (${locale.code})`,
+      title: locale.display_name,
+      value: locale.code,
+    }));
 }
 
 function buildErrorMessage(

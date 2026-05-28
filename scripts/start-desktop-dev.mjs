@@ -5,11 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, "..");
-const desktopApplicationDirectory = resolve(
-    repositoryRoot,
-    "apps",
-    "desktop",
-);
+const desktopApplicationDirectory = repositoryRoot;
 const desktopDebugBinaryPath = resolve(
     repositoryRoot,
     "tmp",

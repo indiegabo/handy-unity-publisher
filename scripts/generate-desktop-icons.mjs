@@ -10,8 +10,6 @@ const scriptDirectoryPath = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRootPath = path.resolve(scriptDirectoryPath, "..");
 const iconsDirectoryPath = path.join(
     repositoryRootPath,
-    "apps",
-    "desktop",
     "src-tauri",
     "icons",
 );

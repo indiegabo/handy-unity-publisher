@@ -16,6 +16,10 @@ jobs:
 
     env:
       TARGET_TRIPLE: x86_64-pc-windows-msvc
+      ITCH_PROJECT: ${{ vars.ITCH_PROJECT }}
+      ITCH_CHANNEL_WINDOWS_EXE: ${{ vars.ITCH_CHANNEL_WINDOWS_EXE }}
+      ITCH_CHANNEL_WINDOWS_MSI: ${{ vars.ITCH_CHANNEL_WINDOWS_MSI }}
+      BUTLER_API_KEY: ${{ secrets.ITCH_BUTLER_API_KEY }}
 
     steps:
       - name: Checkout tagged source
@@ -38,9 +42,13 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Install desktop UI dependencies
+        shell: bash
+        run: npm ci --prefix src-react
+
       - name: Prepare packaged runtime sidecar
         shell: pwsh
-        run: ./scripts/prepare-tauri-sidecar.ps1 -TargetTriple $env:TARGET_TRIPLE -Profile release
+        run: ./scripts/prepare-tauri-sidecar.ps1 -TargetTriple $env:TARGET_TRIPLE -BuildProfile release
 
       - name: Prepare packaged Butler sidecar
         shell: bash
@@ -52,7 +60,7 @@ jobs:
 
       - name: Build Windows desktop bundle
         shell: bash
-        run: cargo tauri build --manifest-path apps/desktop/src-tauri/Cargo.toml --config apps/desktop/src-tauri/tauri.release.conf.json --target "$TARGET_TRIPLE"
+        run: cargo tauri build --manifest-path src-tauri/Cargo.toml --config src-tauri/tauri.release.conf.json --target "$TARGET_TRIPLE" --bundles msi,nsis
 
       - name: Generate bundle checksums
         shell: pwsh
@@ -85,3 +93,176 @@ jobs:
             target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.msi
             target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.exe
             target/${{ env.TARGET_TRIPLE }}/release/bundle/SHA256SUMS.txt
+
+      - name: Validate Itch publish settings
+        shell: pwsh
+        run: |
+          if (-not $env:ITCH_PROJECT) {
+              throw "Missing repository variable ITCH_PROJECT (owner/game)."
+          }
+          if (-not $env:ITCH_CHANNEL_WINDOWS_EXE) {
+              throw "Missing repository variable ITCH_CHANNEL_WINDOWS_EXE."
+          }
+          if (-not $env:ITCH_CHANNEL_WINDOWS_MSI) {
+              throw "Missing repository variable ITCH_CHANNEL_WINDOWS_MSI."
+          }
+          if (-not $env:BUTLER_API_KEY) {
+              throw "Missing repository secret ITCH_BUTLER_API_KEY."
+          }
+
+      - name: Publish Windows installers to Itch channels
+        shell: pwsh
+        run: |
+          $butlerPath = Join-Path $PWD "src-tauri/bin/hgp-butler-$env:TARGET_TRIPLE.exe"
+          if (-not (Test-Path $butlerPath)) {
+              throw "Butler sidecar was not found at $butlerPath"
+          }
+
+          $bundleRoot = Join-Path $PWD "target/$env:TARGET_TRIPLE/release/bundle"
+          $exeAsset = Get-ChildItem -Path $bundleRoot -Recurse -File | Where-Object { $_.Extension -eq '.exe' } | Select-Object -First 1
+          $msiAsset = Get-ChildItem -Path $bundleRoot -Recurse -File | Where-Object { $_.Extension -eq '.msi' } | Select-Object -First 1
+
+          if (-not $exeAsset) {
+              throw "No Windows .exe installer was produced under $bundleRoot"
+          }
+          if (-not $msiAsset) {
+              throw "No Windows .msi installer was produced under $bundleRoot"
+          }
+
+          & $butlerPath push $exeAsset.FullName "$env:ITCH_PROJECT`:$env:ITCH_CHANNEL_WINDOWS_EXE" --userversion $env:GITHUB_REF_NAME
+          if ($LASTEXITCODE -ne 0) {
+              throw "Butler publish failed for Windows EXE channel."
+          }
+
+          & $butlerPath push $msiAsset.FullName "$env:ITCH_PROJECT`:$env:ITCH_CHANNEL_WINDOWS_MSI" --userversion $env:GITHUB_REF_NAME
+          if ($LASTEXITCODE -ne 0) {
+              throw "Butler publish failed for Windows MSI channel."
+          }
+
+  linux-bundle:
+    name: Linux Bundle
+    if: startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+
+    env:
+      TARGET_TRIPLE: x86_64-unknown-linux-gnu
+      ITCH_PROJECT: ${{ vars.ITCH_PROJECT }}
+      ITCH_CHANNEL_LINUX: ${{ vars.ITCH_CHANNEL_LINUX }}
+      BUTLER_API_KEY: ${{ secrets.ITCH_BUTLER_API_KEY }}
+
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Install Linux bundle dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libwebkit2gtk-4.1-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.0
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install desktop UI dependencies
+        shell: bash
+        run: npm ci --prefix src-react
+
+      - name: Prepare packaged runtime sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --package runtime-bin --target "$TARGET_TRIPLE"
+          mkdir -p src-tauri/bin
+          cp "target/$TARGET_TRIPLE/release/hgp-runtime" "src-tauri/bin/hgp-runtime-$TARGET_TRIPLE"
+          chmod +x "src-tauri/bin/hgp-runtime-$TARGET_TRIPLE"
+
+      - name: Prepare packaged Butler sidecar
+        shell: bash
+        run: node ./scripts/prepare-butler-sidecar.mjs --target "$TARGET_TRIPLE"
+
+      - name: Install Tauri CLI
+        shell: bash
+        run: cargo install tauri-cli --version '^2' --locked
+
+      - name: Build Linux desktop bundle
+        shell: bash
+        run: cargo tauri build --manifest-path src-tauri/Cargo.toml --config src-tauri/tauri.release.conf.json --target "$TARGET_TRIPLE" --bundles appimage,deb
+
+      - name: Generate bundle checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="target/$TARGET_TRIPLE/release/bundle"
+          if [[ ! -d "$bundle_root" ]]; then
+            echo "bundle output directory was not found at $bundle_root" >&2
+            exit 1
+          fi
+
+          mapfile -t assets < <(find "$bundle_root" -type f \( -name '*.AppImage' -o -name '*.deb' \) | sort)
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            echo "no Linux release assets were produced under $bundle_root" >&2
+            exit 1
+          fi
+
+          checksum_path="$bundle_root/SHA256SUMS-linux.txt"
+          : > "$checksum_path"
+          for asset in "${assets[@]}"; do
+            sha256sum "$asset" >> "$checksum_path"
+          done
+
+      - name: Upload Linux assets to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.AppImage
+            target/${{ env.TARGET_TRIPLE }}/release/bundle/**/*.deb
+            target/${{ env.TARGET_TRIPLE }}/release/bundle/SHA256SUMS-linux.txt
+
+      - name: Validate Linux Itch publish settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${ITCH_PROJECT:-}" ]] || { echo "Missing repository variable ITCH_PROJECT (owner/game)." >&2; exit 1; }
+          [[ -n "${ITCH_CHANNEL_LINUX:-}" ]] || { echo "Missing repository variable ITCH_CHANNEL_LINUX." >&2; exit 1; }
+          [[ -n "${BUTLER_API_KEY:-}" ]] || { echo "Missing repository secret ITCH_BUTLER_API_KEY." >&2; exit 1; }
+
+      - name: Publish Linux installer to Itch channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          butler_path="src-tauri/bin/hgp-butler-$TARGET_TRIPLE"
+          [[ -x "$butler_path" ]] || { echo "Butler sidecar not found at $butler_path" >&2; exit 1; }
+
+          bundle_root="target/$TARGET_TRIPLE/release/bundle"
+          appimage_path="$(find "$bundle_root" -type f -name '*.AppImage' | head -n 1 || true)"
+          deb_path="$(find "$bundle_root" -type f -name '*.deb' | head -n 1 || true)"
+
+          asset_path="$appimage_path"
+          if [[ -z "$asset_path" ]]; then
+            asset_path="$deb_path"
+          fi
+
+          [[ -n "$asset_path" ]] || { echo "No Linux installer found for Itch publish." >&2; exit 1; }
+
+          "$butler_path" push "$asset_path" "$ITCH_PROJECT:$ITCH_CHANNEL_LINUX" --userversion "$GITHUB_REF_NAME"

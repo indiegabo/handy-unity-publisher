@@ -5,7 +5,7 @@
       "label": "build desktop ui",
       "type": "shell",
       "command": "npm",
-      "args": ["run", "build", "--prefix", "apps/desktop/ui"],
+      "args": ["run", "build", "--prefix", "src-react"],
       "options": {
         "cwd": "${workspaceFolder}"
       },

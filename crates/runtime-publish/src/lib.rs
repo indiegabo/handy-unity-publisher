@@ -720,9 +720,9 @@ mod tests {
     #[test]
     fn resolve_itch_butler_executable_uses_shell_sidecar_when_config_is_empty() {
         let butler_path = if cfg!(windows) {
-            String::from("C:/repo/apps/desktop/src-tauri/bin/hgp-butler-x86_64-pc-windows-msvc.exe")
+            String::from("C:/repo/src-tauri/bin/hgp-butler-x86_64-pc-windows-msvc.exe")
         } else {
-            String::from("/repo/apps/desktop/src-tauri/bin/hgp-butler-x86_64-unknown-linux-gnu")
+            String::from("/repo/src-tauri/bin/hgp-butler-x86_64-unknown-linux-gnu")
         };
 
         assert_eq!(
@@ -746,11 +746,11 @@ mod tests {
     fn resolve_itch_butler_executable_reads_shell_environment_variable() {
         let sidecar = if cfg!(windows) {
             std::ffi::OsString::from(
-                "C:/repo/apps/desktop/src-tauri/bin/hgp-butler-x86_64-pc-windows-msvc.exe",
+                "C:/repo/src-tauri/bin/hgp-butler-x86_64-pc-windows-msvc.exe",
             )
         } else {
             std::ffi::OsString::from(
-                "/repo/apps/desktop/src-tauri/bin/hgp-butler-x86_64-unknown-linux-gnu",
+                "/repo/src-tauri/bin/hgp-butler-x86_64-unknown-linux-gnu",
             )
         };
 

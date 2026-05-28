@@ -2,14 +2,17 @@
     "name": "handy-games-publisher",
     "private": true,
     "workspaces": [
-        "apps/desktop/ui"
+        "src-react"
     ],
     "scripts": {
+        "build": "npm run build --prefix src-react",
         "icons:generate": "node ./scripts/generate-desktop-icons.mjs",
         "version:sync": "node ./scripts/sync-app-version.mjs",
         "version:check": "node ./scripts/sync-app-version.mjs --check",
         "identity:check": "node ./scripts/validate-hgp-identity.mjs",
         "localization:check": "node ./scripts/sync-localization-packs.mjs --check",
+        "localization:freeze": "node ./scripts/freeze-localization-working-set.mjs",
+        "localization:prerelease": "node ./scripts/prerelease-localization-increments.mjs",
         "localization:reset": "node ./scripts/reset-localization-preferences.mjs",
         "localization:sync": "node ./scripts/sync-localization-packs.mjs",
         "smoke:runtime": "node ./scripts/runtime-smoke.mjs",

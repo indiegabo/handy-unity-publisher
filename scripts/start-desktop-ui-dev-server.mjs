@@ -5,12 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, "..");
-const desktopApplicationDirectory = resolve(
-    repositoryRoot,
-    "apps",
-    "desktop",
-);
-const desktopUiDirectory = resolve(desktopApplicationDirectory, "ui");
+const desktopUiDirectory = resolve(repositoryRoot, "src-react");
 const desktopUiHost = "127.0.0.1";
 const desktopUiPort = 1420;
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";

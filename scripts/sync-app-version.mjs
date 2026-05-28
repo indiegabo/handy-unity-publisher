@@ -11,7 +11,7 @@ const isCheckMode = process.argv.includes("--check");
 
 const synchronizationTargets = [
     {
-        filePath: resolve(repositoryRoot, "apps", "desktop", "ui", "package.json"),
+        filePath: resolve(repositoryRoot, "src-react", "package.json"),
         indentation: 2,
         label: "desktop UI manifest",
         update(document) {
@@ -21,9 +21,7 @@ const synchronizationTargets = [
     {
         filePath: resolve(
             repositoryRoot,
-            "apps",
-            "desktop",
-            "ui",
+            "src-react",
             "package-lock.json",
         ),
         indentation: 2,
@@ -48,8 +46,6 @@ const synchronizationTargets = [
     {
         filePath: resolve(
             repositoryRoot,
-            "apps",
-            "desktop",
             "src-tauri",
             "tauri.conf.json",
         ),
@@ -66,7 +62,7 @@ const synchronizationTargets = [
         update(document) {
             return updateJsonValue(
                 document,
-                ["packages", "apps/desktop/ui", "version"],
+                ["packages", "src-react", "version"],
                 workspaceVersion,
             );
         },

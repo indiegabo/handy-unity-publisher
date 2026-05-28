@@ -7,7 +7,7 @@ pipelines/*.yml
 pipelines/*.yaml
 target/
 /target-*/
-apps/desktop/ui/dist/
-apps/desktop/ui/node_modules/
-apps/desktop/src-tauri/gen/
-apps/desktop/src-tauri/bin/
+src-react/dist/
+src-react/node_modules/
+src-tauri/gen/
+src-tauri/bin/

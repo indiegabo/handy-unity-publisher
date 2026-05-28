@@ -16,8 +16,8 @@ Public beta docs: <https://indiegabo.github.io/handy-games-publisher/>.
 
 ## Product Model
 
-- `apps/desktop/src-tauri` hosts the desktop shell and Tauri command surface.
-- `apps/desktop/ui` hosts the React + TypeScript + Vite tray popup and
+- `src-tauri` hosts the desktop shell and Tauri command surface.
+- `src-react` hosts the React + TypeScript + Vite tray popup and
   reusable UI component kit loaded by the shell.
 - `crates/runtime-bin` hosts the bundled runtime entrypoint and developer
   command surface.
@@ -55,9 +55,9 @@ feed plus focus-screen working views, managed overlays, and staged flows.
 The desktop shell supports separate icon sources for the bundled app and the
 tray surface.
 
-- `apps/desktop/src-tauri/icons/app-icon-source.png` is the source image used
+- `src-tauri/icons/app-icon-source.png` is the source image used
   to regenerate the packaged app icons declared in the Tauri bundle config.
-- `apps/desktop/src-tauri/icons/tray-icon-source.png` is an optional dedicated
+- `src-tauri/icons/tray-icon-source.png` is an optional dedicated
   PNG used by the runtime tray icon. When it is absent, the tray falls back to
   the default app icon.
 
@@ -121,7 +121,7 @@ Preview the desktop UI in a browser while iterating on shared primitives and
 focus-screen surfaces:
 
 ```bash
-npm run dev --prefix apps/desktop/ui
+npm run dev --prefix src-react
 ```
 
 The browser preview is useful for component work but does not expose the Tauri
@@ -134,7 +134,7 @@ npm start
 ```
 
 `npm start` resolves the local Tauri CLI from the root package and launches
-the desktop shell from `apps/desktop`. The Tauri development loop owns the UI
+the desktop shell from the repository root. The Tauri development loop owns the UI
 development server and version synchronization through `beforeDevCommand`, and
 the desktop shell startup path then launches the bundled runtime supervisor.
 On Windows the runner also attempts to enter the Visual Studio developer
@@ -152,7 +152,7 @@ The desktop app version is centralized in `Cargo.toml` under
 value if you need to refresh the mirrored version fields without starting the
 desktop development loop.
 
-Localization packs under `apps/desktop/src-tauri/localizations/` use
+Localization packs under `src-tauri/localizations/` use
 `en.json` as the source of truth for the message catalog. When adding or
 translating locale strings, update `en.json` first, run
 `npm run localization:sync` to mirror its keys into every non-English pack,
@@ -168,14 +168,14 @@ top-level tree with temporary files.
 Build the desktop shell without the Tauri development loop:
 
 ```bash
-npm run build --prefix apps/desktop/ui
-cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml
+npm run build --prefix src-react
+cargo run --manifest-path src-tauri/Cargo.toml
 ```
 
 Validate the touched slices:
 
 ```bash
-npm run build --prefix apps/desktop/ui
+npm run build --prefix src-react
 cargo check -p desktop-shell -j 1 -q
 cargo test -p runtime-store -q
 ```
@@ -214,11 +214,21 @@ repository root.
 - `.github/workflows/release-please.yml` maintains SemVer release PRs and tags
   from Conventional Commits on `main`.
 - `.github/workflows/release-bundle.yml` builds the Windows desktop bundle for
-  published releases and uploads installer artifacts plus checksums.
+  published releases, builds Windows and Linux installers, uploads installer
+  artifacts plus checksums to the GitHub release, and publishes installers to
+  Itch channels through Butler.
 - `scripts/prepare-tauri-sidecar.ps1` builds and stages the packaged
   `runtime-bin` sidecar expected by release bundles.
 - `scripts/prepare-butler-sidecar.mjs` downloads and stages the Butler
   sidecar used by Itch publish flows in development and release bundles.
+
+Itch publish automation in `.github/workflows/release-bundle.yml` requires:
+
+- repository secret `ITCH_BUTLER_API_KEY`
+- repository variable `ITCH_PROJECT` in `owner/game` format
+- repository variable `ITCH_CHANNEL_WINDOWS_EXE`
+- repository variable `ITCH_CHANNEL_WINDOWS_MSI`
+- repository variable `ITCH_CHANNEL_LINUX`
 
 ## Operator Expectations
 

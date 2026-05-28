@@ -4,10 +4,10 @@
     "identifier": "com.indiegabo.handygamespublisher",
     "mainBinaryName": "HGP",
     "build": {
-        "beforeDevCommand": "node ../../../scripts/generate-desktop-icons.mjs && node ../../../scripts/sync-app-version.mjs && node ../../../scripts/start-desktop-ui-dev-server.mjs",
-        "beforeBuildCommand": "node ../../../scripts/generate-desktop-icons.mjs && node ../../../scripts/sync-app-version.mjs && npm run build --prefix ui",
+        "beforeDevCommand": "node ./scripts/generate-desktop-icons.mjs && node ./scripts/sync-app-version.mjs && node ./scripts/start-desktop-ui-dev-server.mjs",
+        "beforeBuildCommand": "node ./scripts/generate-desktop-icons.mjs && node ./scripts/sync-app-version.mjs && npm run build --prefix src-react",
         "devUrl": "http://127.0.0.1:1420",
-        "frontendDist": "../ui/dist"
+        "frontendDist": "../src-react/dist"
     },
     "app": {
         "withGlobalTauri": true,

@@ -63,7 +63,7 @@ if (-not (Test-Path $sourcePath)) {
     throw "built runtime binary was not found at $sourcePath"
 }
 
-$destinationDir = Join-Path $repoRoot "apps/desktop/src-tauri/bin"
+$destinationDir = Join-Path $repoRoot "src-tauri/bin"
 New-Item -Path $destinationDir -ItemType Directory -Force | Out-Null
 
 $destinationPath = Join-Path $destinationDir "hgp-runtime-$TargetTriple$extension"

@@ -33,10 +33,10 @@ crates/
   runtime-store/
 ```
 
-The desktop UI source lives in `apps/desktop/ui` as a Vite-driven React +
+The desktop UI source lives in `src-react` as a Vite-driven React +
 TypeScript frontend. Shared buttons, fields, icons, badges, and surface
-primitives live under `apps/desktop/ui/src/components`. Production assets are
-emitted to `apps/desktop/ui/dist` and loaded by the shell build.
+primitives live under `src-react/src/components`. Production assets are
+emitted to `src-react/dist` and loaded by the shell build.
 
 The runtime crates divide responsibilities explicitly:
 
@@ -144,14 +144,14 @@ Install the desktop UI dependencies directly only when you are intentionally
 working outside the root workspace flow:
 
 ```bash
-npm install --prefix apps/desktop/ui
+npm install --prefix src-react
 ```
 
 Start the Vite development server when iterating on shared components in a
 browser preview:
 
 ```bash
-npm run dev --prefix apps/desktop/ui
+npm run dev --prefix src-react
 ```
 
 The browser preview is useful for component work but does not expose live
@@ -164,11 +164,11 @@ npm start
 ```
 
 The root `npm start` command resolves the local Tauri CLI and runs `tauri dev`
-from `apps/desktop`. The Tauri development loop owns the UI development server
+from the repository root. The Tauri development loop owns the UI development server
 and version synchronization through `beforeDevCommand`, and the desktop shell
 startup path then launches the bundled runtime supervisor. Before Tauri starts,
 the root launcher also ensures the Butler sidecar exists under
-`apps/desktop/src-tauri/bin` so Itch destinations can publish without asking
+`src-tauri/bin` so Itch destinations can publish without asking
 operators for a local Butler path. On Windows the runner also attempts to enter
 the Visual Studio developer environment before invoking Tauri, but it still
 requires the native Tauri prerequisites, including the Visual Studio C++
@@ -191,7 +191,7 @@ routes Cargo artifacts through `tmp/` for the same reason.
 Build the desktop UI assets consumed by plain Cargo runs:
 
 ```bash
-npm run build --prefix apps/desktop/ui
+npm run build --prefix src-react
 ```
 
 Bootstrap runtime metadata, health reports, and SQLite state:
@@ -447,7 +447,7 @@ cargo test -p runtime-store -q
 If the React + TypeScript desktop UI or reusable component kit changed:
 
 ```bash
-npm run build --prefix apps/desktop/ui
+npm run build --prefix src-react
 ```
 
 ## Typical Local Flow

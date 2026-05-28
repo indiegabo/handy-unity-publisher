@@ -3,7 +3,7 @@
 
 mod runtime_events;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::io::ErrorKind;
@@ -144,18 +144,20 @@ const AUTH_PROVIDER_STATUS_DISCONNECTED: &str = "disconnected";
 const AUTH_PROVIDER_STATUS_UNAVAILABLE: &str = "unavailable";
 const DESKTOP_SHELL_RERUN_REQUESTED_VIA: &str = "desktop-shell-ui";
 const LOCALIZATION_RESOURCE_DIR_NAME: &str = "localizations";
+const LOCALIZATION_SOURCE_DIR_NAME: &str = "sources";
+const LOCALIZATION_BUNDLE_DIR_NAME: &str = "bundles";
+const LOCALIZATION_BUNDLE_CACHE_DIR_NAME: &str = "bundle-cache";
 const LOCALIZATION_SETTINGS_FILE_NAME: &str = "localization-settings.json";
+const LOCALIZATION_ORIGIN_FILE_NAME: &str = "origin.json";
+const LOCALIZATION_WORKING_FILE_NAME: &str = "working.json";
+const LOCALIZATION_INCREMENT_FILE_PREFIX: &str = "increment-";
+const LOCALIZATION_BUNDLE_CACHE_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_PRIMARY_LOCALE_CODE: &str = "en";
 const DEFAULT_FALLBACK_LOCALE_CODE: &str = "pt-BR";
 const AUTO_SELECTION_SOURCE: &str = "auto";
 const USER_SELECTION_SOURCE: &str = "user";
-const OFFICIAL_LOCALE_CODES: &[&str] = &["en", "es", "pt-BR", "zh-CN"];
-const EMBEDDED_LOCALIZATION_FILES: &[(&str, &str)] = &[
-    ("en.json", include_str!("../localizations/en.json")),
-    ("es.json", include_str!("../localizations/es.json")),
-    ("pt-BR.json", include_str!("../localizations/pt-BR.json")),
-    ("zh-CN.json", include_str!("../localizations/zh-CN.json")),
-];
+
+include!(concat!(env!("OUT_DIR"), "/localization_manifest.rs"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WindowLayoutPreset {
@@ -278,6 +280,11 @@ struct ShellLifecycleState {
     suppress_main_window_focus_loss_until: Mutex<Option<Instant>>,
 }
 
+#[derive(Default)]
+struct LocalizationResourceState {
+    bundle_root: Mutex<Option<PathBuf>>,
+}
+
 #[derive(Debug, Clone)]
 struct CachedHostCapabilityProfile {
     cached_at: Instant,
@@ -386,13 +393,59 @@ struct DetectedHostLocale {
     region: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LocalizationBundleCacheMetadata {
+    schema_version: u32,
+    locale_code: String,
+    origin_signature: LocalizationSourceFileSignature,
+    increment_numbers: Vec<u32>,
+    working_signature: Option<LocalizationSourceFileSignature>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LocalizationSourceFileSignature {
+    byte_len: u64,
+    modified_unix_millis: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalizationSourcePack {
+    locale_code: String,
+    origin_path: PathBuf,
+    increment_sources: Vec<LocalizationIncrementSource>,
+    working_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalizationIncrementSource {
+    number: u32,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LocalizationPackDocument {
     display_name: String,
     #[serde(default)]
     native_name: String,
     #[serde(default)]
     messages: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct LocalizationOverlayDocument {
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    native_name: Option<String>,
+    #[serde(default)]
+    messages: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalizationPackOutputDocument<'a> {
+    display_name: &'a str,
+    native_name: &'a str,
+    messages: BTreeMap<&'a str, &'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1318,6 +1371,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(RuntimeProcessState::default())
         .manage(ShellLifecycleState::default())
+        .manage(LocalizationResourceState::default())
         .invoke_handler(tauri::generate_handler![
             application_version,
             process_feed,
@@ -1375,8 +1429,13 @@ pub fn run() {
             unity_adapter_settings,
         ])
         .setup(|app| {
-            ensure_persisted_localization_resources(app.handle())
+            let localization_root = ensure_persisted_localization_resources(app.handle())
                 .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
+            store_bootstrapped_localization_resource_root(
+                &app.handle().state::<LocalizationResourceState>(),
+                localization_root,
+            )
+            .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
             create_main_window(app.handle())
                 .map_err(|error| -> Box<dyn std::error::Error> { Box::new(io::Error::other(error)) })?;
             launch_runtime_process(app)
@@ -2184,6 +2243,84 @@ fn load_runtime_directory_settings(
 fn resolve_localization_resource_root<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
 ) -> io::Result<PathBuf> {
+    read_bootstrapped_localization_resource_root(
+        &app_handle.state::<LocalizationResourceState>(),
+    )
+}
+
+fn store_bootstrapped_localization_resource_root(
+    state: &LocalizationResourceState,
+    localization_root: PathBuf,
+) -> io::Result<()> {
+    let mut bundle_root = state
+        .bundle_root
+        .lock()
+        .map_err(|_| io::Error::other("localization resource state is unavailable"))?;
+    *bundle_root = Some(localization_root);
+    Ok(())
+}
+
+fn read_bootstrapped_localization_resource_root(
+    state: &LocalizationResourceState,
+) -> io::Result<PathBuf> {
+    state
+        .bundle_root
+        .lock()
+        .map_err(|_| io::Error::other("localization resource state is unavailable"))?
+        .clone()
+        .ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::NotFound,
+                "localization resources were not bootstrapped before command invocation",
+            )
+        })
+}
+
+fn ensure_persisted_localization_resources<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> io::Result<PathBuf> {
+    let persisted_root = resolve_persisted_localization_resource_root(app_handle)?;
+    let official_source_root = resolve_official_localization_source_root(app_handle)?;
+    let bundle_root = resolve_localization_bundle_root(app_handle)?;
+    let cache_root = resolve_localization_bundle_cache_root(app_handle)?;
+
+    if !localization_source_root(&persisted_root).is_dir() {
+        seed_embedded_localization_files(&persisted_root)?;
+    }
+
+    sync_official_localization_sources(&official_source_root, &persisted_root)?;
+    compile_localization_bundles(
+        &localization_source_root(&persisted_root),
+        &bundle_root,
+        &cache_root,
+    )?;
+
+    Ok(bundle_root)
+}
+
+fn resolve_persisted_localization_resource_root<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> io::Result<PathBuf> {
+    resolve_shell_persistence_dir(app_handle)
+        .map(|path| path.join(LOCALIZATION_RESOURCE_DIR_NAME))
+}
+
+fn resolve_localization_bundle_root<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> io::Result<PathBuf> {
+    resolve_shell_local_data_dir(app_handle).map(|path| localization_bundle_root(&path))
+}
+
+fn resolve_localization_bundle_cache_root<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> io::Result<PathBuf> {
+    resolve_shell_local_data_dir(app_handle)
+        .map(|path| localization_bundle_cache_root(&path))
+}
+
+fn resolve_official_localization_source_root<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> io::Result<PathBuf> {
     if cfg!(debug_assertions) {
         return Ok(workspace_localization_resource_root());
     }
@@ -2193,29 +2330,17 @@ fn resolve_localization_resource_root<R: tauri::Runtime>(
         .resource_dir()
         .map(|path| path.join(LOCALIZATION_RESOURCE_DIR_NAME))
         .map_err(|error| io::Error::other(error.to_string()))?;
-
-    if resource_root.is_dir() && localization_packs_exist(&resource_root) {
+    if resource_root.is_dir() {
         return Ok(resource_root);
     }
 
-    let fallback_root = ensure_persisted_localization_resources(app_handle)?;
-
-    Ok(fallback_root)
-}
-
-fn ensure_persisted_localization_resources<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-) -> io::Result<PathBuf> {
     let persisted_root = resolve_persisted_localization_resource_root(app_handle)?;
-    seed_embedded_localization_files(&persisted_root)?;
-    Ok(persisted_root)
-}
+    let persisted_source_root = localization_source_root(&persisted_root);
+    if persisted_source_root.is_dir() {
+        return Ok(persisted_source_root);
+    }
 
-fn resolve_persisted_localization_resource_root<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-) -> io::Result<PathBuf> {
-    resolve_shell_persistence_dir(app_handle)
-        .map(|path| path.join(LOCALIZATION_RESOURCE_DIR_NAME))
+    Ok(persisted_root)
 }
 
 fn resolve_localization_settings_dir<R: tauri::Runtime>(
@@ -2298,26 +2423,492 @@ fn resolve_shell_local_data_dir_from_app_local_data_dir(
 
 fn workspace_localization_resource_root() -> PathBuf {
     workspace_root()
-        .join("apps")
-        .join("desktop")
         .join("src-tauri")
         .join(LOCALIZATION_RESOURCE_DIR_NAME)
 }
 
-fn localization_packs_exist(root: &Path) -> bool {
-    EMBEDDED_LOCALIZATION_FILES
-        .iter()
-        .all(|(file_name, _)| root.join(file_name).is_file())
+fn localization_source_root(localization_root: &Path) -> PathBuf {
+    localization_root.join(LOCALIZATION_SOURCE_DIR_NAME)
+}
+
+fn localization_bundle_root(local_data_dir: &Path) -> PathBuf {
+    local_data_dir
+        .join(LOCALIZATION_RESOURCE_DIR_NAME)
+        .join(LOCALIZATION_BUNDLE_DIR_NAME)
+}
+
+fn localization_bundle_cache_root(local_data_dir: &Path) -> PathBuf {
+    local_data_dir
+        .join(LOCALIZATION_RESOURCE_DIR_NAME)
+        .join(LOCALIZATION_BUNDLE_CACHE_DIR_NAME)
 }
 
 fn seed_embedded_localization_files(root: &Path) -> io::Result<()> {
     fs::create_dir_all(root)?;
+    let source_root = localization_source_root(root);
+    fs::create_dir_all(&source_root)?;
 
     for (file_name, file_contents) in EMBEDDED_LOCALIZATION_FILES {
+        let locale_code = file_name.strip_suffix(".json").unwrap_or(file_name);
+        let locale_source_dir = source_root.join(locale_code);
+        fs::create_dir_all(&locale_source_dir)?;
+        fs::write(
+            locale_source_dir.join(LOCALIZATION_ORIGIN_FILE_NAME),
+            file_contents,
+        )?;
         fs::write(root.join(file_name), file_contents)?;
     }
 
     Ok(())
+}
+
+fn sync_official_localization_sources(
+    official_source_root: &Path,
+    persisted_root: &Path,
+) -> io::Result<()> {
+    let persisted_source_root = localization_source_root(persisted_root);
+    fs::create_dir_all(&persisted_source_root)?;
+
+    if official_source_root == persisted_source_root.as_path() {
+        return Ok(());
+    }
+
+    for locale_code in OFFICIAL_LOCALE_CODES {
+        let source_locale_dir = official_source_root.join(locale_code);
+        if !source_locale_dir.is_dir() {
+            return Err(io::Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "official locale source directory {} is missing",
+                    source_locale_dir.display()
+                ),
+            ));
+        }
+
+        sync_localization_source_directory(
+            &source_locale_dir,
+            &persisted_source_root.join(locale_code),
+        )?;
+    }
+
+    Ok(())
+}
+
+fn sync_localization_source_directory(
+    source_locale_dir: &Path,
+    persisted_locale_dir: &Path,
+) -> io::Result<()> {
+    fs::create_dir_all(persisted_locale_dir)?;
+
+    let mut retained_files = HashSet::new();
+    let mut source_entries = fs::read_dir(source_locale_dir)?.collect::<Result<Vec<_>, _>>()?;
+    source_entries.sort_by(|left, right| left.path().cmp(&right.path()));
+
+    for entry in source_entries {
+        let path = entry.path();
+        if !path.is_file()
+            || path.extension().and_then(|extension| extension.to_str()) != Some("json")
+        {
+            continue;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !is_localization_source_file_name(file_name) {
+            continue;
+        }
+
+        let source_bytes = fs::read(&path)?;
+        let target_path = persisted_locale_dir.join(file_name);
+        let target_matches = fs::read(&target_path)
+            .map(|bytes| bytes == source_bytes)
+            .unwrap_or(false);
+        if !target_matches {
+            fs::write(&target_path, &source_bytes)?;
+        }
+
+        retained_files.insert(file_name.to_owned());
+    }
+
+    let mut persisted_entries = fs::read_dir(persisted_locale_dir)?.collect::<Result<Vec<_>, _>>()?;
+    persisted_entries.sort_by(|left, right| left.path().cmp(&right.path()));
+
+    for entry in persisted_entries {
+        let path = entry.path();
+        if !path.is_file()
+            || path.extension().and_then(|extension| extension.to_str()) != Some("json")
+        {
+            continue;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !retained_files.contains(file_name) {
+            fs::remove_file(path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn compile_localization_bundles(
+    source_root: &Path,
+    bundle_root: &Path,
+    cache_root: &Path,
+) -> io::Result<()> {
+    fs::create_dir_all(bundle_root)?;
+    fs::create_dir_all(cache_root)?;
+
+    let source_packs = discover_localization_source_packs(source_root)?;
+    let mut expected_bundle_names = HashSet::new();
+
+    for source_pack in &source_packs {
+        compile_localization_bundle(source_pack, bundle_root, cache_root)?;
+        expected_bundle_names.insert(format!("{}.json", source_pack.locale_code));
+    }
+
+    let mut bundle_entries = fs::read_dir(bundle_root)?.collect::<Result<Vec<_>, _>>()?;
+    bundle_entries.sort_by(|left, right| left.path().cmp(&right.path()));
+    for entry in bundle_entries {
+        let path = entry.path();
+        if !path.is_file()
+            || path.extension().and_then(|extension| extension.to_str()) != Some("json")
+        {
+            continue;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+
+        if !expected_bundle_names.contains(file_name) {
+            fs::remove_file(path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn discover_localization_source_packs(
+    source_root: &Path,
+) -> io::Result<Vec<LocalizationSourcePack>> {
+    let mut source_packs = Vec::new();
+
+    let entries = match fs::read_dir(source_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(source_packs),
+        Err(error) => return Err(error),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let Some(locale_code) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+
+        let origin_path = path.join(LOCALIZATION_ORIGIN_FILE_NAME);
+        if !origin_path.is_file() {
+            continue;
+        }
+
+        let mut increment_sources = Vec::new();
+        let mut working_path = None;
+        let mut locale_entries = fs::read_dir(&path)?.collect::<Result<Vec<_>, _>>()?;
+        locale_entries.sort_by(|left, right| left.path().cmp(&right.path()));
+
+        for locale_entry in locale_entries {
+            let locale_entry_path = locale_entry.path();
+            if !locale_entry_path.is_file()
+                || locale_entry_path.extension().and_then(|extension| extension.to_str())
+                    != Some("json")
+            {
+                continue;
+            }
+
+            let Some(file_name) = locale_entry_path
+                .file_name()
+                .and_then(|value| value.to_str())
+            else {
+                continue;
+            };
+
+            if file_name == LOCALIZATION_ORIGIN_FILE_NAME {
+                continue;
+            }
+
+            if file_name == LOCALIZATION_WORKING_FILE_NAME {
+                working_path = Some(locale_entry_path);
+                continue;
+            }
+
+            if let Some(increment_number) = parse_localization_increment_file_name(file_name) {
+                increment_sources.push(LocalizationIncrementSource {
+                    number: increment_number,
+                    path: locale_entry_path,
+                });
+            }
+        }
+
+        increment_sources.sort_by_key(|source| source.number);
+        source_packs.push(LocalizationSourcePack {
+            locale_code: locale_code.to_owned(),
+            origin_path,
+            increment_sources,
+            working_path,
+        });
+    }
+
+    source_packs.sort_by(|left, right| left.locale_code.cmp(&right.locale_code));
+    Ok(source_packs)
+}
+
+fn compile_localization_bundle(
+    source_pack: &LocalizationSourcePack,
+    bundle_root: &Path,
+    cache_root: &Path,
+) -> io::Result<()> {
+    let bundle_path = bundle_root.join(format!("{}.json", source_pack.locale_code));
+    let frozen_bundle_path =
+        cache_root.join(format!("{}.frozen.json", source_pack.locale_code));
+    let metadata_path = cache_root.join(format!("{}.meta.json", source_pack.locale_code));
+    let current_metadata = build_localization_bundle_cache_metadata(source_pack)?;
+    let existing_metadata = read_localization_bundle_cache_metadata(&metadata_path)?;
+
+    if existing_metadata.as_ref() == Some(&current_metadata)
+        && bundle_path.is_file()
+        && frozen_bundle_path.is_file()
+    {
+        return Ok(());
+    }
+
+    let mut frozen_bundle = if let Some(existing_metadata) = existing_metadata.as_ref() {
+        if existing_metadata.schema_version == LOCALIZATION_BUNDLE_CACHE_SCHEMA_VERSION
+            && existing_metadata.locale_code == source_pack.locale_code
+            && existing_metadata.origin_signature == current_metadata.origin_signature
+            && current_metadata
+                .increment_numbers
+                .starts_with(&existing_metadata.increment_numbers)
+            && frozen_bundle_path.is_file()
+        {
+            let mut cached_bundle = read_localization_pack_document(&frozen_bundle_path)?;
+            for increment_source in source_pack
+                .increment_sources
+                .iter()
+                .skip(existing_metadata.increment_numbers.len())
+            {
+                apply_localization_overlay_from_path(
+                    &mut cached_bundle,
+                    &increment_source.path,
+                )?;
+            }
+            cached_bundle
+        } else {
+            build_frozen_localization_bundle(source_pack)?
+        }
+    } else {
+        build_frozen_localization_bundle(source_pack)?
+    };
+
+    write_localization_pack_document(&frozen_bundle_path, &frozen_bundle)?;
+
+    if let Some(working_path) = source_pack.working_path.as_deref() {
+        apply_localization_overlay_from_path(&mut frozen_bundle, working_path)?;
+    }
+
+    write_localization_pack_document(&bundle_path, &frozen_bundle)?;
+    write_json_atomic(&metadata_path, &current_metadata)?;
+
+    Ok(())
+}
+
+fn build_frozen_localization_bundle(
+    source_pack: &LocalizationSourcePack,
+) -> io::Result<LocalizationPackDocument> {
+    let mut bundle = read_localization_pack_document(&source_pack.origin_path)?;
+    for increment_source in &source_pack.increment_sources {
+        apply_localization_overlay_from_path(&mut bundle, &increment_source.path)?;
+    }
+    Ok(bundle)
+}
+
+fn build_localization_bundle_cache_metadata(
+    source_pack: &LocalizationSourcePack,
+) -> io::Result<LocalizationBundleCacheMetadata> {
+    Ok(LocalizationBundleCacheMetadata {
+        schema_version: LOCALIZATION_BUNDLE_CACHE_SCHEMA_VERSION,
+        locale_code: source_pack.locale_code.clone(),
+        origin_signature: localization_source_file_signature(&source_pack.origin_path)?,
+        increment_numbers: source_pack
+            .increment_sources
+            .iter()
+            .map(|source| source.number)
+            .collect(),
+        working_signature: source_pack
+            .working_path
+            .as_deref()
+            .map(localization_source_file_signature)
+            .transpose()?,
+    })
+}
+
+fn read_localization_bundle_cache_metadata(
+    path: &Path,
+) -> io::Result<Option<LocalizationBundleCacheMetadata>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    match serde_json::from_slice::<LocalizationBundleCacheMetadata>(&bytes) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn localization_source_file_signature(
+    path: &Path,
+) -> io::Result<LocalizationSourceFileSignature> {
+    let metadata = fs::metadata(path)?;
+    let modified_unix_millis = metadata
+        .modified()
+        .ok()
+        .and_then(|timestamp| timestamp.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64);
+
+    Ok(LocalizationSourceFileSignature {
+        byte_len: metadata.len(),
+        modified_unix_millis,
+    })
+}
+
+fn read_localization_pack_document(path: &Path) -> io::Result<LocalizationPackDocument> {
+    let document = serde_json::from_slice::<LocalizationPackDocument>(&fs::read(path)?)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
+    let display_name = document.display_name.trim();
+    if display_name.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "display_name is required",
+        ));
+    }
+
+    Ok(LocalizationPackDocument {
+        display_name: display_name.to_owned(),
+        native_name: if document.native_name.trim().is_empty() {
+            display_name.to_owned()
+        } else {
+            document.native_name.trim().to_owned()
+        },
+        messages: document.messages,
+    })
+}
+
+fn apply_localization_overlay_from_path(
+    bundle: &mut LocalizationPackDocument,
+    overlay_path: &Path,
+) -> io::Result<()> {
+    let overlay = serde_json::from_slice::<LocalizationOverlayDocument>(&fs::read(overlay_path)?)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
+    apply_localization_overlay(bundle, overlay);
+    Ok(())
+}
+
+fn apply_localization_overlay(
+    bundle: &mut LocalizationPackDocument,
+    overlay: LocalizationOverlayDocument,
+) {
+    if let Some(display_name) = overlay.display_name.as_deref().map(str::trim) {
+        if !display_name.is_empty() {
+            bundle.display_name = display_name.to_owned();
+        }
+    }
+
+    if let Some(native_name) = overlay.native_name.as_deref().map(str::trim) {
+        if !native_name.is_empty() {
+            bundle.native_name = native_name.to_owned();
+        }
+    }
+
+    for (key, value) in overlay.messages {
+        bundle.messages.insert(key, value);
+    }
+}
+
+fn write_localization_pack_document(
+    path: &Path,
+    document: &LocalizationPackDocument,
+) -> io::Result<()> {
+    let mut sorted_messages = BTreeMap::new();
+    for (key, value) in &document.messages {
+        sorted_messages.insert(key.as_str(), value.as_str());
+    }
+
+    write_json_atomic(
+        path,
+        &LocalizationPackOutputDocument {
+            display_name: document.display_name.as_str(),
+            native_name: document.native_name.as_str(),
+            messages: sorted_messages,
+        },
+    )
+}
+
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(value)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    bytes.push(b'\n');
+    write_bytes_atomic(path, &bytes)
+}
+
+fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if fs::read(path).map(|existing| existing == bytes).unwrap_or(false) {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let temp_path = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("localization")
+    ));
+    fs::write(&temp_path, bytes)?;
+
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+
+    match fs::rename(&temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            Err(error)
+        }
+    }
+}
+
+fn is_localization_source_file_name(file_name: &str) -> bool {
+    file_name == LOCALIZATION_ORIGIN_FILE_NAME
+        || file_name == LOCALIZATION_WORKING_FILE_NAME
+        || parse_localization_increment_file_name(file_name).is_some()
+}
+
+fn parse_localization_increment_file_name(file_name: &str) -> Option<u32> {
+    let increment_suffix = file_name
+        .strip_prefix(LOCALIZATION_INCREMENT_FILE_PREFIX)?
+        .strip_suffix(".json")?;
+    increment_suffix.parse::<u32>().ok()
 }
 
 fn localization_preferences_path(settings_dir: &Path) -> PathBuf {
@@ -2355,6 +2946,12 @@ fn load_localization_settings_from_paths_with_detected_locale(
         warnings.push(persisted_warning);
     }
 
+    let official_available_locales = available_locales
+        .iter()
+        .filter(|locale| locale.is_official)
+        .cloned()
+        .collect::<Vec<_>>();
+
     let primary_locale = resolve_configured_locale_code(
         persisted_preferences
             .as_ref()
@@ -2369,7 +2966,7 @@ fn load_localization_settings_from_paths_with_detected_locale(
             .as_ref()
             .map(|preferences| preferences.fallback_locale.as_str()),
         default_fallback_locale_code(&available_locales, &primary_locale),
-        &available_locales,
+        &official_available_locales,
         "fallback",
         &mut warnings,
     );
@@ -2391,6 +2988,11 @@ fn persist_localization_preferences_to_paths(
     let normalized_primary_locale = input.primary_locale.trim();
     let normalized_fallback_locale = input.fallback_locale.trim();
     let (available_locales, _) = discover_localization_locale_settings(localization_root)?;
+    let official_available_locales = available_locales
+        .iter()
+        .filter(|locale| locale.is_official)
+        .cloned()
+        .collect::<Vec<_>>();
 
     if available_locales.is_empty() {
         return Err(io::Error::new(
@@ -2425,6 +3027,17 @@ fn persist_localization_preferences_to_paths(
             ErrorKind::InvalidInput,
             format!(
                 "fallback locale {:?} is not available in {}",
+                normalized_fallback_locale,
+                localization_root.display()
+            ),
+        ));
+    }
+
+    if !locale_code_exists(normalized_fallback_locale, &official_available_locales) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "fallback locale {:?} is not an official locale in {}",
                 normalized_fallback_locale,
                 localization_root.display()
             ),
@@ -2655,12 +3268,19 @@ fn discover_localization_locale_settings(
     let mut available_locales = Vec::new();
     let mut warnings = Vec::new();
 
-    let entries = match fs::read_dir(localization_root) {
+    let source_root = localization_source_root(localization_root);
+    let discovery_root = if source_root.is_dir() {
+        source_root.as_path()
+    } else {
+        localization_root
+    };
+
+    let entries = match fs::read_dir(discovery_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => {
             warnings.push(format!(
                 "No locale packs were found at {}.",
-                localization_root.display()
+                discovery_root.display()
             ));
             return Ok((available_locales, warnings));
         }
@@ -2670,6 +3290,36 @@ fn discover_localization_locale_settings(
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
+
+        if path.is_dir() {
+            let Some(locale_code) = path.file_name().and_then(|file_name| file_name.to_str()) else {
+                warnings.push(format!(
+                    "Ignoring locale source directory with a non-UTF8 name at {}.",
+                    path.display()
+                ));
+                continue;
+            };
+
+            let locale_document_path = path.join(LOCALIZATION_ORIGIN_FILE_NAME);
+            if !locale_document_path.is_file() {
+                warnings.push(format!(
+                    "Ignoring locale source directory without origin.json at {}.",
+                    path.display()
+                ));
+                continue;
+            }
+
+            match load_localization_locale_setting(&locale_document_path, locale_code) {
+                Ok(locale_setting) => available_locales.push(locale_setting),
+                Err(error) => warnings.push(format!(
+                    "Could not load locale source {}: {}",
+                    locale_document_path.display(),
+                    error
+                )),
+            }
+
+            continue;
+        }
 
         if !path.is_file()
             || path.extension().and_then(|extension| extension.to_str()) != Some("json")
@@ -2795,23 +3445,36 @@ fn default_fallback_locale_code<'a>(
     available_locales: &'a [LocalizationLocaleSettings],
     primary_locale_code: &'a str,
 ) -> Option<&'a str> {
+    let official_locales = available_locales
+        .iter()
+        .filter(|locale| locale.is_official)
+        .collect::<Vec<_>>();
+
     if primary_locale_code != DEFAULT_FALLBACK_LOCALE_CODE
-        && locale_code_exists(DEFAULT_FALLBACK_LOCALE_CODE, available_locales)
+        && official_locales
+            .iter()
+            .any(|locale| locale.code == DEFAULT_FALLBACK_LOCALE_CODE)
     {
         return Some(DEFAULT_FALLBACK_LOCALE_CODE);
     }
 
     if primary_locale_code != DEFAULT_PRIMARY_LOCALE_CODE
-        && locale_code_exists(DEFAULT_PRIMARY_LOCALE_CODE, available_locales)
+        && official_locales
+            .iter()
+            .any(|locale| locale.code == DEFAULT_PRIMARY_LOCALE_CODE)
     {
         return Some(DEFAULT_PRIMARY_LOCALE_CODE);
     }
 
-    available_locales
+    official_locales
         .iter()
         .find(|locale| locale.code != primary_locale_code)
         .map(|locale| locale.code.as_str())
-        .or(Some(primary_locale_code))
+        .or_else(|| {
+            official_locales
+                .first()
+                .map(|locale| locale.code.as_str())
+        })
 }
 
 fn locale_code_exists(
@@ -5812,8 +6475,6 @@ fn development_cargo_path() -> PathBuf {
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("..")
-        .join("..")
 }
 
 fn runtime_binary_file_name() -> String {
@@ -5846,8 +6507,6 @@ fn current_butler_sidecar_path() -> Option<PathBuf> {
 fn development_butler_sidecar_path(workspace_root: &Path) -> Option<PathBuf> {
     let target_triple = current_desktop_target_triple()?;
     let sidecar_path = workspace_root
-        .join("apps")
-        .join("desktop")
         .join("src-tauri")
         .join("bin")
         .join(format!(
@@ -5902,6 +6561,7 @@ mod tests {
         ActiveSystemDialogGuard,
         apply_runtime_command_environment,
         butler_binary_file_name,
+        LocalizationResourceState,
         development_butler_sidecar_path,
         finalize_github_auth_login_with_known_accounts,
         github_browser_login_command_args,
@@ -5917,10 +6577,13 @@ mod tests {
         load_repository_inspection,
         load_repository_project_detail,
         load_release_status,
+        read_bootstrapped_localization_resource_root,
         load_localization_settings_from_paths,
         load_localization_settings_from_paths_with_detected_locale,
-        localization_packs_exist,
+        discover_localization_locale_settings,
         localization_preferences_path,
+        localization_source_root,
+        compile_localization_bundles,
         resolve_shell_local_data_dir_from_app_local_data_dir,
         resolve_shell_persistence_dir_from_app_config_dir,
         development_runtime_command_plan, load_runtime_directory_settings,
@@ -5931,7 +6594,11 @@ mod tests {
         seed_embedded_localization_files,
         write_persisted_localization_preferences,
         AUTO_SELECTION_SOURCE,
+        EMBEDDED_LOCALIZATION_FILES,
         EVENT_TOPIC_RELEASE_QUEUED,
+        LOCALIZATION_BUNDLE_CACHE_SCHEMA_VERSION,
+        LOCALIZATION_ORIGIN_FILE_NAME,
+        LOCALIZATION_WORKING_FILE_NAME,
         has_active_system_dialogs,
         is_main_window_focus_loss_suppressed,
         normalize_external_url,
@@ -5951,10 +6618,15 @@ mod tests {
         packaged_butler_sidecar_path,
         load_secret_settings,
         PersistedLocalizationPreferences,
+        LocalizationBundleCacheMetadata,
         USER_SELECTION_SOURCE,
+        read_localization_bundle_cache_metadata,
+        read_localization_pack_document,
         resolve_github_auth_credential,
         ShellLifecycleState,
         should_hide_main_window_on_focus_loss_state,
+        store_bootstrapped_localization_resource_root,
+        sync_official_localization_sources,
         load_unity_adapter_settings,
         normalize_runtime_log_line_limit, packaged_runtime_command_plan,
         runtime_binary_file_name, RuntimeLaunchAction, BUTLER_BINARY_NAME,
@@ -5988,6 +6660,7 @@ mod tests {
         ManualReleaseDispatchInput, RemoveRepositoryProjectStrategy,
         StorageLayout,
     };
+    use std::io::ErrorKind;
     use rusqlite::params;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -6014,6 +6687,34 @@ mod tests {
             "cmd.exe",
             "C:\\Windows\\System32\\cmd.exe"
         ));
+    }
+
+    #[test]
+    fn bootstrapped_localization_resource_root_round_trips_from_state() {
+        let state = LocalizationResourceState::default();
+        let bundle_root = PathBuf::from("C:/tmp/localizations/bundles");
+
+        store_bootstrapped_localization_resource_root(
+            &state,
+            bundle_root.clone(),
+        )
+        .expect("bootstrap should store the compiled localization root");
+
+        assert_eq!(
+            read_bootstrapped_localization_resource_root(&state)
+                .expect("bootstrap should expose the compiled localization root"),
+            bundle_root
+        );
+    }
+
+    #[test]
+    fn bootstrapped_localization_resource_root_requires_setup() {
+        let state = LocalizationResourceState::default();
+
+        let error = read_bootstrapped_localization_resource_root(&state)
+            .expect_err("unbootstrapped localization state must fail");
+
+        assert_eq!(error.kind(), ErrorKind::NotFound);
     }
 
     #[test]
@@ -6076,8 +6777,6 @@ mod tests {
         let target_triple = super::current_desktop_target_triple()
             .expect("test host should map to a supported target triple");
         let sidecar_path = root
-            .join("apps")
-            .join("desktop")
             .join("src-tauri")
             .join("bin")
             .join(format!(
@@ -6120,9 +6819,9 @@ mod tests {
             PathBuf::from("/repo/runtime")
         };
         let butler_sidecar_path = if cfg!(windows) {
-            PathBuf::from("C:/repo/apps/desktop/src-tauri/bin/hgp-butler.exe")
+            PathBuf::from("C:/repo/src-tauri/bin/hgp-butler.exe")
         } else {
-            PathBuf::from("/repo/apps/desktop/src-tauri/bin/hgp-butler")
+            PathBuf::from("/repo/src-tauri/bin/hgp-butler")
         };
         let mut command = Command::new("cargo");
 
@@ -6712,31 +7411,325 @@ mod tests {
         seed_embedded_localization_files(&root)
             .expect("embedded locale files should seed into the persisted root");
 
-        assert!(localization_packs_exist(&root));
+        let source_root = localization_source_root(&root);
+        assert!(source_root.is_dir());
 
-        let english = std::fs::read_to_string(root.join("en.json"))
-            .expect("english locale should exist after seeding");
-        let spanish = std::fs::read_to_string(root.join("es.json"))
-            .expect("spanish locale should exist after seeding");
-        let portuguese = std::fs::read_to_string(root.join("pt-BR.json"))
-            .expect("portuguese locale should exist after seeding");
-        let chinese = std::fs::read_to_string(root.join("zh-CN.json"))
-            .expect("chinese locale should exist after seeding");
+        for (file_name, file_contents) in EMBEDDED_LOCALIZATION_FILES {
+            let locale_code = file_name.strip_suffix(".json").unwrap_or(file_name);
+            let compatibility_bundle = std::fs::read_to_string(root.join(file_name))
+                .expect("compatibility locale bundle should exist after seeding");
+            let persisted_source = std::fs::read_to_string(
+                source_root.join(locale_code).join("origin.json"),
+            )
+            .expect("persisted locale source should exist after seeding");
 
-        assert!(english.contains("\"display_name\": \"English\""));
-        assert!(spanish.contains("\"native_name\": \"Español\""));
-        assert!(portuguese.contains("\"native_name\": \"Português (Brasil)\""));
-        assert!(chinese.contains("\"native_name\": \"简体中文\""));
+            assert_eq!(compatibility_bundle, *file_contents);
+            assert_eq!(persisted_source, *file_contents);
+        }
 
         let settings = load_localization_settings_from_paths(&root, &settings_dir)
             .expect("seeded locale files should load as localization settings");
 
-        assert_eq!(settings.available_locales.len(), 4);
-        assert_eq!(settings.available_locales[0].code, "en");
-        assert_eq!(settings.available_locales[1].code, "es");
-        assert_eq!(settings.available_locales[2].code, "pt-BR");
-        assert_eq!(settings.available_locales[3].code, "zh-CN");
+        assert_eq!(settings.available_locales.len(), EMBEDDED_LOCALIZATION_FILES.len());
+        assert!(settings.available_locales.iter().zip(EMBEDDED_LOCALIZATION_FILES.iter()).all(
+            |(locale, (file_name, _))| locale.code == file_name.strip_suffix(".json").unwrap_or(file_name)
+        ));
         assert!(settings.available_locales.iter().all(|locale| locale.is_official));
+
+        std::fs::remove_dir_all(&root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn discover_localization_locale_settings_prefers_persisted_source_tree() {
+        let root = std::env::temp_dir().join("desktop-shell-localization-source-discovery-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        std::fs::create_dir_all(&root).expect("localization root should create");
+        seed_embedded_localization_files(&root)
+            .expect("embedded localization resources should seed");
+
+        std::fs::write(root.join("en.json"), b"{not-json")
+            .expect("stale compatibility bundle should write");
+
+        let (available_locales, warnings) = discover_localization_locale_settings(&root)
+            .expect("locale discovery should use the persisted source tree");
+
+        assert_eq!(available_locales.len(), EMBEDDED_LOCALIZATION_FILES.len());
+        assert!(warnings.is_empty());
+
+        std::fs::remove_dir_all(&root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn compile_localization_bundles_applies_increment_and_working_layers() {
+        let root = std::env::temp_dir().join("desktop-shell-localization-compile-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let source_root = root.join("sources");
+        let bundle_root = root.join("bundles");
+        let cache_root = root.join("cache");
+        let english_root = source_root.join("en");
+        std::fs::create_dir_all(&english_root).expect("english source root should create");
+        std::fs::write(
+            english_root.join(LOCALIZATION_ORIGIN_FILE_NAME),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_name": "English",
+                "native_name": "English",
+                "messages": {
+                    "key.origin": "origin",
+                    "key.increment": "origin-value"
+                }
+            }))
+            .expect("origin locale should serialize"),
+        )
+        .expect("origin locale should write");
+        std::fs::write(
+            english_root.join("increment-1.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "messages": {
+                    "key.increment": "increment-value",
+                    "key.working": "increment-working"
+                }
+            }))
+            .expect("increment locale should serialize"),
+        )
+        .expect("increment locale should write");
+        std::fs::write(
+            english_root.join(LOCALIZATION_WORKING_FILE_NAME),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "messages": {
+                    "key.working": "working-value",
+                    "key.final": "final-value"
+                }
+            }))
+            .expect("working locale should serialize"),
+        )
+        .expect("working locale should write");
+
+        compile_localization_bundles(&source_root, &bundle_root, &cache_root)
+            .expect("localization bundles should compile");
+
+        let final_bundle = read_localization_pack_document(&bundle_root.join("en.json"))
+            .expect("final bundle should load");
+        assert_eq!(final_bundle.display_name, "English");
+        assert_eq!(final_bundle.native_name, "English");
+        assert_eq!(
+            final_bundle.messages.get("key.origin").map(String::as_str),
+            Some("origin")
+        );
+        assert_eq!(
+            final_bundle.messages.get("key.increment").map(String::as_str),
+            Some("increment-value")
+        );
+        assert_eq!(
+            final_bundle.messages.get("key.working").map(String::as_str),
+            Some("working-value")
+        );
+        assert_eq!(
+            final_bundle.messages.get("key.final").map(String::as_str),
+            Some("final-value")
+        );
+
+        let frozen_bundle = read_localization_pack_document(&cache_root.join("en.frozen.json"))
+            .expect("frozen bundle cache should load");
+        assert_eq!(
+            frozen_bundle.messages.get("key.working").map(String::as_str),
+            Some("increment-working")
+        );
+        assert_eq!(frozen_bundle.messages.get("key.final"), None);
+
+        let metadata = read_localization_bundle_cache_metadata(&cache_root.join("en.meta.json"))
+            .expect("bundle metadata should load")
+            .expect("bundle metadata should exist");
+        assert_eq!(
+            metadata,
+            LocalizationBundleCacheMetadata {
+                schema_version: LOCALIZATION_BUNDLE_CACHE_SCHEMA_VERSION,
+                locale_code: String::from("en"),
+                origin_signature: metadata.origin_signature.clone(),
+                increment_numbers: vec![1],
+                working_signature: metadata.working_signature.clone(),
+            }
+        );
+        assert!(metadata.working_signature.is_some());
+
+        std::fs::remove_dir_all(&root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn sync_official_localization_sources_copies_working_and_increments() {
+        let root = std::env::temp_dir().join("desktop-shell-localization-sync-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let official_root = root.join("official");
+        let persisted_root = root.join("persisted");
+        let official_english_root = official_root.join("en");
+        std::fs::create_dir_all(&official_english_root)
+            .expect("official english source root should create");
+        std::fs::write(
+            official_english_root.join(LOCALIZATION_ORIGIN_FILE_NAME),
+            b"{\n  \"display_name\": \"English\",\n  \"messages\": {}\n}\n",
+        )
+        .expect("origin locale should write");
+        std::fs::write(
+            official_english_root.join("increment-1.json"),
+            b"{\n  \"messages\": {\n    \"key\": \"value\"\n  }\n}\n",
+        )
+        .expect("increment locale should write");
+        std::fs::write(
+            official_english_root.join(LOCALIZATION_WORKING_FILE_NAME),
+            b"{\n  \"messages\": {\n    \"draft\": \"value\"\n  }\n}\n",
+        )
+        .expect("working locale should write");
+
+        let persisted_source_root = localization_source_root(&persisted_root);
+        let persisted_english_root = persisted_source_root.join("en");
+        std::fs::create_dir_all(&persisted_english_root)
+            .expect("persisted english source root should create");
+        std::fs::write(
+            persisted_english_root.join("increment-9.json"),
+            b"obsolete",
+        )
+        .expect("obsolete increment should write");
+
+        sync_official_localization_sources(&official_root, &persisted_root)
+            .expect("official locale sources should sync");
+
+        assert_eq!(
+            std::fs::read(persisted_english_root.join(LOCALIZATION_ORIGIN_FILE_NAME))
+                .expect("persisted origin should read"),
+            std::fs::read(official_english_root.join(LOCALIZATION_ORIGIN_FILE_NAME))
+                .expect("official origin should read"),
+        );
+        assert_eq!(
+            std::fs::read(persisted_english_root.join("increment-1.json"))
+                .expect("persisted increment should read"),
+            std::fs::read(official_english_root.join("increment-1.json"))
+                .expect("official increment should read"),
+        );
+        assert_eq!(
+            std::fs::read(persisted_english_root.join(LOCALIZATION_WORKING_FILE_NAME))
+                .expect("persisted working file should read"),
+            std::fs::read(official_english_root.join(LOCALIZATION_WORKING_FILE_NAME))
+                .expect("official working file should read"),
+        );
+        assert!(!persisted_english_root.join("increment-9.json").exists());
+
+        std::fs::remove_dir_all(&root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn load_localization_settings_from_paths_normalizes_non_official_fallback_to_english() {
+        let root = std::env::temp_dir().join("desktop-shell-localization-fallback-normalization-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let localization_root = root.join("localizations");
+        let settings_dir = root.join("config");
+        std::fs::create_dir_all(&localization_root)
+            .expect("localization root should create");
+        std::fs::write(
+            localization_root.join("en.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_name": "English",
+                "messages": {
+                    "settings.language.title": "Language"
+                }
+            }))
+            .expect("english locale should serialize"),
+        )
+        .expect("english locale should write");
+        std::fs::write(
+            localization_root.join("rs.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_name": "Serbian",
+                "native_name": "Srpski",
+                "messages": {
+                    "settings.language.title": "Jezik"
+                }
+            }))
+            .expect("community locale should serialize"),
+        )
+        .expect("community locale should write");
+        write_persisted_localization_preferences(
+            &settings_dir,
+            &PersistedLocalizationPreferences {
+                primary_locale: String::from("rs"),
+                fallback_locale: String::from("rs"),
+                selection_source: Some(String::from(USER_SELECTION_SOURCE)),
+                detected_host_locale: None,
+                detected_region: None,
+            },
+        )
+        .expect("persisted localization preferences should write");
+
+        let settings = load_localization_settings_from_paths_with_detected_locale(
+            &localization_root,
+            &settings_dir,
+            None,
+        )
+        .expect("localization settings should load");
+
+        assert_eq!(settings.primary_locale, "rs");
+        assert_eq!(settings.fallback_locale, "en");
+        assert!(settings.warnings.iter().any(|warning| warning.contains("Saved fallback locale \"rs\" is not available and was replaced.")));
+
+        std::fs::remove_dir_all(&root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn persist_localization_preferences_to_paths_rejects_non_official_fallback_locale() {
+        let root = std::env::temp_dir().join("desktop-shell-localization-fallback-validation-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let localization_root = root.join("localizations");
+        let settings_dir = root.join("config");
+        std::fs::create_dir_all(&localization_root)
+            .expect("localization root should create");
+        std::fs::write(
+            localization_root.join("en.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_name": "English",
+                "messages": {
+                    "settings.language.title": "Language"
+                }
+            }))
+            .expect("english locale should serialize"),
+        )
+        .expect("english locale should write");
+        std::fs::write(
+            localization_root.join("rs.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_name": "Serbian",
+                "native_name": "Srpski",
+                "messages": {
+                    "settings.language.title": "Jezik"
+                }
+            }))
+            .expect("community locale should serialize"),
+        )
+        .expect("community locale should write");
+
+        let error = persist_localization_preferences_to_paths(
+            &localization_root,
+            &settings_dir,
+            SaveLocalizationPreferencesInput {
+                primary_locale: String::from("rs"),
+                fallback_locale: String::from("rs"),
+            },
+        )
+        .expect_err("community fallback locale should be rejected");
+
+        assert!(error.to_string().contains("is not an official locale"));
 
         std::fs::remove_dir_all(&root).expect("temp directory should be removable");
     }

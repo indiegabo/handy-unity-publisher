@@ -947,7 +947,6 @@
         "start_release.configure.version_source.manual": "Manual version label",
         "start_release.configure.version_source.project_settings": "Detect from project settings",
         "settings.localization.title": "Language And Localization",
-        "settings.localization.primary_label": "Primary language",
-        "settings.localization.fallback_label": "Fallback language"
+        "settings.localization.primary_label": "Primary language"
     }
 }

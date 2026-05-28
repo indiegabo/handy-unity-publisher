@@ -58,6 +58,7 @@ import {
   rerunReleaseProcess,
 } from "./services/processDetail";
 import {
+  loadApplicationVersion,
   loadRuntimeAutomationStatus,
   loadRuntimeHealth,
   requestRepositoryInstantCheck,
@@ -252,6 +253,7 @@ function App() {
   const [workerSnapshot, setWorkerSnapshot] = useState<WorkerStatusSnapshot>(
     EMPTY_WORKER_STATUS_SNAPSHOT,
   );
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [workerActionError, setWorkerActionError] = useState<string | null>(
     null,
   );
@@ -565,8 +567,24 @@ function App() {
     await Promise.all([loadWorkerRepositories(), loadRuntimeStatus()]);
   });
 
+  const loadShellVersion = useEffectEvent(async () => {
+    const versionResult = await loadApplicationVersion()
+      .then((value) => ({ status: "fulfilled" as const, value }))
+      .catch((reason) => ({ status: "rejected" as const, reason }));
+
+    if (versionResult.status === "rejected") {
+      console.error("failed to load application version", versionResult.reason);
+      return;
+    }
+
+    startTransition(() => {
+      setAppVersion(formatVersionTag(versionResult.value.app_version));
+    });
+  });
+
   useEffect(() => {
     void loadWorkerStatus();
+    void loadShellVersion();
   }, []);
 
   const handleRuntimeStatusEvent = useEffectEvent(
@@ -1047,7 +1065,9 @@ function App() {
         });
       } catch (error) {
         startTransition(() => {
-          setWorkerActionError(buildRuntimeActionErrorMessage(t, error, action));
+          setWorkerActionError(
+            buildRuntimeActionErrorMessage(t, error, action),
+          );
         });
       } finally {
         startTransition(() => {
@@ -1148,10 +1168,7 @@ function App() {
     }
 
     const shouldQueue = await openOverlay<boolean>(ConfirmDialog, {
-      cancelLabel: t(
-        "app.instant_checks.confirm.cancel",
-        "Back to selection",
-      ),
+      cancelLabel: t("app.instant_checks.confirm.cancel", "Back to selection"),
       confirmLabel:
         selectedWorkers.length === 1
           ? t("app.instant_checks.confirm.one", "Queue check")
@@ -1293,14 +1310,8 @@ function App() {
 
     if (isCreateProjectWizardDirty) {
       const shouldDiscard = await openOverlay<boolean>(ConfirmDialog, {
-        cancelLabel: t(
-          "app.create_project.discard.cancel",
-          "Continue editing",
-        ),
-        confirmLabel: t(
-          "app.create_project.discard.confirm",
-          "Discard draft",
-        ),
+        cancelLabel: t("app.create_project.discard.cancel", "Continue editing"),
+        confirmLabel: t("app.create_project.discard.confirm", "Discard draft"),
         confirmVariant: "secondary",
         description: t(
           "app.create_project.discard.description",
@@ -1310,10 +1321,7 @@ function App() {
           "app.create_project.discard.message",
           "HGP will discard the repository, target, publish, and path changes that have not been saved yet.",
         ),
-        title: t(
-          "app.create_project.discard.title",
-          "Discard project draft?",
-        ),
+        title: t("app.create_project.discard.title", "Discard project draft?"),
       });
 
       if (!shouldDiscard) {
@@ -1636,6 +1644,11 @@ function App() {
               className="action-bar action-bar--home-bottom"
               aria-label={t("app.main.secondary_actions", "Secondary actions")}
             >
+              <div className="action-bar__leading">
+                <p className="action-bar__version">
+                  {formatVersionTag(appVersion ?? "")}
+                </p>
+              </div>
               <div className="action-bar__actions">
                 {homeSecondaryNavigationActions.map((action) => (
                   <IconButton
@@ -1867,9 +1880,15 @@ function buildRuntimeActionMessage(
 ): string {
   switch (action) {
     case "start":
-      return t("app.runtime.messages.start_requested", "Runtime start requested.");
+      return t(
+        "app.runtime.messages.start_requested",
+        "Runtime start requested.",
+      );
     case "stop":
-      return t("app.runtime.messages.stop_requested", "Runtime stop requested.");
+      return t(
+        "app.runtime.messages.stop_requested",
+        "Runtime stop requested.",
+      );
     case "restart":
       return t(
         "app.runtime.messages.restart_requested",
@@ -2448,6 +2467,15 @@ function resolveFocusBackLabel(t: Translate, activeScreen: AppScreen) {
   }
 
   return t("app.back.main", "Back to main screen");
+}
+
+function formatVersionTag(version: string): string {
+  const trimmedVersion = version.trim();
+  if (trimmedVersion.length === 0) {
+    return "v-";
+  }
+
+  return /^v/iu.test(trimmedVersion) ? trimmedVersion : `v${trimmedVersion}`;
 }
 
 function resolveFocusScreenShellClassName(activeScreen: AppScreen) {

@@ -1596,8 +1596,7 @@ function buildLocalizationSettings(overrides?: {
       },
     ],
     fallback_locale: overrides?.fallback_locale ?? "pt-BR",
-    localization_root:
-      "C:/Users/indie/projetos/Apps/handy-unity-publisher/apps/desktop/src-tauri/localizations",
+    localization_root: "C:/repo/src-tauri/localizations",
     primary_locale: overrides?.primary_locale ?? "en",
     warnings: [],
   };

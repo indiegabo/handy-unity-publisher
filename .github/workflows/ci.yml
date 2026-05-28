@@ -79,7 +79,7 @@ jobs:
 
       - name: Install desktop UI dependencies
         shell: bash
-        run: npm ci --prefix apps/desktop/ui
+        run: npm ci --prefix src-react
 
       - name: Validate synchronized app version
         shell: bash
@@ -87,7 +87,7 @@ jobs:
 
       - name: Build desktop UI
         shell: bash
-        run: npm run build --prefix apps/desktop/ui
+        run: npm run build --prefix src-react
 
       - name: Compile portable workspace slices
         shell: bash
@@ -133,11 +133,11 @@ jobs:
 
       - name: Install desktop UI dependencies
         shell: bash
-        run: npm ci --prefix apps/desktop/ui
+        run: npm ci --prefix src-react
 
       - name: Build desktop UI
         shell: bash
-        run: npm run build --prefix apps/desktop/ui
+        run: npm run build --prefix src-react
 
       - name: Check formatting
         shell: bash
@@ -153,4 +153,4 @@ jobs:
 
       - name: Validate desktop UI build
         shell: bash
-        run: npm run build --prefix apps/desktop/ui
+        run: npm run build --prefix src-react

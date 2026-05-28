@@ -53,8 +53,6 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, "..");
 const sidecarOutputDirectory = resolve(
     repositoryRoot,
-    "apps",
-    "desktop",
     "src-tauri",
     "bin",
 );

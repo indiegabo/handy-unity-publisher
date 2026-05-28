@@ -4,16 +4,15 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const {
-  loadLocalizationSettingsMock,
-  saveLocalizationPreferencesMock,
-} = vi.hoisted(() => ({
-  loadLocalizationSettingsMock: vi.fn(),
-  saveLocalizationPreferencesMock: vi.fn(),
-}));
+const { loadLocalizationSettingsMock, saveLocalizationPreferencesMock } =
+  vi.hoisted(() => ({
+    loadLocalizationSettingsMock: vi.fn(),
+    saveLocalizationPreferencesMock: vi.fn(),
+  }));
 
 vi.mock("../services/runtime", () => ({
   loadLocalizationSettings: loadLocalizationSettingsMock,
@@ -43,7 +42,7 @@ describe("SettingsFocusScreen", () => {
     ).toBeInTheDocument();
     expect(
       await screen.findByRole("heading", {
-        name: "Idioma",
+        name: "Localization",
       }),
     ).toBeInTheDocument();
     expect(
@@ -69,7 +68,8 @@ describe("SettingsFocusScreen", () => {
     render(<SettingsFocusScreen />);
 
     await screen.findByRole("heading", { name: "Settings" });
-    const primaryLanguageField = await screen.findByLabelText("Idioma");
+    const primaryLanguageField =
+      await screen.findByLabelText("Primary language");
 
     fireEvent.change(primaryLanguageField, {
       target: { value: "pt-BR" },
@@ -82,10 +82,51 @@ describe("SettingsFocusScreen", () => {
       });
     });
 
-    expect(
-      await screen.findByText("Idioma salvo."),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Language saved.")).toBeInTheDocument();
     expect(primaryLanguageField).toHaveValue("pt-BR");
+  });
+
+  it("limits fallback options to official locales", async () => {
+    loadLocalizationSettingsMock.mockResolvedValueOnce(
+      buildLocalizationSettings({
+        available_locales: [
+          {
+            code: "en",
+            display_name: "English",
+            is_official: true,
+            message_count: 3,
+            native_name: "English",
+          },
+          {
+            code: "pt-BR",
+            display_name: "Brazilian Portuguese",
+            is_official: true,
+            message_count: 3,
+            native_name: "Português (Brasil)",
+          },
+          {
+            code: "rs",
+            display_name: "Serbian",
+            is_official: false,
+            message_count: 3,
+            native_name: "Srpski",
+          },
+        ],
+        primary_locale: "rs",
+      }),
+    );
+
+    render(<SettingsFocusScreen />);
+
+    await screen.findByRole("heading", { name: "Settings" });
+    const selects = await screen.findAllByRole("combobox");
+
+    expect(
+      within(selects[0]).getByRole("option", { name: "Srpski (rs)" }),
+    ).toBeInTheDocument();
+    expect(
+      within(selects[1]).queryByRole("option", { name: "Srpski (rs)" }),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -122,8 +163,7 @@ function buildLocalizationSettings(
       },
     ],
     fallback_locale: "pt-BR",
-    localization_root:
-      "C:/Users/indie/projetos/Apps/handy-unity-publisher/apps/desktop/src-tauri/localizations",
+    localization_root: "C:/repo/src-tauri/localizations",
     primary_locale: "en",
     warnings: [],
     ...overrides,
