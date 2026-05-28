@@ -1,6 +1,6 @@
 {
     "productName": "HGP",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "identifier": "com.indiegabo.handygamespublisher",
     "mainBinaryName": "HGP",
     "build": {
