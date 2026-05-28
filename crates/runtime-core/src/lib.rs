@@ -10,9 +10,8 @@ pub use events::*;
 
 use runtime_config::{RuntimeConfig, RuntimeSupervisionSettings};
 use runtime_store::{
-    initialize_database, recover_runtime_state, DatabaseBootstrapReport,
-    RuntimeRecoveryReport, StorageLayout,
-    RECOVERY_INTERRUPTION_KIND_REQUESTED, RECOVERY_INTERRUPTION_KIND_SYSTEM,
+    initialize_database, recover_runtime_state, DatabaseBootstrapReport, RuntimeRecoveryReport,
+    StorageLayout, RECOVERY_INTERRUPTION_KIND_REQUESTED, RECOVERY_INTERRUPTION_KIND_SYSTEM,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -331,18 +330,12 @@ pub fn bootstrap_runtime(
     config.directories.ensure_exists()?;
     let recovery_context = recovery_interruption_context(storage);
     let database_bootstrap = initialize_database(storage)?;
-    let recovery_report = recover_runtime_state(
-        storage,
-        recovery_context.kind,
-        recovery_context.message,
-    )?;
+    let recovery_report =
+        recover_runtime_state(storage, recovery_context.kind, recovery_context.message)?;
 
     let supervision_contract =
         RuntimeSupervisionContract::new(config, storage, runtime_command, restart_policy);
-    write_json_file(
-        &storage.supervision_contract_path,
-        &supervision_contract,
-    )?;
+    write_json_file(&storage.supervision_contract_path, &supervision_contract)?;
 
     let started_at_unix = unix_timestamp()?;
     let process_id = process::id();
@@ -418,7 +411,10 @@ pub fn bootstrap_runtime(
 fn recovery_interruption_context(storage: &StorageLayout) -> RuntimeRecoveryInterruptionContext {
     match read_health_report(&storage.health_report_path) {
         Ok(report)
-            if matches!(report.status, RuntimeStatus::ShuttingDown | RuntimeStatus::Stopped) =>
+            if matches!(
+                report.status,
+                RuntimeStatus::ShuttingDown | RuntimeStatus::Stopped
+            ) =>
         {
             RuntimeRecoveryInterruptionContext {
                 kind: RECOVERY_INTERRUPTION_KIND_REQUESTED,
@@ -520,9 +516,7 @@ pub fn read_supervisor_snapshot(path: &Path) -> io::Result<RuntimeSupervisorSnap
 }
 
 /// Reads the persisted runtime automation snapshot from disk.
-pub fn read_runtime_automation_snapshot(
-    path: &Path,
-) -> io::Result<RuntimeAutomationSnapshot> {
+pub fn read_runtime_automation_snapshot(path: &Path) -> io::Result<RuntimeAutomationSnapshot> {
     read_json_file(path)
 }
 
@@ -665,10 +659,7 @@ fn atomic_write_temporary_path(path: &Path) -> PathBuf {
         .and_then(|value| value.to_str())
         .unwrap_or("runtime-state");
 
-    path.with_file_name(format!(
-        ".{file_name}.tmp-{}",
-        process::id()
-    ))
+    path.with_file_name(format!(".{file_name}.tmp-{}", process::id()))
 }
 
 fn emit_log(path: &Path, event: StructuredLogEvent) -> io::Result<()> {
@@ -773,19 +764,15 @@ fn unix_timestamp() -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bootstrap_runtime, read_health_report, read_supervision_contract,
-        read_runtime_automation_snapshot, read_supervisor_snapshot,
-        recovery_interruption_context, shutdown_runtime,
-        load_runtime_automation_snapshot, persist_runtime_automation_mode,
-        write_supervisor_snapshot, RuntimeAutomationMode, RuntimeRestartPolicy,
-        RuntimeStatus,
-        RuntimeSupervisorSnapshot, RuntimeSupervisorStatus,
-        SUPERVISION_PROTOCOL_VERSION,
+        bootstrap_runtime, load_runtime_automation_snapshot, persist_runtime_automation_mode,
+        read_health_report, read_runtime_automation_snapshot, read_supervision_contract,
+        read_supervisor_snapshot, recovery_interruption_context, shutdown_runtime,
+        write_supervisor_snapshot, RuntimeAutomationMode, RuntimeRestartPolicy, RuntimeStatus,
+        RuntimeSupervisorSnapshot, RuntimeSupervisorStatus, SUPERVISION_PROTOCOL_VERSION,
     };
     use runtime_config::RuntimeConfig;
     use runtime_store::{
-        StorageLayout, RECOVERY_INTERRUPTION_KIND_REQUESTED,
-        RECOVERY_INTERRUPTION_KIND_SYSTEM,
+        StorageLayout, RECOVERY_INTERRUPTION_KIND_REQUESTED, RECOVERY_INTERRUPTION_KIND_SYSTEM,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -818,19 +805,30 @@ mod tests {
                 "0007_repository_path_model_cleanup.sql",
                 "0008_build_run_stage_tracking.sql",
                 "0009_build_target_runner_model_cleanup.sql",
+                "0009_execution_retention.sql",
                 "0010_engine_contract_model.sql",
                 "0011_runtime_engine_version.sql",
+                "0012_repository_auth_state.sql",
+                "0013_publish_destination_execution_contract.sql",
+                "0014_release_source_identity.sql",
+                "0015_local_workspace_polling_invariant.sql",
             ]
         );
         assert_eq!(snapshot.health_report.status, RuntimeStatus::Healthy);
-        assert_eq!(snapshot.health_report.runtime_name, "handy-games-publisher-runtime");
+        assert_eq!(
+            snapshot.health_report.runtime_name,
+            "handy-games-publisher-runtime"
+        );
         assert!(snapshot.recovery_report.is_empty());
         assert_eq!(
             snapshot.supervision_contract.protocol_version,
             SUPERVISION_PROTOCOL_VERSION
         );
         assert_eq!(snapshot.supervision_contract.serve_arguments, vec!["serve"]);
-        assert_eq!(snapshot.supervision_contract.runtime_name, "handy-games-publisher-runtime");
+        assert_eq!(
+            snapshot.supervision_contract.runtime_name,
+            "handy-games-publisher-runtime"
+        );
         assert!(storage.health_report_path.exists());
         assert!(storage.supervision_contract_path.exists());
         assert!(storage.runtime_log_path.exists());
@@ -945,11 +943,8 @@ mod tests {
             .ensure_exists()
             .expect("directories should be created");
 
-        let written = persist_runtime_automation_mode(
-            &storage,
-            RuntimeAutomationMode::Idle,
-        )
-        .expect("automation mode should persist");
+        let written = persist_runtime_automation_mode(&storage, RuntimeAutomationMode::Idle)
+            .expect("automation mode should persist");
 
         assert_eq!(written.mode, RuntimeAutomationMode::Idle);
         assert_eq!(
