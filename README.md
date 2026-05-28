@@ -211,15 +211,16 @@ repository root.
 
 - `.github/workflows/ci.yml` rejects deprecated build surfaces and validates
   the active Rust and Tauri slices.
-- `.github/workflows/release-please.yml` maintains SemVer release PRs and tags
-  from Conventional Commits on `main`.
-- `.github/workflows/release-bundle.yml` builds the Windows desktop bundle for
-  published releases, builds Windows and Linux installers, uploads installer
-  artifacts plus checksums to the GitHub release, and publishes installers to
-  Itch channels through Butler.
+- `.github/workflows/semantic-release.yml` runs after successful `main` branch
+  CI, calculates the next SemVer from Conventional Commits, updates the shared
+  version files, creates the release commit and Git tag, publishes the GitHub
+  release, and then invokes the desktop bundle publication workflow.
+- `.github/workflows/release-bundle.yml` builds the Windows and Linux
+  installers for a published release or a reusable workflow call, uploads
+  installer artifacts plus checksums to the GitHub release, and publishes the
+  installers to Itch channels through Butler.
 - `scripts/prepare-tauri-sidecar.ps1` builds and stages the packaged
   `runtime-bin` sidecar expected by release bundles.
-- `scripts/prepare-butler-sidecar.mjs` downloads and stages the Butler
   sidecar used by Itch publish flows in development and release bundles.
 
 Itch publish automation in `.github/workflows/release-bundle.yml` requires:
