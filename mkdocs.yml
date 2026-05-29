@@ -1,0 +1,83 @@
+site_name: HGP Documentation
+site_description: Documentation for the handy-games-publisher (HGP) application.
+site_author: indiegabo
+docs_dir: docs-public
+exclude_docs: |
+  /pt-BR/**
+  /es/**
+  /zh-CN/**
+nav:
+  - Home: index.md
+  - Create Projects: create-projects.md
+  - Monitor Releases: releases-and-builds.md
+  - Publish Artifacts: publish-artifacts.md
+  - Settings and Credentials: settings-and-credentials.md
+  - Troubleshooting: troubleshooting.md
+  - Examples:
+      - Unity Builder Example: examples/unity-builder-example.md
+  # Planning section intentionally removed from public docs; planning
+  # content lives under `developer-docs/` for internal use.
+
+theme:
+  name: material
+  logo: assets/images/hgp-avatar.png
+  custom_dir: docs-public/theme-overrides
+  features:
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+  icon:
+    alternate: material/web
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+extra_css:
+  - assets/stylesheets/overrides.css
+
+plugins:
+  - search:
+      lang:
+        - en
+  - i18n:
+      docs_structure: folder
+      fallback_to_default: true
+      reconfigure_material: true
+      reconfigure_search: false
+      languages:
+        - locale: en
+          name: English
+          default: true
+          build: true
+          site_name: HGP Documentation
+          site_description: Documentation for the handy-games-publisher (HGP) application.
+        - locale: pt-BR
+          name: Português Brasileiro
+          build: true
+        - locale: es
+          name: Spanish
+          build: false
+        - locale: zh-CN
+          name: 简体中文
+          build: false
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - admonition
+
+extra:
+  version: "dev"
