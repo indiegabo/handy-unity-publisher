@@ -1,7 +1,7 @@
 # Architecture
 
 See the delivery roadmap in
-[Desktop Delivery Roadmap](../planning/desktop-delivery-roadmap.md).
+[Desktop Delivery Roadmap](planning/desktop-delivery-roadmap.md).
 
 ## Overview
 
