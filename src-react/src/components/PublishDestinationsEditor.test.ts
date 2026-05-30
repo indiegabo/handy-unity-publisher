@@ -52,11 +52,11 @@ describe("PublishDestinationsEditor helpers", () => {
         expect(
             errors.destinations[destinations[0].id]?.bindings[primaryBinding.id]
                 ?.buildTarget,
-        ).toContain("Only one enabled consuming binding");
+        ).toContain("Only one consuming binding is allowed per build target.");
         expect(
             errors.destinations[destinations[1].id]?.bindings[backupBinding.id]
                 ?.buildTarget,
-        ).toContain("Only one enabled consuming binding");
+        ).toContain("Only one consuming binding is allowed per build target.");
     });
 
     it("parses persisted destination inspection and rebuilds update payloads", () => {
@@ -100,6 +100,7 @@ describe("PublishDestinationsEditor helpers", () => {
         expect(drafts[0]?.itchAccountName).toBe("indiegabo");
         expect(drafts[0]?.bindings[0]?.buildTargetDraftId).toBe("target-windows");
         expect(drafts[0]?.bindings[0]?.itchChannel).toBe("windows-stable");
+        expect(drafts[0]?.bindings[0]?.itchUserversionTemplate).toBe("{{git_tag}}");
 
         const payload = buildUpdateProjectPublishTargetsInput(drafts, BUILD_TARGETS);
 
@@ -125,6 +126,29 @@ describe("PublishDestinationsEditor helpers", () => {
                         }),
                     },
                 ],
+            },
+        ]);
+    });
+
+    it("always emits the git tag as the Itch userversion template", () => {
+        const binding = createItchBinding(BUILD_TARGETS[0], "windows-stable");
+
+        binding.itchUserversionTemplate = "custom-template";
+
+        const payload = buildUpdateProjectPublishTargetsInput(
+            [createItchDestination("Itch stable", binding)],
+            BUILD_TARGETS,
+        );
+
+        expect(payload[0]?.bindings).toEqual([
+            {
+                build_target_id: 11,
+                build_target_name: "Windows",
+                enabled: true,
+                options_json: JSON.stringify({
+                    channel: "windows-stable",
+                    userversion_template: "{{git_tag}}",
+                }),
             },
         ]);
     });

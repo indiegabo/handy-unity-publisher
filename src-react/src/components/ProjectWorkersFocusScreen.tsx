@@ -86,55 +86,10 @@ export function ProjectWorkersFocusScreen({
     !inspectionAvailable && inspectionError === null;
   const showsInventoryError = !inspectionAvailable && inspectionError !== null;
   const [workerInventoryOpen, setWorkerInventoryOpen] = useState(true);
-  const totalBuildTargetCount = projectWorkers.reduce(
-    (total, projectWorker) => total + projectWorker.buildTargets.length,
-    0,
-  );
-  const attentionTargetCount = projectWorkers.reduce(
-    (total, projectWorker) =>
-      total +
-      projectWorker.buildTargets.filter(
-        (buildTarget) => buildTarget.diagnosticStatus !== "ready",
-      ).length,
-    0,
-  );
-  const readyTargetCount = totalBuildTargetCount - attentionTargetCount;
 
   return (
     <div className="project-workers-focus-shell">
-      <ScreenScaffold
-        subtitle={t(
-          "project_workers.subtitle",
-          "Control the local automation runtime and inspect repositories that currently expose enabled build targets.",
-        )}
-        eyebrow={t("project_workers.eyebrow", "Runtime")}
-        summary={
-          <MetaRow>
-            <MetaItem label={t("project_workers.summary.runtime", "Runtime")}>
-              {formatRuntimeStatus(t, runtimeStatus)}
-            </MetaItem>
-            <MetaItem
-              label={t("project_workers.summary.automation", "Automation")}
-            >
-              {formatAutomationMode(t, automationMode)}
-            </MetaItem>
-            <MetaItem label={t("project_workers.summary.workers", "Workers")}>
-              {projectWorkers.length}
-            </MetaItem>
-            <MetaItem label={t("project_workers.summary.targets", "Targets")}>
-              {totalBuildTargetCount}
-            </MetaItem>
-            <MetaItem
-              label={t("project_workers.summary.attention", "Attention")}
-            >
-              {attentionTargetCount === 0
-                ? t("project_workers.all_ready", "All ready")
-                : attentionTargetCount}
-            </MetaItem>
-          </MetaRow>
-        }
-        title={t("project_workers.title", "Project Workers")}
-      >
+      <ScreenScaffold title={t("project_workers.title", "Project Workers")}>
         {actionMessage ? (
           <p className="notice-banner">{actionMessage}</p>
         ) : null}
@@ -155,54 +110,17 @@ export function ProjectWorkersFocusScreen({
             />
           }
           className="project-workers-runtime-panel"
-          description={t(
-            "project_workers.runtime_panel.description",
-            "Runtime-wide lifecycle controls stay separate from project worker groups so host state never competes with repository inspection.",
-          )}
-          eyebrow={t("project_workers.runtime_panel.eyebrow", "Runtime State")}
           headerSeparated
-          summary={
-            <MetaRow>
-              <MetaItem
-                label={t("project_workers.runtime_panel.state", "State")}
-              >
-                {formatRuntimeStatus(t, runtimeStatus)}
-              </MetaItem>
-              <MetaItem
-                label={t(
-                  "project_workers.runtime_panel.automation",
-                  "Automation",
-                )}
-              >
-                {formatAutomationMode(t, automationMode)}
-              </MetaItem>
-              <MetaItem
-                label={t("project_workers.runtime_panel.controls", "Controls")}
-              >
-                {runtimeBusy
-                  ? t(
-                      "project_workers.runtime_panel.transitioning",
-                      "Transition in progress",
-                    )
-                  : t("project_workers.runtime_panel.ready", "Ready")}
-              </MetaItem>
-              <MetaItem
-                label={t("project_workers.runtime_panel.scope", "Scope")}
-              >
-                {t("project_workers.runtime_panel.local_host", "Local host")}
-              </MetaItem>
-            </MetaRow>
-          }
           title={t("project_workers.runtime_panel.title", "Runtime Controls")}
         >
           <div className="project-workers-focus-panel-body">
-            <div className="project-workers-focus-status-row">
+            <div
+              className="project-workers-focus-status-row"
+              title={buildRuntimeCopy(t, runtimeStatus, automationMode)}
+            >
               <Badge tone={resolveRuntimeBadgeTone(runtimeStatus)}>
                 {formatRuntimeStatus(t, runtimeStatus)}
               </Badge>
-              <p className="project-workers-focus-copy">
-                {buildRuntimeCopy(t, runtimeStatus, automationMode)}
-              </p>
             </div>
           </div>
         </SurfacePanel>
@@ -215,6 +133,10 @@ export function ProjectWorkersFocusScreen({
                 leadingIcon="search"
                 onClick={onBulkInstantCheck}
                 size="sm"
+                title={t(
+                  "project_workers.bulk.tooltip",
+                  "Queue instant checks for all visible workers.",
+                )}
                 variant="secondary"
               >
                 {pendingBulkInstantCheck
@@ -223,33 +145,13 @@ export function ProjectWorkersFocusScreen({
               </Button>
             ) : null
           }
-          description={t(
-            "project_workers.inventory.description",
-            "Repositories that currently expose enabled build targets.",
-          )}
-          eyebrow={t("project_workers.inventory.eyebrow", "Inventory")}
           onOpenChange={setWorkerInventoryOpen}
           open={workerInventoryOpen}
-          summary={
-            <MetaRow>
-              <MetaItem
-                label={t("project_workers.inventory.projects", "Projects")}
-              >
-                {projectWorkers.length}
-              </MetaItem>
-              <MetaItem label={t("project_workers.inventory.ready", "Ready")}>
-                {readyTargetCount}
-              </MetaItem>
-              <MetaItem
-                label={t("project_workers.inventory.attention", "Attention")}
-              >
-                {attentionTargetCount === 0
-                  ? t("project_workers.all_ready", "All ready")
-                  : attentionTargetCount}
-              </MetaItem>
-            </MetaRow>
-          }
           title={t("project_workers.inventory.title", "Worker Inventory")}
+          titleTooltip={t(
+            "project_workers.inventory.tooltip",
+            "Repositories that currently expose enabled build targets.",
+          )}
           t={t}
         >
           {inspectionStale && inspectionError ? (
@@ -257,18 +159,16 @@ export function ProjectWorkersFocusScreen({
               <p className="feed-banner feed-banner--error">
                 {inspectionError}
               </p>
-              <p className="project-workers-focus-copy">
-                {t(
-                  "project_workers.inventory.stale_copy",
-                  "Showing the last known worker inventory while the shell recovers repository inspection.",
-                )}
-              </p>
               <div className="project-workers-focus-state__actions">
                 <Button
                   disabled={runtimeBusy}
                   leadingIcon="refresh"
                   onClick={onRetryInventory}
                   size="sm"
+                  title={t(
+                    "project_workers.inventory.retry_tooltip",
+                    "Retry worker inventory inspection.",
+                  )}
                   variant="secondary"
                 >
                   {t("project_workers.inventory.retry", "Retry inventory")}
@@ -278,17 +178,17 @@ export function ProjectWorkersFocusScreen({
           ) : null}
 
           {showsInventoryLoading ? (
-            <div className="feed-state">
+            <div
+              className="feed-state"
+              title={t(
+                "project_workers.inventory.loading_copy",
+                "The shell is refreshing the repositories that currently expose enabled build targets.",
+              )}
+            >
               <p className="feed-state__title">
                 {t(
                   "project_workers.inventory.loading_title",
-                  "Loading project worker inventory...",
-                )}
-              </p>
-              <p className="feed-state__copy">
-                {t(
-                  "project_workers.inventory.loading_copy",
-                  "The shell is refreshing the repositories that currently expose enabled build targets.",
+                  "Loading workers...",
                 )}
               </p>
             </div>
@@ -299,7 +199,7 @@ export function ProjectWorkersFocusScreen({
               <p className="feed-state__title">
                 {t(
                   "project_workers.inventory.unavailable_title",
-                  "Project worker inventory is unavailable.",
+                  "Inventory unavailable.",
                 )}
               </p>
               <p className="feed-state__copy">{inspectionError}</p>
@@ -309,6 +209,10 @@ export function ProjectWorkersFocusScreen({
                   leadingIcon="refresh"
                   onClick={onRetryInventory}
                   size="sm"
+                  title={t(
+                    "project_workers.inventory.retry_tooltip",
+                    "Retry worker inventory inspection.",
+                  )}
                   variant="secondary"
                 >
                   {t("project_workers.inventory.retry", "Retry inventory")}
@@ -318,17 +222,17 @@ export function ProjectWorkersFocusScreen({
           ) : null}
 
           {inspectionAvailable && projectWorkers.length === 0 ? (
-            <div className="feed-state">
+            <div
+              className="feed-state"
+              title={t(
+                "project_workers.inventory.empty_copy",
+                "Enabled repositories need at least one enabled build target before they appear here.",
+              )}
+            >
               <p className="feed-state__title">
                 {t(
                   "project_workers.inventory.empty_title",
-                  "No active project workers configured.",
-                )}
-              </p>
-              <p className="feed-state__copy">
-                {t(
-                  "project_workers.inventory.empty_copy",
-                  "Enabled repositories need at least one enabled build target before they appear here.",
+                  "No workers available.",
                 )}
               </p>
             </div>
@@ -421,16 +325,18 @@ function ProjectWorkersSectionAccordion({
   open,
   summary,
   title,
+  titleTooltip,
   t,
 }: {
   actions?: ReactNode;
   children: ReactNode;
-  description: string;
-  eyebrow: string;
+  description?: string;
+  eyebrow?: string;
   onOpenChange: (nextOpen: boolean) => void;
   open: boolean;
   summary?: ReactNode;
   title: string;
+  titleTooltip?: string;
   t: Translate;
 }) {
   return (
@@ -450,9 +356,13 @@ function ProjectWorkersSectionAccordion({
       header={
         <div className="project-workers-section-accordion__header-content">
           <div className="ui-panel__title-block">
-            <p className="ui-panel__eyebrow">{eyebrow}</p>
-            <h2 className="ui-panel__title">{title}</h2>
-            <p className="ui-panel__description">{description}</p>
+            {eyebrow ? <p className="ui-panel__eyebrow">{eyebrow}</p> : null}
+            <h2 className="ui-panel__title" title={titleTooltip}>
+              {title}
+            </h2>
+            {description ? (
+              <p className="ui-panel__description">{description}</p>
+            ) : null}
             {summary ? (
               <SummaryStrip className="project-workers-section-accordion__summary">
                 {summary}
@@ -520,7 +430,8 @@ function ProjectWorkerAccordion({
               <MetaRow>
                 <MetaItem label={t("project_workers.worker.poll", "Poll")}>
                   {resolveLocalizedProjectAutomationCadenceLabel(t, {
-                    pollingIntervalSeconds: projectWorker.pollingIntervalSeconds,
+                    pollingIntervalSeconds:
+                      projectWorker.pollingIntervalSeconds,
                     sourceMode: projectWorker.sourceMode,
                   })}
                 </MetaItem>
@@ -558,6 +469,10 @@ function ProjectWorkerAccordion({
                 )
               }
               size="sm"
+              title={t(
+                "project_workers.worker.instant_check_tooltip",
+                "Queue an instant check for this worker.",
+              )}
               variant="secondary"
             >
               {pendingInstantCheckRepositoryId === projectWorker.repositoryId
@@ -657,19 +572,6 @@ function formatRuntimeStatus(
     case "unhealthy":
       return t("app.runtime_status.unhealthy", "unhealthy");
   }
-}
-
-function formatAutomationMode(
-  t: Translate,
-  automationMode: RuntimeAutomationMode | null,
-) {
-  if (!automationMode) {
-    return t("app.runtime_status.unavailable", "unavailable");
-  }
-
-  return automationMode === "idle"
-    ? t("project_workers.automation.paused", "paused")
-    : t("project_workers.automation.active", "active");
 }
 
 function buildRuntimeCopy(

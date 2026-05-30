@@ -401,6 +401,14 @@ export async function pickHostPath(
     });
 }
 
+export async function loadDefaultProjectWorkspaceRoot(
+    projectName?: string | null,
+): Promise<string> {
+    return invoke<string>("default_project_workspace_root", {
+        projectName: projectName?.trim() || null,
+    });
+}
+
 export async function pickUnityExecutablePath(): Promise<string | null> {
     return invoke<string | null>("pick_unity_executable_path");
 }

@@ -14,6 +14,13 @@ export type SelectOption = {
   value: string;
 };
 
+export type SelectOptionGroup = {
+  label: string;
+  options: readonly SelectOption[];
+};
+
+type SelectFieldOption = SelectOption | SelectOptionGroup;
+
 type FieldBaseProps = {
   error?: string;
   hint?: string;
@@ -27,7 +34,7 @@ export type TextFieldProps = FieldBaseProps &
 
 export type SelectFieldProps = FieldBaseProps &
   Omit<SelectHTMLAttributes<HTMLSelectElement>, "children"> & {
-    options: readonly SelectOption[];
+    options: readonly SelectFieldOption[];
   };
 
 export type TextAreaFieldProps = FieldBaseProps &
@@ -112,8 +119,9 @@ export function SelectField({
   const labelId = `${fieldId}-label`;
   const hintId = hint ? `${fieldId}-hint` : undefined;
   const errorId = error ? `${fieldId}-error` : undefined;
-  const selectedOptionTitle = options.find(
-    (option) => option.value === String(props.value ?? ""),
+  const selectedOptionTitle = findSelectOptionByValue(
+    options,
+    String(props.value ?? ""),
   )?.title;
 
   return (
@@ -147,16 +155,15 @@ export function SelectField({
           id={fieldId}
           title={props.title ?? selectedOptionTitle}
         >
-          {options.map((option) => (
-            <option
-              disabled={option.disabled}
-              key={option.value}
-              title={option.title}
-              value={option.value}
-            >
-              {option.label}
-            </option>
-          ))}
+          {options.map((option, index) =>
+            isSelectOptionGroup(option) ? (
+              <optgroup key={`${option.label}-${index}`} label={option.label}>
+                {option.options.map(renderSelectOption)}
+              </optgroup>
+            ) : (
+              renderSelectOption(option)
+            ),
+          )}
         </select>
         <Icon className="ui-field__chevron" name="chevronDown" size={14} />
       </span>
@@ -238,4 +245,46 @@ function joinAriaReferences(
 
 function joinClassNames(...tokens: Array<string | false | null | undefined>) {
   return tokens.filter(Boolean).join(" ");
+}
+
+function renderSelectOption(option: SelectOption) {
+  return (
+    <option
+      disabled={option.disabled}
+      key={option.value}
+      title={option.title}
+      value={option.value}
+    >
+      {option.label}
+    </option>
+  );
+}
+
+function isSelectOptionGroup(
+  option: SelectFieldOption,
+): option is SelectOptionGroup {
+  return "options" in option;
+}
+
+function findSelectOptionByValue(
+  options: readonly SelectFieldOption[],
+  value: string,
+): SelectOption | null {
+  for (const option of options) {
+    if (isSelectOptionGroup(option)) {
+      const match = option.options.find((entry) => entry.value === value);
+
+      if (match) {
+        return match;
+      }
+
+      continue;
+    }
+
+    if (option.value === value) {
+      return option;
+    }
+  }
+
+  return null;
 }

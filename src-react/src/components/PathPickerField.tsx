@@ -50,7 +50,9 @@ export function PathPickerField({
   const [isPicking, setIsPicking] = useState(false);
   const canClear = clearable && Boolean(onClear) && Boolean(value.trim());
   const { openOverlay } = useOverlay();
-  const resolvedClearLabel = clearLabel || t("path_picker.actions.clear", "Clear");
+  const resolvedClearLabel =
+    clearLabel || t("path_picker.actions.clear", "Clear");
+  const resolvedTitle = value.trim() || placeholder || undefined;
 
   const handlePick = useEffectEvent(async () => {
     if (disabled || isPicking) {
@@ -100,11 +102,12 @@ export function PathPickerField({
       </span>
 
       <span className="path-picker-field__row">
-        <span className="path-picker-field__field">
+        <span className="path-picker-field__field" title={resolvedTitle}>
           <input
             className="ui-field__input"
             disabled
             placeholder={placeholder}
+            title={resolvedTitle}
             value={value}
           />
         </span>

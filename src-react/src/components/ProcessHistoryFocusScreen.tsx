@@ -22,7 +22,6 @@ import {
   formatLocalizedProcessFeedStatusLabel,
   type ProcessFeedRecord,
 } from "./processFeedPresentation";
-import { MetaItem, MetaRow } from "./Surface";
 
 type ProcessHistoryFocusScreenProps = {
   onOpenDetail: (process: ProcessFeedRecord) => void;
@@ -139,26 +138,28 @@ export function ProcessHistoryFocusScreen({
     },
   );
 
-  const handleCancelProcess = useEffectEvent(async (process: ProcessFeedRecord) => {
-    if (!onRequestCancel) {
-      return;
-    }
+  const handleCancelProcess = useEffectEvent(
+    async (process: ProcessFeedRecord) => {
+      if (!onRequestCancel) {
+        return;
+      }
 
-    startTransition(() => {
-      setPendingCancelReleaseRunId(process.release_run_id);
-    });
-
-    try {
-      await onRequestCancel(process);
-      await loadHistory(page, "event");
-    } finally {
       startTransition(() => {
-        setPendingCancelReleaseRunId((current) =>
-          current === process.release_run_id ? null : current,
-        );
+        setPendingCancelReleaseRunId(process.release_run_id);
       });
-    }
-  });
+
+      try {
+        await onRequestCancel(process);
+        await loadHistory(page, "event");
+      } finally {
+        startTransition(() => {
+          setPendingCancelReleaseRunId((current) =>
+            current === process.release_run_id ? null : current,
+          );
+        });
+      }
+    },
+  );
 
   useEffect(() => {
     void loadHistory(page, "page");
@@ -203,37 +204,7 @@ export function ProcessHistoryFocusScreen({
   return (
     <ScreenScaffold
       className="process-history-screen"
-      eyebrow={t("process_history.eyebrow", "Processes")}
       title={t("process_history.title", "Process History")}
-      subtitle={t(
-        "process_history.subtitle",
-        "Inspect the full release archive with live refresh, status filters, and archive pagination.",
-      )}
-      summary={
-        <MetaRow>
-          <MetaItem label={t("process_history.summary.matches", "Matches")}>
-            {isLoading
-              ? t("process_history.summary.loading", "Loading archive...")
-              : t("process_history.summary.count", "{{count}} processes", {
-                  count: processPage.total_items,
-                })}
-          </MetaItem>
-          {!isLoading ? (
-            <MetaItem label={t("process_history.summary.status", "Status")}>
-              {status === "all"
-                ? t("process_history.summary.status_all", "All")
-                : formatLocalizedProcessFeedStatusLabel(t, status)}
-            </MetaItem>
-          ) : null}
-          {!isLoading ? (
-            <MetaItem label={t("process_history.summary.page", "Page")}>
-              {processPage.total_pages === 0
-                ? "0/0"
-                : `${processPage.page}/${processPage.total_pages}`}
-            </MetaItem>
-          ) : null}
-        </MetaRow>
-      }
       actions={
         <Button
           disabled={isLoading || isRefreshing}
@@ -254,10 +225,6 @@ export function ProcessHistoryFocusScreen({
         <TextField
           autoComplete="off"
           className="process-history-toolbar__query"
-          hint={t(
-            "process_history.filters.query.hint",
-            "Search by process id, project name, tag, or commit.",
-          )}
           label={t("process_history.filters.query.label", "Filter archive")}
           leadingIcon="search"
           onChange={(event) => {
@@ -275,10 +242,6 @@ export function ProcessHistoryFocusScreen({
         />
         <SelectField
           className="process-history-toolbar__status"
-          hint={t(
-            "process_history.filters.status.hint",
-            "Reduce the archive to one normalized process state.",
-          )}
           label={t("process_history.filters.status.label", "Status")}
           onChange={(event) => {
             const nextStatus = event.currentTarget
@@ -295,25 +258,10 @@ export function ProcessHistoryFocusScreen({
 
       {error ? <p className="feed-banner feed-banner--error">{error}</p> : null}
 
-      {isRefreshing && processPage.items.length > 0 ? (
-        <p className="notice-banner">
-          {t(
-            "process_history.notice.refreshing",
-            "Refreshing process history while keeping the latest loaded archive visible.",
-          )}
-        </p>
-      ) : null}
-
       {isLoading && processPage.items.length === 0 ? (
         <div className="feed-state">
           <p className="feed-state__title">
             {t("process_history.loading.title", "Loading process history...")}
-          </p>
-          <p className="feed-state__copy">
-            {t(
-              "process_history.loading.copy",
-              "HGP is rebuilding the archived process timeline from the local runtime database.",
-            )}
           </p>
         </div>
       ) : null}
@@ -321,12 +269,9 @@ export function ProcessHistoryFocusScreen({
       {isEmpty && !hasFilters ? (
         <div className="feed-state">
           <p className="feed-state__title">
-            {t("process_history.empty.none.title", "No processes recorded yet.")}
-          </p>
-          <p className="feed-state__copy">
             {t(
-              "process_history.empty.none.copy",
-              "New releases will land here after the runtime queues and executes build or publish work.",
+              "process_history.empty.none.title",
+              "No processes recorded yet.",
             )}
           </p>
         </div>
@@ -338,12 +283,6 @@ export function ProcessHistoryFocusScreen({
             {t(
               "process_history.empty.filtered.title",
               "No processes match this filter.",
-            )}
-          </p>
-          <p className="feed-state__copy">
-            {t(
-              "process_history.empty.filtered.copy",
-              "Clear or broaden the archive filter to inspect the rest of the release history.",
             )}
           </p>
         </div>

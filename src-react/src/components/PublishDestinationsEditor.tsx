@@ -106,6 +106,7 @@ type PublishDestinationsEditorProps = {
 
 const BINDING_SELECTOR_OVERLAY_THRESHOLD = 8;
 const ITCH_CHANNEL_EXAMPLE_PLACEHOLDER = "WebGL, Windows, Linux";
+const DEFAULT_ITCH_USERVERSION_TEMPLATE = "{{git_tag}}";
 
 export function PublishDestinationsEditor({
   buildTargets,
@@ -1152,7 +1153,6 @@ type PublishDestinationBindingEditorOverlayProps = {
   onResolve?: (
     value?: PublishDestinationBindingEditorOverlayResult | null,
   ) => void;
-  showItchUserversionTemplate?: boolean;
 };
 
 function PublishDestinationBindingEditorOverlay({
@@ -1162,7 +1162,6 @@ function PublishDestinationBindingEditorOverlay({
   initialTargetDraftId,
   mode,
   onResolve,
-  showItchUserversionTemplate = true,
 }: PublishDestinationBindingEditorOverlayProps) {
   const { t } = useLocalization();
   const isCreateMode = mode === "create";
@@ -1216,7 +1215,7 @@ function PublishDestinationBindingEditorOverlay({
       enabled: true,
       filesystemDirectoryPath: draft.filesystemDirectoryPath,
       itchChannel: draft.itchChannel.trim(),
-      itchUserversionTemplate: draft.itchUserversionTemplate,
+      itchUserversionTemplate: DEFAULT_ITCH_USERVERSION_TEMPLATE,
     };
 
     onResolve?.({
@@ -1338,25 +1337,6 @@ function PublishDestinationBindingEditorOverlay({
               placeholder={ITCH_CHANNEL_EXAMPLE_PLACEHOLDER}
               value={draft.itchChannel}
             />
-
-            {showItchUserversionTemplate ? (
-              <TextField
-                label={t(
-                  "publish_destinations.editor.itch.userversion_template",
-                  "Itch userversion template",
-                )}
-                onChange={(event) => {
-                  const nextTemplate = event.currentTarget.value;
-
-                  setDraft((current) => ({
-                    ...current,
-                    itchUserversionTemplate: nextTemplate,
-                  }));
-                }}
-                placeholder="{{git_tag}}"
-                value={draft.itchUserversionTemplate}
-              />
-            ) : null}
           </>
         )}
       </div>
@@ -1621,30 +1601,6 @@ function ItchPublishDestinationAdapter({
               placeholder="windows"
               value={binding.itchChannel}
             />
-
-            {showItchUserversionTemplate ? (
-              <TextField
-                hint={
-                  showExpandedCopy
-                    ? t(
-                        "publish_destinations.editor.itch.userversion_hint",
-                        "Optional template. Leave empty to use the git tag as the userversion.",
-                      )
-                    : undefined
-                }
-                label={t(
-                  "publish_destinations.editor.itch.userversion_template",
-                  "Itch userversion template",
-                )}
-                onChange={(event) =>
-                  handleBindingFieldChange({
-                    itchUserversionTemplate: event.currentTarget.value,
-                  })
-                }
-                placeholder="{{git_tag}}"
-                value={binding.itchUserversionTemplate}
-              />
-            ) : null}
           </>
         )}
         showBindingStatus={showDestinationStatus}
@@ -1930,18 +1886,6 @@ function PublishDestinationBindingsSection({
 
                     <div className="publish-destination-binding-card__summary">
                       <p>{bindingSummary}</p>
-                      {destination.kind === "itch" &&
-                      binding.itchUserversionTemplate ? (
-                        <p className="publish-destination-binding-card__meta">
-                          {t(
-                            "publish_destinations.editor.bindings.summary.userversion",
-                            "Userversion: {{template}}",
-                            {
-                              template: binding.itchUserversionTemplate,
-                            },
-                          )}
-                        </p>
-                      ) : null}
                       {firstBindingError ? (
                         <p className="ui-field__error">{firstBindingError}</p>
                       ) : null}
@@ -2169,7 +2113,7 @@ export function buildPublishDestinationDrafts(
             readJsonStringField(options, "directory_path") || "",
           itchChannel: readJsonStringField(options, "channel") || "",
           itchUserversionTemplate:
-            readJsonStringField(options, "userversion_template") || "",
+            kind === "itch" ? DEFAULT_ITCH_USERVERSION_TEMPLATE : "",
         };
       }),
     };
@@ -2612,10 +2556,8 @@ function buildPublishBindingOptions(
 
   const options: Record<string, string> = {
     channel: binding.itchChannel.trim(),
+    userversion_template: DEFAULT_ITCH_USERVERSION_TEMPLATE,
   };
-  if (binding.itchUserversionTemplate.trim()) {
-    options.userversion_template = binding.itchUserversionTemplate.trim();
-  }
   return options;
 }
 
@@ -2652,7 +2594,7 @@ function createEmptyPublishDestinationBindingDraft(
     enabled: true,
     filesystemDirectoryPath: "",
     itchChannel: "",
-    itchUserversionTemplate: "",
+    itchUserversionTemplate: DEFAULT_ITCH_USERVERSION_TEMPLATE,
   };
 }
 

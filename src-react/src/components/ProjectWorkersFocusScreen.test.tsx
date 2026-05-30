@@ -39,9 +39,7 @@ describe("ProjectWorkersFocusScreen", () => {
       />,
     );
 
-    expect(
-      screen.getByText("Project worker inventory is unavailable."),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Inventory unavailable.")).toBeInTheDocument();
     expect(screen.getByText("Inspection offline")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Retry inventory" }));
@@ -112,6 +110,46 @@ describe("ProjectWorkersFocusScreen", () => {
     ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
+  it("removes descriptive chrome from the shell and panels", () => {
+    render(
+      <ProjectWorkersFocusScreen
+        actionError={null}
+        actionMessage={null}
+        automationMode="active"
+        inspectionAvailable
+        inspectionError={null}
+        inspectionStale={false}
+        onBulkInstantCheck={() => undefined}
+        onInstantCheck={() => undefined}
+        onRestartRuntime={() => undefined}
+        onRetryInventory={() => undefined}
+        onStartRuntime={() => undefined}
+        onStopRuntime={() => undefined}
+        pendingBulkInstantCheck={false}
+        pendingInstantCheckRepositoryId={null}
+        pendingRuntimeAction={null}
+        projectWorkers={[]}
+        runtimeStatus="healthy"
+      />,
+    );
+
+    expect(
+      screen.queryByText(
+        "Control the local automation runtime and inspect repositories that currently expose enabled build targets.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Runtime-wide lifecycle controls stay separate from project worker groups so host state never competes with repository inspection.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Repositories that currently expose enabled build targets.",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
   it("toggles a worker accordion body from the chevron button", () => {
     const { container } = render(
       <ProjectWorkersFocusScreen
@@ -172,7 +210,7 @@ describe("ProjectWorkersFocusScreen", () => {
     expect(accordionBody).toHaveAttribute("hidden");
   });
 
-  it("uses shared summary strips for inventory and worker accordions", () => {
+  it("keeps the worker summary strip but removes the inventory summary strip", () => {
     render(
       <ProjectWorkersFocusScreen
         actionError={null}
@@ -224,7 +262,7 @@ describe("ProjectWorkersFocusScreen", () => {
       (inventoryAccordion as HTMLElement).querySelector(
         ".project-workers-section-accordion__summary.ui-summary-strip",
       ),
-    ).not.toBeNull();
+    ).toBeNull();
     expect(
       (workerAccordion as HTMLElement).querySelector(
         ".project-workers-worker-accordion__summary.ui-summary-strip",

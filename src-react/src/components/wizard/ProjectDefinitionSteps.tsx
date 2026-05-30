@@ -100,7 +100,6 @@ export type TargetStepErrors = {
 };
 
 export type PathStepErrors = {
-  artifactsRootOverride?: string;
   workspaceRootOverride?: string;
 };
 
@@ -159,11 +158,7 @@ function buildRepositoryVisibilityOptions(
 ): ReadonlyArray<SelectOption> {
   return [
     {
-      label: translateMessage(
-        t,
-        "project_shared.visibility.public",
-        "Public",
-      ),
+      label: translateMessage(t, "project_shared.visibility.public", "Public"),
       value: "public",
     },
     {
@@ -342,7 +337,10 @@ export function resolveBuildTargetWizardAdapter(
   t?: Translate,
 ): BuildTargetWizardAdapter {
   const engineLabel = formatRepositoryEngineKindLabel(engineKind, t);
-  const projectLabel = formatProjectKindLabel(projectKind, t).toLocaleLowerCase();
+  const projectLabel = formatProjectKindLabel(
+    projectKind,
+    t,
+  ).toLocaleLowerCase();
 
   if (engineKind === "unity") {
     return {
@@ -477,16 +475,12 @@ export function buildWizardSteps(
       description: translateMessage(
         t,
         "project_shared.step.paths.description",
-        "Choose optional artifact and workspace paths for this project.",
+        "Review the managed workspace path HGP should use for this project.",
       ),
     },
     review: {
       key: "review",
-      label: translateMessage(
-        t,
-        "project_shared.step.review.label",
-        "Review",
-      ),
+      label: translateMessage(t, "project_shared.step.review.label", "Review"),
       description: translateMessage(
         t,
         "project_shared.step.review.description",
@@ -582,11 +576,7 @@ export function normalizePathForComparison(value: string) {
 export function formatDiagnosticStatus(status: string, t?: Translate) {
   switch (status) {
     case "ready":
-      return translateMessage(
-        t,
-        "project_shared.diagnostic.ready",
-        "ready",
-      );
+      return translateMessage(t, "project_shared.diagnostic.ready", "ready");
     case "missing_executable":
       return translateMessage(
         t,
@@ -600,11 +590,7 @@ export function formatDiagnosticStatus(status: string, t?: Translate) {
         "invalid",
       );
     case "validation_failed":
-      return translateMessage(
-        t,
-        "project_shared.diagnostic.failed",
-        "failed",
-      );
+      return translateMessage(t, "project_shared.diagnostic.failed", "failed");
     default:
       return status.replace(/_/g, " ");
   }
@@ -1371,11 +1357,14 @@ export function buildBuildTargetQuickViewCopy(
     );
   }
 
-  return `${target.buildMethod.trim() || translateMessage(
-    t,
-    "project_shared.build_target.quick_view.build_method_pending",
-    "Build method pending",
-  )} • ${unityExecutablePath.trim()}`;
+  return `${
+    target.buildMethod.trim() ||
+    translateMessage(
+      t,
+      "project_shared.build_target.quick_view.build_method_pending",
+      "Build method pending",
+    )
+  } • ${unityExecutablePath.trim()}`;
 }
 
 export function formatProjectSourceReviewDescription(
@@ -1479,7 +1468,10 @@ export function ProjectRepositoryAccessPanel({
         repositoryAccessError,
         t,
       )}
-      eyebrow={t("project_shared.repository_access.panel.eyebrow", "Repository")}
+      eyebrow={t(
+        "project_shared.repository_access.panel.eyebrow",
+        "Repository",
+      )}
       headerSeparated
       summary={
         repositoryUrl.trim() ||
@@ -1488,7 +1480,10 @@ export function ProjectRepositoryAccessPanel({
         repositoryAccessError ? (
           <MetaRow className="wizard-callout__meta">
             <MetaItem
-              label={t("project_shared.repository_access.meta.provider", "Provider")}
+              label={t(
+                "project_shared.repository_access.meta.provider",
+                "Provider",
+              )}
             >
               {formatRepositoryAccessProviderLabel(
                 repositoryAccessAssessment,
@@ -1510,7 +1505,9 @@ export function ProjectRepositoryAccessPanel({
                 t,
               )}
             </MetaItem>
-            <MetaItem label={t("project_shared.repository_access.meta.login", "Login")}>
+            <MetaItem
+              label={t("project_shared.repository_access.meta.login", "Login")}
+            >
               {formatRepositoryLoginStatus(
                 repositoryAccessAssessment,
                 githubAuthProvider,
@@ -1534,7 +1531,10 @@ export function ProjectRepositoryAccessPanel({
           </MetaRow>
         ) : undefined
       }
-      title={t("project_shared.repository_access.panel.title", "Repository access")}
+      title={t(
+        "project_shared.repository_access.panel.title",
+        "Repository access",
+      )}
       tone="inset"
     >
       {repositoryAccessActionMessage ? (
@@ -1667,14 +1667,20 @@ export function ProjectRepositoryAccessPanel({
                 size="sm"
                 variant="ghost"
               >
-                {t("project_shared.repository_access.actions.disconnect", "Disconnect")}
+                {t(
+                  "project_shared.repository_access.actions.disconnect",
+                  "Disconnect",
+                )}
               </Button>
             ) : null}
 
             {onManageAuth &&
             supportsShellRepositoryLoginAction(repositoryAccessAssessment) ? (
               <Button onClick={onManageAuth} size="sm" variant="ghost">
-                {t("project_shared.repository_access.actions.open_accounts", "Open accounts")}
+                {t(
+                  "project_shared.repository_access.actions.open_accounts",
+                  "Open accounts",
+                )}
               </Button>
             ) : null}
           </div>
@@ -1714,7 +1720,10 @@ export function ProjectIdentityStep({
         label={t("project_shared.identity.name.label", "Project name")}
         onBlur={() => onFieldBlur?.("name")}
         onChange={(event) => onNameChange(event.currentTarget.value)}
-        placeholder={t("project_shared.identity.name.placeholder", "Red Horizon")}
+        placeholder={t(
+          "project_shared.identity.name.placeholder",
+          "Red Horizon",
+        )}
         value={draft.name}
       />
 
@@ -2088,7 +2097,12 @@ export function ProjectTargetsStep({
             key={target.id}
             summary={
               <MetaRow className="wizard-target-card__summary">
-                <MetaItem label={t("project_shared.targets.summary.platform", "Platform")}>
+                <MetaItem
+                  label={t(
+                    "project_shared.targets.summary.platform",
+                    "Platform",
+                  )}
+                >
                   {target.targetPlatform.trim() ||
                     t("project_shared.targets.summary.pending", "pending")}
                 </MetaItem>
@@ -2195,28 +2209,20 @@ export function ProjectPublishStep({
 }
 
 type ProjectPathsStepProps = {
-  artifactsRootOverride: string;
   workspaceRootOverride: string;
-  artifactsRootOverrideError?: string;
   workspaceRootOverrideError?: string;
   disabled?: boolean;
-  onArtifactsRootClear: () => void;
   onWorkspaceRootClear: () => void;
   onPathPickError: (error: unknown) => void;
-  onArtifactsRootPicked: (selectedPath: string) => void;
   onWorkspaceRootPicked: (selectedPath: string) => void;
 };
 
 export function ProjectPathsStep({
-  artifactsRootOverride,
   workspaceRootOverride,
-  artifactsRootOverrideError,
   workspaceRootOverrideError,
   disabled = false,
-  onArtifactsRootClear,
   onWorkspaceRootClear,
   onPathPickError,
-  onArtifactsRootPicked,
   onWorkspaceRootPicked,
 }: ProjectPathsStepProps) {
   const { t } = useLocalization();
@@ -2225,41 +2231,14 @@ export function ProjectPathsStep({
     <div className="wizard-form-grid">
       <PathPickerField
         buttonLabel={t(
-          "project_shared.paths.artifacts.button",
-          "Choose artifacts root",
-        )}
-        clearable
-        disabled={disabled}
-        dialogTitle={t(
-          "project_shared.paths.artifacts.dialog_title",
-          "Select artifacts root directory",
-        )}
-        error={artifactsRootOverrideError}
-        hint={t(
-          "project_shared.paths.artifacts.hint",
-          "Optional. Override the artifact root for this repository only.",
-        )}
-        label={t(
-          "project_shared.paths.artifacts.label",
-          "Artifacts root override",
-        )}
-        onClear={onArtifactsRootClear}
-        onError={onPathPickError}
-        onPathPicked={onArtifactsRootPicked}
-        pickerKind="directory"
-        placeholder={t(
-          "project_shared.paths.artifacts.placeholder",
-          "C:/builds/red-horizon",
-        )}
-        value={artifactsRootOverride}
-      />
-
-      <PathPickerField
-        buttonLabel={t(
           "project_shared.paths.workspace.button",
           "Choose workspace root",
         )}
         clearable
+        clearLabel={t(
+          "project_shared.paths.workspace.clear_label",
+          "Use default",
+        )}
         disabled={disabled}
         dialogTitle={t(
           "project_shared.paths.workspace.dialog_title",
@@ -2268,7 +2247,7 @@ export function ProjectPathsStep({
         error={workspaceRootOverrideError}
         hint={t(
           "project_shared.paths.workspace.hint",
-          "Optional. Override the managed checkout root for this repository only.",
+          "Defaults to the host user folder under HGPWorkspaces/<project-name>. Choose another root only when this project must live elsewhere.",
         )}
         label={t(
           "project_shared.paths.workspace.label",
@@ -2280,7 +2259,7 @@ export function ProjectPathsStep({
         pickerKind="directory"
         placeholder={t(
           "project_shared.paths.workspace.placeholder",
-          "C:/workspaces/red-horizon",
+          "C:/Users/operator/HGPWorkspaces/Red Horizon",
         )}
         value={workspaceRootOverride}
       />
@@ -2345,7 +2324,9 @@ export function ProjectReviewStep({
         headerSeparated
         summary={
           <MetaRow>
-            <MetaItem label={t("project_shared.review.project.engine", "Engine")}>
+            <MetaItem
+              label={t("project_shared.review.project.engine", "Engine")}
+            >
               {formatRepositoryEngineKindLabel(draft.engineKind, t)}
             </MetaItem>
             {draft.projectKind === "repository" ? (
@@ -2353,7 +2334,9 @@ export function ProjectReviewStep({
                 {`${draft.pollingIntervalSeconds.trim() || "0"}s`}
               </MetaItem>
             ) : (
-              <MetaItem label={t("project_shared.review.project.source", "Source")}>
+              <MetaItem
+                label={t("project_shared.review.project.source", "Source")}
+              >
                 {t(
                   "project_shared.review.project.no_remote_polling",
                   "No remote polling",
@@ -2385,7 +2368,10 @@ export function ProjectReviewStep({
             "{{projectKind}} with {{targetCount}} configured for registration.",
             {
               projectKind: formatProjectKindLabel(draft.projectKind, t),
-              targetCount: formatWizardTargetCount(draft.buildTargets.length, t),
+              targetCount: formatWizardTargetCount(
+                draft.buildTargets.length,
+                t,
+              ),
             },
           )}
         </p>
@@ -2480,7 +2466,10 @@ export function ProjectReviewStep({
           "project_shared.review.publish.description",
           "Destination-specific publish bindings and credential readiness.",
         )}
-        eyebrow={t("project_shared.review.publish.eyebrow", "Publish Destinations")}
+        eyebrow={t(
+          "project_shared.review.publish.eyebrow",
+          "Publish Destinations",
+        )}
         headerSeparated
         title={t("project_shared.review.publish.title", "Destination Review")}
         tone="inset"
@@ -2571,7 +2560,7 @@ export function ProjectReviewStep({
         className="wizard-review-panel"
         description={t(
           "project_shared.review.paths.description",
-          "Project-specific overrides for artifacts and managed workspaces.",
+          "Managed workspace path that HGP will use for this project.",
         )}
         eyebrow={t("project_shared.review.paths.eyebrow", "Paths")}
         headerSeparated
@@ -2582,39 +2571,17 @@ export function ProjectReviewStep({
           <div className="wizard-summary-list__item">
             <div className="wizard-summary-list__title-row">
               <strong>
-                {t("project_shared.review.paths.artifacts.title", "Artifacts root")}
-              </strong>
-              <Badge tone="muted">
-                {draft.artifactsRootOverride.trim()
-                  ? t("project_shared.review.paths.override", "override")
-                  : t("project_shared.review.paths.default", "default")}
-              </Badge>
-            </div>
-            <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
-              {draft.artifactsRootOverride.trim() ||
-                t(
-                  "project_shared.review.paths.artifacts.default_copy",
-                  "Use the runtime default artifact root.",
+                {t(
+                  "project_shared.review.paths.workspace.title",
+                  "Workspace root",
                 )}
-            </p>
-          </div>
-
-          <div className="wizard-summary-list__item">
-            <div className="wizard-summary-list__title-row">
-              <strong>
-                {t("project_shared.review.paths.workspace.title", "Workspace root")}
               </strong>
-              <Badge tone="muted">
-                {draft.workspaceRootOverride.trim()
-                  ? t("project_shared.review.paths.override", "override")
-                  : t("project_shared.review.paths.default", "default")}
-              </Badge>
             </div>
             <p className="wizard-summary-list__copy wizard-summary-list__copy--muted">
               {draft.workspaceRootOverride.trim() ||
                 t(
                   "project_shared.review.paths.workspace.default_copy",
-                  "Use the runtime default managed checkout root.",
+                  "Use the default HGPWorkspaces root under the host user folder.",
                 )}
             </p>
           </div>

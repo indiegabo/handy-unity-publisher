@@ -1943,6 +1943,10 @@ button {
   max-width: min(460px, 100%);
 }
 
+.project-list-toolbar--compact .ui-field__header {
+  display: none;
+}
+
 .project-list-actions {
   display: inline-flex;
   gap: 8px;

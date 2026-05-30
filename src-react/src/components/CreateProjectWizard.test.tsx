@@ -179,10 +179,12 @@ describe("CreateProjectWizard", () => {
       target: { value: "StandaloneWindows64" },
     });
     expect(
-      within(dialog).getByText("Default target name: Windows"),
+      within(dialog).getByText("Default target name: Windows 64-bit"),
     ).toBeInTheDocument();
     expect(
-      within(dialog).getByText("Default build method: Builder.PerformWindows"),
+      within(dialog).getByText(
+        "Default build method: Builder.PerformWindows64",
+      ),
     ).toBeInTheDocument();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
@@ -193,10 +195,173 @@ describe("CreateProjectWizard", () => {
       ).not.toBeInTheDocument();
     });
 
-    expect(await screen.findByText("Windows")).toBeInTheDocument();
     expect(
-      screen.getAllByText(/Builder\.PerformWindows/).length,
+      await screen.findByRole("heading", { name: "Windows 64-bit" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/Builder\.PerformWindows64/).length,
     ).toBeGreaterThan(0);
+  });
+
+  it("lists the full supported Unity target catalog in the overlay", async () => {
+    render(
+      <OverlayProvider>
+        <CreateProjectWizard
+          initialSnapshot={buildEmptyUnityTargetsStepSnapshot()}
+          onCreated={vi.fn()}
+          onManageAuth={vi.fn()}
+        />
+      </OverlayProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add target" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Add build target",
+    });
+
+    const targetPlatformField = within(dialog).getByLabelText(
+      "Unity target platform",
+    ) as HTMLSelectElement;
+
+    expect(
+      Array.from(targetPlatformField.querySelectorAll("optgroup")).map(
+        (group) => ({
+          label: group.label,
+          options: Array.from(group.querySelectorAll("option")).map(
+            (option) => option.text,
+          ),
+        }),
+      ),
+    ).toEqual([
+      {
+        label: "Desktop",
+        options: ["Windows 32-bit", "Windows 64-bit", "macOS", "Linux 64-bit"],
+      },
+      {
+        label: "Mobile and XR",
+        options: ["iOS", "Android", "tvOS", "visionOS"],
+      },
+      {
+        label: "Web and Store",
+        options: ["WebGL", "UWP"],
+      },
+      {
+        label: "Consoles",
+        options: [
+          "PS4",
+          "PS5",
+          "Xbox One",
+          "GameCore Xbox One",
+          "GameCore Xbox Series",
+          "Nintendo Switch",
+        ],
+      },
+      {
+        label: "Servers",
+        options: ["Dedicated Server Linux"],
+      },
+    ]);
+
+    expect(
+      Array.from(targetPlatformField.options, (option) => option.text),
+    ).toEqual([
+      "Select a Unity target",
+      "Windows 32-bit",
+      "Windows 64-bit",
+      "macOS",
+      "Linux 64-bit",
+      "iOS",
+      "Android",
+      "tvOS",
+      "visionOS",
+      "WebGL",
+      "UWP",
+      "PS4",
+      "PS5",
+      "Xbox One",
+      "GameCore Xbox One",
+      "GameCore Xbox Series",
+      "Nintendo Switch",
+      "Dedicated Server Linux",
+    ]);
+
+    fireEvent.change(targetPlatformField, {
+      target: { value: "PS5" },
+    });
+
+    expect(
+      within(dialog).getByText("Default target name: PS5"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Default build method: Builder.PerformPS5"),
+    ).toBeInTheDocument();
+  });
+
+  it("blocks Unity target platforms that are already configured", async () => {
+    render(
+      <OverlayProvider>
+        <CreateProjectWizard
+          initialSnapshot={buildUnityTargetsStepSnapshot()}
+          onCreated={vi.fn()}
+          onManageAuth={vi.fn()}
+        />
+      </OverlayProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add target" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Add build target",
+    });
+    const targetPlatformField = within(dialog).getByLabelText(
+      "Unity target platform",
+    ) as HTMLSelectElement;
+    const windowsOption = targetPlatformField.querySelector(
+      'option[value="StandaloneWindows64"]',
+    ) as HTMLOptionElement | null;
+
+    expect(windowsOption?.disabled).toBe(true);
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Custom configuration" }),
+    );
+
+    expect(
+      within(dialog).getByLabelText("Custom build method"),
+    ).toHaveAttribute("placeholder", "Builder.PerformWindows32");
+  });
+
+  it("keeps the current target available while editing and blocks the others", async () => {
+    render(
+      <OverlayProvider>
+        <CreateProjectWizard
+          initialSnapshot={buildTargetsStepSnapshotWithMultipleTargets()}
+          onCreated={vi.fn()}
+          onManageAuth={vi.fn()}
+        />
+      </OverlayProvider>,
+    );
+
+    fireEvent.click(
+      (await screen.findAllByRole("button", { name: "Edit" }))[1],
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Edit build target",
+    });
+    const targetPlatformField = within(dialog).getByLabelText(
+      "Unity target platform",
+    ) as HTMLSelectElement;
+    const macOsOption = targetPlatformField.querySelector(
+      'option[value="StandaloneOSX"]',
+    ) as HTMLOptionElement | null;
+    const windowsOption = targetPlatformField.querySelector(
+      'option[value="StandaloneWindows64"]',
+    ) as HTMLOptionElement | null;
+
+    expect(macOsOption?.disabled).toBe(false);
+    expect(windowsOption?.disabled).toBe(true);
   });
 
   it("allows custom configuration for target name and method", async () => {
@@ -221,7 +386,7 @@ describe("CreateProjectWizard", () => {
     });
 
     expect(
-      within(dialog).getByText("Default build method: Builder.PerformLinux"),
+      within(dialog).getByText("Default build method: Builder.PerformLinux64"),
     ).toBeInTheDocument();
 
     fireEvent.click(
@@ -675,6 +840,35 @@ function buildEmptyUnityTargetsStepSnapshot(): CreateProjectWizardSnapshot {
     },
     expandedTargetIds: {},
     unityExecutableDiagnostics: null,
+  };
+}
+
+function buildTargetsStepSnapshotWithMultipleTargets(): CreateProjectWizardSnapshot {
+  const snapshot = buildUnityTargetsStepSnapshot();
+
+  return {
+    ...snapshot,
+    draft: {
+      ...snapshot.draft,
+      buildTargets: [
+        {
+          buildMethod: "Builder.PerformWindows64",
+          id: "target-1",
+          name: "Windows 64-bit",
+          targetPlatform: "StandaloneWindows64",
+        },
+        {
+          buildMethod: "Builder.PerformMacOS",
+          id: "target-2",
+          name: "macOS",
+          targetPlatform: "StandaloneOSX",
+        },
+      ],
+    },
+    expandedTargetIds: {
+      "target-1": true,
+      "target-2": true,
+    },
   };
 }
 

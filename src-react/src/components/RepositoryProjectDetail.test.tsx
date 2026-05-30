@@ -8,6 +8,7 @@ const {
   connectRepositoryAuthMock,
   detectRepositoryProviderMock,
   disconnectRepositoryAuthMock,
+  loadDefaultProjectWorkspaceRootMock,
   loadAuthProvidersMock,
   loadRepositoryInspectionMock,
   loadRepositoryProjectDetailMock,
@@ -23,6 +24,7 @@ const {
   connectRepositoryAuthMock: vi.fn(),
   detectRepositoryProviderMock: vi.fn(),
   disconnectRepositoryAuthMock: vi.fn(),
+  loadDefaultProjectWorkspaceRootMock: vi.fn(),
   loadAuthProvidersMock: vi.fn(),
   loadRepositoryInspectionMock: vi.fn(),
   loadRepositoryProjectDetailMock: vi.fn(),
@@ -40,6 +42,7 @@ vi.mock("../services/projects", () => ({
   connectRepositoryAuth: connectRepositoryAuthMock,
   detectRepositoryProvider: detectRepositoryProviderMock,
   disconnectRepositoryAuth: disconnectRepositoryAuthMock,
+  loadDefaultProjectWorkspaceRoot: loadDefaultProjectWorkspaceRootMock,
   loadRepositoryInspection: loadRepositoryInspectionMock,
   loadRepositoryProjectDetail: loadRepositoryProjectDetailMock,
   loadSecretSettings: loadSecretSettingsMock,
@@ -65,6 +68,12 @@ beforeEach(() => {
   connectRepositoryAuthMock.mockResolvedValue(undefined);
   detectRepositoryProviderMock.mockResolvedValue(buildRepositoryProvider());
   disconnectRepositoryAuthMock.mockResolvedValue(undefined);
+  loadDefaultProjectWorkspaceRootMock.mockImplementation(
+    async (projectName?: string | null) =>
+      projectName?.trim()
+        ? `C:/Users/indie/HGPWorkspaces/${projectName.trim()}`
+        : "C:/Users/indie/HGPWorkspaces",
+  );
   loadAuthProvidersMock.mockResolvedValue([buildGithubAuthProvider()]);
   loadRepositoryInspectionMock.mockResolvedValue({ repositories: [] });
   loadRepositoryProjectDetailMock.mockResolvedValue(buildRepositoryDetail());
@@ -81,6 +90,24 @@ beforeEach(() => {
 });
 
 describe("RepositoryProjectDetail", () => {
+  it("shows only the workspace root override in the paths tab", async () => {
+    renderProjectDetail();
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Paths" }));
+
+    const workspaceRootInput = await screen.findByDisplayValue(
+      "C:/Users/indie/HGPWorkspaces/Revolutions",
+    );
+
+    expect(workspaceRootInput).toHaveAttribute(
+      "title",
+      "C:/Users/indie/HGPWorkspaces/Revolutions",
+    );
+    expect(
+      screen.queryByText("Artifacts root override"),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders wizard step tabs for repository projects", async () => {
     renderProjectDetail();
 

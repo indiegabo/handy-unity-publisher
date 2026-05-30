@@ -65,15 +65,7 @@ describe("ProjectsFocusScreen", () => {
     });
   });
 
-  it("keeps the current inventory visible while a refresh is in progress", async () => {
-    const refreshDeferred =
-      createDeferred<ReturnType<typeof buildRepositoryInspection>>();
-
-    loadRepositoryInspectionMock.mockReset();
-    loadRepositoryInspectionMock
-      .mockResolvedValueOnce(buildRepositoryInspection())
-      .mockImplementationOnce(() => refreshDeferred.promise);
-
+  it("keeps the refresh button in the compact list shell", async () => {
     render(
       <OverlayProvider>
         <ProjectsFocusScreen onOpenProject={vi.fn()} />
@@ -82,73 +74,42 @@ describe("ProjectsFocusScreen", () => {
 
     await screen.findByRole("button", { name: "Quick view for Worker Demo" });
 
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Refreshing..." }),
-    ).toBeDisabled();
+      screen.queryByRole("button", { name: "Refreshing..." }),
+    ).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Refreshing repository inventory/i),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Worker Demo")).toBeInTheDocument();
-
-    refreshDeferred.resolve(buildRepositoryInspection());
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Refresh" })).toBeEnabled();
-    });
+      screen.queryByText(/Refreshing repository inventory/i),
+    ).not.toBeInTheDocument();
   });
 
-  it("opens the quick-open picker and returns the selected project", async () => {
-    const requestAnimationFrameSpy = vi
-      .spyOn(window, "requestAnimationFrame")
-      .mockImplementation((callback: FrameRequestCallback) => {
-        callback(0);
-        return 1;
-      });
-    const onOpenProject = vi.fn();
+  it("renders a compact list shell with only the title, filter bar, and cards", async () => {
+    render(
+      <OverlayProvider>
+        <ProjectsFocusScreen onOpenProject={vi.fn()} />
+      </OverlayProvider>,
+    );
 
-    try {
-      render(
-        <OverlayProvider>
-          <ProjectsFocusScreen onOpenProject={onOpenProject} />
-        </OverlayProvider>,
-      );
+    expect(
+      await screen.findByRole("heading", { name: "Project List" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "Quick open" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Quick view for Worker Demo" }),
+    ).toBeInTheDocument();
 
-      const browseButton = await screen.findByRole("button", {
-        name: "Browse",
-      });
-
-      await waitFor(() => {
-        expect(browseButton).toBeEnabled();
-      });
-
-      browseButton.focus();
-      fireEvent.click(browseButton);
-
-      const dialog = await screen.findByRole("dialog", {
-        name: "Open project",
-      });
-
-      fireEvent.click(
-        within(dialog).getByRole("button", {
-          name: /Worker Demo/i,
-        }),
-      );
-
-      await waitFor(() => {
-        expect(onOpenProject).toHaveBeenCalledWith(1, "Worker Demo");
-      });
-
-      await waitFor(() => {
-        expect(
-          screen.queryByRole("dialog", { name: "Open project" }),
-        ).not.toBeInTheDocument();
-        expect(browseButton).toHaveFocus();
-      });
-    } finally {
-      requestAnimationFrameSpy.mockRestore();
-    }
+    expect(
+      screen.queryByRole("button", { name: "Browse" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Browse registered repositories, inspect current automation health, and jump into project editing without losing context.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("1 registered")).not.toBeInTheDocument();
   });
 
   it("moves focus between the quick-open input and project cards with ArrowDown and ArrowUp", async () => {
@@ -458,13 +419,6 @@ describe("ProjectsFocusScreen", () => {
       await waitFor(() => {
         expect(onOpenProject).toHaveBeenCalledWith(1, "Worker Demo");
       });
-
-      await waitFor(() => {
-        expect(
-          screen.queryByRole("dialog", { name: "Worker Demo" }),
-        ).not.toBeInTheDocument();
-        expect(quickViewButton).toHaveFocus();
-      });
     } finally {
       requestAnimationFrameSpy.mockRestore();
     }
@@ -634,15 +588,4 @@ function buildRepositoryInspection() {
       },
     ],
   };
-}
-
-function createDeferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((nextResolve, nextReject) => {
-    resolve = nextResolve;
-    reject = nextReject;
-  });
-
-  return { promise, reject, resolve };
 }

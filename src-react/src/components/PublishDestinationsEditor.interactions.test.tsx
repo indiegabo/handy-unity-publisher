@@ -132,14 +132,8 @@ describe("PublishDestinationsEditor interactions", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("hides the Itch userversion template for local project flows", async () => {
-    render(
-      <Harness
-        editingMode="overlay"
-        initialDestinations={[]}
-        showItchUserversionTemplate={false}
-      />,
-    );
+  it("does not render the Itch userversion template field", async () => {
+    render(<Harness editingMode="overlay" initialDestinations={[]} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Add destination" }));
     fireEvent.click(screen.getByRole("button", { name: "Itch" }));

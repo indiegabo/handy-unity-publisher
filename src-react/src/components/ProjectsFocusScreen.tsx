@@ -10,9 +10,8 @@ import {
 
 import { Button } from "./Button";
 import { SelectField, TextField, type SelectOption } from "./Field";
-import { MetaItem, MetaRow } from "./Surface";
+import { Icon } from "./Icon";
 import ScreenScaffold from "./ScreenScaffold";
-import InputWithPicker from "./InputWithPicker";
 import SelectListFullScreen from "./SelectListFullScreen";
 import FullScreenModal from "./FullScreenModal";
 import ProjectList from "./projects/ProjectList";
@@ -73,27 +72,9 @@ export function ProjectsFocusScreen({
     }
   });
 
-  const highlightedProject =
-    highlightedRepositoryId === null
-      ? null
-      : (repositories.find(
-          (repository) => repository.repository_id === highlightedRepositoryId,
-        ) ?? null);
-  const enabledRepositoryCount = repositories.filter(
-    (repository) => repository.enabled,
-  ).length;
-  const disabledRepositoryCount = repositories.length - enabledRepositoryCount;
-  const activeBuildTargetCount = repositories.reduce(
-    (total, repository) => total + repository.enabled_build_target_count,
-    0,
-  );
   const filteredRepositories = useMemo(
     () => filterRepositories(repositories, deferredQuickOpenQuery),
     [deferredQuickOpenQuery, repositories],
-  );
-  const quickOpenItems = useMemo(
-    () => repositories.map(buildProjectPickerItem),
-    [repositories],
   );
 
   const loadProjects = useEffectEvent(async (reason: "initial" | "refresh") => {
@@ -136,18 +117,6 @@ export function ProjectsFocusScreen({
       behavior: "smooth",
     });
   }, [highlightedRepositoryId, isLoading, repositories]);
-
-  const handleQuickOpenPick = useEffectEvent((value: string) => {
-    const repository = repositories.find(
-      (entry) => String(entry.repository_id) === value,
-    );
-
-    if (!repository) {
-      return;
-    }
-
-    onOpenProject(repository.repository_id, repository.repository_name);
-  });
 
   const handleOpenProjectQuickView = useEffectEvent(
     async (repositoryId: number) => {
@@ -347,44 +316,10 @@ export function ProjectsFocusScreen({
   return (
     <div className="project-list-shell">
       <ScreenScaffold
-        eyebrow={t("projects.eyebrow", "Projects")}
-        title={t("projects.title", "Project List")}
-        subtitle={t(
-          "projects.subtitle",
-          "Browse registered repositories, inspect current automation health, and jump into project editing without losing context.",
-        )}
-        summary={
-          <MetaRow>
-            <MetaItem label={t("projects.summary.projects", "Projects")}>
-              {isLoading
-                ? t("projects.summary.loading", "Loading snapshot...")
-                : t("projects.summary.registered", "{{count}} registered", {
-                    count: repositories.length,
-                  })}
-            </MetaItem>
-            {!isLoading ? (
-              <MetaItem label={t("projects.summary.enabled", "Enabled")}>
-                {enabledRepositoryCount}
-              </MetaItem>
-            ) : null}
-            {!isLoading ? (
-              <MetaItem label={t("projects.summary.disabled", "Disabled")}>
-                {disabledRepositoryCount}
-              </MetaItem>
-            ) : null}
-            {!isLoading ? (
-              <MetaItem
-                label={t("projects.summary.active_targets", "Active targets")}
-              >
-                {activeBuildTargetCount}
-              </MetaItem>
-            ) : null}
-          </MetaRow>
-        }
         actions={
           <Button
-            leadingIcon="refresh"
             disabled={isLoading || isRefreshing}
+            leadingIcon="refresh"
             onClick={() => void loadProjects("refresh")}
             size="sm"
             variant="secondary"
@@ -394,66 +329,32 @@ export function ProjectsFocusScreen({
               : t("projects.actions.refresh", "Refresh")}
           </Button>
         }
+        title={t("projects.title", "Project List")}
       >
-        {highlightedProject ? (
-          <p className="notice-banner">
-            {t(
-              "projects.notice.created",
-              "{{repositoryName}} was created. Open it to continue editing.",
-              {
-                repositoryName: highlightedProject.repository_name,
-              },
-            )}
-          </p>
-        ) : null}
-
-        <InputWithPicker
-          autoComplete="off"
-          buttonIcon="search"
-          buttonLabel={t("projects.quick_open.browse", "Browse")}
-          className="project-list-toolbar"
-          disabled={isLoading || repositories.length === 0}
-          hint={
-            isLoading
-              ? t("projects.quick_open.loading", "Loading inventory...")
-              : filteredRepositories.length === 1
-                ? t("projects.quick_open.matching.one", "1 matching project")
-                : t(
-                    "projects.quick_open.matching.other",
-                    "{{count}} matching projects",
-                    { count: filteredRepositories.length },
-                  )
-          }
-          inputRef={quickOpenInputRef}
-          label={t("projects.quick_open.label", "Quick open")}
-          leadingIcon="search"
-          onChange={setQuickOpenQuery}
-          onKeyDown={handleQuickOpenKeyDown}
-          onPick={handleQuickOpenPick}
-          pickerComponent={SelectListFullScreen}
-          pickerProps={{
-            description: t(
-              "projects.quick_open.picker.description",
-              "Search the registered project inventory and open a project without leaving this screen.",
-            ),
-            emptyStateCopy: t(
-              "projects.quick_open.picker.empty_copy",
-              "Try a different project name, remote URL, or local workspace path.",
-            ),
-            emptyStateTitle: t(
-              "projects.quick_open.picker.empty_title",
-              "No projects matched the current filter.",
-            ),
-            initialQuery: quickOpenQuery,
-            items: quickOpenItems,
-            title: t("projects.quick_open.picker.title", "Open project"),
-          }}
-          placeholder={t(
-            "projects.quick_open.placeholder",
-            "Filter by project name, remote URL, or local workspace path",
-          )}
-          value={quickOpenQuery}
-        />
+        <label className="project-list-toolbar project-list-toolbar--compact ui-field">
+          <span className="ui-field__header">
+            <span className="ui-field__label" id="projects-filter-label">
+              {t("projects.quick_open.label", "Quick open")}
+            </span>
+          </span>
+          <span className="ui-field__control">
+            <Icon className="ui-field__icon" name="search" />
+            <input
+              aria-labelledby="projects-filter-label"
+              autoComplete="off"
+              className="ui-field__input ui-field__input--with-icon"
+              disabled={isLoading || repositories.length === 0}
+              onChange={(event) => setQuickOpenQuery(event.currentTarget.value)}
+              onKeyDown={handleQuickOpenKeyDown}
+              placeholder={t(
+                "projects.quick_open.placeholder",
+                "Filter by project name, remote URL, or local workspace path",
+              )}
+              ref={quickOpenInputRef}
+              value={quickOpenQuery}
+            />
+          </span>
+        </label>
 
         {error && !isLoading && repositories.length > 0 ? (
           <div className="project-list-state">
@@ -469,15 +370,6 @@ export function ProjectsFocusScreen({
               </Button>
             </div>
           </div>
-        ) : null}
-
-        {isRefreshing && repositories.length > 0 ? (
-          <p className="notice-banner">
-            {t(
-              "projects.notice.refreshing",
-              "Refreshing repository inventory while keeping the latest known snapshot visible.",
-            )}
-          </p>
         ) : null}
 
         {isLoading ? (
@@ -850,12 +742,4 @@ function filterRepositories(
       repository.engine_kind.toLowerCase().includes(normalizedQuery)
     );
   });
-}
-
-function buildProjectPickerItem(repository: RepositoryInspectionEntry) {
-  return {
-    id: String(repository.repository_id),
-    label: repository.repository_name,
-    subtitle: buildProjectSourceDisplay(repository),
-  };
 }

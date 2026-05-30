@@ -1005,6 +1005,10 @@ export function CreateProjectWizard({
     const created = await openOverlay<BuildTargetEditorOverlayResult>(
       BuildTargetEditorOverlay,
       {
+        existingTargets: draft.buildTargets.map(({ id, targetPlatform }) => ({
+          id,
+          targetPlatform,
+        })),
         initialTarget: createEmptyBuildTargetDraft(
           nextBuildTargetIdRef.current,
         ),
@@ -1039,6 +1043,10 @@ export function CreateProjectWizard({
     const updated = await openOverlay<BuildTargetEditorOverlayResult>(
       BuildTargetEditorOverlay,
       {
+        existingTargets: draft.buildTargets.map(({ id, targetPlatform }) => ({
+          id,
+          targetPlatform,
+        })),
         initialTarget: target,
         mode: "edit",
         targetId,
@@ -1895,7 +1903,10 @@ function resolveBuildTargetWizardAdapter(
   t?: Translate,
 ): BuildTargetWizardAdapter {
   const engineLabel = formatRepositoryEngineKindLabel(engineKind, t);
-  const projectLabel = formatProjectKindLabel(projectKind, t).toLocaleLowerCase();
+  const projectLabel = formatProjectKindLabel(
+    projectKind,
+    t,
+  ).toLocaleLowerCase();
 
   if (engineKind === "unity") {
     return {
@@ -1987,7 +1998,11 @@ function buildWizardSteps(
   const definitions: Record<WizardStepKey, WizardStepDefinition> = {
     identity: {
       key: "identity",
-      label: translateMessage(t, "project_shared.step.identity.label", "Identity"),
+      label: translateMessage(
+        t,
+        "project_shared.step.identity.label",
+        "Identity",
+      ),
       description: translateMessage(
         t,
         "project_shared.step.identity.description",
@@ -2393,6 +2408,7 @@ function validateTargetsStep(
   }
 
   const seenNames = new Set<string>();
+  const seenTargetPlatforms = new Set<string>();
   for (const target of draft.buildTargets) {
     const fieldErrors: TargetFieldErrors = {};
     const normalizedName = target.name.trim();
@@ -2414,12 +2430,26 @@ function validateTargetsStep(
       seenNames.add(duplicateKey);
     }
 
-    if (!target.targetPlatform.trim()) {
+    const normalizedTargetPlatform = normalizeUnityTargetPlatformValue(
+      target.targetPlatform,
+    );
+
+    if (!normalizedTargetPlatform) {
       fieldErrors.targetPlatform = translateMessage(
         t,
         "create_project.validation.targets.platform_required",
         "Unity target platform is required.",
       );
+    } else {
+      if (seenTargetPlatforms.has(normalizedTargetPlatform)) {
+        fieldErrors.targetPlatform = translateMessage(
+          t,
+          "create_project.validation.targets.platform_unique",
+          "Each Unity target platform can be added only once.",
+        );
+      }
+
+      seenTargetPlatforms.add(normalizedTargetPlatform);
     }
 
     if (!target.buildMethod.trim()) {
@@ -2478,23 +2508,21 @@ function validatePathStep(draft: ProjectDraft, t?: Translate): PathStepErrors {
     normalizedArtifactsRoot &&
     !looksLikeAbsolutePath(normalizedArtifactsRoot)
   ) {
-    errors.artifactsRootOverride =
-      translateMessage(
-        t,
-        "create_project.validation.paths.artifacts_absolute",
-        "Artifacts root override must be an absolute path.",
-      );
+    errors.artifactsRootOverride = translateMessage(
+      t,
+      "create_project.validation.paths.artifacts_absolute",
+      "Artifacts root override must be an absolute path.",
+    );
   }
   if (
     normalizedWorkspaceRoot &&
     !looksLikeAbsolutePath(normalizedWorkspaceRoot)
   ) {
-    errors.workspaceRootOverride =
-      translateMessage(
-        t,
-        "create_project.validation.paths.workspace_absolute",
-        "Workspace root override must be an absolute path.",
-      );
+    errors.workspaceRootOverride = translateMessage(
+      t,
+      "create_project.validation.paths.workspace_absolute",
+      "Workspace root override must be an absolute path.",
+    );
   }
 
   return errors;

@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { Button } from "./Button";
-import { SelectField, TextField } from "./Field";
+import { SelectField, TextField, type SelectOption } from "./Field";
 import FullScreenModal from "./FullScreenModal";
 import { useLocalization, type Translate } from "../LocalizationProvider";
 
@@ -24,7 +24,13 @@ export type BuildTargetEditorOverlayResult = {
   target: SharedBuildTargetDraft;
 };
 
+type ExistingBuildTargetPlatform = Pick<
+  SharedBuildTargetDraft,
+  "id" | "targetPlatform"
+>;
+
 type BuildTargetEditorOverlayProps = {
+  existingTargets?: readonly ExistingBuildTargetPlatform[];
   initialErrors?: BuildTargetEditorFieldErrors;
   initialTarget: SharedBuildTargetDraft;
   mode: BuildTargetEditorOverlayMode;
@@ -32,48 +38,210 @@ type BuildTargetEditorOverlayProps = {
   targetId: string;
 };
 
-const UNITY_TARGET_OPTIONS = [
+type UnityTargetCatalogEntry = {
+  aliases?: readonly string[];
+  buildMethod: string;
+  fallbackLabel: string;
+  group: UnityTargetGroupId;
+  key: string;
+  targetName: string;
+  value: string;
+};
+
+type UnityTargetGroupId =
+  | "desktop"
+  | "mobileAndXr"
+  | "webAndStore"
+  | "consoles"
+  | "servers";
+
+const UNITY_TARGET_PLACEHOLDER = {
+  fallbackLabel: "Select a Unity target",
+  key: "build_target_editor.target_platform.placeholder",
+  value: "",
+} as const;
+
+const UNITY_TARGET_GROUP_LABELS: Record<UnityTargetGroupId, string> = {
+  consoles: "Consoles",
+  desktop: "Desktop",
+  mobileAndXr: "Mobile and XR",
+  servers: "Servers",
+  webAndStore: "Web and Store",
+};
+
+const UNITY_TARGET_GROUP_ORDER: readonly UnityTargetGroupId[] = [
+  "desktop",
+  "mobileAndXr",
+  "webAndStore",
+  "consoles",
+  "servers",
+];
+
+const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   {
-    fallbackLabel: "Select a Unity target",
-    key: "build_target_editor.target_platform.placeholder",
-    targetName: "",
-    value: "",
+    aliases: ["windows32", "windows 32-bit", "windows x86"],
+    buildMethod: "Builder.PerformWindows32",
+    fallbackLabel: "Windows 32-bit",
+    group: "desktop",
+    key: "build_target_editor.target_platform.windows_32",
+    targetName: "Windows 32-bit",
+    value: "StandaloneWindows",
   },
   {
-    fallbackLabel: "Windows",
-    key: "build_target_editor.target_platform.windows",
-    targetName: "Windows",
+    aliases: ["windows", "windows64", "windows 64-bit"],
+    buildMethod: "Builder.PerformWindows64",
+    fallbackLabel: "Windows 64-bit",
+    group: "desktop",
+    key: "build_target_editor.target_platform.windows_64",
+    targetName: "Windows 64-bit",
     value: "StandaloneWindows64",
   },
   {
-    fallbackLabel: "Linux",
-    key: "build_target_editor.target_platform.linux",
-    targetName: "Linux",
-    value: "StandaloneLinux64",
-  },
-  {
+    aliases: ["mac", "macos", "osx"],
+    buildMethod: "Builder.PerformMacOS",
     fallbackLabel: "macOS",
+    group: "desktop",
     key: "build_target_editor.target_platform.macos",
     targetName: "macOS",
     value: "StandaloneOSX",
   },
   {
+    aliases: ["linux", "linux64", "linux 64-bit"],
+    buildMethod: "Builder.PerformLinux64",
+    fallbackLabel: "Linux 64-bit",
+    group: "desktop",
+    key: "build_target_editor.target_platform.linux_64",
+    targetName: "Linux 64-bit",
+    value: "StandaloneLinux64",
+  },
+  {
+    aliases: ["ios"],
+    buildMethod: "Builder.PerformIOS",
+    fallbackLabel: "iOS",
+    group: "mobileAndXr",
+    key: "build_target_editor.target_platform.ios",
+    targetName: "iOS",
+    value: "iOS",
+  },
+  {
+    aliases: ["android"],
+    buildMethod: "Builder.PerformAndroid",
+    fallbackLabel: "Android",
+    group: "mobileAndXr",
+    key: "build_target_editor.target_platform.android",
+    targetName: "Android",
+    value: "Android",
+  },
+  {
+    aliases: ["tvos"],
+    buildMethod: "Builder.PerformTvOS",
+    fallbackLabel: "tvOS",
+    group: "mobileAndXr",
+    key: "build_target_editor.target_platform.tvos",
+    targetName: "tvOS",
+    value: "tvOS",
+  },
+  {
+    aliases: ["vision os", "visionos"],
+    buildMethod: "Builder.PerformVisionOS",
+    fallbackLabel: "visionOS",
+    group: "mobileAndXr",
+    key: "build_target_editor.target_platform.visionos",
+    targetName: "visionOS",
+    value: "VisionOS",
+  },
+  {
+    aliases: ["webgl"],
+    buildMethod: "Builder.PerformWebGL",
     fallbackLabel: "WebGL",
+    group: "webAndStore",
     key: "build_target_editor.target_platform.webgl",
     targetName: "WebGL",
     value: "WebGL",
   },
   {
-    fallbackLabel: "Android",
-    key: "build_target_editor.target_platform.android",
-    targetName: "Android",
-    value: "Android",
+    aliases: ["uwp", "wsa", "wsaplayer"],
+    buildMethod: "Builder.PerformUWP",
+    fallbackLabel: "UWP",
+    group: "webAndStore",
+    key: "build_target_editor.target_platform.uwp",
+    targetName: "UWP",
+    value: "WSAPlayer",
+  },
+  {
+    aliases: ["ps4"],
+    buildMethod: "Builder.PerformPS4",
+    fallbackLabel: "PS4",
+    group: "consoles",
+    key: "build_target_editor.target_platform.ps4",
+    targetName: "PS4",
+    value: "PS4",
+  },
+  {
+    aliases: ["ps5"],
+    buildMethod: "Builder.PerformPS5",
+    fallbackLabel: "PS5",
+    group: "consoles",
+    key: "build_target_editor.target_platform.ps5",
+    targetName: "PS5",
+    value: "PS5",
+  },
+  {
+    aliases: ["xbox one", "xboxone"],
+    buildMethod: "Builder.PerformXboxOne",
+    fallbackLabel: "Xbox One",
+    group: "consoles",
+    key: "build_target_editor.target_platform.xbox_one",
+    targetName: "Xbox One",
+    value: "XboxOne",
+  },
+  {
+    aliases: ["gamecore xbox one", "gamecorexboxone"],
+    buildMethod: "Builder.PerformGameCoreXboxOne",
+    fallbackLabel: "GameCore Xbox One",
+    group: "consoles",
+    key: "build_target_editor.target_platform.gamecore_xbox_one",
+    targetName: "GameCore Xbox One",
+    value: "GameCoreXboxOne",
+  },
+  {
+    aliases: ["gamecore xbox series", "gamecorexboxseries", "xbox series"],
+    buildMethod: "Builder.PerformGameCoreXboxSeries",
+    fallbackLabel: "GameCore Xbox Series",
+    group: "consoles",
+    key: "build_target_editor.target_platform.gamecore_xbox_series",
+    targetName: "GameCore Xbox Series",
+    value: "GameCoreXboxSeries",
+  },
+  {
+    aliases: ["nintendo switch", "switch"],
+    buildMethod: "Builder.PerformSwitch",
+    fallbackLabel: "Nintendo Switch",
+    group: "consoles",
+    key: "build_target_editor.target_platform.switch",
+    targetName: "Nintendo Switch",
+    value: "Switch",
+  },
+  {
+    aliases: [
+      "dedicated server linux",
+      "dedicatedserverlinux",
+      "linux dedicated server",
+      "linuxheadlesssimulation",
+    ],
+    buildMethod: "Builder.PerformDedicatedServerLinux",
+    fallbackLabel: "Dedicated Server Linux",
+    group: "servers",
+    key: "build_target_editor.target_platform.dedicated_server_linux",
+    targetName: "Dedicated Server Linux",
+    value: "LinuxHeadlessSimulation",
   },
 ] as const;
 
 const DEFAULT_CUSTOM_TARGET_PLATFORM = "StandaloneWindows64";
 
 export function BuildTargetEditorOverlay({
+  existingTargets = [],
   initialErrors = {},
   initialTarget,
   mode,
@@ -110,6 +278,10 @@ export function BuildTargetEditorOverlay({
       );
     });
   const [attemptedSave, setAttemptedSave] = useState(false);
+  const unavailableTargetPlatforms = buildUnavailableTargetPlatformSet(
+    existingTargets,
+    targetId,
+  );
 
   const normalizedTargetPlatform = normalizeUnityTargetPlatformValue(
     draft.targetPlatform,
@@ -117,13 +289,21 @@ export function BuildTargetEditorOverlay({
   const suggestedBuildMethod = resolveSuggestedUnityBuildMethod(
     normalizedTargetPlatform,
   );
-  const unityTargetOptions = buildUnityTargetOptions(t);
+  const unityTargetOptions = buildUnityTargetOptions(
+    t,
+    unavailableTargetPlatforms,
+  );
 
   const fieldErrors = attemptedSave
-    ? validateBuildTargetDraftForOverlay(draft, {
-        isCustomConfigurationEnabled,
-        suggestedBuildMethod,
-      }, t)
+    ? validateBuildTargetDraftForOverlay(
+        draft,
+        {
+          isCustomConfigurationEnabled,
+          suggestedBuildMethod,
+          unavailableTargetPlatforms,
+        },
+        t,
+      )
     : initialErrors;
 
   const enableCustomConfiguration = () => {
@@ -131,7 +311,7 @@ export function BuildTargetEditorOverlay({
     setDraft((current) => {
       const fallbackPlatform = current.targetPlatform.trim()
         ? normalizeUnityTargetPlatformValue(current.targetPlatform)
-        : DEFAULT_CUSTOM_TARGET_PLATFORM;
+        : resolveDefaultCustomTargetPlatform(unavailableTargetPlatforms);
 
       return {
         ...current,
@@ -164,10 +344,15 @@ export function BuildTargetEditorOverlay({
   const handleSave = () => {
     setAttemptedSave(true);
 
-    const errors = validateBuildTargetDraftForOverlay(draft, {
-      isCustomConfigurationEnabled,
-      suggestedBuildMethod,
-    }, t);
+    const errors = validateBuildTargetDraftForOverlay(
+      draft,
+      {
+        isCustomConfigurationEnabled,
+        suggestedBuildMethod,
+        unavailableTargetPlatforms,
+      },
+      t,
+    );
 
     if (firstBuildTargetFieldError(errors)) {
       return;
@@ -281,10 +466,7 @@ export function BuildTargetEditorOverlay({
 
             <div className="wizard-callout wizard-callout--compact">
               <p className="wizard-callout__title">
-                {t(
-                  "build_target_editor.defaults.title",
-                  "Platform defaults",
-                )}
+                {t("build_target_editor.defaults.title", "Platform defaults")}
               </p>
               <p className="wizard-callout__copy">
                 {t(
@@ -353,7 +535,7 @@ export function BuildTargetEditorOverlay({
                   buildMethod: nextBuildMethod,
                 }));
               }}
-              placeholder={suggestedBuildMethod ?? "Builder.PerformWindows"}
+              placeholder={suggestedBuildMethod ?? "Builder.PerformWindows64"}
               value={draft.buildMethod}
             />
           </>
@@ -368,15 +550,24 @@ function validateBuildTargetDraftForOverlay(
   options: {
     isCustomConfigurationEnabled: boolean;
     suggestedBuildMethod: string | null;
+    unavailableTargetPlatforms: ReadonlySet<string>;
   },
   t: Translate,
 ): BuildTargetEditorFieldErrors {
   const errors: BuildTargetEditorFieldErrors = {};
+  const normalizedTargetPlatform = normalizeUnityTargetPlatformValue(
+    target.targetPlatform,
+  );
 
-  if (!target.targetPlatform.trim()) {
+  if (!normalizedTargetPlatform) {
     errors.targetPlatform = t(
       "build_target_editor.validation.target_platform_required",
       "Unity target platform is required.",
+    );
+  } else if (options.unavailableTargetPlatforms.has(normalizedTargetPlatform)) {
+    errors.targetPlatform = t(
+      "build_target_editor.validation.target_platform_duplicate",
+      "This Unity target platform has already been added.",
     );
   }
 
@@ -396,7 +587,7 @@ function validateBuildTargetDraftForOverlay(
     } else if (!target.buildMethod.includes(".")) {
       errors.buildMethod = t(
         "build_target_editor.validation.custom_method_format",
-        "Use a full static method path such as Builder.PerformWindows.",
+        "Use a full static method path such as Builder.PerformWindows64.",
       );
     }
   } else if (!options.suggestedBuildMethod) {
@@ -414,54 +605,117 @@ function firstBuildTargetFieldError(errors: BuildTargetEditorFieldErrors) {
 }
 
 function normalizeUnityTargetPlatformValue(value: string) {
-  switch (value.trim().toLocaleLowerCase()) {
-    case "windows":
-      return "StandaloneWindows64";
-    case "linux":
-      return "StandaloneLinux64";
-    case "macos":
-    case "mac":
-    case "osx":
-      return "StandaloneOSX";
-    case "webgl":
-      return "WebGL";
-    case "android":
-      return "Android";
-    default:
-      return value.trim();
-  }
+  return findUnityTargetEntry(value)?.value ?? value.trim();
 }
 
 function resolveSuggestedUnityBuildMethod(targetPlatform: string) {
-  switch (targetPlatform.trim()) {
-    case "StandaloneWindows64":
-      return "Builder.PerformWindows";
-    case "StandaloneLinux64":
-      return "Builder.PerformLinux";
-    case "StandaloneOSX":
-      return "Builder.PerformMacOS";
-    case "WebGL":
-      return "Builder.PerformWebGL";
-    case "Android":
-      return "Builder.PerformAndroid";
-    default:
-      return null;
-  }
+  return findUnityTargetEntry(targetPlatform)?.buildMethod ?? null;
 }
 
 function resolveUnityBuildTargetName(targetPlatform: string) {
   const normalizedTargetPlatform =
     normalizeUnityTargetPlatformValue(targetPlatform);
-  const option = UNITY_TARGET_OPTIONS.find(
-    (entry) => entry.value === normalizedTargetPlatform,
-  );
+  const option = findUnityTargetEntry(normalizedTargetPlatform);
 
   return option?.targetName || normalizedTargetPlatform || "";
 }
 
-function buildUnityTargetOptions(t: Translate) {
-  return UNITY_TARGET_OPTIONS.map((option) => ({
-    label: t(option.key, option.fallbackLabel),
-    value: option.value,
-  }));
+function buildUnityTargetOptions(
+  t: Translate,
+  unavailableTargetPlatforms: ReadonlySet<string>,
+) {
+  const groupedOptions = UNITY_TARGET_GROUP_ORDER.map((groupId) => ({
+    label: UNITY_TARGET_GROUP_LABELS[groupId],
+    options: UNITY_TARGET_CATALOG.filter(
+      (entry) => entry.group === groupId,
+    ).map((entry) =>
+      buildUnityTargetOption(
+        entry,
+        unavailableTargetPlatforms.has(entry.value),
+      ),
+    ),
+  })).filter((group) => group.options.length > 0);
+
+  return [
+    {
+      label: t(
+        UNITY_TARGET_PLACEHOLDER.key,
+        UNITY_TARGET_PLACEHOLDER.fallbackLabel,
+      ),
+      value: UNITY_TARGET_PLACEHOLDER.value,
+    },
+    ...groupedOptions,
+  ];
+}
+
+function findUnityTargetEntry(value: string) {
+  const normalizedValue = value.trim().toLocaleLowerCase();
+
+  if (!normalizedValue) {
+    return null;
+  }
+
+  return (
+    UNITY_TARGET_CATALOG.find(
+      (entry) =>
+        entry.value.toLocaleLowerCase() === normalizedValue ||
+        entry.aliases?.includes(normalizedValue),
+    ) ?? null
+  );
+}
+
+function buildUnityTargetOption(
+  entry: UnityTargetCatalogEntry,
+  disabled: boolean,
+): SelectOption {
+  return {
+    disabled,
+    label: entry.fallbackLabel,
+    value: entry.value,
+  };
+}
+
+function buildUnavailableTargetPlatformSet(
+  existingTargets: readonly ExistingBuildTargetPlatform[],
+  currentTargetId: string,
+): ReadonlySet<string> {
+  const unavailableTargetPlatforms = new Set<string>();
+
+  for (const target of existingTargets) {
+    if (target.id === currentTargetId) {
+      continue;
+    }
+
+    const normalizedTargetPlatform = normalizeUnityTargetPlatformValue(
+      target.targetPlatform,
+    );
+
+    if (normalizedTargetPlatform) {
+      unavailableTargetPlatforms.add(normalizedTargetPlatform);
+    }
+  }
+
+  return unavailableTargetPlatforms;
+}
+
+function resolveDefaultCustomTargetPlatform(
+  unavailableTargetPlatforms: ReadonlySet<string>,
+) {
+  if (!unavailableTargetPlatforms.has(DEFAULT_CUSTOM_TARGET_PLATFORM)) {
+    return DEFAULT_CUSTOM_TARGET_PLATFORM;
+  }
+
+  return findFirstAvailableTargetPlatform(unavailableTargetPlatforms) ?? "";
+}
+
+function findFirstAvailableTargetPlatform(
+  unavailableTargetPlatforms: ReadonlySet<string>,
+) {
+  for (const entry of UNITY_TARGET_CATALOG) {
+    if (!unavailableTargetPlatforms.has(entry.value)) {
+      return entry.value;
+    }
+  }
+
+  return null;
 }

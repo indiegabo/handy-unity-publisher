@@ -773,11 +773,6 @@ describe("App shell overlays", () => {
       ).toBeInTheDocument();
 
       expect(await screen.findByText("Inspection offline")).toBeInTheDocument();
-      expect(
-        screen.getByText(
-          "Showing the last known worker inventory while the shell recovers repository inspection.",
-        ),
-      ).toBeInTheDocument();
       expect(screen.getByText("Worker Demo")).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Retry inventory" }),

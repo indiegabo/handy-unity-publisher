@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ProcessHistoryFocusScreen } from "./ProcessHistoryFocusScreen";
@@ -11,9 +17,9 @@ const { loadProcessFeedMock, subscribeToProcessFeedEventsMock } = vi.hoisted(
 );
 
 vi.mock("../services/processFeed", async () => {
-  const actual = await vi.importActual<typeof import("../services/processFeed")>(
-    "../services/processFeed",
-  );
+  const actual = await vi.importActual<
+    typeof import("../services/processFeed")
+  >("../services/processFeed");
 
   return {
     ...actual,
@@ -43,25 +49,53 @@ beforeEach(() => {
 });
 
 describe("ProcessHistoryFocusScreen", () => {
+  it("renders a compact process history shell while keeping refresh", async () => {
+    loadProcessFeedMock.mockResolvedValueOnce(PAGE_ONE);
+
+    render(<ProcessHistoryFocusScreen onOpenDetail={vi.fn()} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Process History" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: "Filter archive" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Status" }),
+    ).toBeInTheDocument();
+
+    expect(screen.queryByText("Processes")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Inspect the full release archive with live refresh, status filters, and archive pagination.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Search by process id, project name, tag, or commit."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Reduce the archive to one normalized process state."),
+    ).not.toBeInTheDocument();
+  });
+
   it("loads the archived feed and paginates across the full process history", async () => {
     const onOpenDetail = vi.fn();
 
-    loadProcessFeedMock
-      .mockResolvedValueOnce(PAGE_ONE)
-      .mockResolvedValueOnce({
-        ...PAGE_ONE,
-        has_next_page: false,
-        has_previous_page: true,
-        items: [
-          buildProcessRecord({
-            current_step_label: "Completed",
-            current_step_status: "succeeded",
-            display_status: "succeeded",
-            release_run_id: 77,
-          }),
-        ],
-        page: 2,
-      });
+    loadProcessFeedMock.mockResolvedValueOnce(PAGE_ONE).mockResolvedValueOnce({
+      ...PAGE_ONE,
+      has_next_page: false,
+      has_previous_page: true,
+      items: [
+        buildProcessRecord({
+          current_step_label: "Completed",
+          current_step_status: "succeeded",
+          display_status: "succeeded",
+          release_run_id: 77,
+        }),
+      ],
+      page: 2,
+    });
 
     render(<ProcessHistoryFocusScreen onOpenDetail={onOpenDetail} />);
 

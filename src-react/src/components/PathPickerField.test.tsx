@@ -29,6 +29,24 @@ beforeEach(() => {
 });
 
 describe("PathPickerField", () => {
+  it("exposes the full resolved path through the input title", () => {
+    render(
+      <OverlayProvider>
+        <PathPickerField
+          buttonLabel="Choose workspace root"
+          label="Workspace root"
+          onPathPicked={vi.fn()}
+          pickerKind="directory"
+          value="C:/Users/indie/HGPWorkspaces/Revolutions"
+        />
+      </OverlayProvider>,
+    );
+
+    expect(
+      screen.getByDisplayValue("C:/Users/indie/HGPWorkspaces/Revolutions"),
+    ).toHaveAttribute("title", "C:/Users/indie/HGPWorkspaces/Revolutions");
+  });
+
   it("uses the native picker result when the host picker succeeds", async () => {
     const onPathPicked = vi.fn();
 

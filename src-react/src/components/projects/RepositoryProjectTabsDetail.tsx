@@ -315,7 +315,9 @@ export function RepositoryProjectDetail({
       startTransition(() => {
         setRepositoryCredentials([]);
         setPublishCredentials([]);
-        setRepositoryCredentialsError(buildProjectSaveErrorMessage(loadError, t));
+        setRepositoryCredentialsError(
+          buildProjectSaveErrorMessage(loadError, t),
+        );
         setIsLoadingRepositoryCredentials(false);
       });
     }
@@ -339,7 +341,9 @@ export function RepositoryProjectDetail({
     } catch (loadError) {
       startTransition(() => {
         setDetectedUnityEditors([]);
-        setUnityAdapterSettingsError(buildProjectSaveErrorMessage(loadError, t));
+        setUnityAdapterSettingsError(
+          buildProjectSaveErrorMessage(loadError, t),
+        );
         setIsLoadingUnityAdapterSettings(false);
       });
     }
@@ -757,6 +761,10 @@ export function RepositoryProjectDetail({
     const created = await openOverlay<BuildTargetEditorOverlayResult>(
       BuildTargetEditorOverlay,
       {
+        existingTargets: draft.buildTargets.map(({ id, targetPlatform }) => ({
+          id,
+          targetPlatform,
+        })),
         initialErrors: {},
         initialTarget: nextTarget,
         mode: "create",
@@ -805,6 +813,10 @@ export function RepositoryProjectDetail({
     const updated = await openOverlay<BuildTargetEditorOverlayResult>(
       BuildTargetEditorOverlay,
       {
+        existingTargets: draft.buildTargets.map(({ id, targetPlatform }) => ({
+          id,
+          targetPlatform,
+        })),
         initialErrors: validationState.targets.targets[targetId] ?? {},
         initialTarget: target,
         mode: "edit",
@@ -2080,13 +2092,36 @@ function buildStepSummary(
     case "identity":
       return (
         <MetaRow>
-          <MetaItem label={translateMessage(t, "project_detail.step.identity.name", "Name")}>
-            {draft.name.trim() || translateMessage(t, "project_detail.step.identity.unnamed", "Unnamed")}
+          <MetaItem
+            label={translateMessage(
+              t,
+              "project_detail.step.identity.name",
+              "Name",
+            )}
+          >
+            {draft.name.trim() ||
+              translateMessage(
+                t,
+                "project_detail.step.identity.unnamed",
+                "Unnamed",
+              )}
           </MetaItem>
-          <MetaItem label={translateMessage(t, "project_detail.step.identity.kind", "Kind")}>
+          <MetaItem
+            label={translateMessage(
+              t,
+              "project_detail.step.identity.kind",
+              "Kind",
+            )}
+          >
             {formatProjectKindLabel(draft.projectKind, t)}
           </MetaItem>
-          <MetaItem label={translateMessage(t, "project_detail.step.identity.engine", "Engine")}>
+          <MetaItem
+            label={translateMessage(
+              t,
+              "project_detail.step.identity.engine",
+              "Engine",
+            )}
+          >
             {formatRepositoryEngineKindLabel(draft.engineKind, t)}
           </MetaItem>
         </MetaRow>
@@ -2094,7 +2129,13 @@ function buildStepSummary(
     case "access":
       return draft.projectKind === "repository" ? (
         <MetaRow>
-          <MetaItem label={translateMessage(t, "project_detail.step.access.visibility", "Visibility")}>
+          <MetaItem
+            label={translateMessage(
+              t,
+              "project_detail.step.access.visibility",
+              "Visibility",
+            )}
+          >
             {draft.repositoryVisibility === "private"
               ? translateMessage(
                   t,
@@ -2107,18 +2148,40 @@ function buildStepSummary(
                   "Public",
                 )}
           </MetaItem>
-          <MetaItem label={translateMessage(t, "project_detail.step.access.poll", "Poll")}>
+          <MetaItem
+            label={translateMessage(
+              t,
+              "project_detail.step.access.poll",
+              "Poll",
+            )}
+          >
             {`${draft.pollingIntervalSeconds.trim() || "0"}s`}
           </MetaItem>
-          <MetaItem label={translateMessage(t, "project_detail.step.access.access", "Access")}>
+          <MetaItem
+            label={translateMessage(
+              t,
+              "project_detail.step.access.access",
+              "Access",
+            )}
+          >
             {repositoryAccessSummary}
           </MetaItem>
         </MetaRow>
       ) : (
         <MetaRow>
-          <MetaItem label={translateMessage(t, "project_detail.step.access.workspace", "Workspace")}>
+          <MetaItem
+            label={translateMessage(
+              t,
+              "project_detail.step.access.workspace",
+              "Workspace",
+            )}
+          >
             {draft.localPath.trim()
-              ? translateMessage(t, "project_detail.state.configured", "Configured")
+              ? translateMessage(
+                  t,
+                  "project_detail.state.configured",
+                  "Configured",
+                )
               : translateMessage(t, "project_detail.state.missing", "Missing")}
           </MetaItem>
         </MetaRow>
@@ -2126,12 +2189,28 @@ function buildStepSummary(
     case "targets":
       return (
         <MetaRow>
-          <MetaItem label={translateMessage(t, "project_detail.step.targets.count", "Targets")}>
+          <MetaItem
+            label={translateMessage(
+              t,
+              "project_detail.step.targets.count",
+              "Targets",
+            )}
+          >
             {draft.buildTargets.length}
           </MetaItem>
-          <MetaItem label={translateMessage(t, "project_detail.step.targets.executable", "Executable")}>
+          <MetaItem
+            label={translateMessage(
+              t,
+              "project_detail.step.targets.executable",
+              "Executable",
+            )}
+          >
             {draft.unityExecutablePath.trim()
-              ? translateMessage(t, "project_detail.state.configured", "Configured")
+              ? translateMessage(
+                  t,
+                  "project_detail.state.configured",
+                  "Configured",
+                )
               : translateMessage(
                   t,
                   "project_shared.repository_access.summary.pending",
@@ -2143,7 +2222,13 @@ function buildStepSummary(
     case "publish":
       return (
         <MetaRow>
-          <MetaItem label={translateMessage(t, "project_detail.step.publish.destinations", "Destinations")}>
+          <MetaItem
+            label={translateMessage(
+              t,
+              "project_detail.step.publish.destinations",
+              "Destinations",
+            )}
+          >
             {draft.publishDestinations.length}
           </MetaItem>
         </MetaRow>
@@ -2151,12 +2236,24 @@ function buildStepSummary(
     case "paths":
       return (
         <MetaRow>
-          <MetaItem label={translateMessage(t, "project_detail.step.paths.artifacts", "Artifacts")}>
+          <MetaItem
+            label={translateMessage(
+              t,
+              "project_detail.step.paths.artifacts",
+              "Artifacts",
+            )}
+          >
             {draft.artifactsRootOverride.trim()
               ? translateMessage(t, "project_detail.state.override", "Override")
               : translateMessage(t, "project_detail.state.default", "Default")}
           </MetaItem>
-          <MetaItem label={translateMessage(t, "project_detail.step.paths.workspace", "Workspace")}>
+          <MetaItem
+            label={translateMessage(
+              t,
+              "project_detail.step.paths.workspace",
+              "Workspace",
+            )}
+          >
             {draft.workspaceRootOverride.trim()
               ? translateMessage(t, "project_detail.state.override", "Override")
               : translateMessage(t, "project_detail.state.default", "Default")}
@@ -2166,7 +2263,13 @@ function buildStepSummary(
     case "review":
       return (
         <MetaRow>
-          <MetaItem label={translateMessage(t, "project_detail.step.review.ready", "Ready")}>
+          <MetaItem
+            label={translateMessage(
+              t,
+              "project_detail.step.review.ready",
+              "Ready",
+            )}
+          >
             {translateMessage(
               t,
               "project_detail.step.review.copy",
@@ -2210,18 +2313,22 @@ function buildValidationState(input: {
   t?: Translate;
 }): ValidationState {
   const identity = validateIdentityStep(input.draft, input.inventory, input.t);
-  const access = validateAccessStep(input.draft, {
-    repositoryAccessAssessment: input.repositoryAccessAssessment,
-    isAssessingRepositoryAccess: input.isAssessingRepositoryAccess,
-    repositoryAccessError: input.repositoryAccessError,
-    repositoryCredentialId: input.repositoryCredentialId,
-    githubAuthProvider: input.githubAuthProvider,
-    isLoadingAuthProviders: input.isLoadingAuthProviders,
-    authProviderError: input.authProviderError,
-    isLoadingRepositoryCredentials: input.isLoadingRepositoryCredentials,
-    repositoryCredentialsError: input.repositoryCredentialsError,
-    repositoryCredentialCount: input.repositoryCredentialCount,
-  }, input.t);
+  const access = validateAccessStep(
+    input.draft,
+    {
+      repositoryAccessAssessment: input.repositoryAccessAssessment,
+      isAssessingRepositoryAccess: input.isAssessingRepositoryAccess,
+      repositoryAccessError: input.repositoryAccessError,
+      repositoryCredentialId: input.repositoryCredentialId,
+      githubAuthProvider: input.githubAuthProvider,
+      isLoadingAuthProviders: input.isLoadingAuthProviders,
+      authProviderError: input.authProviderError,
+      isLoadingRepositoryCredentials: input.isLoadingRepositoryCredentials,
+      repositoryCredentialsError: input.repositoryCredentialsError,
+      repositoryCredentialCount: input.repositoryCredentialCount,
+    },
+    input.t,
+  );
   const buildTargetAdapter = resolveBuildTargetWizardAdapter(
     input.draft.engineKind,
     input.draft.projectKind,
@@ -2241,7 +2348,11 @@ function buildValidationState(input: {
       buildTargetId: target.buildTargetId ?? null,
       name:
         target.name.trim() ||
-        translateMessage(input.t, "project_shared.target.unnamed", "Unnamed target"),
+        translateMessage(
+          input.t,
+          "project_shared.target.unnamed",
+          "Unnamed target",
+        ),
     })),
   );
   const paths = validatePathStep(input.draft, input.t);
@@ -2577,6 +2688,7 @@ function validateTargetsStep(
   }
 
   const seenNames = new Set<string>();
+  const seenTargetPlatforms = new Set<string>();
   for (const target of draft.buildTargets) {
     const fieldErrors: TargetFieldErrors = {};
     const normalizedName = target.name.trim();
@@ -2599,12 +2711,26 @@ function validateTargetsStep(
       seenNames.add(duplicateKey);
     }
 
-    if (!target.targetPlatform.trim()) {
+    const normalizedTargetPlatform = normalizeUnityTargetPlatformValue(
+      target.targetPlatform,
+    );
+
+    if (!normalizedTargetPlatform) {
       fieldErrors.targetPlatform = translateMessage(
         t,
         "create_project.validation.targets.platform_required",
         "Unity target platform is required.",
       );
+    } else {
+      if (seenTargetPlatforms.has(normalizedTargetPlatform)) {
+        fieldErrors.targetPlatform = translateMessage(
+          t,
+          "create_project.validation.targets.platform_unique",
+          "Each Unity target platform can be added only once.",
+        );
+      }
+
+      seenTargetPlatforms.add(normalizedTargetPlatform);
     }
 
     if (!target.buildMethod.trim()) {
@@ -2664,24 +2790,22 @@ function validatePathStep(draft: ProjectDraft, t?: Translate): PathStepErrors {
     normalizedArtifactsRoot &&
     !looksLikeAbsolutePath(normalizedArtifactsRoot)
   ) {
-    errors.artifactsRootOverride =
-      translateMessage(
-        t,
-        "create_project.validation.paths.artifacts_absolute",
-        "Artifacts root override must be an absolute path.",
-      );
+    errors.artifactsRootOverride = translateMessage(
+      t,
+      "create_project.validation.paths.artifacts_absolute",
+      "Artifacts root override must be an absolute path.",
+    );
   }
 
   if (
     normalizedWorkspaceRoot &&
     !looksLikeAbsolutePath(normalizedWorkspaceRoot)
   ) {
-    errors.workspaceRootOverride =
-      translateMessage(
-        t,
-        "create_project.validation.paths.workspace_absolute",
-        "Workspace root override must be an absolute path.",
-      );
+    errors.workspaceRootOverride = translateMessage(
+      t,
+      "create_project.validation.paths.workspace_absolute",
+      "Workspace root override must be an absolute path.",
+    );
   }
 
   return errors;
