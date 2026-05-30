@@ -1352,6 +1352,7 @@ pub fn run() {
             set_main_window_pinned,
             close_main_window,
             pick_host_path,
+            default_project_workspace_root,
             pick_unity_executable_path,
             validate_unity_executable_path,
             create_repository_project,
@@ -1554,6 +1555,68 @@ fn pick_host_path(
     drop(dialog_guard);
 
     Ok(selected_path.map(|path| path.display().to_string()))
+}
+
+fn resolve_best_operation_system_user_folder() -> io::Result<PathBuf> {
+    let candidate_keys = if cfg!(windows) {
+        ["USERPROFILE", "HOME"]
+    } else {
+        ["HOME", "USERPROFILE"]
+    };
+
+    for key in candidate_keys {
+        let Some(value) = std::env::var_os(key) else {
+            continue;
+        };
+
+        let path = PathBuf::from(value);
+        if !path.as_os_str().is_empty() && path.is_absolute() {
+            return Ok(path);
+        }
+    }
+
+    Err(io::Error::new(
+        ErrorKind::NotFound,
+        "host user folder is unavailable",
+    ))
+}
+
+fn sanitize_default_workspace_directory_name(value: &str) -> String {
+    let sanitized = value
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+            {
+                '-'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let trimmed = sanitized.trim().trim_matches('.').trim();
+
+    if trimmed.is_empty() {
+        String::from("project")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+#[tauri::command]
+fn default_project_workspace_root(project_name: Option<String>) -> Result<String, String> {
+    let base_root = resolve_best_operation_system_user_folder()
+        .map_err(|error| error.to_string())?
+        .join("HGPWorkspaces");
+    let resolved = match normalize_optional_shell_string(project_name) {
+        Some(project_name) => {
+            base_root.join(sanitize_default_workspace_directory_name(&project_name))
+        }
+        None => base_root,
+    };
+
+    Ok(resolved.display().to_string())
 }
 
 #[tauri::command]
