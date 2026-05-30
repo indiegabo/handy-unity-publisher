@@ -3,18 +3,17 @@ site_description: Documentation for the handy-games-publisher (HGP) application.
 site_author: indiegabo
 docs_dir: docs-public
 exclude_docs: |
-  /pt-BR/**
   /es/**
   /zh-CN/**
 nav:
-  - Home: index.md
+  - About: index.md
   - Create Projects: create-projects.md
-  - Monitor Releases: releases-and-builds.md
-  - Publish Artifacts: publish-artifacts.md
+  - Release Processes: release-processes.md
   - Settings and Credentials: settings-and-credentials.md
   - Troubleshooting: troubleshooting.md
-  - Examples:
-      - Unity Builder Example: examples/unity-builder-example.md
+  - Specifics:
+      - Unity:
+          - Building Unity Projects: specifics/unity/building-unity-projects.md
   # Planning section intentionally removed from public docs; planning
   # content lives under `developer-docs/` for internal use.
 
@@ -32,21 +31,14 @@ theme:
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: custom
-      accent: custom
       toggle:
         icon: material/weather-night
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: custom
-      accent: custom
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode
-
-extra_css:
-  - assets/stylesheets/overrides.css
 
 plugins:
   - search:
@@ -67,6 +59,17 @@ plugins:
         - locale: pt-BR
           name: Português Brasileiro
           build: true
+          site_name: Documentação do HGP
+          site_description: Documentação do aplicativo handy-games-publisher (HGP).
+          nav_translations:
+            About: Sobre
+            Create Projects: Criar Projetos
+            Release Processes: Processos de Release
+            Settings and Credentials: Configurações e Credenciais
+            Troubleshooting: Solução de Problemas
+            Specifics: Especificidades
+            Unity: Unity
+            Building Unity Projects: Compilando Projetos Unity
         - locale: es
           name: Spanish
           build: false
