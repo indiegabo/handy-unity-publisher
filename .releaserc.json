@@ -1,6 +1,14 @@
 {
   "branches": [
-    "main"
+    "main",
+    {
+      "name": "alpha",
+      "prerelease": true
+    },
+    {
+      "name": "beta",
+      "prerelease": true
+    }
   ],
   "tagFormat": "v${version}",
   "plugins": [
@@ -23,7 +31,7 @@
           "src-react/package-lock.json",
           "src-tauri/tauri.conf.json"
         ],
-        "message": "chore(main): release ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+        "message": "chore(release): release ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }
     ],
     "@semantic-release/github"

@@ -1,14 +1,66 @@
+.# .gitignore for handy-games-publisher
+# This file lists paths that should not be committed to the repository.
+#
+# Organization:
+#  - Environment / secrets
+#  - Package manager / build outputs (Node, Rust, etc.)
+#  - Generated build artefacts and runtime data
+#  - CI / pipeline manifests (local copies)
+#  - Tauri / platform-specific generated files
+#  - Documentation build outputs
+#
+# Keep entries minimal and explain why each group is ignored.
+
+# --- Environment / secrets ---
+# Local environment variables and secret files used for local development.
 .env
+
+# --- Node / JavaScript artifacts ---
+# Node modules and frontend build outputs are generated and should not be
+# committed. `src-react/dist/` is the built web assets for the desktop UI.
 node_modules/
+src-react/node_modules/
+src-react/dist/
+
+# --- Temporary and data directories ---
+# Transient files and runtime data produced on the developer machine.
 data/
 tmp/
 .tmp*/
+
+# --- Pipeline manifests (local edits) ---
+# Local pipeline manifests used during development/testing. These are
+# intentionally ignored to avoid accidental publishing of local or forked
+# pipeline files.
 pipelines/*.yml
 pipelines/*.yaml
+
+# --- Rust / Cargo build outputs ---
+# Rust's `target/` directory contains compiled artifacts.
 target/
 /target-*/
-src-react/dist/
-src-react/node_modules/
+
+# --- Tauri / desktop shell generated files ---
+# Tauri generates code and binaries under `src-tauri/gen/` and `src-tauri/bin/`.
+# We keep generated platform assets out of version control.
 src-tauri/gen/
 src-tauri/bin/
+
+# --- Release artifacts ---
+# Folder used to stage produced releases and installers. Kept local.
 releases/
+
+# --- Documentation site build output ---
+# `site/` is the MkDocs generated site output. The source for documentation
+# lives under `public-docs/` (public) and `developer-docs/` (internal).
+# We build `site/` during CI or locally; do not commit it.
+site/
+
+# === Notes ===
+# - If a file under these folders must be tracked for a specific reason
+#   (e.g., an intentionally checked-in static asset), use an explicit
+#   whitelist in `.git/info/exclude` or add a short project-specific note
+#   and remove only that entry.
+# - To stop tracking an already-tracked folder, run:
+#     git rm -r --cached <path>
+#   then commit the change.
