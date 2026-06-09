@@ -94,6 +94,10 @@ pub struct ExecutionProgress {
 /// Receives coarse execution progress updates from workspace preparation and host runners.
 pub trait ExecutionProgressReporter {
     fn heartbeat(&mut self, progress: ExecutionProgress);
+
+    fn check_cancellation(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -112,6 +116,10 @@ impl GitProgressReporter for WorkspacePreparationProgressReporter<'_> {
         self.reporter.heartbeat(ExecutionProgress {
             message: message.to_owned(),
         });
+    }
+
+    fn check_cancellation(&mut self) -> io::Result<()> {
+        self.reporter.check_cancellation()
     }
 }
 
@@ -171,20 +179,33 @@ fn process_checkout_git_dir_path(source_path: &Path) -> PathBuf {
     source_path.join(".git")
 }
 
+fn git_process_checkout_has_materialized_worktree(source_path: &Path) -> bool {
+    if !process_checkout_git_dir_path(source_path).is_dir() {
+        return false;
+    }
+
+    fs::read_dir(source_path)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_name() != std::ffi::OsStr::new(".git"))
+}
+
 fn process_checkout_is_ready(planned: &PreparedWorkspace) -> bool {
+    if planned.source_is_local_workspace {
+        return planned.source_path.is_dir();
+    }
+
     process_checkout_marker_path(&planned.root_path).is_file()
-        || if planned.source_is_local_workspace {
-            planned.source_path.is_dir()
-        } else {
-            process_checkout_git_dir_path(&planned.source_path).is_dir()
-        }
+        && git_process_checkout_has_materialized_worktree(&planned.source_path)
 }
 
 fn write_process_checkout_marker(planned: &PreparedWorkspace) -> io::Result<()> {
     fs::write(process_checkout_marker_path(&planned.root_path), b"ready\n")
 }
 
-/// Allocates deterministic per-run directories and checks out one repository tag into source.
+/// Allocates deterministic per-run directories and checks out one repository ref into source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspacePreparer {
     directories: RuntimeDirectories,
@@ -274,7 +295,7 @@ impl WorkspacePreparer {
         self.prepare_with_reporter(input, &mut reporter)
     }
 
-    /// Creates isolated directories and checks out the requested repository tag.
+    /// Creates isolated directories and checks out the requested repository ref.
     pub fn prepare_process(
         &self,
         input: &WorkspacePreparationInput,
@@ -319,30 +340,41 @@ impl WorkspacePreparer {
             fs::create_dir_all(&directory)?;
         }
 
-        if process_checkout_marker_path(&planned.root_path).is_file() {
+        let checkout_marker_path = process_checkout_marker_path(&planned.root_path);
+        if checkout_marker_path.is_file() {
             let source_ready = if planned.source_is_local_workspace {
                 planned.source_path.is_dir()
             } else {
-                process_checkout_git_dir_path(&planned.source_path).is_dir()
+                git_process_checkout_has_materialized_worktree(&planned.source_path)
             };
             if !source_ready {
-                return Err(io::Error::new(
-                    ErrorKind::NotFound,
-                    format!(
-                        "release process workspace '{}' is marked as checked out but source is missing at '{}'",
-                        planned.root_path.display(),
+                if planned.source_is_local_workspace {
+                    return Err(io::Error::new(
+                        ErrorKind::NotFound,
+                        format!(
+                            "release process workspace '{}' is marked as checked out but source is missing at '{}'",
+                            planned.root_path.display(),
+                            planned.source_path.display(),
+                        ),
+                    ));
+                }
+
+                reporter.heartbeat(ExecutionProgress {
+                    message: format!(
+                        "Incomplete process checkout detected at '{}'; clearing the stale checkout marker and re-syncing the requested repository ref.",
                         planned.source_path.display(),
                     ),
-                ));
+                });
+                fs::remove_file(&checkout_marker_path)?;
+            } else {
+                reporter.heartbeat(ExecutionProgress {
+                    message: format!(
+                        "Release process checkout already exists at '{}'; skipping Git sync.",
+                        planned.source_path.display(),
+                    ),
+                });
+                return Ok(planned);
             }
-
-            reporter.heartbeat(ExecutionProgress {
-                message: format!(
-                    "Release process checkout already exists at '{}'; skipping Git sync.",
-                    planned.source_path.display(),
-                ),
-            });
-            return Ok(planned);
         }
 
         if planned.source_is_local_workspace {
@@ -366,15 +398,15 @@ impl WorkspacePreparer {
             return Ok(planned);
         }
 
-        if process_checkout_git_dir_path(&planned.source_path).is_dir() {
+        if process_checkout_git_dir_path(&planned.source_path).is_dir()
+            && !git_process_checkout_has_materialized_worktree(&planned.source_path)
+        {
             reporter.heartbeat(ExecutionProgress {
                 message: format!(
-                    "Release process source already exists at '{}'; sealing the process checkout marker without re-running Git sync.",
+                    "Incomplete process checkout detected at '{}'; existing Git metadata will be re-synced before the build continues.",
                     planned.source_path.display(),
                 ),
             });
-            write_process_checkout_marker(&planned)?;
-            return Ok(planned);
         }
 
         let WorkspacePreparationSource::GitRef {
@@ -801,9 +833,10 @@ mod tests {
         RunnerSelectionDiagnostics, UnityBuildExecutionProcessor, UnityLicenseDiagnostics,
     };
     use super::{
-        artifact_output_relative_path, discover_artifacts, process_checkout_marker_path,
-        ExecutionPlan, ExecutionProgress, ExecutionProgressReporter, WorkspacePreparationInput,
-        WorkspacePreparationSource, WorkspacePreparer,
+        artifact_output_relative_path, discover_artifacts, process_checkout_git_dir_path,
+        process_checkout_marker_path, ExecutionPlan, ExecutionProgress,
+        ExecutionProgressReporter, WorkspacePreparationInput, WorkspacePreparationSource,
+        WorkspacePreparer,
     };
     use runtime_config::{HostPlatform, RuntimeDirectories};
     use runtime_git::GitAuthOptions;
@@ -1001,6 +1034,132 @@ mod tests {
     }
 
     #[test]
+    fn workspace_preparer_resyncs_partial_git_checkout_without_marker() {
+        let root = test_root("prepare-process-partial-git-checkout");
+        let directories = RuntimeDirectories::from_root(&root);
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
+        let repository_path = create_tagged_unity_repository(
+            &root.join("partial-process-source-repo"),
+            "2022.3.14f1",
+            "v5.1.3",
+        );
+        let preparer = WorkspacePreparer::new(&directories);
+        let input = WorkspacePreparationInput {
+            release_run_id: 26,
+            build_run_id: 44,
+            attempt_token: String::from("attempt-44"),
+            repository_name: String::from("revolutions"),
+            source: git_source(&repository_path, "v5.1.3"),
+            workspace_root_override: None,
+            artifacts_root_override: None,
+        };
+        let planned = preparer.plan(&input).expect("workspace plan should resolve");
+
+        fs::create_dir_all(planned.source_path.parent().expect("source parent should exist"))
+            .expect("source parent should create");
+        run_git_test_command(
+            planned
+                .source_path
+                .parent()
+                .expect("source parent should exist"),
+            &[
+                "clone",
+                "--no-checkout",
+                repository_path.to_string_lossy().as_ref(),
+                planned.source_path.to_string_lossy().as_ref(),
+            ],
+        );
+
+        assert!(process_checkout_git_dir_path(&planned.source_path).is_dir());
+        assert!(!process_checkout_marker_path(&planned.root_path).is_file());
+        assert!(!preparer
+            .is_process_prepared(&input)
+            .expect("partial checkout should be inspectable"));
+
+        let mut reporter = RecordingExecutionProgressReporter::default();
+        let prepared = preparer
+            .prepare_process_with_reporter(&input, &mut reporter)
+            .expect("partial checkout should resync successfully");
+
+        assert!(process_checkout_marker_path(&prepared.root_path).is_file());
+        assert!(prepared
+            .source_path
+            .join(PROJECT_VERSION_FILE_PATH)
+            .is_file());
+        assert!(reporter
+            .messages
+            .iter()
+            .any(|message| message.contains("Fetching ref 'v5.1.3'")));
+
+        fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn workspace_preparer_resyncs_stale_marker_git_checkout() {
+        let root = test_root("prepare-process-stale-marker-checkout");
+        let directories = RuntimeDirectories::from_root(&root);
+        directories
+            .ensure_exists()
+            .expect("runtime directories should create");
+        let repository_path = create_tagged_unity_repository(
+            &root.join("stale-marker-source-repo"),
+            "2022.3.14f1",
+            "v5.1.4",
+        );
+        let preparer = WorkspacePreparer::new(&directories);
+        let input = WorkspacePreparationInput {
+            release_run_id: 28,
+            build_run_id: 45,
+            attempt_token: String::from("attempt-45"),
+            repository_name: String::from("revolutions"),
+            source: git_source(&repository_path, "v5.1.4"),
+            workspace_root_override: None,
+            artifacts_root_override: None,
+        };
+        let planned = preparer.plan(&input).expect("workspace plan should resolve");
+
+        fs::create_dir_all(planned.source_path.parent().expect("source parent should exist"))
+            .expect("source parent should create");
+        run_git_test_command(
+            planned
+                .source_path
+                .parent()
+                .expect("source parent should exist"),
+            &[
+                "clone",
+                "--no-checkout",
+                repository_path.to_string_lossy().as_ref(),
+                planned.source_path.to_string_lossy().as_ref(),
+            ],
+        );
+        fs::write(process_checkout_marker_path(&planned.root_path), b"ready\n")
+            .expect("stale checkout marker should write");
+
+        assert!(!preparer
+            .is_process_prepared(&input)
+            .expect("stale marker checkout should be inspectable"));
+
+        let mut reporter = RecordingExecutionProgressReporter::default();
+        let prepared = preparer
+            .prepare_process_with_reporter(&input, &mut reporter)
+            .expect("stale marker checkout should resync successfully");
+
+        assert!(process_checkout_marker_path(&prepared.root_path).is_file());
+        assert!(prepared
+            .source_path
+            .join(PROJECT_VERSION_FILE_PATH)
+            .is_file());
+        assert!(reporter.messages.iter().any(|message| {
+            message.contains("Incomplete process checkout detected")
+                && message.contains("clearing the stale checkout marker")
+        }));
+
+        fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
     fn workspace_preparer_prepare_build_requires_existing_process_checkout() {
         let root = test_root("prepare-build-requires-process-checkout");
         let directories = RuntimeDirectories::from_root(&root);
@@ -1172,6 +1331,7 @@ mod tests {
             diagnostics.unity_executable_path,
             Some(executable_path.display().to_string())
         );
+        assert_eq!(diagnostics.process_priority, "low");
         assert!(diagnostics.unity_executable_exists);
         assert!(diagnostics.unity_executable_is_file);
         assert_eq!(diagnostics.additional_argument_count, 2);
@@ -1197,6 +1357,7 @@ mod tests {
             diagnostics.unity_executable_path,
             Some(executable_path.display().to_string())
         );
+        assert_eq!(diagnostics.process_priority, "low");
         assert!(!diagnostics.unity_executable_exists);
         assert!(!diagnostics.unity_executable_is_file);
     }
@@ -1207,6 +1368,7 @@ mod tests {
 
         assert_eq!(diagnostics.status, "invalid_config");
         assert_eq!(diagnostics.unity_executable_path, None);
+        assert_eq!(diagnostics.process_priority, "low");
         assert!(!diagnostics.unity_executable_exists);
         assert!(!diagnostics.unity_executable_is_file);
         assert!(diagnostics

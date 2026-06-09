@@ -27,6 +27,7 @@ pub use self::output::{
 };
 
 use runtime_config::{HostPlatform, RuntimeDirectories};
+use runtime_contracts::ProcessPriority;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,6 +35,8 @@ use std::env;
 use std::fs;
 use std::io;
 use std::io::ErrorKind;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
@@ -45,7 +48,6 @@ const UNITY_NON_SHIPPABLE_ARCHIVE_PATH_SUFFIXES: &[&str] =
 const UNITY_MACOS_OPTIONAL_ARCHIVE_PATH_SUFFIXES: &[&str] = &[".dSYM"];
 const UNITY_WINDOWS_OPTIONAL_ARCHIVE_FILE_SUFFIXES: &[&str] = &[".pdb"];
 const UNITY_WEBGL_OPTIONAL_ARCHIVE_FILE_SUFFIXES: &[&str] = &[".symbols.json"];
-
 use crate::{
     artifact_output_relative_path, cleanup_previous_artifact_output,
     host::execute_command_with_timeout, normalized_optional_string, require_non_empty,
@@ -811,11 +813,14 @@ fn execute_host_native_unity(
         Err(error) => return Err((Vec::new(), error)),
     };
     let editor_log_path = default_unity_editor_log_path();
+    let unity_hub_bootstrap_note = maybe_launch_unity_hub(&config.unity_executable_path);
 
     let mut command = Command::new(&config.unity_executable_path);
     command.current_dir(&request.workspace.source_path);
     command.stdout(Stdio::null());
     command.stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(request.plan.process_priority.creation_flags());
     command.args(&config.additional_arguments);
     let log_path = request.workspace.log_path.display().to_string();
     command.args([
@@ -870,8 +875,10 @@ fn execute_host_native_unity(
         build_method.as_str(),
         output_path.as_str(),
         log_path.as_str(),
+        request.plan.process_priority.as_str(),
         config.additional_arguments.len(),
         editor_log_path.as_deref(),
+        Some(unity_hub_bootstrap_note.as_str()),
     );
 
     let output = match execute_command_with_timeout(
@@ -1029,6 +1036,128 @@ fn default_unity_editor_log_path() -> Option<PathBuf> {
     }
 }
 
+fn maybe_launch_unity_hub(unity_executable_path: &str) -> String {
+    let platform = HostPlatform::current();
+    let path_entries = current_path_entries();
+    maybe_launch_unity_hub_with(
+        platform,
+        Path::new(unity_executable_path),
+        &path_entries,
+        spawn_background_process,
+    )
+}
+
+fn maybe_launch_unity_hub_with<F>(
+    platform: HostPlatform,
+    unity_executable_path: &Path,
+    path_entries: &[PathBuf],
+    mut spawn_process: F,
+) -> String
+where
+    F: FnMut(&Path) -> io::Result<()>,
+{
+    let Some(hub_path) = resolve_unity_hub_executable_path(
+        platform,
+        unity_executable_path,
+        path_entries,
+    ) else {
+        return String::from("unity_hub_bootstrap: skipped (not found)");
+    };
+
+    match spawn_process(&hub_path) {
+        Ok(()) => format!(
+            "unity_hub_bootstrap: launched {}",
+            hub_path.display()
+        ),
+        Err(error) => format!(
+            "unity_hub_bootstrap: failed {} ({error})",
+            hub_path.display()
+        ),
+    }
+}
+
+fn resolve_unity_hub_executable_path(
+    platform: HostPlatform,
+    unity_executable_path: &Path,
+    path_entries: &[PathBuf],
+) -> Option<PathBuf> {
+    unity_hub_path_near_editor(platform, unity_executable_path)
+        .and_then(|path| resolve_explicit_command_path(&path))
+        .or_else(|| {
+            default_unity_hub_executable_paths(platform)
+                .into_iter()
+                .find_map(|path| resolve_explicit_command_path(&path))
+        })
+        .or_else(|| {
+            unity_hub_command_name(platform)
+                .and_then(|command_name| resolve_command_path(command_name, path_entries))
+        })
+}
+
+fn unity_hub_path_near_editor(
+    platform: HostPlatform,
+    unity_executable_path: &Path,
+) -> Option<PathBuf> {
+    let hub_root = unity_executable_path.ancestors().find(|path| {
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("Hub"))
+    })?;
+
+    Some(unity_hub_executable_path(platform, hub_root))
+}
+
+fn default_unity_hub_executable_paths(platform: HostPlatform) -> Vec<PathBuf> {
+    match platform {
+        HostPlatform::Windows => {
+            vec![PathBuf::from("C:/Program Files/Unity/Hub/Unity Hub.exe")]
+        }
+        HostPlatform::MacOS => vec![
+            PathBuf::from("/Applications/Unity Hub.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("Unity Hub"),
+        ],
+        HostPlatform::Linux => vec![PathBuf::from("/opt/Unity/Hub/unityhub")],
+    }
+}
+
+fn unity_hub_command_name(platform: HostPlatform) -> Option<&'static str> {
+    match platform {
+        HostPlatform::Windows => None,
+        HostPlatform::MacOS | HostPlatform::Linux => Some("unityhub"),
+    }
+}
+
+fn unity_hub_executable_path(platform: HostPlatform, hub_root: &Path) -> PathBuf {
+    match platform {
+        HostPlatform::Windows => hub_root.join("Unity Hub.exe"),
+        HostPlatform::MacOS => hub_root
+            .parent()
+            .unwrap_or(hub_root)
+            .join("Unity Hub.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("Unity Hub"),
+        HostPlatform::Linux => hub_root.join("unityhub"),
+    }
+}
+
+fn current_path_entries() -> Vec<PathBuf> {
+    env::var_os("PATH")
+        .map(|value| env::split_paths(&value).collect())
+        .unwrap_or_default()
+}
+
+fn spawn_background_process(path: &Path) -> io::Result<()> {
+    Command::new(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
 fn execution_log_preamble(
     request: &UnityBuildExecutionRequest,
     unity_executable_path: &str,
@@ -1036,8 +1165,10 @@ fn execution_log_preamble(
     build_method: &str,
     output_path: &str,
     log_path: &str,
+    process_priority: &str,
     additional_argument_count: usize,
     editor_log_path: Option<&Path>,
+    unity_hub_bootstrap_note: Option<&str>,
 ) -> Vec<u8> {
     let mut preamble = String::new();
     preamble.push_str("HGP host-native execution\n");
@@ -1053,6 +1184,7 @@ fn execution_log_preamble(
     preamble.push_str(&format!("artifact_output_path: {output_path}\n"));
     preamble.push_str(&format!("build_target: {}\n", build_target.trim()));
     preamble.push_str(&format!("build_method: {}\n", build_method.trim()));
+    preamble.push_str(&format!("process_priority: {}\n", process_priority.trim()));
     preamble.push_str(&format!(
         "additional_argument_count: {additional_argument_count}\n"
     ));
@@ -1061,6 +1193,12 @@ fn execution_log_preamble(
             "editor_fallback_log_path: {}\n",
             editor_log_path.display()
         ));
+    }
+    if let Some(unity_hub_bootstrap_note) = unity_hub_bootstrap_note {
+        let note = unity_hub_bootstrap_note.trim();
+        if !note.is_empty() {
+            preamble.push_str(&format!("{note}\n"));
+        }
     }
     preamble.push_str("\n");
 
@@ -1079,6 +1217,7 @@ fn parse_host_native_runner_config(config_json: &str) -> io::Result<HostNativeRu
     )?;
     Ok(HostNativeRunnerConfig {
         unity_executable_path,
+        process_priority: config.process_priority,
         additional_arguments: config.additional_arguments,
         environment: config.environment,
     })
@@ -1091,6 +1230,7 @@ fn build_host_native_runner_diagnostics(
     let mut diagnostics = HostNativeRunnerDiagnostics {
         runner_family: String::from(RunnerFamily::HostNative.label()),
         unity_executable_path: Some(config.unity_executable_path.clone()),
+        process_priority: String::from(config.process_priority.as_str()),
         unity_executable_exists: false,
         unity_executable_is_file: false,
         additional_argument_count: config.additional_arguments.len(),
@@ -1326,6 +1466,8 @@ struct HostNativeRunnerConfig {
     #[serde(default)]
     unity_executable_path: String,
     #[serde(default)]
+    process_priority: ProcessPriority,
+    #[serde(default)]
     additional_arguments: Vec<String>,
     #[serde(default)]
     environment: BTreeMap<String, String>,
@@ -1370,6 +1512,89 @@ mod tests {
     }
 
     #[test]
+    fn parse_host_native_runner_config_defaults_to_low_process_priority() {
+        let config = parse_host_native_runner_config(
+            &serde_json::json!({
+                "unity_executable_path": "C:/Unity/Editor/Unity.exe"
+            })
+            .to_string(),
+        )
+        .expect("config should parse");
+
+        assert_eq!(config.process_priority, ProcessPriority::Low);
+    }
+
+    #[test]
+    fn parse_host_native_runner_config_rejects_unknown_process_priority() {
+        let error = parse_host_native_runner_config(
+            &serde_json::json!({
+                "unity_executable_path": "C:/Unity/Editor/Unity.exe",
+                "process_priority": "realtime"
+            })
+            .to_string(),
+        )
+        .expect_err("unknown process priority should fail");
+
+        assert!(error
+            .to_string()
+            .contains("unknown variant `realtime`, expected one of `low`, `normal`, `high`"));
+    }
+
+    #[test]
+    fn resolve_unity_hub_path_prefers_hub_near_hub_managed_editor() {
+        let root = std::env::temp_dir().join(format!(
+            "handy-games-publisher-unity-hub-path-{}",
+            std::process::id()
+        ));
+        let platform = HostPlatform::current();
+        let hub_root = create_fake_hub_root(&root, platform);
+        let unity_executable_path = create_fake_hub_managed_editor(&hub_root, platform);
+        let expected_hub_path = unity_hub_executable_path(platform, &hub_root);
+
+        let resolved = resolve_unity_hub_executable_path(
+            platform,
+            &unity_executable_path,
+            &[],
+        )
+        .expect("hub-managed editor should resolve a nearby Unity Hub executable");
+
+        assert_eq!(resolved, expected_hub_path);
+
+        fs::remove_dir_all(&root).expect("temporary hub root should be removable");
+    }
+
+    #[test]
+    fn maybe_launch_unity_hub_reports_launch_without_failing_execution() {
+        let root = std::env::temp_dir().join(format!(
+            "handy-games-publisher-unity-hub-bootstrap-{}",
+            std::process::id()
+        ));
+        let platform = HostPlatform::current();
+        let hub_root = create_fake_hub_root(&root, platform);
+        let unity_executable_path = create_fake_hub_managed_editor(&hub_root, platform);
+        let expected_hub_path = unity_hub_executable_path(platform, &hub_root);
+        let mut launched_paths = Vec::new();
+
+        let note = maybe_launch_unity_hub_with(
+            platform,
+            &unity_executable_path,
+            &[],
+            |path| {
+                launched_paths.push(path.to_path_buf());
+                Ok(())
+            },
+        );
+
+        assert_eq!(launched_paths, vec![expected_hub_path.clone()]);
+        assert_eq!(
+            note,
+            format!("unity_hub_bootstrap: launched {}", expected_hub_path.display())
+        );
+
+        fs::remove_dir_all(&root).expect("temporary hub root should be removable");
+    }
+
+    #[test]
     fn unity_archive_path_is_optional_debug_symbol_accepts_canonical_platform_names() {
         assert!(unity_archive_path_is_optional_debug_symbol(
             &test_execution_plan("StandaloneWindows64"),
@@ -1404,8 +1629,40 @@ mod tests {
             output_kind: None,
             output_path_template: None,
             engine_version: String::from("6000.0.0f1"),
+            process_priority: ProcessPriority::Low,
             config_json: String::from("{}"),
             timeout_seconds: 60,
         }
+    }
+
+    fn create_fake_hub_root(root: &Path, platform: HostPlatform) -> PathBuf {
+        let hub_root = match platform {
+            HostPlatform::Windows => root.join("Unity").join("Hub"),
+            HostPlatform::MacOS => root.join("Applications").join("Unity").join("Hub"),
+            HostPlatform::Linux => root.join("opt").join("Unity").join("Hub"),
+        };
+        let hub_executable_path = unity_hub_executable_path(platform, &hub_root);
+        fs::create_dir_all(
+            hub_executable_path
+                .parent()
+                .expect("hub executable path should have a parent"),
+        )
+        .expect("hub executable parent directory should create");
+        fs::write(&hub_executable_path, b"hub").expect("hub executable should write");
+        hub_root
+    }
+
+    fn create_fake_hub_managed_editor(hub_root: &Path, platform: HostPlatform) -> PathBuf {
+        let install_root = hub_root.join("Editor").join("2022.3.14f1");
+        let unity_executable_path = hub_unity_executable_path(platform, &install_root);
+        fs::create_dir_all(
+            unity_executable_path
+                .parent()
+                .expect("unity executable path should have a parent"),
+        )
+        .expect("unity executable parent directory should create");
+        fs::write(&unity_executable_path, b"unity")
+            .expect("unity executable should write");
+        unity_executable_path
     }
 }

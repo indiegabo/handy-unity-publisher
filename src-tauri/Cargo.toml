@@ -24,6 +24,7 @@ sys-locale = { workspace = true }
 sysinfo = { workspace = true }
 zip = { workspace = true }
 runtime-config = { path = "../crates/runtime-config" }
+runtime-contracts = { path = "../crates/runtime-contracts" }
 runtime-core = { path = "../crates/runtime-core" }
 runtime-git = { path = "../crates/runtime-git" }
 runtime-runner = { path = "../crates/runtime-runner" }

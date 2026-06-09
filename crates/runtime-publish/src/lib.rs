@@ -3,16 +3,22 @@
 
 #![forbid(unsafe_code)]
 
+use runtime_contracts::ProcessPriority;
 use serde::Deserialize;
 use std::fs;
 use std::io;
 use std::io::ErrorKind;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 const KIND_ITCH_API_KEY: &str = "itch-api-key";
 const BUTLER_API_KEY_ENV: &str = "BUTLER_API_KEY";
 const HGP_BUTLER_PATH_ENV: &str = "HGP_BUTLER_PATH";
+const PUBLISH_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Lists the publish backends enabled by the local runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +45,7 @@ pub struct ExecutionPlan {
     pub repository_id: i64,
     pub repository_name: String,
     pub git_tag: String,
+    pub process_priority: ProcessPriority,
     pub build_run_id: i64,
     pub publish_target_id: i64,
     pub publish_target_name: String,
@@ -69,7 +76,28 @@ pub struct ExecutionResult {
 /// Executes one publish plan against the configured backend.
 pub trait Processor {
     fn process(&self, plan: &ExecutionPlan) -> io::Result<ExecutionResult>;
+
+    fn process_with_controller(
+        &self,
+        plan: &ExecutionPlan,
+        controller: &mut dyn ExecutionController,
+    ) -> io::Result<ExecutionResult> {
+        let _ = controller;
+        self.process(plan)
+    }
 }
+
+/// Allows the caller to interrupt long-running publish transports.
+pub trait ExecutionController {
+    fn check_cancellation(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct NoopExecutionController;
+
+impl ExecutionController for NoopExecutionController {}
 
 /// Resolves the final destination path that one publish backend will write for the given plan.
 pub fn resolve_destination_path(plan: &ExecutionPlan) -> io::Result<PathBuf> {
@@ -95,9 +123,21 @@ impl ExecutionProcessor {
 
 impl Processor for ExecutionProcessor {
     fn process(&self, plan: &ExecutionPlan) -> io::Result<ExecutionResult> {
+        let mut controller = NoopExecutionController;
+        self.process_with_controller(plan, &mut controller)
+    }
+
+    fn process_with_controller(
+        &self,
+        plan: &ExecutionPlan,
+        controller: &mut dyn ExecutionController,
+    ) -> io::Result<ExecutionResult> {
         match parse_publish_backend(&plan.publish_target_kind)? {
-            PublishBackend::Filesystem => publish_to_filesystem(plan),
-            PublishBackend::Itch => publish_to_itch(plan),
+            PublishBackend::Filesystem => {
+                controller.check_cancellation()?;
+                publish_to_filesystem(plan)
+            }
+            PublishBackend::Itch => publish_to_itch(plan, controller),
         }
     }
 }
@@ -171,26 +211,18 @@ fn publish_to_filesystem(plan: &ExecutionPlan) -> io::Result<ExecutionResult> {
     })
 }
 
-fn publish_to_itch(plan: &ExecutionPlan) -> io::Result<ExecutionResult> {
+fn publish_to_itch(
+    plan: &ExecutionPlan,
+    controller: &mut dyn ExecutionController,
+) -> io::Result<ExecutionResult> {
     let request = build_itch_publish_request(plan)?;
     let source_path = require_existing_source_path(&plan.source_path)?;
-    let output = Command::new(&request.executable)
-        .arg("push")
-        .arg(&source_path)
-        .arg(&request.channel_ref)
-        .arg("--userversion")
-        .arg(&request.userversion)
-        .env(BUTLER_API_KEY_ENV, &request.api_key)
-        .output()
-        .map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!(
-                    "failed to launch Itch transport {:?}: {error}",
-                    request.executable
-                ),
-            )
-        })?;
+    let output = run_itch_publish_command(
+        &request,
+        &source_path,
+        plan.process_priority,
+        controller,
+    )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -219,6 +251,83 @@ fn publish_to_itch(plan: &ExecutionPlan) -> io::Result<ExecutionResult> {
         artifact_active_location_kind: None,
         artifact_active_location_ref: None,
     })
+}
+
+fn run_itch_publish_command(
+    request: &ItchPublishRequest,
+    source_path: &Path,
+    process_priority: ProcessPriority,
+    controller: &mut dyn ExecutionController,
+) -> io::Result<std::process::Output> {
+    controller.check_cancellation()?;
+
+    let mut command = Command::new(&request.executable);
+    command
+        .arg("push")
+        .arg(source_path)
+        .arg(&request.channel_ref)
+        .arg("--userversion")
+        .arg(&request.userversion)
+        .env(BUTLER_API_KEY_ENV, &request.api_key)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(process_priority.creation_flags());
+
+    let child = command.spawn().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "failed to launch Itch transport {:?}: {error}",
+                request.executable
+            ),
+        )
+    })?;
+
+    wait_for_publish_process_output(child, controller, "itch publish transport")
+}
+
+fn wait_for_publish_process_output(
+    mut child: Child,
+    controller: &mut dyn ExecutionController,
+    command_label: &str,
+) -> io::Result<std::process::Output> {
+    loop {
+        if let Some(_status) = child.try_wait()? {
+            return child.wait_with_output();
+        }
+
+        if let Err(error) = controller.check_cancellation() {
+            terminate_child_process(&mut child, command_label)?;
+            let _ = child.wait();
+            return Err(error);
+        }
+
+        thread::sleep(PUBLISH_PROCESS_POLL_INTERVAL);
+    }
+}
+
+fn terminate_child_process(child: &mut Child, command_label: &str) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        match Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(_) | Err(_) => {}
+        }
+    }
+
+    match child.kill() {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::InvalidInput => Ok(()),
+        Err(error) => Err(io::Error::other(format!(
+            "terminate {command_label}: {error}"
+        ))),
+    }
 }
 
 fn resolve_filesystem_destination_path(plan: &ExecutionPlan) -> io::Result<PathBuf> {
@@ -527,11 +636,14 @@ fn move_regular_file(source_path: &Path, destination_path: &Path) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_destination_path, resolve_itch_butler_executable_with_sidecar, ExecutionPlan,
-        ExecutionProcessor, Processor, HGP_BUTLER_PATH_ENV,
+        resolve_destination_path, resolve_itch_butler_executable_with_sidecar,
+        ExecutionController, ExecutionPlan, ExecutionProcessor, Processor,
+        HGP_BUTLER_PATH_ENV,
     };
+    use runtime_contracts::ProcessPriority;
     use serde_json::json;
     use std::fs;
+    use std::io::{self, ErrorKind};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -715,6 +827,49 @@ mod tests {
     }
 
     #[test]
+    fn execution_processor_interrupts_itch_publish_when_cancellation_is_requested() {
+        let root = test_root("itch-publish-cancel");
+        let artifact_root = root.join("artifacts");
+        fs::create_dir_all(&artifact_root).expect("artifact root should create");
+        let source_path = artifact_root.join("game.zip");
+        fs::write(&source_path, "artifact").expect("artifact source should write");
+        let butler_path = write_slow_fake_butler(&root);
+
+        let error = ExecutionProcessor::new()
+            .process_with_controller(
+                &ExecutionPlan {
+                    source_path: source_path.display().to_string(),
+                    artifact_root_path: artifact_root.display().to_string(),
+                    publish_target_config_json: json!({
+                        "account_name": "indiegabo",
+                        "game_slug": "revolutions",
+                        "butler_path": butler_path.display().to_string()
+                    })
+                    .to_string(),
+                    publish_target_credentials_kind: Some(String::from("itch-api-key")),
+                    publish_target_credentials_config_json: Some(
+                        json!({"api_key": "itch-secret"}).to_string(),
+                    ),
+                    execution_contract_json: json!({
+                        "binding_options_json": json!({
+                            "channel": "windows-stable",
+                            "userversion_template": "release-{{git_tag}}"
+                        })
+                        .to_string()
+                    })
+                    .to_string(),
+                    ..base_execution_plan("itch", "v1.2.3", "game.zip")
+                },
+                &mut CancelAfterSpawnController::default(),
+            )
+            .expect_err("itch publish should stop when cancellation is requested");
+
+        assert_eq!(error.kind(), ErrorKind::Interrupted);
+
+        fs::remove_dir_all(root).expect("temporary publish root should be removable");
+    }
+
+    #[test]
     fn resolve_itch_butler_executable_prefers_configured_override() {
         assert_eq!(
             resolve_itch_butler_executable_with_sidecar(
@@ -772,6 +927,7 @@ mod tests {
             repository_id: 3,
             repository_name: String::from("revolutions"),
             git_tag: String::from(git_tag),
+            process_priority: ProcessPriority::Low,
             build_run_id: 4,
             publish_target_id: 5,
             publish_target_name: String::from(kind),
@@ -833,6 +989,58 @@ mod tests {
             fs::set_permissions(&script_path, permissions)
                 .expect("fake butler permissions should update");
 
+            script_path
+        }
+    }
+
+    #[derive(Default)]
+    struct CancelAfterSpawnController {
+        check_count: usize,
+    }
+
+    impl ExecutionController for CancelAfterSpawnController {
+        fn check_cancellation(&mut self) -> io::Result<()> {
+            self.check_count += 1;
+            if self.check_count >= 2 {
+                return Err(io::Error::new(
+                    ErrorKind::Interrupted,
+                    "publish run canceled by operator",
+                ));
+            }
+
+            Ok(())
+        }
+    }
+
+    fn write_slow_fake_butler(root: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let script_path = root.join("fake-butler-slow.cmd");
+            fs::write(
+                &script_path,
+                concat!(
+                    "@echo off\r\n",
+                    "powershell -NoProfile -Command \"Start-Sleep -Seconds 3\"\r\n",
+                    "exit /b 0\r\n"
+                ),
+            )
+            .expect("slow fake butler script should write");
+            script_path
+        }
+
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let script_path = root.join("fake-butler-slow.sh");
+            fs::write(&script_path, "#!/bin/sh\nsleep 3\nexit 0\n")
+                .expect("slow fake butler script should write");
+            let mut permissions = fs::metadata(&script_path)
+                .expect("slow fake butler metadata should load")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions)
+                .expect("slow fake butler permissions should update");
             script_path
         }
     }

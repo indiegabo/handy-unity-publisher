@@ -6,5 +6,6 @@ publish.workspace = true
 version.workspace = true
 
 [dependencies]
+runtime-contracts = { path = "../runtime-contracts" }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1,10 +1,12 @@
 use super::*;
+use runtime_contracts::ProcessPriority;
 
 /// Summarizes whether one host-native runner config can execute on the current host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HostNativeRunnerDiagnostics {
     pub runner_family: String,
     pub unity_executable_path: Option<String>,
+    pub process_priority: String,
     pub unity_executable_exists: bool,
     pub unity_executable_is_file: bool,
     pub additional_argument_count: usize,
@@ -126,6 +128,7 @@ pub fn diagnose_host_native_runner_config(config_json: &str) -> HostNativeRunner
         Err(error) => HostNativeRunnerDiagnostics {
             runner_family: String::from(RunnerFamily::HostNative.label()),
             unity_executable_path: None,
+            process_priority: String::from(ProcessPriority::default().as_str()),
             unity_executable_exists: false,
             unity_executable_is_file: false,
             additional_argument_count: 0,

@@ -24,9 +24,12 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use runtime_config::{RuntimeConcurrencySettings, RuntimeDirectories};
-use runtime_contracts::{BuildKind, EngineKind};
+use runtime_contracts::{BuildKind, EngineKind, ProcessPriority};
 use runtime_git::{
-    git_auth_options_from_credentials, GitAuthOptions, KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER,
+    git_auth_options_from_credentials, GitAuthOptions, GitBranchListRequest,
+    GitBranchLister, GitRemoteRefKind, GitRemoteRefLookupRequest,
+    GitRemoteRefResolver, GitTagListRequest, GitTagLister, KIND_GIT_HTTP_BASIC,
+    KIND_GIT_HTTP_BEARER,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -62,6 +65,7 @@ const RELEASE_SOURCE_KIND_MANAGED_REF: &str = "managed_ref";
 const RELEASE_SOURCE_KIND_LOCAL_WORKSPACE: &str = "local_workspace";
 const RELEASE_VERSION_SOURCE_MANUAL: &str = "manual";
 const RELEASE_VERSION_SOURCE_PROJECT_SETTINGS: &str = "project_settings";
+const RELEASE_VERSION_SOURCE_SOURCE_TAG: &str = "source_tag";
 const PROJECT_VERSION_FILE_PATH: &str = "ProjectSettings/ProjectVersion.txt";
 const PROJECT_SETTINGS_ASSET_PATH: &str = "ProjectSettings/ProjectSettings.asset";
 
@@ -181,6 +185,11 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0015_local_workspace_polling_invariant.sql"),
         transactional: false,
     },
+    Migration {
+        name: "0016_release_run_history.sql",
+        sql: include_str!("../migrations/0016_release_run_history.sql"),
+        transactional: true,
+    },
 ];
 
 const MIGRATION_NO_OP_SQL: &str = "SELECT 1;\n";
@@ -281,6 +290,7 @@ struct ResolvedReleaseSourceMetadata {
     source_ref: Option<String>,
     local_path: Option<String>,
     version_source: Option<String>,
+    process_priority: ProcessPriority,
     unity_executable_path_override: Option<String>,
 }
 
@@ -359,8 +369,17 @@ struct NormalizedOnDemandReleaseDispatchInput {
     source_ref: Option<String>,
     local_path: Option<String>,
     version_source: String,
+    process_priority: ProcessPriority,
     unity_executable_path_override: Option<String>,
     source_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedOnDemandReleaseSourceInput {
+    repository: OnDemandRepositoryState,
+    source_kind: String,
+    source_ref: Option<String>,
+    local_path: Option<String>,
 }
 
 /// Owns the local queue, lease, and idempotency primitives backed by SQLite.
@@ -752,6 +771,39 @@ impl LocalCoordinator {
         self.queue_release_run(record.id)
     }
 
+    /// Resolves the version label that would be produced by one on-demand release draft.
+    pub fn preview_on_demand_release_version(
+        &self,
+        input: OnDemandReleaseVersionPreviewInput,
+    ) -> io::Result<String> {
+        let source = self.resolve_on_demand_release_source_input(
+            input.repository_id,
+            input.source_kind,
+            input.source_ref,
+            input.local_path,
+        )?;
+        let version_source = normalize_release_version_source(&input.version_source)?;
+
+        self.preview_on_demand_release_version_value(
+            &source.repository,
+            &source.source_kind,
+            source.source_ref.as_deref(),
+            source.local_path.as_deref(),
+            &version_source,
+        )
+    }
+
+    /// Lists the remote branches or tags that can drive one managed on-demand release.
+    pub fn list_on_demand_release_remote_refs(
+        &self,
+        input: OnDemandReleaseRemoteRefsInput,
+    ) -> io::Result<Vec<OnDemandReleaseRemoteRef>> {
+        let repository = self.load_on_demand_repository_state(input.repository_id)?;
+        let source_kind = normalize_release_source_kind(&input.source_kind)?;
+
+        self.list_on_demand_release_remote_refs_for_source(&repository, &source_kind)
+    }
+
     /// Requeues one stored release run while preserving its original source metadata.
     pub fn dispatch_release_rebuild_by_id(
         &self,
@@ -808,6 +860,45 @@ impl LocalCoordinator {
         require_positive_identifier(release_run_id, "release run id")?;
         self.load_release_run_record(release_run_id)?
             .ok_or_else(|| not_found_error(format!("release run {release_run_id} was not found")))
+    }
+
+    /// Loads the whole-process elapsed duration for one persisted release run.
+    pub fn get_release_run_elapsed_snapshot(
+        &self,
+        release_run_id: i64,
+    ) -> io::Result<ReleaseRunElapsedSnapshot> {
+        require_positive_identifier(release_run_id, "release run id")?;
+
+        let connection = open_connection(&self.database_path)?;
+        let snapshot = connection
+            .query_row(
+                "
+                SELECT status,
+                       finished_at,
+                       CAST(
+                           STRFTIME('%s', COALESCE(finished_at, 'now'))
+                           - STRFTIME('%s', created_at)
+                           AS INTEGER
+                       ) AS elapsed_seconds
+                FROM release_runs
+                WHERE id = ?
+                ",
+                [release_run_id],
+                |row| {
+                    let elapsed_seconds = row.get::<_, i64>(2)?.max(0) as u64;
+
+                    Ok(ReleaseRunElapsedSnapshot {
+                        release_run_id,
+                        status: row.get::<_, String>(0)?.trim().to_owned(),
+                        finished_at: normalize_optional_string(row.get(1)?),
+                        elapsed_seconds,
+                    })
+                },
+            )
+            .optional()
+            .map_err(sqlite_error)?;
+
+        snapshot.ok_or_else(|| not_found_error(format!("release run {release_run_id} was not found")))
     }
 
     /// Plans queued build runs for one queued release and dispatches queued work.
@@ -1218,22 +1309,55 @@ impl LocalCoordinator {
 
         let connection = open_connection(&self.database_path)?;
         validate_optional_credentials_binding(&connection, credentials_id)?;
+        let repository = connection
+            .query_row(
+                "
+                SELECT source_provider_id,
+                       auth_requirement_status,
+                       auth_binding_status,
+                       auth_status_message
+                FROM repositories
+                WHERE id = ?
+                ",
+                params![repository_id],
+                |row| {
+                    Ok((
+                        normalize_optional_string(row.get::<_, Option<String>>(0)?),
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(sqlite_error)?
+            .ok_or_else(|| not_found_error(format!("repository {repository_id} was not found")))?;
+        let auth_binding_status = Self::repository_auth_binding_status_for_credentials_update(
+            &repository.1,
+            &repository.2,
+            credentials_id.is_some(),
+        );
+        let auth_status_message = Self::repository_auth_status_message_for_binding(
+            repository.0.as_deref(),
+            auth_binding_status,
+            &repository.3,
+        );
         let updated = connection
             .execute(
                 "
                 UPDATE repositories
                 SET credentials_id = ?,
-                    auth_binding_status = CASE
-                        WHEN auth_binding_status = 'unsupported' THEN 'unsupported'
-                        WHEN auth_requirement_status = 'none' THEN 'not_required'
-                        WHEN auth_requirement_status = 'required' AND ? IS NOT NULL THEN 'bound_ready'
-                        WHEN auth_requirement_status = 'required' THEN 'required_unbound'
-                        ELSE 'unknown'
-                    END,
+                    auth_binding_status = ?,
+                    auth_status_message = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 ",
-                params![credentials_id, credentials_id, repository_id],
+                params![
+                    credentials_id,
+                    auth_binding_status,
+                    auth_status_message,
+                    repository_id,
+                ],
             )
             .map_err(sqlite_error)?;
         if updated == 0 {
@@ -1244,6 +1368,61 @@ impl LocalCoordinator {
 
         Ok(())
     }
+
+fn repository_auth_binding_status_for_credentials_update(
+    auth_requirement_status: &str,
+    current_auth_binding_status: &str,
+    has_credentials: bool,
+) -> &'static str {
+    if current_auth_binding_status == "unsupported" {
+        return "unsupported";
+    }
+
+    match auth_requirement_status {
+        "none" => "not_required",
+        "required" if has_credentials => "bound_ready",
+        "required" => "required_unbound",
+        _ => "unknown",
+    }
+}
+
+fn repository_auth_status_message_for_binding(
+    source_provider_id: Option<&str>,
+    auth_binding_status: &str,
+    current_message: &str,
+) -> String {
+    match auth_binding_status {
+        "not_required" => String::from(
+            "Public repository detected through anonymous remote access.",
+        ),
+        "bound_ready" => format!(
+            "{} access is connected.",
+            Self::repository_auth_provider_label(source_provider_id)
+        ),
+        "required_unbound" => format!(
+            "{} repository requires authentication before HGP can access it.",
+            Self::repository_auth_provider_label(source_provider_id)
+        ),
+        "unsupported" | REPOSITORY_AUTH_BINDING_STATUS_REAUTH_REQUIRED | "unknown" => {
+            current_message.to_owned()
+        }
+        _ => current_message.to_owned(),
+    }
+}
+
+fn repository_auth_provider_label(source_provider_id: Option<&str>) -> &'static str {
+    match source_provider_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("github") => "GitHub",
+        Some("gitlab") => "GitLab",
+        Some("bitbucket") => "Bitbucket",
+        _ => "Repository",
+    }
+}
 
     /// Persists the latest repository access assessment snapshot for one
     /// managed repository row.
@@ -1852,15 +2031,63 @@ impl LocalCoordinator {
         &self,
         input: OnDemandReleaseDispatchInput,
     ) -> io::Result<NormalizedOnDemandReleaseDispatchInput> {
-        if input.repository_id <= 0 {
+        let requested_via = input.requested_via.trim().to_owned();
+        let source = self.resolve_on_demand_release_source_input(
+            input.repository_id,
+            input.source_kind,
+            input.source_ref,
+            input.local_path,
+        )?;
+        let version_source = normalize_release_version_source(&input.version_source)?;
+        let git_tag = self.resolve_on_demand_release_git_tag(
+            &source.repository,
+            &source.source_kind,
+            source.source_ref.as_deref(),
+            source.local_path.as_deref(),
+            &version_source,
+            input.release_version.as_deref(),
+        )?;
+        let unity_executable_path_override = normalize_absolute_path_string(
+            input.unity_executable_path_override,
+            "unity executable path override",
+        )?;
+        let process_priority = input.process_priority.unwrap_or_default();
+        let source_identity = build_release_source_identity(
+            &source.source_kind,
+            source.source_ref.as_deref(),
+            source.local_path.as_deref(),
+        )?;
+
+        Ok(NormalizedOnDemandReleaseDispatchInput {
+            repository_id: input.repository_id,
+            git_tag,
+            git_commit: String::new(),
+            requested_via,
+            source_kind: source.source_kind,
+            source_ref: source.source_ref,
+            local_path: source.local_path,
+            version_source,
+            process_priority,
+            unity_executable_path_override,
+            source_identity,
+        })
+    }
+
+    fn resolve_on_demand_release_source_input(
+        &self,
+        repository_id: i64,
+        source_kind: String,
+        source_ref: Option<String>,
+        local_path: Option<String>,
+    ) -> io::Result<ResolvedOnDemandReleaseSourceInput> {
+        if repository_id <= 0 {
             return Err(invalid_input_error(
                 "repository id must be greater than zero",
             ));
         }
 
-        let repository = self.load_on_demand_repository_state(input.repository_id)?;
-        let requested_via = input.requested_via.trim().to_owned();
-        let source_kind = if input.source_kind.trim().is_empty() {
+        let repository = self.load_on_demand_repository_state(repository_id)?;
+        let source_kind = if source_kind.trim().is_empty() {
             match repository.source_mode.as_str() {
                 SOURCE_MODE_LOCAL_WORKSPACE => String::from(RELEASE_SOURCE_KIND_LOCAL_WORKSPACE),
                 _ => {
@@ -1870,12 +2097,11 @@ impl LocalCoordinator {
                 }
             }
         } else {
-            normalize_release_source_kind(&input.source_kind)?
+            normalize_release_source_kind(&source_kind)?
         };
-        let version_source = normalize_release_version_source(&input.version_source)?;
-        let mut source_ref = normalize_optional_string(input.source_ref);
+        let mut source_ref = normalize_optional_string(source_ref);
         let mut local_path =
-            normalize_absolute_path_string(input.local_path, "on-demand release local_path")?;
+            normalize_absolute_path_string(local_path, "on-demand release local_path")?;
 
         match source_kind.as_str() {
             RELEASE_SOURCE_KIND_MANAGED_TAG | RELEASE_SOURCE_KIND_MANAGED_REF => {
@@ -1913,46 +2139,140 @@ impl LocalCoordinator {
             }
         }
 
-        let git_tag = match version_source.as_str() {
-            RELEASE_VERSION_SOURCE_MANUAL => require_non_empty(
-                input.release_version.as_deref().unwrap_or_default(),
-                "on-demand release version",
-            )?,
-            RELEASE_VERSION_SOURCE_PROJECT_SETTINGS => self.resolve_on_demand_release_version(
-                &repository,
-                &source_kind,
-                source_ref.as_deref(),
-                local_path.as_deref(),
-            )?,
-            other => {
-                return Err(invalid_input_error(format!(
-                    "unsupported on-demand release version_source {:?}",
-                    other
-                )));
-            }
-        };
-        let unity_executable_path_override = normalize_absolute_path_string(
-            input.unity_executable_path_override,
-            "unity executable path override",
-        )?;
-        let source_identity = build_release_source_identity(
-            &source_kind,
-            source_ref.as_deref(),
-            local_path.as_deref(),
-        )?;
-
-        Ok(NormalizedOnDemandReleaseDispatchInput {
-            repository_id: input.repository_id,
-            git_tag,
-            git_commit: String::new(),
-            requested_via,
+        Ok(ResolvedOnDemandReleaseSourceInput {
+            repository,
             source_kind,
             source_ref,
             local_path,
-            version_source,
-            unity_executable_path_override,
-            source_identity,
         })
+    }
+
+    fn resolve_on_demand_release_git_tag(
+        &self,
+        repository: &OnDemandRepositoryState,
+        source_kind: &str,
+        source_ref: Option<&str>,
+        local_path: Option<&str>,
+        version_source: &str,
+        release_version: Option<&str>,
+    ) -> io::Result<String> {
+        match version_source {
+            RELEASE_VERSION_SOURCE_MANUAL => {
+                self.validate_on_demand_release_source(repository, source_kind, source_ref)?;
+                require_non_empty(
+                    release_version.unwrap_or_default(),
+                    "on-demand release version",
+                )
+            }
+            RELEASE_VERSION_SOURCE_PROJECT_SETTINGS => self.resolve_on_demand_release_version(
+                repository,
+                source_kind,
+                source_ref,
+                local_path,
+            ),
+            RELEASE_VERSION_SOURCE_SOURCE_TAG => self.resolve_on_demand_release_source_tag_version(
+                repository,
+                source_kind,
+                source_ref,
+            ),
+            other => Err(invalid_input_error(format!(
+                "unsupported on-demand release version_source {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn preview_on_demand_release_version_value(
+        &self,
+        repository: &OnDemandRepositoryState,
+        source_kind: &str,
+        source_ref: Option<&str>,
+        local_path: Option<&str>,
+        version_source: &str,
+    ) -> io::Result<String> {
+        match version_source {
+            RELEASE_VERSION_SOURCE_MANUAL => Err(invalid_input_error(
+                "manual version_source does not support release preview",
+            )),
+            RELEASE_VERSION_SOURCE_PROJECT_SETTINGS => self.resolve_on_demand_release_version(
+                repository,
+                source_kind,
+                source_ref,
+                local_path,
+            ),
+            RELEASE_VERSION_SOURCE_SOURCE_TAG => self.resolve_on_demand_release_source_tag_version(
+                repository,
+                source_kind,
+                source_ref,
+            ),
+            other => Err(invalid_input_error(format!(
+                "unsupported on-demand release version_source {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn list_on_demand_release_remote_refs_for_source(
+        &self,
+        repository: &OnDemandRepositoryState,
+        source_kind: &str,
+    ) -> io::Result<Vec<OnDemandReleaseRemoteRef>> {
+        match source_kind {
+            RELEASE_SOURCE_KIND_MANAGED_REF => {
+                let repository_url = repository.repo_url.as_deref().ok_or_else(|| {
+                    invalid_input_error("managed repository URL must not be empty")
+                })?;
+                let git_auth = self.resolve_release_git_auth(repository.credentials_id)?;
+                let mut refs = GitBranchLister::new()
+                    .list_branches(&GitBranchListRequest {
+                        repository_url: repository_url.to_owned(),
+                        auth: git_auth,
+                    })?
+                    .into_iter()
+                    .map(|branch| OnDemandReleaseRemoteRef {
+                        name: branch.name,
+                        commit: branch.commit,
+                    })
+                    .collect::<Vec<_>>();
+
+                if let Some(default_branch) = repository.default_branch.as_deref() {
+                    if let Some(index) = refs.iter().position(|git_ref| git_ref.name == default_branch)
+                    {
+                        let default_ref = refs.remove(index);
+                        refs.insert(0, default_ref);
+                    }
+                }
+
+                Ok(refs)
+            }
+            RELEASE_SOURCE_KIND_MANAGED_TAG => {
+                let repository_url = repository.repo_url.as_deref().ok_or_else(|| {
+                    invalid_input_error("managed repository URL must not be empty")
+                })?;
+                let git_auth = self.resolve_release_git_auth(repository.credentials_id)?;
+                let mut refs = GitTagLister::new()
+                    .list_tags(&GitTagListRequest {
+                        repository_url: repository_url.to_owned(),
+                        auth: git_auth,
+                    })?
+                    .into_iter()
+                    .map(|tag| OnDemandReleaseRemoteRef {
+                        name: tag.name,
+                        commit: tag.commit,
+                    })
+                    .collect::<Vec<_>>();
+                refs.reverse();
+
+                Ok(refs)
+            }
+            RELEASE_SOURCE_KIND_LOCAL_WORKSPACE => Err(invalid_input_error(
+                "local workspace sources do not expose remote refs",
+            )),
+            other => Err(invalid_input_error(format!(
+                "unsupported on-demand release source_kind {:?}",
+                other
+            ))),
+        }
     }
 
     fn resolve_on_demand_release_version(
@@ -1984,6 +2304,66 @@ impl LocalCoordinator {
                     &git_auth,
                 )
             }
+            other => Err(invalid_input_error(format!(
+                "unsupported on-demand release source_kind {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn resolve_on_demand_release_source_tag_version(
+        &self,
+        repository: &OnDemandRepositoryState,
+        source_kind: &str,
+        source_ref: Option<&str>,
+    ) -> io::Result<String> {
+        if source_kind != RELEASE_SOURCE_KIND_MANAGED_TAG {
+            return Err(invalid_input_error(
+                "on-demand source_tag version_source requires source_kind \"managed_tag\"",
+            ));
+        }
+
+        let git_tag = require_non_empty(
+            source_ref.unwrap_or_default(),
+            "on-demand release source_ref",
+        )?;
+        self.validate_on_demand_release_source(repository, source_kind, Some(git_tag.as_str()))?;
+
+        Ok(git_tag)
+    }
+
+    fn validate_on_demand_release_source(
+        &self,
+        repository: &OnDemandRepositoryState,
+        source_kind: &str,
+        source_ref: Option<&str>,
+    ) -> io::Result<()> {
+        match source_kind {
+            RELEASE_SOURCE_KIND_MANAGED_TAG | RELEASE_SOURCE_KIND_MANAGED_REF => {
+                let repository_url = repository.repo_url.as_deref().ok_or_else(|| {
+                    invalid_input_error("managed repository URL must not be empty")
+                })?;
+                let git_ref = require_non_empty(
+                    source_ref.unwrap_or_default(),
+                    "on-demand release source_ref",
+                )?;
+                let git_auth = self.resolve_release_git_auth(repository.credentials_id)?;
+                let ref_kind = if source_kind == RELEASE_SOURCE_KIND_MANAGED_TAG {
+                    GitRemoteRefKind::Tag
+                } else {
+                    GitRemoteRefKind::Branch
+                };
+
+                GitRemoteRefResolver::new().resolve_ref(&GitRemoteRefLookupRequest {
+                    repository_url: repository_url.to_owned(),
+                    git_ref,
+                    ref_kind,
+                    auth: git_auth,
+                })?;
+
+                Ok(())
+            }
+            RELEASE_SOURCE_KIND_LOCAL_WORKSPACE => Ok(()),
             other => Err(invalid_input_error(format!(
                 "unsupported on-demand release source_kind {:?}",
                 other
@@ -2454,7 +2834,7 @@ impl LocalCoordinator {
         Ok(record)
     }
 
-    /// Marks one running build run as failed and stores the terminal error message.
+    /// Marks one queued or running build run as failed and stores the terminal error message.
     pub fn fail_build_run(
         &self,
         build_run_id: i64,
@@ -2472,11 +2852,12 @@ impl LocalCoordinator {
                     workspace_path = COALESCE(?, workspace_path),
                     log_path = COALESCE(?, log_path),
                     artifact_root_path = COALESCE(?, artifact_root_path),
+                    started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
                     finished_at = CURRENT_TIMESTAMP,
                     error_message = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
-                  AND status = ?
+                  AND status IN (?, ?)
                 ",
                 params![
                     BuildStatus::Failed.as_str(),
@@ -2485,6 +2866,7 @@ impl LocalCoordinator {
                     nullable_string(&input.artifact_root_path),
                     error_message,
                     build_run_id,
+                    BuildStatus::Queued.as_str(),
                     BuildStatus::Running.as_str(),
                 ],
             )
@@ -2492,7 +2874,7 @@ impl LocalCoordinator {
         if updated == 0 {
             return Err(self.build_run_transition_error(
                 build_run_id,
-                BuildStatus::Running.as_str(),
+                "queued or running",
                 "fail",
             ));
         }
@@ -2663,7 +3045,7 @@ impl LocalCoordinator {
         self.get_release_run_record(release_run_id)
     }
 
-    /// Starts or refreshes one named stage under a running build run.
+    /// Starts or refreshes one named stage under a queued or running build run.
     pub fn start_build_run_stage(
         &self,
         build_run_id: i64,
@@ -2699,8 +3081,8 @@ impl LocalCoordinator {
                     heartbeat_at = CURRENT_TIMESTAMP,
                     last_progress_message = ?,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND status = ?
+                                WHERE id = ?
+                                    AND status IN (?, ?)
                 ",
                 params![
                     workspace_path,
@@ -2711,6 +3093,7 @@ impl LocalCoordinator {
                     BuildStatus::Running.as_str(),
                     message,
                     build_run_id,
+                    BuildStatus::Queued.as_str(),
                     BuildStatus::Running.as_str(),
                 ],
             )
@@ -2718,7 +3101,7 @@ impl LocalCoordinator {
         if build_updated == 0 {
             return Err(self.build_run_transition_error(
                 build_run_id,
-                BuildStatus::Running.as_str(),
+                "queued or running",
                 "start build stage",
             ));
         }
@@ -2773,7 +3156,7 @@ impl LocalCoordinator {
             })
     }
 
-    /// Refreshes the heartbeat of one running build stage and the parent build run.
+    /// Refreshes the heartbeat of one build stage and the parent queued or running build run.
     pub fn heartbeat_build_run_stage(
         &self,
         build_run_id: i64,
@@ -2834,8 +3217,8 @@ impl LocalCoordinator {
                     heartbeat_at = CURRENT_TIMESTAMP,
                     last_progress_message = ?,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND status = ?
+                                WHERE id = ?
+                                    AND status IN (?, ?)
                 ",
                 params![
                     workspace_path,
@@ -2846,6 +3229,7 @@ impl LocalCoordinator {
                     BuildStatus::Running.as_str(),
                     message,
                     build_run_id,
+                    BuildStatus::Queued.as_str(),
                     BuildStatus::Running.as_str(),
                 ],
             )
@@ -2853,7 +3237,7 @@ impl LocalCoordinator {
         if build_updated == 0 {
             return Err(self.build_run_transition_error(
                 build_run_id,
-                BuildStatus::Running.as_str(),
+                "queued or running",
                 "heartbeat build stage",
             ));
         }
@@ -2865,7 +3249,7 @@ impl LocalCoordinator {
         })
     }
 
-    /// Completes one build stage and keeps the parent build run marked as running.
+    /// Completes one build stage while preserving the parent queued or running build run.
     pub fn complete_build_run_stage(
         &self,
         build_run_id: i64,
@@ -2928,8 +3312,8 @@ impl LocalCoordinator {
                     heartbeat_at = CURRENT_TIMESTAMP,
                     last_progress_message = ?,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND status = ?
+                                WHERE id = ?
+                                    AND status IN (?, ?)
                 ",
                 params![
                     workspace_path,
@@ -2940,6 +3324,7 @@ impl LocalCoordinator {
                     BuildStatus::Succeeded.as_str(),
                     message,
                     build_run_id,
+                    BuildStatus::Queued.as_str(),
                     BuildStatus::Running.as_str(),
                 ],
             )
@@ -2947,7 +3332,7 @@ impl LocalCoordinator {
         if build_updated == 0 {
             return Err(self.build_run_transition_error(
                 build_run_id,
-                BuildStatus::Running.as_str(),
+                "queued or running",
                 "complete build stage",
             ));
         }
@@ -2961,7 +3346,7 @@ impl LocalCoordinator {
             })
     }
 
-    /// Fails one build stage while keeping the parent build run transition separate.
+    /// Fails one build stage while keeping the parent queued or running build run transition separate.
     pub fn fail_build_run_stage(
         &self,
         build_run_id: i64,
@@ -3026,8 +3411,8 @@ impl LocalCoordinator {
                     heartbeat_at = CURRENT_TIMESTAMP,
                     last_progress_message = ?,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                  AND status = ?
+                                WHERE id = ?
+                                    AND status IN (?, ?)
                 ",
                 params![
                     workspace_path,
@@ -3038,6 +3423,7 @@ impl LocalCoordinator {
                     BuildStatus::Failed.as_str(),
                     error_message,
                     build_run_id,
+                    BuildStatus::Queued.as_str(),
                     BuildStatus::Running.as_str(),
                 ],
             )
@@ -3045,7 +3431,7 @@ impl LocalCoordinator {
         if build_updated == 0 {
             return Err(self.build_run_transition_error(
                 build_run_id,
-                BuildStatus::Running.as_str(),
+                "queued or running",
                 "fail build stage",
             ));
         }
@@ -3286,6 +3672,7 @@ impl LocalCoordinator {
                        rr.repository_id,
                        r.name,
                        rr.git_tag,
+                      rr.source_metadata_json,
                        pr.build_run_id,
                        pr.publish_target_id,
                        pt.name,
@@ -5602,6 +5989,8 @@ impl LocalCoordinator {
                 WHERE repository_id = ?
                   AND git_tag = ?
                   AND source_identity = ?
+                                ORDER BY id DESC
+                                LIMIT 1
                 ",
                 params![repository_id, git_tag, source_identity],
                 |row| row.get(0),
@@ -5621,6 +6010,8 @@ impl LocalCoordinator {
                     WHERE repository_id = ?
                       AND git_tag = ?
                       AND source_identity = ?
+                                        ORDER BY id DESC
+                                        LIMIT 1
                     ",
                     params![repository_id, git_tag, RELEASE_SOURCE_KIND_MANAGED_TAG],
                     |row| row.get(0),
@@ -9280,6 +9671,7 @@ fn manual_dispatch_metadata_json(requested_via: &str, git_tag: &str) -> io::Resu
         source_ref: Some(require_non_empty(git_tag, "git tag")?),
         local_path: None,
         version_source: Some(String::from(RELEASE_VERSION_SOURCE_MANUAL)),
+        process_priority: Some(ProcessPriority::default()),
         unity_executable_path_override: None,
     })
 }
@@ -9292,6 +9684,7 @@ fn repository_poll_metadata_json(observed_via: &str, git_tag: &str) -> io::Resul
         source_ref: Some(require_non_empty(git_tag, "git tag")?),
         local_path: None,
         version_source: None,
+        process_priority: Some(ProcessPriority::default()),
         unity_executable_path_override: None,
     })
 }
@@ -9306,6 +9699,7 @@ fn on_demand_dispatch_metadata_json(
         source_ref: input.source_ref.clone(),
         local_path: input.local_path.clone(),
         version_source: Some(input.version_source.clone()),
+        process_priority: Some(input.process_priority),
         unity_executable_path_override: input.unity_executable_path_override.clone(),
     })
 }
@@ -9329,6 +9723,7 @@ fn rebuild_release_metadata_json(
         source_ref: metadata.source_ref,
         local_path: metadata.local_path,
         version_source: metadata.version_source,
+        process_priority: Some(metadata.process_priority),
         unity_executable_path_override: metadata.unity_executable_path_override,
     })
 }
@@ -9353,6 +9748,12 @@ fn release_source_metadata_json(metadata: &ReleaseSourceMetadata) -> io::Result<
     }
     if let Some(value) = metadata.version_source.as_deref() {
         object.insert(String::from("version_source"), serde_json::json!(value));
+    }
+    if let Some(value) = metadata.process_priority {
+        object.insert(
+            String::from("process_priority"),
+            serde_json::json!(value.as_str()),
+        );
     }
     if let Some(value) = metadata.unity_executable_path_override.as_deref() {
         object.insert(
@@ -9405,6 +9806,7 @@ fn decode_release_source_metadata(
             .as_deref()
             .map(normalize_release_version_source)
             .transpose()?,
+        process_priority: metadata.process_priority.unwrap_or_default(),
         unity_executable_path_override: normalize_absolute_path_string(
             metadata.unity_executable_path_override,
             "release source metadata unity_executable_path_override",
@@ -9432,6 +9834,7 @@ fn normalize_release_version_source(value: &str) -> io::Result<String> {
         RELEASE_VERSION_SOURCE_PROJECT_SETTINGS => {
             Ok(String::from(RELEASE_VERSION_SOURCE_PROJECT_SETTINGS))
         }
+        RELEASE_VERSION_SOURCE_SOURCE_TAG => Ok(String::from(RELEASE_VERSION_SOURCE_SOURCE_TAG)),
         other => Err(invalid_input_error(format!(
             "unsupported release version_source {:?}",
             other
@@ -9634,6 +10037,10 @@ fn summarize_process_feed_record(
         );
     let display_status = if current_step_status == PROCESS_FEED_ON_HOLD_STATUS {
         String::from(PROCESS_FEED_ON_HOLD_STATUS)
+    } else if current_step_status == BuildStatus::Running.as_str()
+        || current_step_status == PublishStatus::Running.as_str()
+    {
+        String::from("running")
     } else {
         classify_process_feed_status(&release, build_counts, publish_counts).to_owned()
     };
@@ -9720,7 +10127,36 @@ fn summarize_process_feed_step(
         );
     }
 
-    if let Some(run) = latest_build_run_by_status(build_runs, BuildStatus::Queued.as_str()) {
+    if let Some(run) = preferred_process_feed_queued_build_run(build_runs) {
+        if let Some(prefix) = resolve_process_feed_build_stage_prefix(run.current_stage_key.as_deref())
+        {
+            let step_label = if process_feed_build_stage_is_process_scoped(
+                run.current_stage_key.as_deref(),
+            ) {
+                format_process_feed_process_scoped_build_label(prefix)
+            } else {
+                format_process_feed_build_label(
+                    prefix,
+                    build_run_contexts,
+                    run.id,
+                    build_counts.queued,
+                )
+            };
+
+            return (
+                step_label,
+                run.current_stage_status
+                    .clone()
+                    .unwrap_or_else(|| String::from(BuildStatus::Queued.as_str())),
+                run.last_progress_message.clone().or_else(|| {
+                    Some(format!(
+                        "{} build target(s) are waiting to start",
+                        build_counts.queued
+                    ))
+                }),
+            );
+        }
+
         return (
             format_process_feed_build_label(
                 "Queued build:",
@@ -9923,6 +10359,10 @@ fn format_process_feed_running_build_label(
 ) -> String {
     let prefix = resolve_process_feed_build_stage_prefix(run.current_stage_key.as_deref())
         .unwrap_or("Building");
+    if process_feed_build_stage_is_process_scoped(run.current_stage_key.as_deref()) {
+        return format_process_feed_process_scoped_build_label(prefix);
+    }
+
     format_process_feed_build_label(prefix, build_run_contexts, run.id, running_count)
 }
 
@@ -9991,8 +10431,24 @@ fn format_process_feed_count_label(
     format!("{prefix} {count} {plural}")
 }
 
+fn format_process_feed_process_scoped_build_label(prefix: &str) -> String {
+    format!("{prefix} source")
+}
+
+fn process_feed_build_stage_is_process_scoped(stage_key: Option<&str>) -> bool {
+    let Some(stage_key) = stage_key else {
+        return false;
+    };
+
+    stage_key.trim().to_ascii_lowercase().contains("checkout")
+}
+
 fn resolve_process_feed_build_stage_prefix(stage_key: Option<&str>) -> Option<&'static str> {
     let stage_key = stage_key?.trim().to_ascii_lowercase();
+
+    if stage_key.contains("checkout") {
+        return Some("Checking out");
+    }
 
     if stage_key.contains("validate") {
         return Some("Preparing");
@@ -10413,6 +10869,34 @@ fn latest_build_run_by_status<'a>(
     runs.iter()
         .filter(|run| run.status == status)
         .max_by_key(|run| (build_run_activity_key(run), run.id))
+}
+
+fn preferred_process_feed_queued_build_run(
+    runs: &[BuildRunRecord],
+) -> Option<&BuildRunRecord> {
+    runs.iter()
+        .filter(|run| run.status == BuildStatus::Queued.as_str())
+        .max_by_key(|run| {
+            (
+                queued_build_run_has_visible_stage_progress(run),
+                build_run_activity_key(run),
+                run.id,
+            )
+        })
+}
+
+fn queued_build_run_has_visible_stage_progress(run: &BuildRunRecord) -> bool {
+    run.current_stage_key
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || run
+            .current_stage_status
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || run
+            .last_progress_message
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn latest_publish_run_by_status<'a>(
@@ -10976,18 +11460,18 @@ fn scan_publish_run_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<PublishR
 }
 
 fn scan_publish_execution_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<PublishExecutionPlan> {
-    let execution_contract_json = row.get::<_, String>(10)?;
+    let execution_contract_json = row.get::<_, String>(11)?;
     let target_snapshot = scan_publish_execution_target_snapshot(execution_contract_json.as_str())
         .map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                10,
+                11,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?;
-    let artifact_id = row.get::<_, Option<i64>>(12)?.ok_or_else(|| {
+    let artifact_id = row.get::<_, Option<i64>>(13)?.ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
-            12,
+            13,
             rusqlite::types::Type::Integer,
             Box::new(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -10999,11 +11483,11 @@ fn scan_publish_execution_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<Publ
         )
     })?;
     let artifact_name = row
-        .get::<_, Option<String>>(13)?
+        .get::<_, Option<String>>(14)?
         .and_then(|value| normalize_optional_string(Some(value)))
         .ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
-                13,
+                14,
                 rusqlite::types::Type::Text,
                 Box::new(io::Error::new(
                     ErrorKind::InvalidInput,
@@ -11015,15 +11499,15 @@ fn scan_publish_execution_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<Publ
             )
         })?;
     let artifact_kind = row
-        .get::<_, Option<String>>(14)?
+        .get::<_, Option<String>>(15)?
         .and_then(|value| normalize_optional_string(Some(value)))
         .unwrap_or_else(|| String::from("file"));
     let artifact_path = normalize_relative_store_artifact_path(
-        &row.get::<_, Option<String>>(15)?
+        &row.get::<_, Option<String>>(16)?
             .and_then(|value| normalize_optional_string(Some(value)))
             .ok_or_else(|| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    15,
+                    16,
                     rusqlite::types::Type::Text,
                     Box::new(io::Error::new(
                         ErrorKind::InvalidInput,
@@ -11036,14 +11520,14 @@ fn scan_publish_execution_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<Publ
             })?,
     )
     .map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(15, rusqlite::types::Type::Text, Box::new(error))
+        rusqlite::Error::FromSqlConversionFailure(16, rusqlite::types::Type::Text, Box::new(error))
     })?;
     let artifact_root_path = row
-        .get::<_, Option<String>>(16)?
+        .get::<_, Option<String>>(17)?
         .and_then(|value| normalize_optional_string(Some(value)))
         .ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
-                16,
+                17,
                 rusqlite::types::Type::Text,
                 Box::new(io::Error::new(
                     ErrorKind::InvalidInput,
@@ -11055,14 +11539,14 @@ fn scan_publish_execution_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<Publ
             )
         })?;
     let (artifact_active_location_kind, artifact_active_location_ref) =
-        scan_artifact_active_location_columns(row.get(17)?, row.get(18)?, artifact_path.as_str());
+        scan_artifact_active_location_columns(row.get(18)?, row.get(19)?, artifact_path.as_str());
     let source_path = resolve_artifact_source_path(
         artifact_active_location_kind.as_str(),
         artifact_active_location_ref.as_str(),
         artifact_root_path.as_str(),
     )
     .map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(18, rusqlite::types::Type::Text, Box::new(error))
+        rusqlite::Error::FromSqlConversionFailure(19, rusqlite::types::Type::Text, Box::new(error))
     })?;
 
     Ok(PublishExecutionPlan {
@@ -11071,27 +11555,28 @@ fn scan_publish_execution_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<Publ
         repository_id: row.get(2)?,
         repository_name: row.get::<_, String>(3)?.trim().to_owned(),
         git_tag: row.get::<_, String>(4)?.trim().to_owned(),
-        build_run_id: row.get(5)?,
-        publish_target_id: row.get(6)?,
+        source_metadata_json: row.get(5)?,
+        build_run_id: row.get(6)?,
+        publish_target_id: row.get(7)?,
         publish_target_name: if target_snapshot.publish_target_name.trim().is_empty() {
-            row.get::<_, String>(7)?.trim().to_owned()
+            row.get::<_, String>(8)?.trim().to_owned()
         } else {
             target_snapshot.publish_target_name.trim().to_owned()
         },
         publish_target_kind: if target_snapshot.publish_target_kind.trim().is_empty() {
-            row.get::<_, String>(8)?.trim().to_owned()
+            row.get::<_, String>(9)?.trim().to_owned()
         } else {
             target_snapshot.publish_target_kind.trim().to_owned()
         },
         publish_target_config_json: if target_snapshot.publish_target_config_json.trim().is_empty()
         {
-            row.get(9)?
+            row.get(10)?
         } else {
             target_snapshot.publish_target_config_json.clone()
         },
         publish_target_credentials_id: target_snapshot.publish_target_credentials_id,
         execution_contract_json,
-        status: row.get(11)?,
+        status: row.get(12)?,
         artifact_id,
         artifact_name,
         artifact_kind,
@@ -12631,20 +13116,24 @@ mod tests {
         CreateArtifactRecordInput, CreateRepositoryProjectBuildTargetInput,
         CreateRepositoryProjectCredentialInput, CreateRepositoryProjectInput,
         CreatedRepositoryProjectRecord, CredentialRecord, FailBuildRunInput,
+        HeartbeatBuildRunStageInput,
         InterruptedBuildRecoveryRecord, LocalCoordinator, ManualReleaseDispatchInput,
+        OnDemandReleaseDispatchInput,
         ObservedProcess, ProcessFeedPageQuery, ProcessFeedScope, ProcessFeedStatusFilter,
         PublishDispatchJob, PublishTargetRuntimeSettingsRecord, QueueDispatchOutcome,
         ReleaseDispatchJob, ReleaseRunRecord, RuntimeControlRequest, RuntimeRecoveryReport,
-        StartBuildRunInput, StartPublishRunInput, StorageLayout, UpdateRepositoryAuthStateInput,
+        StartBuildRunInput, StartBuildRunStageInput, StartPublishRunInput, StorageLayout,
+        CompleteBuildRunStageInput, UpdateRepositoryAuthStateInput,
         UpdateRepositoryProjectBuildTargetInput, UpdateRepositoryProjectInput,
         UpsertCredentialRecordInput, BUILD_RUN_QUEUE_NAME, DEFAULT_HOST_NATIVE_RUNNER_TYPE,
         KIND_GIT_HTTP_BASIC, MIGRATIONS, PROJECT_VERSION_FILE_PATH, PUBLISH_RUN_QUEUE_NAME,
-        RECOVERY_INTERRUPTION_KIND_SYSTEM, RELEASE_RUN_QUEUE_NAME, SQLITE_BUSY_TIMEOUT_MILLIS,
+        RECOVERY_INTERRUPTION_KIND_SYSTEM, RELEASE_RUN_QUEUE_NAME,
+        RELEASE_VERSION_SOURCE_MANUAL, SQLITE_BUSY_TIMEOUT_MILLIS,
         TRIGGER_SOURCE_MANUAL, TRIGGER_SOURCE_POLL,
     };
     use crate::lifecycle::{BuildStatus, PublishStatus, ReleaseStatus};
     use runtime_config::{RuntimeConcurrencySettings, RuntimeDirectories};
-    use runtime_contracts::{BuildKind, EngineKind};
+    use runtime_contracts::{BuildKind, EngineKind, ProcessPriority};
     use rusqlite::{params, Connection};
     use serde_json::Value;
     use std::ffi::OsString;
@@ -12769,6 +13258,7 @@ mod tests {
                 "0013_publish_destination_execution_contract.sql",
                 "0014_release_source_identity.sql",
                 "0015_local_workspace_polling_invariant.sql",
+                "0016_release_run_history.sql",
             ]
         );
 
@@ -13387,6 +13877,10 @@ mod tests {
         assert_eq!(unbound[0].visibility_status, "private");
         assert_eq!(unbound[0].auth_requirement_status, "required");
         assert_eq!(unbound[0].source_provider_id.as_deref(), Some("github"));
+        assert_eq!(
+            unbound[0].auth_status_message,
+            "GitHub repository requires authentication before HGP can access it.",
+        );
         assert!(unbound[0].auth_last_verified_at.is_some());
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
@@ -13412,6 +13906,7 @@ mod tests {
             .expect("managed polling repositories should load after binding");
         assert_eq!(bound[0].auth_binding_status, "bound_ready");
         assert_eq!(bound[0].credentials_id, Some(credentials_id));
+        assert_eq!(bound[0].auth_status_message, "GitHub access is connected.");
 
         coordinator
             .update_repository_auth_state(UpdateRepositoryAuthStateInput {
@@ -13433,6 +13928,10 @@ mod tests {
         assert_eq!(public[0].auth_binding_status, "not_required");
         assert_eq!(public[0].credentials_id, None);
         assert_eq!(public[0].visibility_status, "public");
+        assert_eq!(
+            public[0].auth_status_message,
+            "Public repository detected through anonymous remote access.",
+        );
 
         coordinator
             .update_repository_auth_state(UpdateRepositoryAuthStateInput {
@@ -13461,6 +13960,10 @@ mod tests {
             .expect("managed polling repositories should load after clearing");
         assert_eq!(cleared[0].auth_binding_status, "required_unbound");
         assert_eq!(cleared[0].credentials_id, None);
+        assert_eq!(
+            cleared[0].auth_status_message,
+            "GitHub repository requires authentication before HGP can access it.",
+        );
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -14584,6 +15087,193 @@ mod tests {
     }
 
     #[test]
+    fn list_process_feed_page_surfaces_checkout_stage_for_queued_builds() {
+        let root = test_root("list-process-feed-page-queued-checkout");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let fixture = seed_repository_fixture(&connection, "process-feed-queued-checkout");
+        let release_run_id = insert_release_run(
+            &connection,
+            fixture.repository_id,
+            "v1.2.1",
+            ReleaseStatus::Queued.as_str(),
+        );
+        let queued_build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            fixture.primary_build_target_id,
+            BuildStatus::Queued.as_str(),
+        );
+        update_build_run_plan(
+            &connection,
+            queued_build_run_id,
+            "2022.3.21f1",
+            DEFAULT_HOST_NATIVE_RUNNER_TYPE,
+        );
+        connection
+            .execute(
+                "
+                UPDATE build_runs
+                SET current_stage_key = ?,
+                    current_stage_label = ?,
+                    current_stage_status = ?,
+                    last_progress_message = ?,
+                    heartbeat_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                ",
+                params![
+                    "checkout-repository",
+                    "Checkout Repository",
+                    BuildStatus::Running.as_str(),
+                    "Fetching target ref 'v1.2.1' into the process workspace.",
+                    queued_build_run_id,
+                ],
+            )
+            .expect("queued build checkout stage should persist");
+        drop(connection);
+
+        let page = list_process_feed_page(&layout, 1, 10)
+            .expect("queued checkout process feed page should load");
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].release_run_id, release_run_id);
+        assert_eq!(page.items[0].display_status, "running");
+        assert_eq!(page.items[0].current_step_label, "Checking out source");
+        assert_eq!(page.items[0].current_step_status, "running");
+        assert_eq!(
+            page.items[0].current_step_detail.as_deref(),
+            Some("Fetching target ref 'v1.2.1' into the process workspace."),
+        );
+        assert_eq!(page.items[0].queued_build_runs, 1);
+        assert_eq!(page.items[0].running_build_runs, 0);
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn list_process_feed_page_prefers_staged_queued_build_over_newer_plain_queued_runs() {
+        let root = test_root("list-process-feed-page-prefers-staged-queued-build");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let fixture = seed_repository_fixture(&connection, "process-feed-prefers-staged-queued-build");
+        let release_run_id = insert_release_run(
+            &connection,
+            fixture.repository_id,
+            "v1.2.2",
+            ReleaseStatus::Queued.as_str(),
+        );
+        let staged_build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            fixture.primary_build_target_id,
+            BuildStatus::Queued.as_str(),
+        );
+        update_build_run_plan(
+            &connection,
+            staged_build_run_id,
+            "2022.3.21f1",
+            DEFAULT_HOST_NATIVE_RUNNER_TYPE,
+        );
+        connection
+            .execute(
+                "
+                UPDATE build_runs
+                SET current_stage_key = ?,
+                    current_stage_label = ?,
+                    current_stage_status = ?,
+                    last_progress_message = ?,
+                    heartbeat_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                ",
+                params![
+                    "checkout-repository",
+                    "Checkout Repository",
+                    BuildStatus::Running.as_str(),
+                    "Cloning repository metadata into the process workspace.",
+                    staged_build_run_id,
+                ],
+            )
+            .expect("queued build checkout stage should persist");
+
+        let later_plain_build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            fixture.secondary_build_target_id,
+            BuildStatus::Queued.as_str(),
+        );
+        update_build_run_plan(
+            &connection,
+            later_plain_build_run_id,
+            "2022.3.21f1",
+            DEFAULT_HOST_NATIVE_RUNNER_TYPE,
+        );
+        connection
+            .execute(
+                "
+                INSERT INTO build_targets (
+                    repository_id,
+                    name,
+                    build_kind,
+                    contract_json
+                ) VALUES (?, ?, ?, ?)
+                ",
+                params![
+                    fixture.repository_id,
+                    "process-feed-prefers-staged-queued-build-webgl",
+                    "player",
+                    serde_json::json!({
+                        "unity": {
+                            "targetPlatform": "WebGL",
+                            "buildMethod": "Builder.Perform",
+                            "editorVersion": ""
+                        }
+                    })
+                    .to_string(),
+                ],
+            )
+            .expect("tertiary build target should insert");
+        let tertiary_build_target_id = connection.last_insert_rowid();
+        let latest_plain_build_run_id = insert_build_run(
+            &connection,
+            release_run_id,
+            tertiary_build_target_id,
+            BuildStatus::Queued.as_str(),
+        );
+        update_build_run_plan(
+            &connection,
+            latest_plain_build_run_id,
+            "2022.3.21f1",
+            DEFAULT_HOST_NATIVE_RUNNER_TYPE,
+        );
+        drop(connection);
+
+        let page = list_process_feed_page(&layout, 1, 10)
+            .expect("queued checkout process feed page should load");
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].release_run_id, release_run_id);
+        assert_eq!(page.items[0].display_status, "running");
+        assert_eq!(page.items[0].current_step_label, "Checking out source");
+        assert_eq!(page.items[0].current_step_status, "running");
+        assert_eq!(
+            page.items[0].current_step_detail.as_deref(),
+            Some("Cloning repository metadata into the process workspace."),
+        );
+        assert_eq!(page.items[0].queued_build_runs, 3);
+        assert_eq!(page.items[0].running_build_runs, 0);
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
     fn list_process_feed_page_surfaces_publish_target_names() {
         let root = test_root("list-process-feed-page-publish-running");
         let directories = RuntimeDirectories::from_root(&root);
@@ -14935,7 +15625,8 @@ mod tests {
                 "0012_repository_auth_state.sql",
                 "0013_publish_destination_execution_contract.sql",
                 "0014_release_source_identity.sql",
-                "0015_local_workspace_polling_invariant.sql"
+                "0015_local_workspace_polling_invariant.sql",
+                "0016_release_run_history.sql"
             ]
         );
 
@@ -15404,13 +16095,73 @@ mod tests {
         let metadata: Value = serde_json::from_str(&release.source_metadata_json)
             .expect("manual release metadata should decode");
         assert_eq!(metadata["requested_via"], "cli");
+        assert_eq!(metadata["process_priority"], "low");
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
 
     #[test]
-    fn dispatch_manual_release_rejects_duplicate_repository_tag() {
-        let root = test_root("release-dispatch-conflict");
+    fn release_run_elapsed_snapshot_measures_whole_process_from_creation_until_finish() {
+        let root = test_root("release-run-elapsed-snapshot");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repo = seed_repository_fixture(&connection, "elapsed-release-repo");
+        connection
+            .execute(
+                "
+                INSERT INTO release_runs (
+                    repository_id,
+                    git_tag,
+                    git_commit,
+                    trigger_source,
+                    trigger_rule_id,
+                    source_metadata_json,
+                    source_identity,
+                    status,
+                    started_at,
+                    finished_at,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ",
+                params![
+                    repo.repository_id,
+                    "v6.0.0",
+                    "deadbeef",
+                    TRIGGER_SOURCE_MANUAL,
+                    Option::<i64>::None,
+                    "{}",
+                    "manual:v6.0.0:deadbeef",
+                    ReleaseStatus::Succeeded.as_str(),
+                    "2026-01-10T10:00:10Z",
+                    "2026-01-10T10:12:00Z",
+                    "2026-01-10T10:00:00Z",
+                    "2026-01-10T10:12:00Z",
+                ],
+            )
+            .expect("release run should insert");
+        let release_run_id = connection.last_insert_rowid();
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let snapshot = coordinator
+            .get_release_run_elapsed_snapshot(release_run_id)
+            .expect("release elapsed snapshot should load");
+
+        assert_eq!(snapshot.release_run_id, release_run_id);
+        assert_eq!(snapshot.status, ReleaseStatus::Succeeded.as_str());
+        assert_eq!(snapshot.finished_at.as_deref(), Some("2026-01-10T10:12:00Z"));
+        assert_eq!(snapshot.elapsed_seconds, 12 * 60);
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn dispatch_manual_release_allows_repeating_repository_tag_as_new_history() {
+        let root = test_root("release-dispatch-repeat");
         let directories = RuntimeDirectories::from_root(&root);
         let layout = StorageLayout::from_directories(&directories);
         initialize_database(&layout).expect("database bootstrap should succeed");
@@ -15420,7 +16171,7 @@ mod tests {
         drop(connection);
 
         let coordinator = LocalCoordinator::new(&layout);
-        coordinator
+        let first = coordinator
             .dispatch_manual_release(ManualReleaseDispatchInput {
                 repository_id: repo.repository_id,
                 git_tag: "v6.1.0".to_owned(),
@@ -15429,19 +16180,151 @@ mod tests {
             })
             .expect("first manual release dispatch should succeed");
 
-        let error = coordinator
+        let second = coordinator
             .dispatch_manual_release(ManualReleaseDispatchInput {
                 repository_id: repo.repository_id,
                 git_tag: "v6.1.0".to_owned(),
                 git_commit: String::new(),
                 requested_via: "hub".to_owned(),
             })
-            .expect_err("duplicate manual release dispatch should fail");
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+            .expect("repeated manual release dispatch should create a new run");
+        assert!(second.id > first.id);
         assert_eq!(
             queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME),
-            1
+            2
         );
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let release_count: i64 = connection
+            .query_row(
+                "
+                SELECT COUNT(1)
+                FROM release_runs
+                WHERE repository_id = ?
+                  AND git_tag = ?
+                ",
+                params![repo.repository_id, "v6.1.0"],
+                |row| row.get(0),
+            )
+            .expect("release run count should load");
+        assert_eq!(release_count, 2);
+        drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn dispatch_on_demand_release_allows_repeating_source_identity_as_new_history() {
+        let root = test_root("on-demand-release-repeat");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+        let local_workspace_path = root.join("local-workspace");
+        std::fs::create_dir_all(&local_workspace_path)
+            .expect("local workspace directory should create");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repo = seed_repository_fixture(&connection, "on-demand-release-repeat");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let first = coordinator
+            .dispatch_on_demand_release(OnDemandReleaseDispatchInput {
+                repository_id: repo.repository_id,
+                requested_via: "shell".to_owned(),
+                release_version: Some("v9.0.0".to_owned()),
+                version_source: RELEASE_VERSION_SOURCE_MANUAL.to_owned(),
+                source_kind: "local_workspace".to_owned(),
+                source_ref: None,
+                local_path: Some(local_workspace_path.display().to_string()),
+                process_priority: None,
+                unity_executable_path_override: None,
+            })
+            .expect("first on-demand release dispatch should succeed");
+        let second = coordinator
+            .dispatch_on_demand_release(OnDemandReleaseDispatchInput {
+                repository_id: repo.repository_id,
+                requested_via: "shell".to_owned(),
+                release_version: Some("v9.0.0".to_owned()),
+                version_source: RELEASE_VERSION_SOURCE_MANUAL.to_owned(),
+                source_kind: "local_workspace".to_owned(),
+                source_ref: None,
+                local_path: Some(local_workspace_path.display().to_string()),
+                process_priority: None,
+                unity_executable_path_override: None,
+            })
+            .expect("repeated on-demand release dispatch should create a new run");
+
+        assert!(second.id > first.id);
+        assert_eq!(first.git_tag, "v9.0.0");
+        assert_eq!(second.git_tag, "v9.0.0");
+        assert_eq!(
+            queue_message_count(&layout.database_path, RELEASE_RUN_QUEUE_NAME),
+            2
+        );
+        let mut expected_local_path = local_workspace_path.display().to_string();
+        expected_local_path = expected_local_path.replace('\\', "/");
+        if cfg!(windows) {
+            expected_local_path.make_ascii_lowercase();
+        }
+        let expected_source_identity = format!("local_workspace:{expected_local_path}");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let release_count: i64 = connection
+            .query_row(
+                "
+                SELECT COUNT(1)
+                FROM release_runs
+                WHERE repository_id = ?
+                  AND git_tag = ?
+                  AND source_identity = ?
+                ",
+                params![
+                    repo.repository_id,
+                    "v9.0.0",
+                    expected_source_identity
+                ],
+                |row| row.get(0),
+            )
+            .expect("on-demand release run count should load");
+        assert_eq!(release_count, 2);
+        drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn dispatch_on_demand_release_persists_process_priority_in_source_metadata() {
+        let root = test_root("on-demand-release-priority");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+        let local_workspace_path = root.join("local-workspace");
+        std::fs::create_dir_all(&local_workspace_path)
+            .expect("local workspace directory should create");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let repo = seed_repository_fixture(&connection, "on-demand-release-priority");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let release = coordinator
+            .dispatch_on_demand_release(OnDemandReleaseDispatchInput {
+                repository_id: repo.repository_id,
+                requested_via: "shell".to_owned(),
+                release_version: Some("v9.1.0".to_owned()),
+                version_source: RELEASE_VERSION_SOURCE_MANUAL.to_owned(),
+                source_kind: "local_workspace".to_owned(),
+                source_ref: None,
+                local_path: Some(local_workspace_path.display().to_string()),
+                process_priority: Some(ProcessPriority::High),
+                unity_executable_path_override: None,
+            })
+            .expect("on-demand release dispatch should persist process priority");
+
+        let metadata: Value = serde_json::from_str(&release.source_metadata_json)
+            .expect("on-demand release metadata should decode");
+        assert_eq!(metadata["process_priority"], "high");
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }
@@ -16892,20 +17775,21 @@ mod tests {
     }
 
     #[test]
-    fn fail_build_run_requires_running_state_and_error_message() {
+    fn fail_build_run_allows_queued_or_running_state_and_requires_error_message() {
         let root = test_root("build-run-fail");
         let directories = RuntimeDirectories::from_root(&root);
         let layout = StorageLayout::from_directories(&directories);
         initialize_database(&layout).expect("database bootstrap should succeed");
 
         let connection = open_connection(&layout.database_path).expect("connection should open");
-        let fixture = seed_build_execution_fixture(&connection, "build-run-fail");
+        let queued_fixture = seed_build_execution_fixture(&connection, "build-run-fail-queued");
+        let running_fixture = seed_build_execution_fixture(&connection, "build-run-fail-running");
         drop(connection);
 
         let coordinator = LocalCoordinator::new(&layout);
         let empty_error = coordinator
             .fail_build_run(
-                fixture.build_run_id,
+                queued_fixture.build_run_id,
                 FailBuildRunInput {
                     workspace_path: String::new(),
                     log_path: String::new(),
@@ -16916,9 +17800,25 @@ mod tests {
             .expect_err("empty error message should be rejected");
         assert_eq!(empty_error.kind(), std::io::ErrorKind::InvalidInput);
 
+        let queued_failed = coordinator
+            .fail_build_run(
+                queued_fixture.build_run_id,
+                FailBuildRunInput {
+                    workspace_path: String::new(),
+                    log_path: String::new(),
+                    artifact_root_path: String::new(),
+                    error_message: String::from("checkout exploded"),
+                },
+            )
+            .expect("queued build run should fail before execution starts");
+        assert_eq!(queued_failed.status, BuildStatus::Failed.as_str());
+        assert_eq!(queued_failed.error_message.as_deref(), Some("checkout exploded"));
+        assert!(queued_failed.started_at.is_some());
+        assert!(queued_failed.finished_at.is_some());
+
         coordinator
             .start_build_run(
-                fixture.build_run_id,
+                running_fixture.build_run_id,
                 StartBuildRunInput {
                     workspace_path: String::from("/tmp/runs/build-run-fail"),
                     log_path: String::from("/tmp/logs/build-run-fail.log"),
@@ -16928,7 +17828,7 @@ mod tests {
             .expect("build run should start");
         let failed = coordinator
             .fail_build_run(
-                fixture.build_run_id,
+                running_fixture.build_run_id,
                 FailBuildRunInput {
                     workspace_path: String::new(),
                     log_path: String::new(),
@@ -16940,6 +17840,111 @@ mod tests {
         assert_eq!(failed.status, BuildStatus::Failed.as_str());
         assert_eq!(failed.error_message.as_deref(), Some("runner exploded"));
         assert!(failed.finished_at.is_some());
+
+        std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
+    }
+
+    #[test]
+    fn build_run_stage_updates_allow_queued_parent_builds() {
+        let root = test_root("build-run-stage-queued-parent");
+        let directories = RuntimeDirectories::from_root(&root);
+        let layout = StorageLayout::from_directories(&directories);
+        initialize_database(&layout).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&layout.database_path).expect("connection should open");
+        let fixture = seed_build_execution_fixture(&connection, "build-run-stage-queued-parent");
+        drop(connection);
+
+        let coordinator = LocalCoordinator::new(&layout);
+        let log_path = "/tmp/runs/build-run-stage-queued-parent/logs/01-checkout-repository.log";
+        let workspace_path = "/tmp/runs/build-run-stage-queued-parent";
+        let artifact_root_path = "/tmp/runs/build-run-stage-queued-parent/outputs";
+
+        let started = coordinator
+            .start_build_run_stage(
+                fixture.build_run_id,
+                StartBuildRunStageInput {
+                    position: 1,
+                    step_key: String::from("checkout-repository"),
+                    step_label: String::from("Checkout Repository"),
+                    step_log_path: String::from(log_path),
+                    workspace_path: String::from(workspace_path),
+                    log_path: String::from(log_path),
+                    artifact_root_path: String::from(artifact_root_path),
+                    message: String::from("Cloning repository into the process workspace."),
+                },
+            )
+            .expect("queued build should allow starting checkout stage");
+        assert_eq!(started.status, BuildStatus::Running.as_str());
+
+        let heartbeated = coordinator
+            .heartbeat_build_run_stage(
+                fixture.build_run_id,
+                HeartbeatBuildRunStageInput {
+                    step_key: String::from("checkout-repository"),
+                    step_label: String::from("Checkout Repository"),
+                    step_log_path: String::from(log_path),
+                    workspace_path: String::from(workspace_path),
+                    log_path: String::from(log_path),
+                    artifact_root_path: String::from(artifact_root_path),
+                    message: String::from("Resolving the requested tag before build startup."),
+                },
+            )
+            .expect("queued build should allow checkout heartbeats");
+        assert_eq!(heartbeated.status, BuildStatus::Queued.as_str());
+        assert_eq!(
+            heartbeated.current_stage_key.as_deref(),
+            Some("checkout-repository")
+        );
+        assert_eq!(
+            heartbeated.current_stage_status.as_deref(),
+            Some(BuildStatus::Running.as_str())
+        );
+        assert_eq!(
+            heartbeated.last_progress_message.as_deref(),
+            Some("Resolving the requested tag before build startup."),
+        );
+
+        let completed = coordinator
+            .complete_build_run_stage(
+                fixture.build_run_id,
+                CompleteBuildRunStageInput {
+                    step_key: String::from("checkout-repository"),
+                    step_label: String::from("Checkout Repository"),
+                    step_log_path: String::from(log_path),
+                    workspace_path: String::from(workspace_path),
+                    log_path: String::from(log_path),
+                    artifact_root_path: String::from(artifact_root_path),
+                    message: String::from("Repository checkout completed."),
+                },
+            )
+            .expect("queued build should allow checkout stage completion");
+        assert_eq!(completed.status, BuildStatus::Succeeded.as_str());
+
+        let build_run = coordinator
+            .get_build_run_record(fixture.build_run_id)
+            .expect("build run should reload after queued checkout stage");
+        assert_eq!(build_run.status, BuildStatus::Queued.as_str());
+        assert_eq!(
+            build_run.current_stage_key.as_deref(),
+            Some("checkout-repository")
+        );
+        assert_eq!(
+            build_run.current_stage_status.as_deref(),
+            Some(BuildStatus::Succeeded.as_str())
+        );
+        assert_eq!(
+            build_run.last_progress_message.as_deref(),
+            Some("Repository checkout completed."),
+        );
+
+        let stages = coordinator
+            .list_build_run_stages(fixture.build_run_id)
+            .expect("build run stages should load after queued checkout stage");
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0].step_key, "checkout-repository");
+        assert_eq!(stages[0].position, 1);
+        assert_eq!(stages[0].status, BuildStatus::Succeeded.as_str());
 
         std::fs::remove_dir_all(root).expect("temporary database directory should be removable");
     }

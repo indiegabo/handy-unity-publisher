@@ -48,6 +48,22 @@ impl RuntimeLoopCadence {
     }
 }
 
+struct RuntimeShutdownGitProgressReporter<'a> {
+    storage: &'a StorageLayout,
+}
+
+impl GitProgressReporter for RuntimeShutdownGitProgressReporter<'_> {
+    fn report(&mut self, _message: &str) {}
+
+    fn check_cancellation(&mut self) -> io::Result<()> {
+        if runtime_stop_requested(self.storage)? {
+            return Err(runtime_shutdown_interruption_error("repository polling"));
+        }
+
+        Ok(())
+    }
+}
+
 pub(crate) fn run_release_planner_cycle(storage: &StorageLayout) -> Result<bool, Box<dyn Error>> {
     let coordinator = LocalCoordinator::new(storage);
 
@@ -79,6 +95,10 @@ pub(crate) fn run_runtime_worker_iteration(
     storage: &StorageLayout,
     poll_schedule: &mut RepositoryPollSchedule,
 ) -> Result<(), Box<dyn Error>> {
+    if runtime_stop_requested(storage)? {
+        return Ok(());
+    }
+
     let coordinator = LocalCoordinator::new(storage);
     let forced_repository_ids = match take_forced_repository_poll_ids(storage) {
         Ok(repository_ids) => repository_ids,
@@ -95,11 +115,27 @@ pub(crate) fn run_runtime_worker_iteration(
         &forced_repository_ids,
         automation_snapshot.mode,
     )?;
+    if runtime_stop_requested(storage)? {
+        return Ok(());
+    }
+
     // RetryLater planner messages must not monopolize the serve loop, or
     // queued build work for earlier releases never gets a chance to start.
     let _ = run_release_planner_cycle(storage)?;
-    while run_build_worker_cycle(config, storage)? {}
-    while run_publish_worker_cycle(config, storage)? {}
+    if runtime_stop_requested(storage)? {
+        return Ok(());
+    }
+
+    while run_build_worker_cycle(config, storage)? {
+        if runtime_stop_requested(storage)? {
+            return Ok(());
+        }
+    }
+    while run_publish_worker_cycle(config, storage)? {
+        if runtime_stop_requested(storage)? {
+            return Ok(());
+        }
+    }
 
     Ok(())
 }
@@ -177,6 +213,10 @@ fn run_repository_poll_cycle_with_forced_repositories(
     let mut results = Vec::new();
 
     for repository in repositories {
+        if runtime_stop_requested(storage)? {
+            break;
+        }
+
         seen_repositories.insert(repository.id);
         let force_poll = forced_repository_ids.contains(&repository.id);
 
@@ -285,6 +325,10 @@ fn run_repository_poll_cycle_with_forced_repositories(
                 results.push(result);
             }
             Err(error) => {
+                if error.kind() == ErrorKind::Interrupted && runtime_stop_requested(storage)? {
+                    break;
+                }
+
                 log_failed_poll_attempt(
                     storage,
                     &repository,
@@ -325,10 +369,14 @@ fn poll_repository(
     repository: &PollingRepositoryRecord,
 ) -> io::Result<RepositoryPollResult> {
     let git_auth = resolve_repository_git_auth(coordinator, repository.credentials_id)?;
-    let tags = tag_lister.list_tags(&GitTagListRequest {
-        repository_url: repository.repo_url.clone(),
-        auth: git_auth,
-    })?;
+    let mut reporter = RuntimeShutdownGitProgressReporter { storage };
+    let tags = tag_lister.list_tags_with_reporter(
+        &GitTagListRequest {
+            repository_url: repository.repo_url.clone(),
+            auth: git_auth,
+        },
+        &mut reporter,
+    )?;
     if !repository.has_release_history
         && repository
             .last_seen_tag
@@ -380,6 +428,10 @@ fn poll_repository(
                 if let Err(error) = emit_release_queued_event(storage, &context) {
                     log_runtime_event_failure(EVENT_TOPIC_RELEASE_QUEUED, &error);
                 }
+                ensure_process_elapsed_ticker(
+                    storage,
+                    process_elapsed_event_context_from_release(&context),
+                );
                 discovered_tags.push(tag);
                 queued_release_ids.push(release.id);
             }
@@ -902,6 +954,8 @@ pub(crate) fn serve_runtime(
     let mut last_heartbeat_at = Instant::now();
 
     loop {
+        ensure_active_process_elapsed_tickers(storage);
+
         if runtime_stop_requested(storage)? {
             return Ok(());
         }
@@ -964,14 +1018,7 @@ pub(crate) fn serve_runtime(
 }
 
 pub(crate) fn runtime_stop_requested(storage: &StorageLayout) -> io::Result<bool> {
-    match read_health_report(&storage.health_report_path) {
-        Ok(report) => Ok(matches!(
-            report.status,
-            RuntimeStatus::ShuttingDown | RuntimeStatus::Stopped
-        )),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
+    runtime_shutdown_requested(storage)
 }
 
 pub(crate) fn supervise_runtime(

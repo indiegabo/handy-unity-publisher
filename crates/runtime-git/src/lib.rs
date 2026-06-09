@@ -10,9 +10,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::io::ErrorKind;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Identifies Git credentials backed by HTTP basic authentication.
 pub const KIND_GIT_HTTP_BASIC: &str = "git-http-basic";
@@ -51,6 +54,10 @@ const REPOSITORY_AUTH_STATUS_UNSUPPORTED: &str = "unsupported";
 const REPOSITORY_AUTH_STATUS_UNKNOWN: &str = "unknown";
 #[cfg(test)]
 const TEST_GIT_EXECUTABLE_ENV: &str = "HANDY_GAMES_PUBLISHER_TEST_GIT_EXECUTABLE";
+const GIT_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const GIT_PROGRESS_REPORT_INTERVAL: Duration = Duration::from_secs(2);
+const GIT_COMMAND_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
+const GIT_CREDENTIAL_HELPER_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Lists the Git transport strategy supported by the runtime scaffold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +253,10 @@ pub fn detect_repository_provider_from_url(
 /// Receives coarse checkout progress updates emitted by the Git workspace syncer.
 pub trait GitProgressReporter {
     fn report(&mut self, message: &str);
+
+    fn check_cancellation(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -397,13 +408,46 @@ fn request_github_host_login_credentials(
     instance_url: &str,
     login: Option<&str>,
 ) -> io::Result<(String, String)> {
+    request_github_host_login_credentials_with_timeout(
+        instance_url,
+        login,
+        GIT_CREDENTIAL_HELPER_TIMEOUT,
+    )
+}
+
+fn request_github_host_login_credentials_with_timeout(
+    instance_url: &str,
+    login: Option<&str>,
+    inactivity_timeout: Duration,
+) -> io::Result<(String, String)> {
     let (protocol, host) = credential_context_from_instance_url(instance_url)?;
-    let (preview, mut command) = prepare_github_credential_fill_command();
+    let (preview, command) = prepare_github_credential_fill_command();
+
+    request_github_host_login_credentials_with_timeout_and_command(
+        instance_url,
+        login,
+        inactivity_timeout,
+        &protocol,
+        &host,
+        preview,
+        command,
+    )
+}
+
+fn request_github_host_login_credentials_with_timeout_and_command(
+    instance_url: &str,
+    login: Option<&str>,
+    inactivity_timeout: Duration,
+    protocol: &str,
+    host: &str,
+    preview: String,
+    mut command: Command,
+) -> io::Result<(String, String)> {
 
     let mut child = command
         .spawn()
         .map_err(|error| io::Error::other(format!("spawn git {preview}: {error}")))?;
-    let input = git_credential_fill_input(&protocol, &host, login);
+    let input = git_credential_fill_input(protocol, host, login);
     {
         use std::io::Write as _;
 
@@ -419,9 +463,14 @@ fn request_github_host_login_credentials(
         })?;
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(|error| io::Error::other(format!("wait for git {preview}: {error}")))?;
+    let mut reporter = NoopGitProgressReporter;
+    let output = wait_for_git_command_output_with_timeout(
+        child,
+        &mut reporter,
+        &preview,
+        "credential helper",
+        Some(inactivity_timeout),
+    )?;
     if !output.status.success() {
         return Err(io::Error::other(format_git_command_failure(
             &preview, &output,
@@ -687,9 +736,23 @@ pub struct GitTag {
     pub commit: String,
 }
 
+/// Describes one branch discovered from a Git remote in ascending refname order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitBranch {
+    pub name: String,
+    pub commit: String,
+}
+
 /// Defines the repository whose tags must be listed through the local Git CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitTagListRequest {
+    pub repository_url: String,
+    pub auth: GitAuthOptions,
+}
+
+/// Defines the repository whose branches must be listed through the local Git CLI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitBranchListRequest {
     pub repository_url: String,
     pub auth: GitAuthOptions,
 }
@@ -699,6 +762,53 @@ pub struct GitTagListRequest {
 pub struct GitRemoteHeadRefRequest {
     pub repository_url: String,
     pub auth: GitAuthOptions,
+}
+
+/// Identifies which remote reference namespace should be queried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitRemoteRefKind {
+    Branch,
+    Tag,
+}
+
+impl GitRemoteRefKind {
+    fn full_ref(self, git_ref: &str) -> String {
+        match self {
+            Self::Branch => format!("refs/heads/{git_ref}"),
+            Self::Tag => format!("refs/tags/{git_ref}"),
+        }
+    }
+
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Branch => "refs/heads/",
+            Self::Tag => "refs/tags/",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Branch => "branch",
+            Self::Tag => "tag",
+        }
+    }
+}
+
+/// Defines one exact remote branch or tag that should be validated through `git ls-remote`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRemoteRefLookupRequest {
+    pub repository_url: String,
+    pub git_ref: String,
+    pub ref_kind: GitRemoteRefKind,
+    pub auth: GitAuthOptions,
+}
+
+/// Describes one exact branch or tag resolved from a remote repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRemoteRefMatch {
+    pub name: String,
+    pub full_ref: String,
+    pub commit: String,
 }
 
 /// Lists repository tags through the local Git CLI.
@@ -713,8 +823,18 @@ impl GitTagLister {
 
     /// Lists remote tags in ascending version/refname order.
     pub fn list_tags(&self, request: &GitTagListRequest) -> io::Result<Vec<GitTag>> {
+        let mut reporter = NoopGitProgressReporter;
+        self.list_tags_with_reporter(request, &mut reporter)
+    }
+
+    /// Lists remote tags while allowing the caller to interrupt the Git process.
+    pub fn list_tags_with_reporter(
+        &self,
+        request: &GitTagListRequest,
+        reporter: &mut dyn GitProgressReporter,
+    ) -> io::Result<Vec<GitTag>> {
         let repository_url = require_non_empty(&request.repository_url, "repository url")?;
-        let output = run_git_command_with_output(
+        let output = run_git_command_with_output_and_progress(
             None,
             request.auth.append_git_args([
                 "ls-remote",
@@ -725,9 +845,40 @@ impl GitTagLister {
             ]),
             request.auth.credential_helper.as_deref(),
             request.auth.preserve_credential_helper,
+            reporter,
         )?;
 
         parse_git_tags(&output)
+    }
+}
+
+/// Lists repository branches through the local Git CLI.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GitBranchLister;
+
+impl GitBranchLister {
+    /// Creates the default Git CLI-backed branch lister.
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Lists remote branches in ascending refname order.
+    pub fn list_branches(&self, request: &GitBranchListRequest) -> io::Result<Vec<GitBranch>> {
+        let repository_url = require_non_empty(&request.repository_url, "repository url")?;
+        let output = run_git_command_with_output(
+            None,
+            request.auth.append_git_args([
+                "ls-remote",
+                "--refs",
+                "--heads",
+                "--sort=refname",
+                repository_url.as_str(),
+            ]),
+            request.auth.credential_helper.as_deref(),
+            request.auth.preserve_credential_helper,
+        )?;
+
+        parse_git_branches(&output)
     }
 }
 
@@ -757,6 +908,38 @@ impl GitRemoteHeadRefResolver {
         )?;
 
         parse_remote_head_ref(&output)
+    }
+}
+
+/// Resolves one exact branch or tag from a repository remote.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GitRemoteRefResolver;
+
+impl GitRemoteRefResolver {
+    /// Creates the default Git CLI-backed remote ref resolver.
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Resolves one exact remote branch or tag and returns its fully-qualified ref and commit.
+    pub fn resolve_ref(&self, request: &GitRemoteRefLookupRequest) -> io::Result<GitRemoteRefMatch> {
+        let repository_url = require_non_empty(&request.repository_url, "repository url")?;
+        let git_ref = require_non_empty(&request.git_ref, "git ref")?;
+        let full_ref = request.ref_kind.full_ref(&git_ref);
+        let output = run_git_command_with_output(
+            None,
+            request.auth.append_git_args([
+                "ls-remote",
+                "--exit-code",
+                "--refs",
+                repository_url.as_str(),
+                full_ref.as_str(),
+            ]),
+            request.auth.credential_helper.as_deref(),
+            request.auth.preserve_credential_helper,
+        )?;
+
+        parse_git_remote_ref(&output, request.ref_kind)
     }
 }
 
@@ -827,26 +1010,27 @@ impl GitWorkspaceSyncer {
             ));
             reset_workspace_path(&workspace_path)?;
             let clone_destination = workspace_path.display().to_string();
-            run_git_command(
+            run_git_command_with_output_and_progress(
                 None,
                 request.auth.append_git_args([
                     "clone",
+                    "--progress",
                     "--no-checkout",
                     repository_url.as_str(),
                     clone_destination.as_str(),
                 ]),
                 request.auth.credential_helper.as_deref(),
                 request.auth.preserve_credential_helper,
+                reporter,
             )
-            .map_err(|error| {
-                io::Error::other(format!("clone repository into workspace: {error}"))
-            })?;
+            .map(|_| ())
+            .map_err(|error| wrap_git_sync_error("clone repository into workspace", error))?;
         } else {
             reporter.report(&format!(
                 "Refreshing Git remote configuration for existing workspace '{}'.",
                 workspace_display,
             ));
-            run_git_command(
+            run_git_command_with_output_and_progress(
                 Some(&workspace_path),
                 vec![
                     String::from("remote"),
@@ -856,8 +1040,10 @@ impl GitWorkspaceSyncer {
                 ],
                 None,
                 false,
+                reporter,
             )
-            .map_err(|error| io::Error::other(format!("set workspace remote origin: {error}")))?;
+            .map(|_| ())
+            .map_err(|error| wrap_git_sync_error("set workspace remote origin", error))?;
         }
 
         reporter.report(&format!(
@@ -872,10 +1058,11 @@ impl GitWorkspaceSyncer {
             "Fetching ref '{}' from origin into '{}'.",
             git_ref, workspace_display,
         ));
-        run_git_command(
+        run_git_command_with_output_and_progress(
             Some(&workspace_path),
             request.auth.append_git_args([
                 "fetch",
+                "--progress",
                 "--force",
                 "--depth=1",
                 "origin",
@@ -883,14 +1070,16 @@ impl GitWorkspaceSyncer {
             ]),
             request.auth.credential_helper.as_deref(),
             request.auth.preserve_credential_helper,
+            reporter,
         )
-        .map_err(|error| io::Error::other(format!("fetch repository ref {git_ref:?}: {error}")))?;
+        .map(|_| ())
+        .map_err(|error| wrap_git_sync_error(&format!("fetch repository ref {git_ref:?}"), error))?;
 
         reporter.report(&format!(
             "Checking out fetched ref '{}' in detached HEAD mode.",
             git_ref,
         ));
-        run_git_command(
+        run_git_command_with_output_and_progress(
             Some(&workspace_path),
             vec![
                 String::from("checkout"),
@@ -900,22 +1089,24 @@ impl GitWorkspaceSyncer {
             ],
             None,
             false,
+            reporter,
         )
-        .map_err(|error| {
-            io::Error::other(format!("checkout repository ref {git_ref:?}: {error}"))
-        })?;
+        .map(|_| ())
+        .map_err(|error| wrap_git_sync_error(&format!("checkout repository ref {git_ref:?}"), error))?;
 
         reporter.report(&format!(
             "Cleaning untracked files in '{}'.",
             workspace_display,
         ));
-        run_git_command(
+        run_git_command_with_output_and_progress(
             Some(&workspace_path),
             vec![String::from("clean"), String::from("-fdx")],
             None,
             false,
+            reporter,
         )
-        .map_err(|error| io::Error::other(format!("clean workspace after checkout: {error}")))?;
+        .map(|_| ())
+        .map_err(|error| wrap_git_sync_error("clean workspace after checkout", error))?;
 
         reporter.report(&format!(
             "Repository ref '{}' is ready at '{}'.",
@@ -974,6 +1165,10 @@ fn reset_workspace_path(workspace_path: &Path) -> io::Result<()> {
     }
 }
 
+fn wrap_git_sync_error(action: &str, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{action}: {error}"))
+}
+
 fn run_git_command(
     working_dir: Option<&Path>,
     args: Vec<String>,
@@ -987,7 +1182,6 @@ fn run_git_command(
         preserve_credential_helper,
     )?;
     let _ = output;
-
     Ok(())
 }
 
@@ -997,6 +1191,26 @@ fn run_git_command_with_output(
     credential_helper: Option<&str>,
     preserve_credential_helper: bool,
 ) -> io::Result<String> {
+    let mut reporter = NoopGitProgressReporter;
+
+    run_git_command_with_output_and_progress(
+        working_dir,
+        args,
+        credential_helper,
+        preserve_credential_helper,
+        &mut reporter,
+    )
+}
+
+fn run_git_command_with_output_and_progress(
+    working_dir: Option<&Path>,
+    args: Vec<String>,
+    credential_helper: Option<&str>,
+    preserve_credential_helper: bool,
+    reporter: &mut dyn GitProgressReporter,
+) -> io::Result<String> {
+    let operation_label = describe_git_operation(&args);
+    let inactivity_timeout = git_operation_inactivity_timeout(&operation_label);
     let (preview, mut command) = prepare_git_command(
         working_dir,
         args,
@@ -1004,16 +1218,384 @@ fn run_git_command_with_output(
         preserve_credential_helper,
     );
 
-    let output = command
-        .output()
+    reporter.check_cancellation()?;
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let child = command
+        .spawn()
         .map_err(|error| io::Error::other(format!("spawn git {preview}: {error}")))?;
+
+    let output = wait_for_git_command_output(
+        child,
+        reporter,
+        &preview,
+        &operation_label,
+        inactivity_timeout,
+    )?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
 
-    Err(io::Error::other(format_git_command_failure(
-        &preview, &output,
-    )))
+    report_failed_git_command_output(reporter, &output);
+
+    Err(io::Error::other(format_git_command_failure(&preview, &output)))
+}
+
+fn wait_for_git_command_output(
+    child: Child,
+    reporter: &mut dyn GitProgressReporter,
+    preview: &str,
+    operation_label: &str,
+    inactivity_timeout: Option<Duration>,
+) -> io::Result<Output> {
+    wait_for_git_command_output_with_timeout(
+        child,
+        reporter,
+        preview,
+        operation_label,
+        inactivity_timeout,
+    )
+}
+
+fn wait_for_git_command_output_with_timeout(
+    mut child: Child,
+    reporter: &mut dyn GitProgressReporter,
+    preview: &str,
+    operation_label: &str,
+    inactivity_timeout: Option<Duration>,
+) -> io::Result<Output> {
+    let last_output_activity_at = Arc::new(Mutex::new(Instant::now()));
+    let live_output_messages = Arc::new(Mutex::new(Vec::new()));
+    let stdout_collector = spawn_git_output_collector(
+        child.stdout.take(),
+        preview,
+        "stdout",
+        Arc::clone(&last_output_activity_at),
+        Arc::clone(&live_output_messages),
+    )?;
+    let stderr_collector = spawn_git_output_collector(
+        child.stderr.take(),
+        preview,
+        "stderr",
+        Arc::clone(&last_output_activity_at),
+        Arc::clone(&live_output_messages),
+    )?;
+    let started_at = Instant::now();
+    let mut last_progress_report_at = started_at;
+    let mut last_live_output_message = None::<String>;
+
+    loop {
+        let _ = emit_live_git_output_messages(
+            reporter,
+            &live_output_messages,
+            &mut last_live_output_message,
+        )?;
+
+        if let Some(status) = child.try_wait()? {
+            let stdout = join_git_output_collector(stdout_collector, preview, "stdout")?;
+            let stderr = join_git_output_collector(stderr_collector, preview, "stderr")?;
+            let _ = emit_live_git_output_messages(
+                reporter,
+                &live_output_messages,
+                &mut last_live_output_message,
+            )?;
+            return Ok(Output {
+                status,
+                stdout,
+                stderr,
+            });
+        }
+
+        if let Err(error) = reporter.check_cancellation() {
+            terminate_child_process(&mut child, preview)?;
+            let _ = child.wait();
+            let _ = join_git_output_collector(stdout_collector, preview, "stdout");
+            let _ = join_git_output_collector(stderr_collector, preview, "stderr");
+            let _ = emit_live_git_output_messages(
+                reporter,
+                &live_output_messages,
+                &mut last_live_output_message,
+            );
+            return Err(error);
+        }
+
+        let last_output_elapsed = last_output_activity_at
+            .lock()
+            .map_err(|_| {
+                io::Error::other(format!(
+                    "track git {operation_label} output activity for {preview}: output activity lock was poisoned"
+                ))
+            })?
+            .elapsed();
+        if let Some(inactivity_timeout) = inactivity_timeout {
+            if last_output_elapsed >= inactivity_timeout {
+                let _ = emit_live_git_output_messages(
+                    reporter,
+                    &live_output_messages,
+                    &mut last_live_output_message,
+                );
+                reporter.report(&format!(
+                    "Git {operation_label} stopped producing output for {}s; aborting the stalled operation.",
+                    inactivity_timeout.as_secs()
+                ));
+                terminate_child_process(&mut child, preview)?;
+                let _ = child.wait();
+                let _ = join_git_output_collector(stdout_collector, preview, "stdout");
+                let _ = join_git_output_collector(stderr_collector, preview, "stderr");
+                return Err(io::Error::new(
+                    ErrorKind::TimedOut,
+                    format!(
+                        "git {preview} timed out after {}s without observable output; this usually indicates a hung credential helper or stalled network transport",
+                        inactivity_timeout.as_secs()
+                    ),
+                ));
+            }
+        }
+
+        if last_live_output_message.is_none()
+            && last_progress_report_at.elapsed() >= GIT_PROGRESS_REPORT_INTERVAL
+        {
+            reporter.report(&format!(
+                "Git {operation_label} is still running after {}s; waiting for completion.",
+                started_at.elapsed().as_secs()
+            ));
+            last_progress_report_at = Instant::now();
+        }
+
+        thread::sleep(GIT_PROCESS_POLL_INTERVAL);
+    }
+}
+
+fn spawn_git_output_collector(
+    pipe: Option<impl Read + Send + 'static>,
+    preview: &str,
+    stream_label: &'static str,
+    last_output_activity_at: Arc<Mutex<Instant>>,
+    live_output_messages: Arc<Mutex<Vec<String>>>,
+) -> io::Result<thread::JoinHandle<io::Result<Vec<u8>>>> {
+    let Some(mut pipe) = pipe else {
+        return Err(io::Error::other(format!(
+            "git {preview} is missing a {stream_label} pipe"
+        )));
+    };
+
+    let preview = preview.to_owned();
+    Ok(thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let mut pending_line = Vec::new();
+        loop {
+            let read = pipe.read(&mut chunk).map_err(|error| {
+                io::Error::other(format!(
+                    "read git {stream_label} for {preview}: {error}"
+                ))
+            })?;
+            if read == 0 {
+                break;
+            }
+
+            buffer.extend_from_slice(&chunk[..read]);
+            *last_output_activity_at.lock().map_err(|_| {
+                io::Error::other(format!(
+                    "track git {stream_label} activity for {preview}: output activity lock was poisoned"
+                ))
+            })? = Instant::now();
+            collect_live_git_output_messages(
+                &mut pending_line,
+                &chunk[..read],
+                &live_output_messages,
+                &preview,
+                stream_label,
+            )?;
+        }
+
+        push_live_git_output_message(
+            &mut pending_line,
+            &live_output_messages,
+            &preview,
+            stream_label,
+        )?;
+
+        Ok(buffer)
+    }))
+}
+
+fn collect_live_git_output_messages(
+    pending_line: &mut Vec<u8>,
+    chunk: &[u8],
+    live_output_messages: &Arc<Mutex<Vec<String>>>,
+    preview: &str,
+    stream_label: &'static str,
+) -> io::Result<()> {
+    for byte in chunk {
+        if *byte == b'\n' || *byte == b'\r' {
+            push_live_git_output_message(
+                pending_line,
+                live_output_messages,
+                preview,
+                stream_label,
+            )?;
+            continue;
+        }
+
+        pending_line.push(*byte);
+    }
+
+    Ok(())
+}
+
+fn push_live_git_output_message(
+    pending_line: &mut Vec<u8>,
+    live_output_messages: &Arc<Mutex<Vec<String>>>,
+    preview: &str,
+    stream_label: &'static str,
+) -> io::Result<()> {
+    if pending_line.is_empty() {
+        return Ok(());
+    }
+
+    let message = String::from_utf8_lossy(pending_line).trim().to_owned();
+    pending_line.clear();
+
+    if message.is_empty() {
+        return Ok(());
+    }
+
+    live_output_messages
+        .lock()
+        .map_err(|_| {
+            io::Error::other(format!(
+                "track git {stream_label} live output for {preview}: live output lock was poisoned"
+            ))
+        })?
+        .push(message);
+    Ok(())
+}
+
+fn emit_live_git_output_messages(
+    reporter: &mut dyn GitProgressReporter,
+    live_output_messages: &Arc<Mutex<Vec<String>>>,
+    last_live_output_message: &mut Option<String>,
+) -> io::Result<bool> {
+    let messages = drain_live_git_output_messages(live_output_messages)?;
+    let mut emitted = false;
+
+    for message in messages {
+        let normalized_message = message.trim();
+        if normalized_message.is_empty() {
+            continue;
+        }
+
+        if last_live_output_message.as_deref() == Some(normalized_message) {
+            continue;
+        }
+
+        reporter.report(normalized_message);
+        *last_live_output_message = Some(normalized_message.to_owned());
+        emitted = true;
+    }
+
+    Ok(emitted)
+}
+
+fn drain_live_git_output_messages(
+    live_output_messages: &Arc<Mutex<Vec<String>>>,
+) -> io::Result<Vec<String>> {
+    let mut guard = live_output_messages.lock().map_err(|_| {
+        io::Error::other("drain git live output messages: live output lock was poisoned")
+    })?;
+    Ok(std::mem::take(&mut *guard))
+}
+
+fn join_git_output_collector(
+    handle: thread::JoinHandle<io::Result<Vec<u8>>>,
+    preview: &str,
+    stream_label: &'static str,
+) -> io::Result<Vec<u8>> {
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::other(format!(
+            "join git {stream_label} collector for {preview} panicked"
+        ))),
+    }
+}
+
+fn report_failed_git_command_output(reporter: &mut dyn GitProgressReporter, output: &Output) {
+    report_git_output_lines(reporter, &output.stderr);
+    report_git_output_lines(reporter, &output.stdout);
+}
+
+fn report_git_output_lines(reporter: &mut dyn GitProgressReporter, buffer: &[u8]) {
+    if buffer.is_empty() {
+        return;
+    }
+
+    let decoded = String::from_utf8_lossy(buffer);
+    for line in decoded.split(|character| character == '\n' || character == '\r') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        reporter.report(trimmed);
+    }
+}
+
+fn terminate_child_process(child: &mut Child, command_label: &str) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        match Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(_) | Err(_) => {}
+        }
+    }
+
+    match child.kill() {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::InvalidInput => Ok(()),
+        Err(error) => Err(io::Error::other(format!(
+            "terminate git {command_label}: {error}"
+        ))),
+    }
+}
+
+fn describe_git_operation(args: &[String]) -> String {
+    let mut index = 0;
+    while index < args.len() {
+        let argument = args[index].as_str();
+        if argument == "-c" {
+            index += 2;
+            continue;
+        }
+        if argument.starts_with('-') {
+            index += 1;
+            continue;
+        }
+
+        if argument == "remote" && index + 1 < args.len() {
+            let subcommand = args[index + 1].trim();
+            if !subcommand.is_empty() && !subcommand.starts_with('-') {
+                return format!("remote {subcommand}");
+            }
+        }
+
+        return argument.to_owned();
+    }
+
+    String::from("operation")
+}
+
+fn git_operation_inactivity_timeout(operation_label: &str) -> Option<Duration> {
+    match operation_label.trim().to_ascii_lowercase().as_str() {
+        "clone" | "fetch" => Some(GIT_COMMAND_PROGRESS_TIMEOUT),
+        _ => None,
+    }
 }
 
 fn prepare_git_command(
@@ -1117,7 +1699,27 @@ fn platform_git_command_args(
 }
 
 fn parse_git_tags(output: &str) -> io::Result<Vec<GitTag>> {
-    let mut tags = Vec::new();
+    parse_named_git_refs(output, "refs/tags/", "tag").map(|refs| {
+        refs.into_iter()
+            .map(|(name, commit)| GitTag { name, commit })
+            .collect()
+    })
+}
+
+fn parse_git_branches(output: &str) -> io::Result<Vec<GitBranch>> {
+    parse_named_git_refs(output, "refs/heads/", "branch").map(|refs| {
+        refs.into_iter()
+            .map(|(name, commit)| GitBranch { name, commit })
+            .collect()
+    })
+}
+
+fn parse_named_git_refs(
+    output: &str,
+    prefix: &str,
+    label: &str,
+) -> io::Result<Vec<(String, String)>> {
+    let mut refs = Vec::new();
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -1145,20 +1747,17 @@ fn parse_git_tags(output: &str) -> io::Result<Vec<GitTag>> {
             ));
         }
 
-        let Some(tag_name) = reference.strip_prefix("refs/tags/") else {
+        let Some(name) = reference.strip_prefix(prefix) else {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
-                format!("git ls-remote output returned non-tag ref {reference:?}"),
+                format!("git ls-remote output returned non-{label} ref {reference:?}"),
             ));
         };
 
-        tags.push(GitTag {
-            name: tag_name.to_owned(),
-            commit: commit.to_owned(),
-        });
+        refs.push((name.to_owned(), commit.to_owned()));
     }
 
-    Ok(tags)
+    Ok(refs)
 }
 
 fn parse_remote_head_ref(output: &str) -> io::Result<String> {
@@ -1203,6 +1802,59 @@ fn parse_remote_head_ref(output: &str) -> io::Result<String> {
     ))
 }
 
+fn parse_git_remote_ref(output: &str, ref_kind: GitRemoteRefKind) -> io::Result<GitRemoteRefMatch> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let mut fields = trimmed.split_whitespace();
+        let commit = fields.next().ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                "git ls-remote output is missing commit",
+            )
+        })?;
+        let reference = fields.next().ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                "git ls-remote output is missing ref",
+            )
+        })?;
+        if fields.next().is_some() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!("git ls-remote output has unexpected extra fields: {trimmed}"),
+            ));
+        }
+
+        let Some(name) = reference.strip_prefix(ref_kind.prefix()) else {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "git ls-remote output returned non-{} ref {reference:?}",
+                    ref_kind.label()
+                ),
+            ));
+        };
+
+        return Ok(GitRemoteRefMatch {
+            name: name.to_owned(),
+            full_ref: reference.to_owned(),
+            commit: commit.to_owned(),
+        });
+    }
+
+    Err(io::Error::new(
+        ErrorKind::NotFound,
+        format!(
+            "git ls-remote did not report a remote {} match",
+            ref_kind.label()
+        ),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::prepare_github_credential_fill_command;
@@ -1211,9 +1863,16 @@ mod tests {
         format_git_command_failure, git_auth_options_from_credentials,
         git_auth_options_from_credentials_with_github_header_resolver, normalize_repository_url,
         parse_git_credential_fill_output, platform_git_command_args, prepare_git_command,
-        GitAuthOptions, GitRemoteHeadRefRequest, GitRemoteHeadRefResolver, GitTagListRequest,
-        GitTagLister, GitWorkspaceSyncRefRequest, GitWorkspaceSyncRequest, GitWorkspaceSyncer,
-        KIND_GIT_HTTP_BASIC, KIND_GIT_HTTP_BEARER, KIND_GIT_HTTP_GITHUB_HOST_LOGIN,
+        report_failed_git_command_output,
+        request_github_host_login_credentials_with_timeout_and_command,
+        wait_for_git_command_output, wait_for_git_command_output_with_timeout, GitAuthOptions,
+        GitBranchListRequest, GitBranchLister, GitProgressReporter, GitRemoteHeadRefRequest,
+        GitRemoteHeadRefResolver, GitRemoteRefKind, GitRemoteRefLookupRequest,
+        GitRemoteRefResolver, GitTagListRequest, GitTagLister, GitWorkspaceSyncRefRequest,
+        GitWorkspaceSyncRequest,
+        GitWorkspaceSyncer, GIT_COMMAND_PROGRESS_TIMEOUT, KIND_GIT_HTTP_BASIC,
+        KIND_GIT_HTTP_BEARER,
+        KIND_GIT_HTTP_GITHUB_HOST_LOGIN, TEST_GIT_EXECUTABLE_ENV,
     };
     use std::ffi::OsStr;
     use std::fs;
@@ -1222,8 +1881,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::thread::{self, JoinHandle};
+    use std::time::Duration;
 
     #[test]
     fn git_auth_options_from_basic_credentials_builds_authorization_header() {
@@ -1310,6 +1970,327 @@ mod tests {
         )
         .expect_err("blank username should fail");
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn sync_ref_with_progress_aborts_when_cancellation_is_requested() {
+        let _guard = test_git_executable_env_lock()
+            .lock()
+            .expect("git executable env lock should not be poisoned");
+        let root = test_root("sync-ref-cancel");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("existing git cancel root should be removable");
+        }
+        fs::create_dir_all(&root).expect("git cancel root should create");
+
+        let fake_git_path = write_fake_sleeping_git_script(&root);
+        let previous = std::env::var_os(TEST_GIT_EXECUTABLE_ENV);
+        std::env::set_var(TEST_GIT_EXECUTABLE_ENV, &fake_git_path);
+
+        let mut reporter = CancelAfterSpawnGitReporter::default();
+        let error = GitWorkspaceSyncer::new()
+            .sync_ref_with_progress(
+                &GitWorkspaceSyncRefRequest {
+                    repository_url: String::from("https://example.com/revolutions.git"),
+                    workspace_path: root.join("workspace"),
+                    git_ref: String::from("refs/tags/v1.0.0"),
+                    auth: GitAuthOptions::default(),
+                },
+                &mut reporter,
+            )
+            .expect_err("git workspace sync should stop when cancellation is requested");
+
+        match previous {
+            Some(previous) => std::env::set_var(TEST_GIT_EXECUTABLE_ENV, previous),
+            None => std::env::remove_var(TEST_GIT_EXECUTABLE_ENV),
+        }
+
+        assert_eq!(error.kind(), ErrorKind::Interrupted);
+        assert!(reporter.report_count > 0);
+
+        fs::remove_dir_all(root).expect("temporary git cancel root should be removable");
+    }
+
+    #[test]
+    fn list_tags_with_reporter_aborts_when_cancellation_is_requested() {
+        let _guard = test_git_executable_env_lock()
+            .lock()
+            .expect("git executable env lock should not be poisoned");
+        let root = test_root("list-tags-cancel");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("existing git tag cancel root should be removable");
+        }
+        fs::create_dir_all(&root).expect("git tag cancel root should create");
+
+        let fake_git_path = write_fake_sleeping_git_script(&root);
+        let previous = std::env::var_os(TEST_GIT_EXECUTABLE_ENV);
+        std::env::set_var(TEST_GIT_EXECUTABLE_ENV, &fake_git_path);
+
+        let mut reporter = CancelAfterSpawnGitReporter::default();
+        let error = GitTagLister::new()
+            .list_tags_with_reporter(
+                &GitTagListRequest {
+                    repository_url: String::from("https://example.com/revolutions.git"),
+                    auth: GitAuthOptions::default(),
+                },
+                &mut reporter,
+            )
+            .expect_err("git tag listing should stop when cancellation is requested");
+
+        match previous {
+            Some(previous) => std::env::set_var(TEST_GIT_EXECUTABLE_ENV, previous),
+            None => std::env::remove_var(TEST_GIT_EXECUTABLE_ENV),
+        }
+
+        assert_eq!(error.kind(), ErrorKind::Interrupted);
+        assert!(reporter.check_count >= 2);
+
+        fs::remove_dir_all(root).expect("temporary git tag cancel root should be removable");
+    }
+
+    #[test]
+    fn wait_for_git_command_output_reports_git_stderr_when_process_fails() {
+        let root = test_root("sync-ref-stderr");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("existing git stderr root should be removable");
+        }
+        fs::create_dir_all(&root).expect("git stderr root should create");
+
+        let fake_git_path = write_fake_failing_git_script(&root);
+        let mut reporter = RecordedGitReporter::default();
+        let child = Command::new(&fake_git_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fake failing git process should spawn");
+        let output = wait_for_git_command_output(
+            child,
+            &mut reporter,
+            "fake git failure",
+            "clone",
+            Some(GIT_COMMAND_PROGRESS_TIMEOUT),
+        )
+            .expect("fake failing git process should complete");
+        report_failed_git_command_output(&mut reporter, &output);
+
+        assert!(
+            format_git_command_failure("fake git failure", &output)
+                .contains("fatal: unable to get password from user"),
+            "error should preserve the git authentication failure"
+        );
+        assert!(
+            reporter
+                .messages
+                .iter()
+                .any(|message| message.contains("fatal: unable to get password from user")),
+            "reporter should capture the fatal git stderr line"
+        );
+
+        fs::remove_dir_all(root).expect("temporary git stderr root should be removable");
+    }
+
+    #[test]
+    fn wait_for_git_command_output_reports_periodic_progress_for_long_running_processes() {
+        let root = test_root("sync-ref-progress-heartbeat");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("existing git progress root should be removable");
+        }
+        fs::create_dir_all(&root).expect("git progress root should create");
+
+        let fake_git_path = write_fake_sleeping_git_script(&root);
+        let mut reporter = RecordedGitReporter::default();
+        let child = Command::new(&fake_git_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fake sleeping git process should spawn");
+        let output = wait_for_git_command_output(
+            child,
+            &mut reporter,
+            "fake git progress",
+            "clone",
+            Some(GIT_COMMAND_PROGRESS_TIMEOUT),
+        )
+        .expect("fake sleeping git process should complete");
+
+        assert!(
+            output.status.success(),
+            "fake sleeping git process should succeed"
+        );
+        assert!(
+            reporter
+                .messages
+                .iter()
+                .any(|message| message.contains("Git clone is still running after")),
+            "reporter should capture at least one periodic git progress heartbeat"
+        );
+
+        fs::remove_dir_all(root).expect("temporary git progress root should be removable");
+    }
+
+    #[test]
+    fn wait_for_git_command_output_reports_live_progress_without_overwriting_it() {
+        let root = test_root("sync-ref-live-progress");
+        if root.exists() {
+            fs::remove_dir_all(&root)
+                .expect("existing live progress root should be removable");
+        }
+        fs::create_dir_all(&root).expect("live progress root should create");
+
+        let fake_git_path = write_fake_progress_git_script(&root);
+        let mut reporter = RecordedGitReporter::default();
+        let child = Command::new(&fake_git_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fake progress git process should spawn");
+        let output = wait_for_git_command_output(
+            child,
+            &mut reporter,
+            "fake git live progress",
+            "clone",
+            Some(GIT_COMMAND_PROGRESS_TIMEOUT),
+        )
+        .expect("fake progress git process should complete");
+
+        assert!(
+            output.status.success(),
+            "fake progress git process should succeed"
+        );
+        assert!(
+            reporter.messages.iter().any(|message| message.contains(
+                "Receiving objects: 42% (42/100), 1.20 MiB | 256.00 KiB/s"
+            )),
+            "reporter should capture the live git progress line"
+        );
+        assert!(
+            reporter
+                .messages
+                .iter()
+                .all(|message| !message.contains("Git clone is still running after")),
+            "generic heartbeat should stay disabled once live git progress is available"
+        );
+
+        fs::remove_dir_all(root).expect("temporary live progress root should be removable");
+    }
+
+    #[test]
+    fn wait_for_git_command_output_times_out_when_process_stops_emitting_output() {
+        let root = test_root("sync-ref-progress-timeout");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("existing git timeout root should be removable");
+        }
+        fs::create_dir_all(&root).expect("git timeout root should create");
+
+        let fake_git_path = write_fake_sleeping_git_script(&root);
+        let mut reporter = RecordedGitReporter::default();
+        let child = Command::new(&fake_git_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fake sleeping git process should spawn");
+        let error = wait_for_git_command_output_with_timeout(
+            child,
+            &mut reporter,
+            "fake git timeout",
+            "fetch",
+            Some(Duration::from_millis(200)),
+        )
+        .expect_err("silent git process should time out");
+
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert!(
+            error
+                .to_string()
+                .contains("hung credential helper or stalled network transport"),
+            "timeout error should explain the likely git stall"
+        );
+        assert!(
+            reporter
+                .messages
+                .iter()
+                .any(|message| message.contains("stopped producing output")),
+            "reporter should capture the stalled git timeout message"
+        );
+
+        fs::remove_dir_all(root).expect("temporary git timeout root should be removable");
+    }
+
+    #[test]
+    fn request_github_host_login_credentials_times_out_when_helper_hangs() {
+        let root = test_root("github-host-login-timeout");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("existing github host login root should be removable");
+        }
+        fs::create_dir_all(&root).expect("github host login root should create");
+
+        let fake_git_path = write_fake_sleeping_git_script(&root);
+        let mut command = Command::new(&fake_git_path);
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let error = request_github_host_login_credentials_with_timeout_and_command(
+            "https://github.com",
+            Some("indiegabo"),
+            Duration::from_millis(200),
+            "https",
+            "github.com",
+            String::from(
+                "-c credential.helper=manager credential fill",
+            ),
+            command,
+        )
+        .expect_err("hung credential helper should time out");
+
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert!(
+            error
+                .to_string()
+                .contains("credential.helper=manager credential fill"),
+            "credential helper timeout should identify the stalled command"
+        );
+
+        fs::remove_dir_all(root).expect("temporary github host login root should be removable");
+    }
+
+    #[test]
+    fn wait_for_git_command_output_allows_silent_checkout_without_timeout_guard() {
+        let root = test_root("sync-ref-checkout-no-timeout");
+        if root.exists() {
+            fs::remove_dir_all(&root)
+                .expect("existing checkout no-timeout root should be removable");
+        }
+        fs::create_dir_all(&root).expect("checkout no-timeout root should create");
+
+        let fake_git_path = write_fake_sleeping_git_script(&root);
+        let mut reporter = RecordedGitReporter::default();
+        let child = Command::new(&fake_git_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fake silent checkout process should spawn");
+        let output = wait_for_git_command_output_with_timeout(
+            child,
+            &mut reporter,
+            "fake git checkout",
+            "checkout",
+            None,
+        )
+        .expect("silent checkout should complete when inactivity timeout is disabled");
+
+        assert!(
+            output.status.success(),
+            "silent checkout process should succeed"
+        );
+        assert!(
+            reporter
+                .messages
+                .iter()
+                .all(|message| !message.contains("stopped producing output")),
+            "checkout without inactivity timeout should not report a stall"
+        );
+
+        fs::remove_dir_all(root)
+            .expect("temporary checkout no-timeout root should be removable");
     }
 
     #[test]
@@ -1461,6 +2442,34 @@ mod tests {
     }
 
     #[test]
+    fn git_branch_lister_lists_repository_branches_in_refname_order() {
+        let root = test_root("list-branches");
+        let repository_path = root.join("repo");
+        create_repository_with_tags(&repository_path, "2022.3.20f1", &["v1.0.0"]);
+
+        let default_branch = current_branch_name(&repository_path);
+        run_git_test_command(&repository_path, &["branch", "develop"]);
+        run_git_test_command(&repository_path, &["branch", "release/3"]);
+
+        let branches = GitBranchLister::new()
+            .list_branches(&GitBranchListRequest {
+                repository_url: repository_path.display().to_string(),
+                auth: GitAuthOptions::default(),
+            })
+            .expect("git branches should list");
+
+        let branch_names: Vec<_> = branches.iter().map(|branch| branch.name.as_str()).collect();
+        let mut expected_branch_names = vec![default_branch, String::from("develop"), String::from("release/3")];
+        expected_branch_names.sort();
+        let expected_branch_names: Vec<_> = expected_branch_names.iter().map(String::as_str).collect();
+
+        assert_eq!(branch_names, expected_branch_names);
+        assert!(branches.iter().all(|branch| !branch.commit.trim().is_empty()));
+
+        fs::remove_dir_all(root).expect("temporary git test root should be removable");
+    }
+
+    #[test]
     fn git_remote_head_ref_resolver_returns_current_branch_name() {
         let root = test_root("resolve-remote-head");
         let repository_path = root.join("repo");
@@ -1474,6 +2483,51 @@ mod tests {
             .expect("remote HEAD branch should resolve");
 
         assert_eq!(branch, current_branch_name(&repository_path));
+
+        fs::remove_dir_all(root).expect("temporary git test root should be removable");
+    }
+
+    #[test]
+    fn git_remote_ref_resolver_returns_exact_branch_match() {
+        let root = test_root("resolve-remote-branch-ref");
+        let repository_path = root.join("repo");
+        create_repository_with_tags(&repository_path, "2022.3.20f1", &["v1.0.0"]);
+        let branch_name = current_branch_name(&repository_path);
+
+        let matched = GitRemoteRefResolver::new()
+            .resolve_ref(&GitRemoteRefLookupRequest {
+                repository_url: repository_path.display().to_string(),
+                git_ref: branch_name.clone(),
+                ref_kind: GitRemoteRefKind::Branch,
+                auth: GitAuthOptions::default(),
+            })
+            .expect("remote branch ref should resolve");
+
+        assert_eq!(matched.name, branch_name);
+        assert_eq!(matched.full_ref, format!("refs/heads/{}", matched.name));
+        assert!(!matched.commit.trim().is_empty());
+
+        fs::remove_dir_all(root).expect("temporary git test root should be removable");
+    }
+
+    #[test]
+    fn git_remote_ref_resolver_returns_exact_tag_match() {
+        let root = test_root("resolve-remote-tag-ref");
+        let repository_path = root.join("repo");
+        create_repository_with_tags(&repository_path, "2022.3.20f1", &["v1.0.0"]);
+
+        let matched = GitRemoteRefResolver::new()
+            .resolve_ref(&GitRemoteRefLookupRequest {
+                repository_url: repository_path.display().to_string(),
+                git_ref: String::from("v1.0.0"),
+                ref_kind: GitRemoteRefKind::Tag,
+                auth: GitAuthOptions::default(),
+            })
+            .expect("remote tag ref should resolve");
+
+        assert_eq!(matched.name, "v1.0.0");
+        assert_eq!(matched.full_ref, "refs/tags/v1.0.0");
+        assert!(!matched.commit.trim().is_empty());
 
         fs::remove_dir_all(root).expect("temporary git test root should be removable");
     }
@@ -2289,5 +3343,138 @@ mod tests {
             "handy-games-publisher-runtime-git-{label}-{}",
             std::process::id()
         ))
+    }
+
+    fn test_git_executable_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[derive(Default)]
+    struct CancelAfterSpawnGitReporter {
+        report_count: usize,
+        check_count: usize,
+    }
+
+    impl GitProgressReporter for CancelAfterSpawnGitReporter {
+        fn report(&mut self, _message: &str) {
+            self.report_count += 1;
+        }
+
+        fn check_cancellation(&mut self) -> io::Result<()> {
+            self.check_count += 1;
+            if self.check_count >= 2 {
+                return Err(io::Error::new(
+                    ErrorKind::Interrupted,
+                    "git workspace sync canceled by operator",
+                ));
+            }
+
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordedGitReporter {
+        messages: Vec<String>,
+    }
+
+    impl GitProgressReporter for RecordedGitReporter {
+        fn report(&mut self, message: &str) {
+            self.messages.push(message.to_owned());
+        }
+    }
+
+    fn write_fake_sleeping_git_script(root: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let script_path = root.join("fake-git.cmd");
+            fs::write(
+                &script_path,
+                "@echo off\r\npowershell -NoProfile -Command \"Start-Sleep -Seconds 3\"\r\nexit /b 0\r\n",
+            )
+            .expect("fake git script should write");
+            script_path
+        }
+
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let script_path = root.join("fake-git.sh");
+            fs::write(&script_path, "#!/bin/sh\nsleep 3\nexit 0\n")
+                .expect("fake git script should write");
+            let mut permissions = fs::metadata(&script_path)
+                .expect("fake git metadata should load")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions)
+                .expect("fake git permissions should update");
+            script_path
+        }
+    }
+
+    fn write_fake_progress_git_script(root: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let script_path = root.join("fake-progress-git.cmd");
+            fs::write(
+                &script_path,
+                "@echo off\r\necho Receiving objects: 42%% (42/100), 1.20 MiB ^| 256.00 KiB/s 1>&2\r\npowershell -NoProfile -Command \"Start-Sleep -Seconds 3\"\r\nexit /b 0\r\n",
+            )
+            .expect("fake progress git script should write");
+            script_path
+        }
+
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let script_path = root.join("fake-progress-git.sh");
+            fs::write(
+                &script_path,
+                "#!/bin/sh\necho \"Receiving objects: 42% (42/100), 1.20 MiB | 256.00 KiB/s\" 1>&2\nsleep 3\nexit 0\n",
+            )
+            .expect("fake progress git script should write");
+            let mut permissions = fs::metadata(&script_path)
+                .expect("fake progress git metadata should load")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions)
+                .expect("fake progress git permissions should update");
+            script_path
+        }
+    }
+
+    fn write_fake_failing_git_script(root: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let script_path = root.join("fake-failing-git.cmd");
+            fs::write(
+                &script_path,
+                "@echo off\r\nfor /L %%I in (1,1,1024) do @echo remote: authentication required %%I 1>&2\r\necho fatal: unable to get password from user 1>&2\r\nexit /b 128\r\n",
+            )
+            .expect("fake failing git script should write");
+            script_path
+        }
+
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let script_path = root.join("fake-failing-git.sh");
+            fs::write(
+                &script_path,
+                "#!/bin/sh\ni=1\nwhile [ $i -le 1024 ]; do\n  echo \"remote: authentication required $i\" 1>&2\n  i=$((i + 1))\ndone\necho \"fatal: unable to get password from user\" 1>&2\nexit 128\n",
+            )
+            .expect("fake failing git script should write");
+            let mut permissions = fs::metadata(&script_path)
+                .expect("fake failing git metadata should load")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions)
+                .expect("fake failing git permissions should update");
+            script_path
+        }
     }
 }

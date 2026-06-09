@@ -36,6 +36,14 @@ pub(crate) fn execute_command_with_timeout(
     fallback_log_label: Option<&str>,
     reporter: &mut dyn ExecutionProgressReporter,
 ) -> Result<CommandExecutionOutput, CommandExecutionError> {
+    if let Err(error) = reporter.check_cancellation() {
+        return Err(CommandExecutionError {
+            output: Vec::new(),
+            error,
+            exit_status: None,
+        });
+    }
+
     let mut child = command.spawn().map_err(|error| CommandExecutionError {
         output: Vec::new(),
         error: io::Error::other(format!("spawn {command_label}: {error}")),
@@ -174,6 +182,12 @@ fn wait_for_child(
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok((status, false));
+        }
+
+        if let Err(error) = reporter.check_cancellation() {
+            terminate_child_process(child, command_label)?;
+            let _ = child.wait();
+            return Err(error);
         }
 
         if last_heartbeat_at.elapsed() >= EXECUTION_HEARTBEAT_INTERVAL {

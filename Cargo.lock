@@ -788,6 +788,7 @@ dependencies = [
  "notify",
  "rfd",
  "runtime-config",
+ "runtime-contracts",
  "runtime-core",
  "runtime-git",
  "runtime-runner",
@@ -3205,6 +3206,7 @@ dependencies = [
 name = "runtime-publish"
 version = "1.0.3"
 dependencies = [
+ "runtime-contracts",
  "serde",
  "serde_json",
 ]

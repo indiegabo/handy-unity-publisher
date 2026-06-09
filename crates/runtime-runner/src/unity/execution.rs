@@ -1,4 +1,5 @@
 use super::*;
+use runtime_contracts::ProcessPriority;
 
 /// Describes the joined metadata required to execute one host-native Unity build run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +17,7 @@ pub struct UnityBuildExecutionPlan {
     pub output_kind: Option<String>,
     pub output_path_template: Option<String>,
     pub engine_version: String,
+    pub process_priority: ProcessPriority,
     pub config_json: String,
     pub timeout_seconds: i64,
 }

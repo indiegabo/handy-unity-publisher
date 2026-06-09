@@ -2,6 +2,7 @@
 //! runtime and expose operator-facing diagnostics to the UI.
 
 mod runtime_events;
+mod start_release;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
@@ -19,6 +20,7 @@ use runtime_config::{
     HostPlatform, RuntimeConfig, DEVELOPMENT_PRODUCT_DIRECTORY_NAME, PRODUCT_DIRECTORY_NAME,
     RUNTIME_ROOT_ENV,
 };
+use runtime_contracts::ProcessPriority;
 use runtime_core::{
     emit_runtime_event, load_runtime_automation_snapshot, persist_runtime_automation_mode,
     read_health_report, read_supervision_contract, read_supervisor_snapshot, RuntimeAutomationMode,
@@ -110,6 +112,7 @@ const MAX_PROCESS_FEED_PAGE_SIZE: u32 = 50;
 const HOST_CAPABILITY_PROFILE_CACHE_TTL: Duration = Duration::from_secs(30);
 const DEFAULT_HOST_NATIVE_RUNNER_TYPE: &str = "host-native";
 const DEFAULT_BUILD_TARGET_TIMEOUT_SECONDS: i64 = 3600;
+const DEFAULT_BUILD_PROCESS_PRIORITY: &str = "low";
 const MIN_REPOSITORY_POLL_INTERVAL_SECONDS: i64 = 5;
 const SUPPORTED_REPOSITORY_ENGINE_KIND_UNITY: &str = "unity";
 const GITHUB_AUTH_PROVIDER_ID: &str = "github";
@@ -582,6 +585,8 @@ struct CreateRepositoryProjectBuildTargetCommandInput {
     name: String,
     contract: BuildContractCommandInput,
     unity_executable_path: String,
+    #[serde(default)]
+    process_priority: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -648,6 +653,8 @@ struct UpdateRepositoryProjectBuildTargetCommandInput {
     name: String,
     contract: BuildContractCommandInput,
     unity_executable_path: String,
+    #[serde(default)]
+    process_priority: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -708,7 +715,24 @@ struct OnDemandReleaseProcessCommandInput {
     source_kind: String,
     source_ref: Option<String>,
     local_path: Option<String>,
+    #[serde(default)]
+    process_priority: Option<String>,
     unity_executable_path_override: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct OnDemandReleaseVersionPreviewCommandInput {
+    repository_id: i64,
+    version_source: String,
+    source_kind: String,
+    source_ref: Option<String>,
+    local_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct OnDemandReleaseRemoteRefsCommandInput {
+    repository_id: i64,
+    source_kind: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -725,6 +749,7 @@ struct NormalizedCreateRepositoryProjectBuildTargetCommandInput {
     target_platform: String,
     build_method: String,
     unity_executable_path: String,
+    process_priority: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -768,6 +793,7 @@ struct NormalizedUpdateRepositoryProjectBuildTargetCommandInput {
     target_platform: String,
     build_method: String,
     unity_executable_path: String,
+    process_priority: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1391,6 +1417,8 @@ pub fn run() {
             restart_runtime,
             set_runtime_automation_mode,
             dispatch_on_demand_release_process,
+            preview_on_demand_release_version,
+            list_on_demand_release_remote_refs,
             rerun_release_process,
             cancel_release_process,
             notify_process_on_hold,
@@ -1822,11 +1850,29 @@ fn dispatch_on_demand_release_process(
     input: OnDemandReleaseProcessCommandInput,
 ) -> Result<ReleaseRunRecord, String> {
     let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
-    let record =
-        request_on_demand_release_process(&config, input).map_err(|error| error.to_string())?;
+    let record = request_on_demand_release_process(&config, input)
+        .map_err(|error| error.to_string())?;
 
     launch_runtime_process_handle(&app_handle).map_err(|error| error.to_string())?;
     Ok(record)
+}
+
+#[tauri::command]
+fn preview_on_demand_release_version(
+    input: OnDemandReleaseVersionPreviewCommandInput,
+) -> Result<String, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    start_release::preview_on_demand_release_version(&config, input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_on_demand_release_remote_refs(
+    input: OnDemandReleaseRemoteRefsCommandInput,
+) -> Result<Vec<runtime_store::OnDemandReleaseRemoteRef>, String> {
+    let config = load_shell_runtime_config().map_err(|error| error.to_string())?;
+    start_release::list_on_demand_release_remote_refs(&config, input)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -3676,7 +3722,7 @@ fn build_repository_inspection_entry(
         enabled: repository.enabled,
         polling_interval_seconds: repository.polling_interval_seconds,
         default_branch: repository.default_branch,
-        artifacts_root_override: repository.artifacts_root_override,
+        artifacts_root_override: None,
         workspace_root_override: repository.workspace_root_override,
         last_seen_tag: repository.last_seen_tag,
         enabled_build_target_count: repository.enabled_build_target_count,
@@ -3771,21 +3817,7 @@ fn request_on_demand_release_process(
     config: &RuntimeConfig,
     input: OnDemandReleaseProcessCommandInput,
 ) -> io::Result<ReleaseRunRecord> {
-    config.directories.ensure_exists()?;
-    let storage = StorageLayout::from_directories(&config.directories);
-    if !storage.database_path.is_file() {
-        return Err(io::Error::new(
-            ErrorKind::NotFound,
-            format!("repository {} was not found", input.repository_id),
-        ));
-    }
-
-    let coordinator = LocalCoordinator::new(&storage);
-    let record = coordinator
-        .dispatch_on_demand_release(normalize_on_demand_release_process_command_input(input))?;
-    emit_shell_release_queued_event(&storage, &coordinator, &record)?;
-
-    Ok(record)
+    start_release::request_on_demand_release_process(config, input)
 }
 
 fn emit_shell_release_queued_event(
@@ -5031,7 +5063,7 @@ fn persist_repository_project(
             local_path: normalized.local_path,
             credentials: None,
             default_branch: normalized.default_branch,
-            artifacts_root_override: normalized.artifacts_root_override,
+            artifacts_root_override: None,
             workspace_root_override: normalized.workspace_root_override,
             polling_interval_seconds: normalized.polling_interval_seconds,
             enabled: true,
@@ -5050,7 +5082,10 @@ fn persist_repository_project(
                         &target.target_platform,
                         &target.build_method,
                     ),
-                    runner_config_json: unity_runner_config_json(&target.unity_executable_path),
+                    runner_config_json: unity_runner_config_json(
+                        &target.unity_executable_path,
+                        &target.process_priority,
+                    ),
                 })
                 .collect(),
             publish_targets: normalized
@@ -5108,7 +5143,7 @@ fn persist_repository_project_update(
             repo_url: normalized.repository_url,
             local_path: normalized.local_path,
             default_branch: normalized.default_branch,
-            artifacts_root_override: normalized.artifacts_root_override,
+            artifacts_root_override: None,
             workspace_root_override: normalized.workspace_root_override,
             polling_interval_seconds: normalized.polling_interval_seconds,
             enabled: normalized.enabled,
@@ -5128,7 +5163,10 @@ fn persist_repository_project_update(
                         &target.target_platform,
                         &target.build_method,
                     ),
-                    runner_config_json: unity_runner_config_json(&target.unity_executable_path),
+                    runner_config_json: unity_runner_config_json(
+                        &target.unity_executable_path,
+                        &target.process_priority,
+                    ),
                 })
                 .collect(),
             publish_targets: normalized
@@ -5437,7 +5475,7 @@ fn normalize_create_repository_project_command_input(
         repository_access_assessment: input.repository_access_assessment,
         repository_credentials_id: input.repository_credentials_id,
         default_branch: normalize_optional_shell_string(input.default_branch),
-        artifacts_root_override: normalize_optional_shell_string(input.artifacts_root_override),
+        artifacts_root_override: None,
         workspace_root_override: normalize_optional_shell_string(input.workspace_root_override),
         polling_interval_seconds,
         build_targets,
@@ -5578,7 +5616,7 @@ fn normalize_update_repository_project_command_input(
         local_path,
         repository_access_assessment: input.repository_access_assessment,
         default_branch: normalize_optional_shell_string(input.default_branch),
-        artifacts_root_override: normalize_optional_shell_string(input.artifacts_root_override),
+        artifacts_root_override: None,
         workspace_root_override: normalize_optional_shell_string(input.workspace_root_override),
         polling_interval_seconds,
         enabled: input.enabled,
@@ -5624,6 +5662,7 @@ fn normalize_create_repository_project_build_target_command_input(
     if diagnostics.status != "ready" {
         return Err(io::Error::new(ErrorKind::InvalidInput, diagnostics.message));
     }
+    let process_priority = normalize_build_process_priority(&input.process_priority)?;
 
     Ok(NormalizedCreateRepositoryProjectBuildTargetCommandInput {
         name: require_shell_non_empty(&input.name, "build target name")?,
@@ -5636,6 +5675,7 @@ fn normalize_create_repository_project_build_target_command_input(
             "build target contract.unity.build_method",
         )?,
         unity_executable_path,
+        process_priority,
     })
 }
 
@@ -5656,6 +5696,7 @@ fn normalize_update_repository_project_build_target_command_input(
             name: input.name,
             contract: input.contract,
             unity_executable_path: input.unity_executable_path,
+            process_priority: input.process_priority,
         },
     )?;
 
@@ -5665,6 +5706,7 @@ fn normalize_update_repository_project_build_target_command_input(
         target_platform: normalized.target_platform,
         build_method: normalized.build_method,
         unity_executable_path: normalized.unity_executable_path,
+        process_priority: normalized.process_priority,
     })
 }
 
@@ -5827,11 +5869,27 @@ fn unity_contract_json(target_platform: &str, build_method: &str) -> String {
     .to_string()
 }
 
-fn unity_runner_config_json(unity_executable_path: &str) -> String {
+fn unity_runner_config_json(unity_executable_path: &str, process_priority: &str) -> String {
     serde_json::json!({
         "unity_executable_path": unity_executable_path.trim(),
+        "process_priority": process_priority.trim().to_ascii_lowercase(),
     })
     .to_string()
+}
+
+fn normalize_build_process_priority(value: &str) -> io::Result<String> {
+    let trimmed = value.trim();
+
+    match trimmed {
+        "" | DEFAULT_BUILD_PROCESS_PRIORITY => {
+            Ok(String::from(DEFAULT_BUILD_PROCESS_PRIORITY))
+        }
+        "normal" | "high" => Ok(trimmed.to_owned()),
+        _ => Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "build target process_priority must be one of: low, normal, high",
+        )),
+    }
 }
 
 fn validate_unity_executable_path_diagnostics(path: &str) -> HostNativeRunnerDiagnostics {
@@ -5865,19 +5923,37 @@ fn normalize_optional_shell_string(value: Option<String>) -> Option<String> {
 
 fn normalize_on_demand_release_process_command_input(
     input: OnDemandReleaseProcessCommandInput,
-) -> StoreOnDemandReleaseDispatchInput {
-    StoreOnDemandReleaseDispatchInput {
+) -> io::Result<StoreOnDemandReleaseDispatchInput> {
+    Ok(StoreOnDemandReleaseDispatchInput {
         repository_id: input.repository_id,
         release_version: normalize_optional_shell_string(input.release_version),
         version_source: input.version_source.trim().to_owned(),
         source_kind: input.source_kind.trim().to_owned(),
         source_ref: normalize_optional_shell_string(input.source_ref),
         local_path: normalize_optional_shell_string(input.local_path),
+        process_priority: normalize_release_process_priority(input.process_priority)?,
         requested_via: String::from(DESKTOP_SHELL_RERUN_REQUESTED_VIA),
         unity_executable_path_override: normalize_optional_shell_string(
             input.unity_executable_path_override,
         ),
-    }
+    })
+}
+
+fn normalize_release_process_priority(
+    value: Option<String>,
+) -> io::Result<Option<ProcessPriority>> {
+    let Some(value) = normalize_optional_shell_string(value) else {
+        return Ok(None);
+    };
+
+    ProcessPriority::parse_or_default(&value)
+        .map(Some)
+        .map_err(|_| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                "release process_priority must be one of: low, normal, high",
+            )
+        })
 }
 
 fn credential_binding_references(
@@ -6495,6 +6571,8 @@ mod tests {
         CreateRepositoryProjectBuildTargetCommandInput, CreateRepositoryProjectCommandInput,
         DetectedHostLocale, DisconnectRepositoryAuthInput, LocalizationBundleCacheMetadata,
         LocalizationResourceState, OnDemandReleaseProcessCommandInput,
+        OnDemandReleaseRemoteRefsCommandInput,
+        OnDemandReleaseVersionPreviewCommandInput,
         PersistedLocalizationPreferences, ProcessFeedInput, ReconnectRepositoryAuthInput,
         RemoveRepositoryProjectCommandInput, RepositoryAccessAssessment,
         RepositoryAccessAssessmentInput, RepositoryProviderDetection, RuntimeLaunchAction,
@@ -6503,7 +6581,8 @@ mod tests {
         UpdatePublishTargetSecretBindingInput, UpdateRepositoryProjectBuildTargetCommandInput,
         UpdateRepositoryProjectCommandInput, AUTH_PROVIDER_STATUS_CONNECTED, AUTO_SELECTION_SOURCE,
         BUTLER_BINARY_NAME, EMBEDDED_LOCALIZATION_FILES, EVENT_TOPIC_RELEASE_QUEUED,
-        HGP_BUTLER_PATH_ENV, LOCALIZATION_BUNDLE_CACHE_SCHEMA_VERSION,
+        DEFAULT_BUILD_PROCESS_PRIORITY, HGP_BUTLER_PATH_ENV,
+        LOCALIZATION_BUNDLE_CACHE_SCHEMA_VERSION,
         LOCALIZATION_ORIGIN_FILE_NAME, LOCALIZATION_WORKING_FILE_NAME, RUNTIME_BINARY_NAME,
         USER_SELECTION_SOURCE,
     };
@@ -7835,6 +7914,9 @@ mod tests {
             std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
         }
 
+        let repository_path = root.join("managed-ref-repo");
+        create_unity_git_repository(&repository_path, "release/next", None, "9.2.0");
+
         let config = RuntimeConfig::from_root(&root);
         let storage = StorageLayout::from_directories(&config.directories);
         initialize_database(&storage).expect("database bootstrap should succeed");
@@ -7845,9 +7927,9 @@ mod tests {
                 "INSERT INTO repositories (name, repo_url, engine_kind, default_branch) VALUES (?, ?, ?, ?)",
                 params![
                     "on-demand-managed-ref-repo",
-                    "https://example.com/on-demand-managed-ref.git",
+                    repository_path.display().to_string(),
                     "unity",
-                    "main",
+                    "release/next",
                 ],
             )
             .expect("repository should insert");
@@ -7863,6 +7945,7 @@ mod tests {
                 source_kind: String::from("managed_ref"),
                 source_ref: Some(String::from("release/next")),
                 local_path: None,
+                process_priority: Some(String::from("high")),
                 unity_executable_path_override: Some(String::from("  C:/Unity/Editor/Unity.exe  ")),
             },
         )
@@ -7874,6 +7957,7 @@ mod tests {
         let metadata: serde_json::Value = serde_json::from_str(&record.source_metadata_json)
             .expect("source metadata should decode");
         assert_eq!(metadata["requested_via"], "desktop-shell-ui");
+        assert_eq!(metadata["process_priority"], "high");
         assert_eq!(metadata["source_kind"], "managed_ref");
         assert_eq!(metadata["source_ref"], "release/next");
         assert_eq!(
@@ -7932,6 +8016,7 @@ mod tests {
                 source_kind: String::from("local_workspace"),
                 source_ref: None,
                 local_path: Some(local_workspace.display().to_string()),
+                process_priority: None,
                 unity_executable_path_override: None,
             },
         )
@@ -7942,6 +8027,7 @@ mod tests {
         assert_eq!(record.trigger_source, "manual");
         let metadata: serde_json::Value = serde_json::from_str(&record.source_metadata_json)
             .expect("source metadata should decode");
+        assert_eq!(metadata["process_priority"], "low");
         assert_eq!(metadata["requested_via"], "desktop-shell-ui");
         assert_eq!(metadata["source_kind"], "local_workspace");
         let persisted_local_path = PathBuf::from(
@@ -7970,6 +8056,170 @@ mod tests {
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }
 
+    #[test]
+    fn preview_on_demand_release_version_reads_bundle_version_from_managed_branch() {
+        let root = std::env::temp_dir().join("desktop-shell-managed-preview-version-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let repository_path = root.join("managed-preview-repo");
+        create_unity_git_repository(&repository_path, "main", None, "3.4.5");
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO repositories (name, repo_url, engine_kind, default_branch) VALUES (?, ?, ?, ?)",
+                params![
+                    "managed-preview-repo",
+                    repository_path.display().to_string(),
+                    "unity",
+                    "main",
+                ],
+            )
+            .expect("repository should insert");
+        let repository_id = connection.last_insert_rowid();
+        drop(connection);
+
+        let version = super::start_release::preview_on_demand_release_version(
+            &config,
+            OnDemandReleaseVersionPreviewCommandInput {
+                repository_id,
+                version_source: String::from("project_settings"),
+                source_kind: String::from("managed_ref"),
+                source_ref: Some(String::from("main")),
+                local_path: None,
+            },
+        )
+        .expect("managed branch version preview should succeed");
+
+        assert_eq!(version, "3.4.5");
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn request_on_demand_release_process_dispatches_managed_tag_release_from_source_tag() {
+        let root = std::env::temp_dir().join("desktop-shell-managed-tag-source-version-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let repository_path = root.join("managed-tag-repo");
+        create_unity_git_repository(&repository_path, "main", Some("v9.4.0"), "4.0.0");
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO repositories (name, repo_url, engine_kind, default_branch) VALUES (?, ?, ?, ?)",
+                params![
+                    "managed-tag-repo",
+                    repository_path.display().to_string(),
+                    "unity",
+                    "main",
+                ],
+            )
+            .expect("repository should insert");
+        let repository_id = connection.last_insert_rowid();
+        drop(connection);
+
+        let record = request_on_demand_release_process(
+            &config,
+            OnDemandReleaseProcessCommandInput {
+                repository_id,
+                release_version: None,
+                version_source: String::from("source_tag"),
+                source_kind: String::from("managed_tag"),
+                source_ref: Some(String::from("v9.4.0")),
+                local_path: None,
+                process_priority: None,
+                unity_executable_path_override: None,
+            },
+        )
+        .expect("managed tag dispatch should succeed");
+
+        assert_eq!(record.repository_id, repository_id);
+        assert_eq!(record.git_tag, "v9.4.0");
+        let metadata: serde_json::Value = serde_json::from_str(&record.source_metadata_json)
+            .expect("source metadata should decode");
+        assert_eq!(metadata["process_priority"], "low");
+        assert_eq!(metadata["source_kind"], "managed_tag");
+        assert_eq!(metadata["source_ref"], "v9.4.0");
+        assert_eq!(metadata["version_source"], "source_tag");
+
+        let queued_event = latest_runtime_event(&storage);
+        assert_eq!(queued_event.payload["source_kind"], "managed_tag");
+        assert_eq!(queued_event.payload["source_ref"], "v9.4.0");
+        assert_eq!(queued_event.summary, "On-demand tag release queued for managed-tag-repo v9.4.0");
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
+    #[test]
+    fn list_on_demand_release_remote_refs_lists_branches_and_tags_for_managed_repositories() {
+        let root = std::env::temp_dir().join("desktop-shell-managed-remote-refs-test");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("existing temp directory should be removable");
+        }
+
+        let repository_path = root.join("managed-refs-repo");
+        create_unity_git_repository(&repository_path, "main", Some("v1.0.0"), "1.0.0");
+        run_git_command(Some(&repository_path), &["branch", "develop"]);
+        run_git_command(Some(&repository_path), &["tag", "v1.2.0"]);
+        run_git_command(Some(&repository_path), &["tag", "v1.10.0"]);
+
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let connection = open_connection(&storage.database_path).expect("connection should open");
+        connection
+            .execute(
+                "INSERT INTO repositories (name, repo_url, engine_kind, default_branch) VALUES (?, ?, ?, ?)",
+                params![
+                    "managed-refs-repo",
+                    repository_path.display().to_string(),
+                    "unity",
+                    "main",
+                ],
+            )
+            .expect("repository should insert");
+        let repository_id = connection.last_insert_rowid();
+        drop(connection);
+
+        let branches = super::start_release::list_on_demand_release_remote_refs(
+            &config,
+            OnDemandReleaseRemoteRefsCommandInput {
+                repository_id,
+                source_kind: String::from("managed_ref"),
+            },
+        )
+        .expect("managed branches should list");
+        let branch_names: Vec<_> = branches.iter().map(|git_ref| git_ref.name.as_str()).collect();
+        assert_eq!(branch_names, vec!["main", "develop"]);
+
+        let tags = super::start_release::list_on_demand_release_remote_refs(
+            &config,
+            OnDemandReleaseRemoteRefsCommandInput {
+                repository_id,
+                source_kind: String::from("managed_tag"),
+            },
+        )
+        .expect("managed tags should list");
+        let tag_names: Vec<_> = tags.iter().map(|git_ref| git_ref.name.as_str()).collect();
+        assert_eq!(tag_names, vec!["v1.10.0", "v1.2.0", "v1.0.0"]);
+
+        std::fs::remove_dir_all(root).expect("temp directory should be removable");
+    }
+
     fn latest_runtime_event(storage: &StorageLayout) -> runtime_core::RuntimeEventRecord {
         read_runtime_event_batch(&storage.runtime_events_path, 0)
             .expect("runtime event stream should load")
@@ -7977,6 +8227,54 @@ mod tests {
             .into_iter()
             .last()
             .expect("runtime event stream should contain at least one event")
+    }
+
+    fn create_unity_git_repository(
+        repository_path: &Path,
+        branch_name: &str,
+        tag_name: Option<&str>,
+        bundle_version: &str,
+    ) {
+        std::fs::create_dir_all(repository_path.join("ProjectSettings"))
+            .expect("repository settings directory should create");
+        std::fs::write(
+            repository_path.join("ProjectSettings").join("ProjectSettings.asset"),
+            format!("bundleVersion: {bundle_version}\n"),
+        )
+        .expect("project settings asset should write");
+
+        run_git_command(None, &["init", repository_path.to_string_lossy().as_ref()]);
+        run_git_command(
+            Some(repository_path),
+            &["config", "user.name", "HGP Test Harness"],
+        );
+        run_git_command(
+            Some(repository_path),
+            &["config", "user.email", "tests@example.com"],
+        );
+        run_git_command(Some(repository_path), &["add", "."]);
+        run_git_command(Some(repository_path), &["commit", "-m", "Initial commit"]);
+        run_git_command(Some(repository_path), &["branch", "-M", branch_name]);
+        if let Some(tag_name) = tag_name {
+            run_git_command(Some(repository_path), &["tag", tag_name]);
+        }
+    }
+
+    fn run_git_command(cwd: Option<&Path>, args: &[&str]) {
+        let mut command = Command::new("git");
+        command.args(args);
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+
+        let output = command.output().expect("git command should launch");
+        assert!(
+            output.status.success(),
+            "git {:?} failed with stdout {:?} and stderr {:?}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     #[test]
@@ -9631,6 +9929,7 @@ mod tests {
                             build_method: String::from("Builder.PerformWindows"),
                         }),
                     },
+                    process_priority: String::from(DEFAULT_BUILD_PROCESS_PRIORITY),
                     unity_executable_path: unity_executable_path.clone(),
                 }],
                 publish_targets: vec![],
@@ -9705,6 +10004,7 @@ mod tests {
                             build_method: String::from("Builder.PerformWindows"),
                         }),
                     },
+                    process_priority: String::from(DEFAULT_BUILD_PROCESS_PRIORITY),
                     unity_executable_path: unity_executable_path.clone(),
                 }],
                 publish_targets: vec![],
@@ -9797,6 +10097,7 @@ mod tests {
                             build_method: String::from("Builder.PerformWindows"),
                         }),
                     },
+                    process_priority: String::from(DEFAULT_BUILD_PROCESS_PRIORITY),
                     unity_executable_path,
                 }],
                 publish_targets: vec![],
@@ -9879,6 +10180,7 @@ mod tests {
                             build_method: String::from("Builder.PerformWindows"),
                         }),
                     },
+                    process_priority: String::from(DEFAULT_BUILD_PROCESS_PRIORITY),
                     unity_executable_path: unity_executable_path.clone(),
                 }],
                 publish_targets: vec![],
@@ -10066,6 +10368,7 @@ mod tests {
                             build_method: String::from("Builder.PerformWindows"),
                         }),
                     },
+                    process_priority: String::from(DEFAULT_BUILD_PROCESS_PRIORITY),
                     unity_executable_path: unity_executable_path.clone(),
                 }],
                 publish_targets: vec![],
@@ -10123,6 +10426,7 @@ mod tests {
                             build_method: String::from("Builder.PerformWindows"),
                         }),
                     },
+                    process_priority: String::from(DEFAULT_BUILD_PROCESS_PRIORITY),
                     unity_executable_path: unity_executable_path.clone(),
                 }],
                 publish_targets: vec![],
@@ -10175,6 +10479,7 @@ mod tests {
                             build_method: String::from("Builder.PerformWindows"),
                         }),
                     },
+                    process_priority: String::from(DEFAULT_BUILD_PROCESS_PRIORITY),
                     unity_executable_path,
                 }],
                 publish_targets: vec![],
@@ -10227,6 +10532,7 @@ mod tests {
                             build_method: String::from("Builder.PerformWindows"),
                         }),
                     },
+                    process_priority: String::from(DEFAULT_BUILD_PROCESS_PRIORITY),
                     unity_executable_path: unity_executable_path.clone(),
                 }],
                 publish_targets: vec![],
@@ -10259,6 +10565,7 @@ mod tests {
                                 build_method: String::from("Builder.PerformWindowsStable"),
                             }),
                         },
+                        process_priority: String::from("high"),
                         unity_executable_path: unity_executable_path.clone(),
                     },
                     UpdateRepositoryProjectBuildTargetCommandInput {
@@ -10270,6 +10577,7 @@ mod tests {
                                 build_method: String::from("Builder.PerformWebGl"),
                             }),
                         },
+                        process_priority: String::from("high"),
                         unity_executable_path,
                     },
                 ],
@@ -10317,6 +10625,20 @@ mod tests {
             inspection.repositories[0].build_targets[1].target_name,
             "WebGL"
         );
+        assert_eq!(
+            inspection.repositories[0].build_targets[0]
+                .host_native_diagnostics
+                .as_ref()
+                .map(|diagnostics| diagnostics.process_priority.as_str()),
+            Some("high")
+        );
+        assert_eq!(
+            inspection.repositories[0].build_targets[1]
+                .host_native_diagnostics
+                .as_ref()
+                .map(|diagnostics| diagnostics.process_priority.as_str()),
+            Some("high")
+        );
 
         std::fs::remove_dir_all(root).expect("temp directory should be removable");
     }
@@ -10357,6 +10679,7 @@ mod tests {
                             build_method: String::from("Builder.PerformWindows"),
                         }),
                     },
+                    process_priority: String::from(DEFAULT_BUILD_PROCESS_PRIORITY),
                     unity_executable_path: unity_executable_path.clone(),
                 }],
                 publish_targets: vec![],
@@ -10388,6 +10711,7 @@ mod tests {
                             build_method: String::from("Builder.PerformWindows"),
                         }),
                     },
+                    process_priority: String::from(DEFAULT_BUILD_PROCESS_PRIORITY),
                     unity_executable_path,
                 }],
                 publish_targets: vec![],

@@ -2,7 +2,7 @@
 //! packaging for the current Unity adapter-backed build worker.
 
 use super::*;
-use runtime_contracts::BuildKind;
+use runtime_contracts::{BuildKind, ProcessPriority};
 use runtime_runner::{
     unity::{
         package_unity_build_output, resolve_final_unity_artifact_output_path,
@@ -80,6 +80,7 @@ struct ResolvedBuildSourceMetadata {
     source_kind: String,
     source_ref: Option<String>,
     local_path: Option<String>,
+    process_priority: ProcessPriority,
     unity_executable_path_override: Option<String>,
 }
 
@@ -99,6 +100,7 @@ impl BuildExecutionDispatchPlan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BuildProcessStage {
+    CheckoutRepository,
     ValidateContext,
     ExecuteBuild,
     PackageArtifact,
@@ -108,6 +110,7 @@ enum BuildProcessStage {
 impl BuildProcessStage {
     const fn default_key(self) -> &'static str {
         match self {
+            Self::CheckoutRepository => "checkout-repository",
             Self::ValidateContext => "validate-build-context",
             Self::ExecuteBuild => "execute-build",
             Self::PackageArtifact => "package-artifact",
@@ -117,6 +120,7 @@ impl BuildProcessStage {
 
     const fn default_label(self) -> &'static str {
         match self {
+            Self::CheckoutRepository => "Checkout Repository",
             Self::ValidateContext => "Validate Build Context",
             Self::ExecuteBuild => "Execute Build",
             Self::PackageArtifact => "Package Artifact",
@@ -228,6 +232,18 @@ fn append_timestamped_log_message(path: &Path, message: &str) -> io::Result<()> 
 
 struct ProcessCheckoutLogReporter {
     log_path: PathBuf,
+    storage: Option<StorageLayout>,
+    coordinator: Option<LocalCoordinator>,
+    build_run_id: Option<i64>,
+    stage_context: Option<CheckoutStageProgressContext>,
+    error: Option<io::Error>,
+}
+
+struct CheckoutStageProgressContext {
+    event_context: BuildRunEventContext,
+    workspace_path: PathBuf,
+    artifact_root_path: PathBuf,
+    started: bool,
 }
 
 impl ProcessCheckoutLogReporter {
@@ -236,7 +252,52 @@ impl ProcessCheckoutLogReporter {
             fs::create_dir_all(parent)?;
         }
 
-        Ok(Self { log_path })
+        Ok(Self {
+            log_path,
+            storage: None,
+            coordinator: None,
+            build_run_id: None,
+            stage_context: None,
+            error: None,
+        })
+    }
+
+    fn with_cancellation(
+        log_path: PathBuf,
+        storage: &StorageLayout,
+        coordinator: LocalCoordinator,
+        build_run_id: i64,
+    ) -> io::Result<Self> {
+        let mut reporter = Self::new(log_path)?;
+        reporter.storage = Some(storage.clone());
+        reporter.coordinator = Some(coordinator);
+        reporter.build_run_id = Some(build_run_id);
+        Ok(reporter)
+    }
+
+    fn with_stage_progress(
+        log_path: PathBuf,
+        workspace_path: PathBuf,
+        artifact_root_path: PathBuf,
+        storage: &StorageLayout,
+        coordinator: LocalCoordinator,
+        build_run_id: i64,
+        event_context: &BuildRunEventContext,
+    ) -> io::Result<Self> {
+        let mut reporter = Self::with_cancellation(log_path, storage, coordinator, build_run_id)?;
+        reporter.stage_context = Some(CheckoutStageProgressContext {
+            event_context: event_context.clone(),
+            workspace_path,
+            artifact_root_path,
+            started: false,
+        });
+        Ok(reporter)
+    }
+
+    fn stage_started(&self) -> bool {
+        self.stage_context
+            .as_ref()
+            .is_some_and(|stage_context| stage_context.started)
     }
 }
 
@@ -250,6 +311,93 @@ impl ExecutionProgressReporter for ProcessCheckoutLogReporter {
                 error,
             );
         }
+
+        let (Some(stage_context), Some(coordinator), Some(build_run_id)) = (
+            self.stage_context.as_mut(),
+            self.coordinator.as_ref(),
+            self.build_run_id,
+        ) else {
+            return;
+        };
+
+        let log_path = self.log_path.clone();
+        let log_path_string = log_path.display().to_string();
+        let message = progress.message.clone();
+        let stage_result = if stage_context.started {
+            coordinator
+                .heartbeat_build_run_stage(
+                    build_run_id,
+                    HeartbeatBuildRunStageInput {
+                step_key: String::from(BuildProcessStage::CheckoutRepository.default_key()),
+                        step_label: String::from(
+                            BuildProcessStage::CheckoutRepository.default_label(),
+                        ),
+                        step_log_path: log_path_string.clone(),
+                        workspace_path: stage_context.workspace_path.display().to_string(),
+                        log_path: log_path_string.clone(),
+                        artifact_root_path: stage_context
+                            .artifact_root_path
+                            .display()
+                            .to_string(),
+                        message: message.clone(),
+                    },
+                )
+                .map(|_| ())
+        } else {
+            coordinator
+                .start_build_run_stage(
+                    build_run_id,
+                    StartBuildRunStageInput {
+                step_key: String::from(BuildProcessStage::CheckoutRepository.default_key()),
+                step_label: String::from(BuildProcessStage::CheckoutRepository.default_label()),
+                        position: 1,
+                        step_log_path: log_path_string.clone(),
+                        workspace_path: stage_context.workspace_path.display().to_string(),
+                        log_path: log_path_string.clone(),
+                        artifact_root_path: stage_context
+                            .artifact_root_path
+                            .display()
+                            .to_string(),
+                        message: message.clone(),
+                    },
+                )
+                .map(|_| ())
+        };
+
+        match stage_result {
+            Ok(()) => {
+                stage_context.started = true;
+
+                if let Some(storage) = self.storage.as_ref() {
+                    if let Err(error) = emit_build_run_stage_updated_event(
+                        storage,
+                        &stage_context.event_context,
+                        BuildProcessStage::CheckoutRepository.default_key(),
+                        BuildProcessStage::CheckoutRepository.default_label(),
+                        &message,
+                    ) {
+                        log_runtime_event_failure("build stage updated", &error);
+                    }
+                }
+            }
+            Err(error) => {
+                self.error = Some(error);
+            }
+        }
+    }
+
+    fn check_cancellation(&mut self) -> io::Result<()> {
+        if let Some(error) = self.error.take() {
+            return Err(error);
+        }
+
+        check_build_run_cancellation(
+            self.storage.as_ref(),
+            self.coordinator.as_ref(),
+            self.build_run_id,
+            true,
+            "process checkout",
+        )
     }
 }
 
@@ -267,17 +415,212 @@ fn process_validation_log_path(workspace_path: &Path) -> PathBuf {
 
 fn ensure_release_process_checkout(
     directories: &runtime_config::RuntimeDirectories,
+    planned: PreparedWorkspace,
     preparation: &WorkspacePreparationInput,
+    reporter: &mut dyn ExecutionProgressReporter,
 ) -> io::Result<PreparedWorkspace> {
     let preparer = WorkspacePreparer::new(directories);
-    let planned = preparer.plan(preparation)?;
     if preparer.is_process_prepared(preparation)? {
         return Ok(planned);
     }
 
-    let mut reporter =
-        ProcessCheckoutLogReporter::new(process_checkout_log_path(&planned.root_path))?;
-    preparer.prepare_process_with_reporter(preparation, &mut reporter)
+    preparer.prepare_process_with_reporter(preparation, reporter)
+}
+
+fn build_run_stage_sequence(
+    coordinator: &LocalCoordinator,
+    build_run_id: i64,
+) -> io::Result<Rc<RefCell<BuildRunStageSequence>>> {
+    let mut sequence = BuildRunStageSequence::default();
+    let has_checkout_stage = coordinator
+        .list_build_run_stages(build_run_id)?
+        .iter()
+        .any(|stage| {
+            stage.step_key == BuildProcessStage::CheckoutRepository.default_key()
+        });
+    if has_checkout_stage {
+        sequence
+            .ordered_stages
+            .push(BuildProcessStage::CheckoutRepository);
+    }
+
+    Ok(Rc::new(RefCell::new(sequence)))
+}
+
+fn seed_checkout_stage_sequence(stage_sequence: &Rc<RefCell<BuildRunStageSequence>>) {
+    let mut stage_sequence = stage_sequence.borrow_mut();
+    if !stage_sequence
+        .ordered_stages
+        .contains(&BuildProcessStage::CheckoutRepository)
+    {
+        stage_sequence
+            .ordered_stages
+            .push(BuildProcessStage::CheckoutRepository);
+    }
+}
+
+fn complete_checkout_stage(
+    coordinator: &LocalCoordinator,
+    build_run_id: i64,
+    planned: &PreparedWorkspace,
+    stage_sequence: &Rc<RefCell<BuildRunStageSequence>>,
+    message: &str,
+) -> io::Result<()> {
+    seed_checkout_stage_sequence(stage_sequence);
+    let log_path = process_checkout_log_path(&planned.root_path);
+    append_timestamped_log_message(&log_path, message)?;
+    coordinator.complete_build_run_stage(
+        build_run_id,
+        CompleteBuildRunStageInput {
+            step_key: String::from(BuildProcessStage::CheckoutRepository.default_key()),
+            step_label: String::from(BuildProcessStage::CheckoutRepository.default_label()),
+            step_log_path: log_path.display().to_string(),
+            workspace_path: planned.root_path.display().to_string(),
+            log_path: log_path.display().to_string(),
+            artifact_root_path: planned.artifact_root_path.display().to_string(),
+            message: message.to_owned(),
+        },
+    )?;
+    Ok(())
+}
+
+fn fail_checkout_stage(
+    coordinator: &LocalCoordinator,
+    build_run_id: i64,
+    planned: &PreparedWorkspace,
+    stage_sequence: &Rc<RefCell<BuildRunStageSequence>>,
+    error_message: &str,
+) -> io::Result<()> {
+    seed_checkout_stage_sequence(stage_sequence);
+    let log_path = process_checkout_log_path(&planned.root_path);
+    append_timestamped_log_message(&log_path, error_message)?;
+    coordinator.fail_build_run_stage(
+        build_run_id,
+        FailBuildRunStageInput {
+            step_key: String::from(BuildProcessStage::CheckoutRepository.default_key()),
+            step_label: String::from(BuildProcessStage::CheckoutRepository.default_label()),
+            step_log_path: log_path.display().to_string(),
+            workspace_path: planned.root_path.display().to_string(),
+            log_path: log_path.display().to_string(),
+            artifact_root_path: planned.artifact_root_path.display().to_string(),
+            error_message: error_message.to_owned(),
+        },
+    )?;
+    Ok(())
+}
+
+fn build_run_cancellation_error(build_run_id: i64, context: &str) -> io::Error {
+    io::Error::new(
+        ErrorKind::Interrupted,
+        format!(
+            "build run {build_run_id} was canceled while {context} was active"
+        ),
+    )
+}
+
+fn check_build_run_cancellation(
+    storage: Option<&StorageLayout>,
+    coordinator: Option<&LocalCoordinator>,
+    build_run_id: Option<i64>,
+    allow_queued_status: bool,
+    context: &str,
+) -> io::Result<()> {
+    if let Some(storage) = storage {
+        if runtime_stop_requested(storage)? {
+            return Err(runtime_shutdown_interruption_error(context));
+        }
+    }
+
+    let (Some(coordinator), Some(build_run_id)) = (coordinator, build_run_id) else {
+        return Ok(());
+    };
+
+    let build_run = coordinator.get_build_run_record(build_run_id)?;
+    let status_allows_progress = build_run.status == BuildStatus::Running.as_str()
+        || (allow_queued_status && build_run.status == BuildStatus::Queued.as_str());
+    if !status_allows_progress {
+        return Err(build_run_cancellation_error(build_run_id, context));
+    }
+
+    Ok(())
+}
+
+fn start_build_run_after_checkout(
+    coordinator: &LocalCoordinator,
+    storage: &StorageLayout,
+    event_context: &BuildRunEventContext,
+    build_run_id: i64,
+    workspace_path: &Path,
+    validation_log_path: &Path,
+    artifact_root_path: &Path,
+) -> io::Result<BuildRunRecord> {
+    match coordinator.start_build_run(
+        build_run_id,
+        StartBuildRunInput {
+            workspace_path: workspace_path.display().to_string(),
+            log_path: validation_log_path.display().to_string(),
+            artifact_root_path: artifact_root_path.display().to_string(),
+        },
+    ) {
+        Ok(started) => {
+            ensure_process_elapsed_ticker(
+                storage,
+                process_elapsed_event_context_from_build(event_context),
+            );
+            if let Err(error) = emit_build_run_started_event(storage, event_context) {
+                log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STARTED, &error);
+            }
+            Ok(started)
+        }
+        Err(error) => {
+            let record = load_interrupted_build_run_record(coordinator, storage, build_run_id)?;
+            if record.status == BuildStatus::Canceled.as_str()
+                || (record.status == BuildStatus::Queued.as_str()
+                    && runtime_stop_requested(storage)?)
+            {
+                return Ok(record);
+            }
+
+            Err(error)
+        }
+    }
+}
+
+fn load_interrupted_build_run_record(
+    coordinator: &LocalCoordinator,
+    storage: &StorageLayout,
+    build_run_id: i64,
+) -> io::Result<BuildRunRecord> {
+    let record = coordinator.get_build_run_record(build_run_id)?;
+    if record.status == BuildStatus::Canceled.as_str() {
+        return Ok(record);
+    }
+
+    if record.status == BuildStatus::Running.as_str() && runtime_stop_requested(storage)? {
+        return Ok(record);
+    }
+
+    Ok(record)
+}
+
+fn maybe_return_interrupted_build_run_record(
+    coordinator: &LocalCoordinator,
+    storage: &StorageLayout,
+    build_run_id: i64,
+    tracker: &BuildRunStageTracker<'_>,
+    stage: BuildProcessStage,
+    message: &str,
+) -> io::Result<Option<BuildRunRecord>> {
+    let record = coordinator.get_build_run_record(build_run_id)?;
+    let should_return_record = record.status == BuildStatus::Canceled.as_str()
+        || (record.status == BuildStatus::Running.as_str() && runtime_stop_requested(storage)?);
+    if !should_return_record {
+        return Ok(None);
+    }
+
+    let execution = tracker.stage_execution(stage)?;
+    let _ = tracker.write_stage_message(stage, &execution.log_path, message);
+    Ok(Some(record))
 }
 
 struct BuildRunStageTracker<'a> {
@@ -352,7 +695,7 @@ impl<'a> BuildRunStageTracker<'a> {
 
     fn resolve_stage_log_path(&self, stage: BuildProcessStage) -> io::Result<PathBuf> {
         match stage {
-            BuildProcessStage::ValidateContext => self
+            BuildProcessStage::CheckoutRepository | BuildProcessStage::ValidateContext => self
                 .stage_sequence
                 .borrow_mut()
                 .shared_process_log_path(&self.process_logs_dir(), self.stage_key(stage)),
@@ -559,6 +902,16 @@ impl ExecutionProgressReporter for BuildStageHeartbeatReporter<'_, '_> {
             log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED, &error);
         }
     }
+
+    fn check_cancellation(&mut self) -> io::Result<()> {
+        check_build_run_cancellation(
+            Some(self.storage),
+            Some(self.tracker.coordinator),
+            Some(self.tracker.build_run_id),
+            false,
+            self.tracker.stage_label(self.stage),
+        )
+    }
 }
 
 fn emit_build_stage_started_event(
@@ -755,6 +1108,21 @@ pub(crate) fn run_build_stage_next_command(
         }
     };
 
+    if runtime_stop_requested(storage)?
+        && (staged.status == BuildStatus::Running.as_str()
+            || staged.status == BuildStatus::Queued.as_str())
+    {
+        let shutdown_error = runtime_shutdown_interruption_error("build staging");
+        release_claimed_build_message(
+            &coordinator,
+            message.id,
+            &message.lease_token,
+            &shutdown_error,
+        )?;
+        lease_renewer.finish()?;
+        return Ok(String::from("null"));
+    }
+
     let acknowledged = coordinator.acknowledge_message(message.id, &message.lease_token)?;
     let renewer_result = lease_renewer.finish();
     if !acknowledged {
@@ -847,17 +1215,6 @@ pub(crate) fn run_build_run_next_command(
         };
 
         let validation_log_path = process_validation_log_path(&planned.root_path);
-        coordinator.start_build_run(
-            plan.build_run_id,
-            StartBuildRunInput {
-                workspace_path: planned.root_path.display().to_string(),
-                log_path: validation_log_path.display().to_string(),
-                artifact_root_path: planned.artifact_root_path.display().to_string(),
-            },
-        )?;
-        if let Err(error) = emit_build_run_started_event(storage, &event_context) {
-            log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STARTED, &error);
-        }
         let preparation = match resolve_build_workspace_preparation(&coordinator, &plan) {
             Ok(preparation) => preparation,
             Err(error) => {
@@ -880,7 +1237,56 @@ pub(crate) fn run_build_run_next_command(
                 return Ok(record);
             }
         };
-        if let Err(error) = ensure_release_process_checkout(&config.directories, &preparation) {
+        let stage_sequence = build_run_stage_sequence(&coordinator, plan.build_run_id)?;
+        let mut checkout_reporter = match ProcessCheckoutLogReporter::with_stage_progress(
+            process_checkout_log_path(&planned.root_path),
+            planned.root_path.clone(),
+            planned.artifact_root_path.clone(),
+            storage,
+            coordinator.clone(),
+            plan.build_run_id,
+            &event_context,
+        ) {
+            Ok(reporter) => reporter,
+            Err(error) => {
+                let record = coordinator.fail_build_run(
+                    plan.build_run_id,
+                    FailBuildRunInput {
+                        workspace_path: planned.root_path.display().to_string(),
+                        log_path: process_checkout_log_path(&planned.root_path)
+                            .display()
+                            .to_string(),
+                        artifact_root_path: planned.artifact_root_path.display().to_string(),
+                        error_message: error.to_string(),
+                    },
+                )?;
+                return Ok(record);
+            }
+        };
+
+        if let Err(error) = ensure_release_process_checkout(
+            &config.directories,
+            planned.clone(),
+            &preparation,
+            &mut checkout_reporter,
+        ) {
+            if checkout_reporter.stage_started() {
+                let _ = fail_checkout_stage(
+                    &coordinator,
+                    plan.build_run_id,
+                    &planned,
+                    &stage_sequence,
+                    &error.to_string(),
+                );
+            }
+
+            if error.kind() == ErrorKind::Interrupted {
+                return Ok(load_interrupted_build_run_record(
+                    &coordinator,
+                    storage,
+                    plan.build_run_id,
+                )?);
+            }
             if error_indicates_authentication_failure(&error) {
                 persist_repository_auth_runtime_failure(&coordinator, plan.repository_id, &error);
             }
@@ -897,7 +1303,26 @@ pub(crate) fn run_build_run_next_command(
             )?;
             return Ok(record);
         }
-        let stage_sequence = Rc::new(RefCell::new(BuildRunStageSequence::default()));
+
+        if checkout_reporter.stage_started() {
+            complete_checkout_stage(
+                &coordinator,
+                plan.build_run_id,
+                &planned,
+                &stage_sequence,
+                "Repository checkout completed.",
+            )?;
+        }
+
+        start_build_run_after_checkout(
+            &coordinator,
+            storage,
+            &event_context,
+            plan.build_run_id,
+            &planned.root_path,
+            &validation_log_path,
+            &planned.artifact_root_path,
+        )?;
         let validation_tracker = BuildRunStageTracker::new(
             &coordinator,
             plan.build_run_id,
@@ -996,6 +1421,21 @@ pub(crate) fn run_build_run_next_command(
         }
     };
 
+    if runtime_stop_requested(storage)?
+        && (record.status == BuildStatus::Running.as_str()
+            || record.status == BuildStatus::Queued.as_str())
+    {
+        let shutdown_error = runtime_shutdown_interruption_error("build execution");
+        release_claimed_build_message(
+            &coordinator,
+            message.id,
+            &message.lease_token,
+            &shutdown_error,
+        )?;
+        lease_renewer.finish()?;
+        return Ok(String::from("null"));
+    }
+
     synchronize_build_execution_report(&coordinator, record.id, None, None)?;
 
     maybe_run_release_cleanup(&coordinator, record.release_run_id, record.id);
@@ -1030,19 +1470,7 @@ fn stage_claimed_build_job(
     let planned_preparation = build_workspace_preparation(&plan, GitAuthOptions::default())?;
     let planned = WorkspacePreparer::new(&config.directories).plan(&planned_preparation)?;
     let event_context = build_run_event_context(coordinator, &plan);
-    let started = coordinator.start_build_run(
-        plan.build_run_id,
-        StartBuildRunInput {
-            workspace_path: planned.root_path.display().to_string(),
-            log_path: process_validation_log_path(&planned.root_path)
-                .display()
-                .to_string(),
-            artifact_root_path: planned.artifact_root_path.display().to_string(),
-        },
-    )?;
-    if let Err(error) = emit_build_run_started_event(storage, &event_context) {
-        log_runtime_event_failure(EVENT_TOPIC_BUILD_RUN_STARTED, &error);
-    }
+    let validation_log_path = process_validation_log_path(&planned.root_path);
 
     let preparation = match resolve_build_workspace_preparation(coordinator, &plan) {
         Ok(preparation) => preparation,
@@ -1054,9 +1482,7 @@ fn stage_claimed_build_job(
                 plan.build_run_id,
                 FailBuildRunInput {
                     workspace_path: planned.root_path.display().to_string(),
-                    log_path: process_validation_log_path(&planned.root_path)
-                        .display()
-                        .to_string(),
+                    log_path: validation_log_path.display().to_string(),
                     artifact_root_path: planned.artifact_root_path.display().to_string(),
                     error_message: error.to_string(),
                 },
@@ -1064,9 +1490,66 @@ fn stage_claimed_build_job(
         }
     };
 
-    match ensure_release_process_checkout(&config.directories, &preparation) {
-        Ok(_) => Ok(started),
+    let stage_sequence = build_run_stage_sequence(coordinator, plan.build_run_id)?;
+    let mut checkout_reporter = ProcessCheckoutLogReporter::with_stage_progress(
+        process_checkout_log_path(&planned.root_path),
+        planned.root_path.clone(),
+        planned.artifact_root_path.clone(),
+        storage,
+        coordinator.clone(),
+        plan.build_run_id,
+        &event_context,
+    )?;
+
+    match ensure_release_process_checkout(
+        &config.directories,
+        planned.clone(),
+        &preparation,
+        &mut checkout_reporter,
+    ) {
+        Ok(_) => {
+            if checkout_reporter.stage_started() {
+                complete_checkout_stage(
+                    coordinator,
+                    plan.build_run_id,
+                    &planned,
+                    &stage_sequence,
+                    "Repository checkout completed.",
+                )?;
+            }
+
+            start_build_run_after_checkout(
+                coordinator,
+                storage,
+                &event_context,
+                plan.build_run_id,
+                &planned.root_path,
+                &validation_log_path,
+                &planned.artifact_root_path,
+            )
+        }
+        Err(error) if error.kind() == ErrorKind::Interrupted => {
+            if checkout_reporter.stage_started() {
+                let _ = fail_checkout_stage(
+                    coordinator,
+                    plan.build_run_id,
+                    &planned,
+                    &stage_sequence,
+                    &error.to_string(),
+                );
+            }
+            load_interrupted_build_run_record(coordinator, storage, plan.build_run_id)
+        }
         Err(error) => {
+            if checkout_reporter.stage_started() {
+                let _ = fail_checkout_stage(
+                    coordinator,
+                    plan.build_run_id,
+                    &planned,
+                    &stage_sequence,
+                    &error.to_string(),
+                );
+            }
             if error_indicates_authentication_failure(&error) {
                 persist_repository_auth_runtime_failure(coordinator, plan.repository_id, &error);
             }
@@ -1837,9 +2320,66 @@ fn process_unity_build_run_with_retry(
 
     loop {
         let planned = WorkspacePreparer::new(directories).plan(&current_preparation)?;
-        let workspace = match processor.prepare_build_workspace(&current_preparation) {
+        let tracker = BuildRunStageTracker::new(
+            coordinator,
+            build_run_id,
+            planned.root_path.clone(),
+            planned.build_root_path.clone(),
+            planned.artifact_root_path.clone(),
+            resolve_unity_build_stage_identity(runner_plan),
+            stage_sequence.clone(),
+        )?;
+        let prepare_build_message = format!(
+            "Preparing source checkout and build workspace for Unity target '{}'.",
+            runner_plan.unity_target_platform,
+        );
+        tracker.start_stage(BuildProcessStage::ExecuteBuild, &prepare_build_message)?;
+        emit_build_stage_started_event(
+            storage,
+            event_context,
+            &tracker,
+            BuildProcessStage::ExecuteBuild,
+            &prepare_build_message,
+        );
+
+        let mut preparation_reporter = BuildStageHeartbeatReporter::new(
+            &tracker,
+            storage,
+            event_context,
+            BuildProcessStage::ExecuteBuild,
+        );
+        let workspace = match processor
+            .prepare_build_workspace_with_reporter(&current_preparation, &mut preparation_reporter)
+        {
             Ok(workspace) => workspace,
             Err(error) => {
+                if let Some(stage_error) = preparation_reporter.take_error() {
+                    if let Some(record) = maybe_return_interrupted_build_run_record(
+                        coordinator,
+                        storage,
+                        build_run_id,
+                        &tracker,
+                        BuildProcessStage::ExecuteBuild,
+                        &stage_error.to_string(),
+                    )? {
+                        return Ok(record);
+                    }
+                    let _ = tracker.fail_stage(
+                        BuildProcessStage::ExecuteBuild,
+                        &stage_error.to_string(),
+                    );
+                }
+                if let Some(record) = maybe_return_interrupted_build_run_record(
+                    coordinator,
+                    storage,
+                    build_run_id,
+                    &tracker,
+                    BuildProcessStage::ExecuteBuild,
+                    &error.to_string(),
+                )? {
+                    return Ok(record);
+                }
+                let _ = tracker.fail_stage(BuildProcessStage::ExecuteBuild, &error.to_string());
                 let record = coordinator.fail_build_run(
                     build_run_id,
                     FailBuildRunInput {
@@ -1852,15 +2392,29 @@ fn process_unity_build_run_with_retry(
                 return Ok(record);
             }
         };
-        let tracker = BuildRunStageTracker::new(
-            coordinator,
-            build_run_id,
-            planned.root_path.clone(),
-            planned.build_root_path.clone(),
-            planned.artifact_root_path.clone(),
-            resolve_unity_build_stage_identity(runner_plan),
-            stage_sequence.clone(),
-        )?;
+        if let Some(error) = preparation_reporter.take_error() {
+            if let Some(record) = maybe_return_interrupted_build_run_record(
+                coordinator,
+                storage,
+                build_run_id,
+                &tracker,
+                BuildProcessStage::ExecuteBuild,
+                &error.to_string(),
+            )? {
+                return Ok(record);
+            }
+            tracker.fail_stage(BuildProcessStage::ExecuteBuild, &error.to_string())?;
+            let record = coordinator.fail_build_run(
+                build_run_id,
+                FailBuildRunInput {
+                    workspace_path: planned.root_path.display().to_string(),
+                    log_path: validation_log_path.display().to_string(),
+                    artifact_root_path: planned.artifact_root_path.display().to_string(),
+                    error_message: error.to_string(),
+                },
+            )?;
+            return Ok(record);
+        }
 
         let unity_log_path = tracker.stage_log_path(BuildProcessStage::ExecuteBuild)?;
         let mut workspace = workspace;
@@ -1870,12 +2424,12 @@ fn process_unity_build_run_with_retry(
             "Launching Unity build method '{}' for target '{}'.",
             runner_plan.unity_build_method, runner_plan.unity_target_platform,
         );
-        tracker.start_stage(BuildProcessStage::ExecuteBuild, &unity_build_message)?;
-        emit_build_stage_started_event(
+        tracker.heartbeat_stage(BuildProcessStage::ExecuteBuild, &unity_build_message)?;
+        let _ = emit_build_run_stage_updated_event(
             storage,
             event_context,
-            &tracker,
-            BuildProcessStage::ExecuteBuild,
+            tracker.stage_key(BuildProcessStage::ExecuteBuild),
+            tracker.stage_label(BuildProcessStage::ExecuteBuild),
             &unity_build_message,
         );
 
@@ -1901,6 +2455,16 @@ fn process_unity_build_run_with_retry(
         );
         let execute_outcome = processor.execute_prepared(runner_plan, workspace, &mut reporter);
         if let Some(error) = reporter.take_error() {
+            if let Some(record) = maybe_return_interrupted_build_run_record(
+                coordinator,
+                storage,
+                build_run_id,
+                &tracker,
+                BuildProcessStage::ExecuteBuild,
+                &error.to_string(),
+            )? {
+                return Ok(record);
+            }
             tracker.fail_stage(BuildProcessStage::ExecuteBuild, &error.to_string())?;
             let record = coordinator.fail_build_run(
                 build_run_id,
@@ -1916,6 +2480,24 @@ fn process_unity_build_run_with_retry(
 
         match execute_outcome {
             Ok(UnityBuildExecutionProcessOutcome { result, error }) => match error {
+                Some(error) if error.kind() == ErrorKind::Interrupted => {
+                    if let Some(record) = maybe_return_interrupted_build_run_record(
+                        coordinator,
+                        storage,
+                        build_run_id,
+                        &tracker,
+                        BuildProcessStage::ExecuteBuild,
+                        &error.to_string(),
+                    )? {
+                        return Ok(record);
+                    }
+                    tracker.fail_stage(BuildProcessStage::ExecuteBuild, &error.to_string())?;
+                    return load_interrupted_build_run_record(
+                        coordinator,
+                        storage,
+                        build_run_id,
+                    );
+                }
                 Some(error)
                     if retry_available && should_retry_in_fresh_workspace(&result.log_path)? =>
                 {
@@ -2278,13 +2860,14 @@ fn build_workspace_preparation(
         repository_name: plan.repository_name.clone(),
         source,
         workspace_root_override: plan.workspace_root_override.clone(),
-        artifacts_root_override: plan.artifacts_root_override.clone(),
+        artifacts_root_override: None,
     })
 }
 
 fn unity_runner_execution_plan(
     plan: &StoredBuildExecutionPlan,
 ) -> io::Result<UnityBuildExecutionPlan> {
+    let source_metadata = resolve_build_source_metadata(plan)?;
     let contract = resolve_unity_build_target_contract(plan)?;
     if plan.timeout_seconds <= 0 {
         return Err(io::Error::new(
@@ -2310,6 +2893,7 @@ fn unity_runner_execution_plan(
         output_kind: plan.output_kind.clone(),
         output_path_template: plan.output_path_template.clone(),
         engine_version: plan.engine_version.clone(),
+        process_priority: source_metadata.process_priority,
         config_json: resolve_unity_runner_config_json(plan)?,
         timeout_seconds: plan.timeout_seconds,
     })
@@ -2376,6 +2960,7 @@ fn resolve_build_source_metadata(
         source_kind,
         source_ref,
         local_path,
+        process_priority: metadata.process_priority.unwrap_or_default(),
         unity_executable_path_override,
     })
 }
@@ -2628,7 +3213,66 @@ mod tests {
         assert_eq!(resolved.runner_type, RunnerFamily::HostNative.label());
         assert_eq!(resolved.unity_target_platform, "StandaloneWindows64");
         assert_eq!(resolved.unity_build_method, "Builder.PerformWindows");
+        assert_eq!(resolved.process_priority, ProcessPriority::Low);
         assert!(resolved.config_json.contains("unity_executable_path"));
+    }
+
+    #[test]
+    fn resolve_build_execution_dispatch_plan_with_profile_uses_release_process_priority() {
+        let mut plan = test_stored_build_execution_plan(EngineKind::Unity);
+        plan.source_metadata_json = serde_json::json!({
+            "process_priority": "high"
+        })
+        .to_string();
+
+        let resolved = resolve_build_execution_dispatch_plan_with_profile(
+            &plan,
+            &test_host_capability_profile(),
+        )
+        .expect("Unity plans should inherit release process priority")
+        .into_unity_host_native();
+
+        assert_eq!(resolved.process_priority, ProcessPriority::High);
+    }
+
+    #[test]
+    fn build_workspace_preparation_uses_managed_branch_source_ref_for_git_checkout() {
+        let mut plan = test_stored_build_execution_plan(EngineKind::Unity);
+        plan.git_tag = String::from("v1.3.3");
+        plan.source_metadata_json = serde_json::json!({
+            "source_kind": RELEASE_SOURCE_KIND_MANAGED_REF,
+            "source_ref": "release/next"
+        })
+        .to_string();
+
+        let preparation = build_workspace_preparation(&plan, GitAuthOptions::default())
+            .expect("managed branch build preparation should resolve");
+
+        let WorkspacePreparationSource::GitRef { git_ref, .. } = preparation.source else {
+            panic!("managed branch build preparation should use a Git ref source");
+        };
+
+        assert_eq!(git_ref, "release/next");
+    }
+
+    #[test]
+    fn build_workspace_preparation_uses_managed_tag_source_ref_for_git_checkout() {
+        let mut plan = test_stored_build_execution_plan(EngineKind::Unity);
+        plan.git_tag = String::from("v1.3.3");
+        plan.source_metadata_json = serde_json::json!({
+            "source_kind": RELEASE_SOURCE_KIND_MANAGED_TAG,
+            "source_ref": "release-candidate-9"
+        })
+        .to_string();
+
+        let preparation = build_workspace_preparation(&plan, GitAuthOptions::default())
+            .expect("managed tag build preparation should resolve");
+
+        let WorkspacePreparationSource::GitRef { git_ref, .. } = preparation.source else {
+            panic!("managed tag build preparation should use a Git ref source");
+        };
+
+        assert_eq!(git_ref, "release-candidate-9");
     }
 
     #[test]
@@ -2791,6 +3435,7 @@ mod tests {
             output_kind: Some(String::from("archive")),
             output_path_template: Some(String::from("Builds/Linux")),
             engine_version: String::from("2022.3.20f1"),
+            process_priority: ProcessPriority::Low,
             config_json: String::from(r#"{"unity_executable_path":"C:/Unity/Editor/Unity.exe"}"#),
             timeout_seconds: 900,
         };

@@ -500,6 +500,18 @@ pub fn shutdown_runtime(
     Ok(stopped)
 }
 
+/// Returns whether the persisted runtime lifecycle state currently requests a stop.
+pub fn runtime_shutdown_requested(storage: &StorageLayout) -> io::Result<bool> {
+    match read_health_report(&storage.health_report_path) {
+        Ok(report) => Ok(matches!(
+            report.status,
+            RuntimeStatus::ShuttingDown | RuntimeStatus::Stopped
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Reads the last persisted runtime health report from disk.
 pub fn read_health_report(path: &Path) -> io::Result<RuntimeHealthReport> {
     read_json_file(path)

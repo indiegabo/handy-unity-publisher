@@ -2,7 +2,11 @@
 //! across runtime-store coordination and reporting flows.
 
 use super::*;
-use runtime_contracts::{BuildKind, EngineKind};
+use runtime_contracts::{BuildKind, EngineKind, ProcessPriority};
+
+fn default_source_metadata_json() -> String {
+    String::from("{}")
+}
 
 /// Defines the durable paths owned by the local runtime store.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,6 +293,7 @@ pub struct ReleaseRunRecord {
     pub git_commit: Option<String>,
     pub trigger_source: String,
     pub trigger_rule_id: Option<i64>,
+    #[serde(default = "default_source_metadata_json")]
     pub source_metadata_json: String,
     pub source_identity: String,
     pub engine_version: Option<String>,
@@ -298,6 +303,16 @@ pub struct ReleaseRunRecord {
     pub error_message: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Reports one persisted release run together with its whole-process elapsed
+/// duration derived from the durable release timestamps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseRunElapsedSnapshot {
+    pub release_run_id: i64,
+    pub status: String,
+    pub finished_at: Option<String>,
+    pub elapsed_seconds: u64,
 }
 
 /// Stores one repository row exposed to the runtime polling loop.
@@ -408,6 +423,8 @@ pub struct PublishExecutionPlan {
     pub repository_id: i64,
     pub repository_name: String,
     pub git_tag: String,
+    #[serde(default = "default_source_metadata_json")]
+    pub source_metadata_json: String,
     pub build_run_id: i64,
     pub publish_target_id: i64,
     pub publish_target_name: String,
@@ -454,6 +471,7 @@ pub struct BuildExecutionPlan {
     pub repository_local_path: Option<String>,
     pub git_tag: String,
     pub git_commit: Option<String>,
+    #[serde(default = "default_source_metadata_json")]
     pub source_metadata_json: String,
     pub target_name: String,
     pub build_kind: BuildKind,
@@ -1022,8 +1040,33 @@ pub struct OnDemandReleaseDispatchInput {
     pub source_kind: String,
     pub source_ref: Option<String>,
     pub local_path: Option<String>,
+    pub process_priority: Option<ProcessPriority>,
     pub requested_via: String,
     pub unity_executable_path_override: Option<String>,
+}
+
+/// Defines the operator-provided fields used to preview one on-demand release version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnDemandReleaseVersionPreviewInput {
+    pub repository_id: i64,
+    pub version_source: String,
+    pub source_kind: String,
+    pub source_ref: Option<String>,
+    pub local_path: Option<String>,
+}
+
+/// Defines the operator-provided fields used to list one managed repository ref namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnDemandReleaseRemoteRefsInput {
+    pub repository_id: i64,
+    pub source_kind: String,
+}
+
+/// Describes one managed repository branch or tag offered to the start-release flow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnDemandReleaseRemoteRef {
+    pub name: String,
+    pub commit: String,
 }
 
 /// Defines the structured source metadata persisted for one release run.
@@ -1035,5 +1078,75 @@ pub struct ReleaseSourceMetadata {
     pub source_ref: Option<String>,
     pub local_path: Option<String>,
     pub version_source: Option<String>,
+    pub process_priority: Option<ProcessPriority>,
     pub unity_executable_path_override: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_execution_plan_defaults_missing_source_metadata_json() {
+        let plan: BuildExecutionPlan = serde_json::from_value(serde_json::json!({
+            "build_run_id": 1,
+            "release_run_id": 2,
+            "repository_id": 3,
+            "engine_kind": "unity",
+            "repository_name": "revolutions",
+            "repository_credentials_id": null,
+            "workspace_root_override": null,
+            "artifacts_root_override": null,
+            "build_target_id": 4,
+            "repository_source_mode": "local_workspace",
+            "repository_url": "https://example.invalid/revolutions.git",
+            "repository_local_path": "C:/repos/revolutions",
+            "git_tag": "v1.2.3",
+            "git_commit": null,
+            "target_name": "Windows 64-bit",
+            "build_kind": "player",
+            "contract_json": "{}",
+            "runner_type": "host_native",
+            "output_kind": null,
+            "output_path_template": null,
+            "config_json": "{}",
+            "engine_version": "6000.0.0f1",
+            "image_ref": "",
+            "timeout_seconds": 3600,
+            "status": "queued"
+        }))
+        .expect("legacy build execution plan should decode without source metadata");
+
+        assert_eq!(plan.source_metadata_json, "{}");
+    }
+
+    #[test]
+    fn publish_execution_plan_defaults_missing_source_metadata_json() {
+        let plan: PublishExecutionPlan = serde_json::from_value(serde_json::json!({
+            "publish_run_id": 1,
+            "release_run_id": 2,
+            "repository_id": 3,
+            "repository_name": "revolutions",
+            "git_tag": "v1.2.3",
+            "build_run_id": 4,
+            "publish_target_id": 5,
+            "publish_target_name": "itch",
+            "publish_target_kind": "itch",
+            "publish_target_config_json": "{}",
+            "publish_target_credentials_id": null,
+            "execution_contract_json": "{}",
+            "artifact_id": 6,
+            "artifact_name": "game.zip",
+            "artifact_kind": "archive",
+            "artifact_path": "C:/artifacts/game.zip",
+            "artifact_active_location_kind": "runtime_artifact",
+            "artifact_active_location_ref": "game.zip",
+            "artifact_root_path": "C:/artifacts",
+            "source_path": "C:/artifacts/game.zip",
+            "status": "queued"
+        }))
+        .expect("legacy publish execution plan should decode without source metadata");
+
+        assert_eq!(plan.source_metadata_json, "{}");
+    }
 }

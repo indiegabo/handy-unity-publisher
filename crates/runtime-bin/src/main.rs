@@ -23,6 +23,7 @@ use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -31,18 +32,20 @@ use cli::*;
 use runtime_config::{RuntimeConfig, SUPERVISION_ATTEMPT_ENV};
 use runtime_core::{
     bootstrap_runtime, emit_runtime_event, load_runtime_automation_snapshot, read_health_report,
-    read_supervision_contract, shutdown_runtime, update_runtime_health, write_supervisor_snapshot,
-    RuntimeAutomationMode, RuntimeEventInput, RuntimeRestartPolicy, RuntimeStatus,
+    read_supervision_contract, runtime_shutdown_requested, shutdown_runtime,
+    update_runtime_health, write_supervisor_snapshot, RuntimeAutomationMode,
+    RuntimeEventInput, RuntimeRestartPolicy, RuntimeStatus,
     RuntimeSupervisionContract, RuntimeSupervisorSnapshot, RuntimeSupervisorStatus,
     RUNTIME_HEARTBEAT_EVENT,
 };
 use runtime_git::{
-    git_auth_options_from_credentials, GitAuthOptions, GitRemoteHeadRefRequest,
-    GitRemoteHeadRefResolver, GitTag, GitTagListRequest, GitTagLister, GitWorkspaceSyncRefRequest,
-    GitWorkspaceSyncer,
+    git_auth_options_from_credentials, GitAuthOptions, GitProgressReporter,
+    GitRemoteHeadRefRequest, GitRemoteHeadRefResolver, GitTag, GitTagListRequest,
+    GitTagLister, GitWorkspaceSyncRefRequest, GitWorkspaceSyncer,
 };
 use runtime_manifests::sync_directory as sync_manifest_directory;
 use runtime_publish::{
+    ExecutionController as PublishExecutionController,
     resolve_destination_path as resolve_publish_destination_path,
     ExecutionPlan as PublishExecutionPlan, ExecutionProcessor as PublishExecutionProcessor,
     Processor as PublishProcessor,
@@ -63,7 +66,8 @@ use runtime_store::{
     CompleteBuildRunStageInput, CompletePublishRunInput, FailBuildRunInput, FailBuildRunStageInput,
     FailPublishRunInput, HeartbeatBuildRunStageInput, InterruptedBuildRecoveryRecord,
     LocalCoordinator, ManualReleaseDispatchInput, PollingRepositoryRecord, PublishDispatchJob,
-    PublishExecutionPlan as StoredPublishExecutionPlan, PublishRunRecord, ReleaseRunRecord,
+    PublishExecutionPlan as StoredPublishExecutionPlan, PublishRunRecord,
+    ReleaseRunElapsedSnapshot, ReleaseRunRecord,
     ReleaseSourceMetadata, RepositoryCheckoutRecord, RepositoryPollDispatchInput,
     RuntimeControlRequest, RuntimeRecoveryReport, StartBuildRunInput, StartBuildRunStageInput,
     StartPublishRunInput, StorageLayout, RECOVERY_INTERRUPTION_KIND_REQUESTED,
@@ -115,6 +119,9 @@ const EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED: &str = "build.stage_updated";
 const EVENT_TOPIC_BUILD_RUN_ON_HOLD: &str = "build.run_on_hold";
 const EVENT_TOPIC_PUBLISH_RUN_STARTED: &str = "publish.run_started";
 const EVENT_TOPIC_PUBLISH_RUN_FINISHED: &str = "publish.run_finished";
+const PROCESS_ELAPSED_TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+static ACTIVE_PROCESS_ELAPSED_TICKERS: OnceLock<Mutex<HashSet<i64>>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReleaseEventContext {
@@ -149,6 +156,15 @@ struct PublishRunEventContext {
     publish_target_id: i64,
     publish_target_name: String,
     artifact_name: String,
+    origin: ReleaseEventOriginContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessElapsedEventContext {
+    release_run_id: i64,
+    repository_id: i64,
+    repository_name: String,
+    git_tag: String,
     origin: ReleaseEventOriginContext,
 }
 
@@ -306,8 +322,219 @@ fn publish_run_event_context(
     }
 }
 
+fn process_elapsed_event_context_from_release(
+    context: &ReleaseEventContext,
+) -> ProcessElapsedEventContext {
+    ProcessElapsedEventContext {
+        release_run_id: context.release_run_id,
+        repository_id: context.repository_id,
+        repository_name: context.repository_name.clone(),
+        git_tag: context.git_tag.clone(),
+        origin: context.origin.clone(),
+    }
+}
+
+fn process_elapsed_event_context_from_build(
+    context: &BuildRunEventContext,
+) -> ProcessElapsedEventContext {
+    ProcessElapsedEventContext {
+        release_run_id: context.release_run_id,
+        repository_id: context.repository_id,
+        repository_name: context.repository_name.clone(),
+        git_tag: context.git_tag.clone(),
+        origin: context.origin.clone(),
+    }
+}
+
+fn process_elapsed_event_context_from_publish(
+    context: &PublishRunEventContext,
+) -> ProcessElapsedEventContext {
+    ProcessElapsedEventContext {
+        release_run_id: context.release_run_id,
+        repository_id: context.repository_id,
+        repository_name: context.repository_name.clone(),
+        git_tag: context.git_tag.clone(),
+        origin: context.origin.clone(),
+    }
+}
+
+fn process_elapsed_runtime_event_topic(release_run_id: i64) -> String {
+    format!("process.{release_run_id}.elapsed_time")
+}
+
+fn format_process_elapsed_clock(total_seconds: u64) -> String {
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn release_status_is_terminal(status: &str) -> bool {
+    matches!(status, "succeeded" | "failed" | "canceled")
+}
+
+fn active_process_elapsed_ticker_registry() -> &'static Mutex<HashSet<i64>> {
+    ACTIVE_PROCESS_ELAPSED_TICKERS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn try_claim_process_elapsed_ticker(release_run_id: i64) -> bool {
+    let Ok(mut active_release_ids) = active_process_elapsed_ticker_registry().lock() else {
+        eprintln!(
+            "failed to acquire process elapsed ticker registry for release run {}",
+            release_run_id
+        );
+        return false;
+    };
+
+    active_release_ids.insert(release_run_id)
+}
+
+fn release_process_elapsed_ticker_claim(release_run_id: i64) {
+    let Ok(mut active_release_ids) = active_process_elapsed_ticker_registry().lock() else {
+        eprintln!(
+            "failed to release process elapsed ticker registry claim for release run {}",
+            release_run_id
+        );
+        return;
+    };
+
+    active_release_ids.remove(&release_run_id);
+}
+
+fn emit_process_elapsed_updated_event(
+    storage: &StorageLayout,
+    context: &ProcessElapsedEventContext,
+    snapshot: &ReleaseRunElapsedSnapshot,
+) -> io::Result<()> {
+    let mode = release_event_mode_label(&context.origin);
+    let elapsed_clock = format_process_elapsed_clock(snapshot.elapsed_seconds);
+
+    emit_runtime_event(
+        storage,
+        RuntimeEventInput {
+            topic: process_elapsed_runtime_event_topic(context.release_run_id),
+            severity: String::from("info"),
+            origin: String::from("runtime-bin"),
+            user_requested: context.origin.user_requested,
+            repository_id: Some(context.repository_id),
+            release_run_id: Some(context.release_run_id),
+            build_run_id: None,
+            publish_run_id: None,
+            summary: format!(
+                "{mode} process elapsed tick for {} {}",
+                context.repository_name, context.git_tag
+            ),
+            payload: serde_json::json!({
+                "repository_name": &context.repository_name,
+                "git_tag": &context.git_tag,
+                "trigger_source": &context.origin.trigger_source,
+                "source_kind": &context.origin.source_kind,
+                "source_ref": &context.origin.source_ref,
+                "local_path": &context.origin.local_path,
+                "requested_via": &context.origin.requested_via,
+                "status": &snapshot.status,
+                "elapsed_seconds": snapshot.elapsed_seconds,
+                "elapsed_clock": elapsed_clock,
+            }),
+        },
+    )?;
+
+    Ok(())
+}
+
+fn ensure_process_elapsed_ticker(
+    storage: &StorageLayout,
+    context: ProcessElapsedEventContext,
+) {
+    if !try_claim_process_elapsed_ticker(context.release_run_id) {
+        return;
+    }
+
+    let storage = storage.clone();
+    thread::spawn(move || {
+        let release_run_id = context.release_run_id;
+        let coordinator = LocalCoordinator::new(&storage);
+
+        loop {
+            let snapshot = match coordinator.get_release_run_elapsed_snapshot(release_run_id) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    eprintln!(
+                        "failed to load process elapsed snapshot for release run {}: {}",
+                        release_run_id, error
+                    );
+                    break;
+                }
+            };
+
+            if let Err(error) = emit_process_elapsed_updated_event(&storage, &context, &snapshot)
+            {
+                eprintln!(
+                    "failed to emit runtime event {}: {}",
+                    process_elapsed_runtime_event_topic(release_run_id),
+                    error
+                );
+            }
+
+            if snapshot.finished_at.is_some() || release_status_is_terminal(&snapshot.status) {
+                break;
+            }
+
+            if runtime_stop_requested(&storage).unwrap_or(false) {
+                break;
+            }
+
+            thread::sleep(PROCESS_ELAPSED_TICK_INTERVAL);
+        }
+
+        release_process_elapsed_ticker_claim(release_run_id);
+    });
+}
+
+fn ensure_active_process_elapsed_tickers(storage: &StorageLayout) {
+    let coordinator = LocalCoordinator::new(storage);
+    let snapshot = match coordinator.automation_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            eprintln!("failed to inspect active releases for elapsed tickers: {error}");
+            return;
+        }
+    };
+
+    for repository in snapshot.repositories {
+        for release in repository.release_queue {
+            let record = match coordinator.get_release_run_record(release.release_run_id) {
+                Ok(record) => record,
+                Err(error) => {
+                    eprintln!(
+                        "failed to reload active release run {} for elapsed ticker bootstrap: {}",
+                        release.release_run_id, error
+                    );
+                    continue;
+                }
+            };
+
+            ensure_process_elapsed_ticker(
+                storage,
+                process_elapsed_event_context_from_release(&release_event_context(
+                    &repository.repository_name,
+                    &record,
+                )),
+            );
+        }
+    }
+}
+
 fn log_runtime_event_failure(topic: &str, error: &io::Error) {
     eprintln!("failed to emit runtime event {topic}: {error}");
+}
+
+fn runtime_shutdown_interruption_error(context: &str) -> io::Error {
+    io::Error::new(
+        ErrorKind::Interrupted,
+        format!("runtime shutdown was requested while {context} was active"),
+    )
 }
 
 fn terminal_event_severity(status: &str) -> &'static str {
@@ -1108,12 +1335,21 @@ fn run_publish_run_next_command(
             resolved.plan.publish_run_id,
             StartPublishRunInput::default(),
         )?;
+        ensure_process_elapsed_ticker(
+            storage,
+            process_elapsed_event_context_from_publish(&event_context),
+        );
         if let Err(error) = emit_publish_run_started_event(storage, &event_context) {
             log_runtime_event_failure(EVENT_TOPIC_PUBLISH_RUN_STARTED, &error);
         }
 
         let processor = PublishExecutionProcessor::new();
-        let record = match processor.process(&publish_plan) {
+        let mut controller = PublishRunCancellationController {
+            coordinator: &coordinator,
+            storage,
+            publish_run_id: resolved.plan.publish_run_id,
+        };
+        let record = match processor.process_with_controller(&publish_plan, &mut controller) {
             Ok(result) => coordinator.complete_publish_run(
                 resolved.plan.publish_run_id,
                 CompletePublishRunInput {
@@ -1122,6 +1358,9 @@ fn run_publish_run_next_command(
                     artifact_active_location_ref: result.artifact_active_location_ref,
                 },
             )?,
+            Err(error) if error.kind() == ErrorKind::Interrupted => {
+                coordinator.get_publish_run_record(resolved.plan.publish_run_id)?
+            }
             Err(error) => coordinator.fail_publish_run(
                 resolved.plan.publish_run_id,
                 FailPublishRunInput {
@@ -1147,6 +1386,18 @@ fn run_publish_run_next_command(
         }
     };
 
+    if runtime_stop_requested(storage)? && record.status == "running" {
+        let shutdown_error = runtime_shutdown_interruption_error("publish transport");
+        release_claimed_publish_message(
+            &coordinator,
+            message.id,
+            &message.lease_token,
+            &shutdown_error,
+        )?;
+        lease_renewer.finish()?;
+        return Ok(String::from("null"));
+    }
+
     let acknowledged = coordinator.acknowledge_message(message.id, &message.lease_token)?;
     let renewer_result = lease_renewer.finish();
     if !acknowledged {
@@ -1165,6 +1416,33 @@ fn run_publish_run_next_command(
     }
 
     serde_json::to_string_pretty(&record).map_err(|error| Box::new(error) as Box<dyn Error>)
+}
+
+struct PublishRunCancellationController<'a> {
+    coordinator: &'a LocalCoordinator,
+    storage: &'a StorageLayout,
+    publish_run_id: i64,
+}
+
+impl PublishExecutionController for PublishRunCancellationController<'_> {
+    fn check_cancellation(&mut self) -> io::Result<()> {
+        if runtime_stop_requested(self.storage)? {
+            return Err(runtime_shutdown_interruption_error("publish transport"));
+        }
+
+        let publish_run = self.coordinator.get_publish_run_record(self.publish_run_id)?;
+        if publish_run.status != "running" {
+            return Err(io::Error::new(
+                ErrorKind::Interrupted,
+                format!(
+                    "publish run {} was canceled while the publish transport was active",
+                    self.publish_run_id,
+                ),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 fn run_publish_inspect_command(
@@ -1200,6 +1478,7 @@ fn publish_execution_plan(
 ) -> io::Result<PublishExecutionPlan> {
     let (publish_target_credentials_kind, publish_target_credentials_config_json) =
         resolve_publish_target_credentials(coordinator, plan.publish_target_credentials_id)?;
+    let source_metadata = decode_release_event_source_metadata(&plan.source_metadata_json);
 
     Ok(PublishExecutionPlan {
         publish_run_id: plan.publish_run_id,
@@ -1207,6 +1486,7 @@ fn publish_execution_plan(
         repository_id: plan.repository_id,
         repository_name: plan.repository_name.clone(),
         git_tag: plan.git_tag.clone(),
+        process_priority: source_metadata.process_priority.unwrap_or_default(),
         build_run_id: plan.build_run_id,
         publish_target_id: plan.publish_target_id,
         publish_target_name: plan.publish_target_name.clone(),
@@ -1409,10 +1689,12 @@ mod tests {
         runtime_stop_requested, select_queued_repository_tags, AutomationPollReport,
         BuildExecutionReport, BuildRunRecord, PublishedOutputInspectionReport, QueueLeaseRenewer,
         RegistrationCheckoutReport, RepositoryPollSchedule, RuntimeLoopCadence,
+        EVENT_TOPIC_BUILD_RUN_FINISHED, EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED,
+        EVENT_TOPIC_BUILD_RUN_STARTED,
         EVENT_TOPIC_POLL_AUTH_FAILED, EVENT_TOPIC_RELEASE_QUEUED, EVENT_TOPIC_TAG_DETECTED,
     };
     use runtime_config::{HostPlatform, RuntimeConfig, RuntimeDirectories};
-    use runtime_contracts::{BuildKind, EngineKind};
+    use runtime_contracts::{BuildKind, EngineKind, ProcessPriority};
     use runtime_core::{read_runtime_event_batch, shutdown_runtime};
     use runtime_git::GitTag;
     use runtime_manifests::ApplyReport as ManifestApplyReport;
@@ -1422,7 +1704,9 @@ mod tests {
         UnityBuildExecutionPlan as RunnerExecutionPlan, UnityBuildExecutionResult,
         UnityLicenseDiagnostics,
     };
+    use runtime_store::lifecycle::BuildStatus;
     use runtime_store::{
+        CancelReleaseRunInput,
         enqueue_runtime_control_request, CreateRepositoryProjectBuildTargetInput,
         CreateRepositoryProjectInput, ImportedRepositoryRegistrationReport,
         InterruptedBuildRecoveryRecord, LocalCoordinator, RuntimeControlRequest,
@@ -1431,7 +1715,8 @@ mod tests {
     };
     use runtime_store::{
         initialize_database, AutomationSnapshot, BuildExecutionPlan, PollingRepositoryRecord,
-        PublishRunRecord, ReleaseRunRecord, StorageLayout,
+        PublishExecutionPlan as StoredPublishExecutionPlan, PublishRunRecord,
+        ReleaseRunRecord, StorageLayout,
     };
     use rusqlite::{params, Connection};
     use serde_json::json;
@@ -1474,6 +1759,51 @@ mod tests {
         contents
     }
 
+    #[test]
+    fn publish_execution_plan_uses_release_process_priority() {
+        let root = test_root("runtime-bin-publish-priority");
+        let directories = RuntimeDirectories::from_root(&root);
+        let storage = StorageLayout::from_directories(&directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+        let coordinator = LocalCoordinator::new(&storage);
+
+        let plan = super::publish_execution_plan(
+            &coordinator,
+            &StoredPublishExecutionPlan {
+                publish_run_id: 1,
+                release_run_id: 2,
+                repository_id: 3,
+                repository_name: String::from("revolutions"),
+                git_tag: String::from("v1.2.3"),
+                source_metadata_json: json!({
+                    "process_priority": "high"
+                })
+                .to_string(),
+                build_run_id: 4,
+                publish_target_id: 5,
+                publish_target_name: String::from("itch"),
+                publish_target_kind: String::from("itch"),
+                publish_target_config_json: String::from("{}"),
+                publish_target_credentials_id: None,
+                execution_contract_json: String::from("{}"),
+                artifact_id: 6,
+                artifact_name: String::from("game.zip"),
+                artifact_kind: String::from("archive"),
+                artifact_path: String::from("game.zip"),
+                artifact_active_location_kind: String::from("runtime_artifact"),
+                artifact_active_location_ref: String::from("game.zip"),
+                artifact_root_path: String::from("C:/artifacts"),
+                source_path: String::from("C:/artifacts/game.zip"),
+                status: String::from("queued"),
+            },
+        )
+        .expect("publish execution plan should resolve");
+
+        assert_eq!(plan.process_priority, ProcessPriority::High);
+
+        fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
     fn test_archive_execution_plan(platform: &str, target_name: &str) -> RunnerExecutionPlan {
         RunnerExecutionPlan {
             build_run_id: 41,
@@ -1489,6 +1819,7 @@ mod tests {
             output_kind: Some(String::from("archive")),
             output_path_template: Some(format!("Builds/{target_name}")),
             engine_version: String::from("2021.3.33f1"),
+            process_priority: ProcessPriority::Low,
             config_json: String::from("{}"),
             timeout_seconds: 900,
         }
@@ -3693,6 +4024,13 @@ mod tests {
         assert_eq!(queue_message_count(&connection, "build-runs"), 0);
         drop(connection);
 
+        let stages = runtime_store::LocalCoordinator::new(&storage)
+            .list_build_run_stages(record.id)
+            .expect("build stages should load after checkout failure");
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0].step_key, "checkout-repository");
+        assert_eq!(stages[0].status, BuildStatus::Failed.as_str());
+
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
 
@@ -3772,6 +4110,80 @@ mod tests {
         let connection = Connection::open(&storage.database_path).expect("connection should open");
         assert_eq!(queue_message_count(&connection, "build-runs"), 0);
         drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn build_run_next_command_does_not_emit_started_event_before_checkout_succeeds() {
+        let root = test_root("runtime-bin-build-run-next-checkout-gate");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let missing_repository_url = root
+            .join("runtime-bin-build-run-next-checkout-gate")
+            .join("missing-repo")
+            .display()
+            .to_string();
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let repository_id = seed_repository_with_url(
+            &connection,
+            "runtime-bin-build-run-next-checkout-gate",
+            &missing_repository_url,
+        );
+        seed_build_target(&connection, repository_id, "windows-player", "windows");
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v1.0.0", "2021.3.33f1");
+        drop(connection);
+
+        run_release_plan_command(
+            &[String::from("--release-run-id"), release_run_id.to_string()],
+            &storage,
+        )
+        .expect("release plan command should succeed");
+
+        let output = run_build_run_next_command(&[], &config, &storage)
+            .expect("build run-next should persist a failed run on checkout failure");
+        let record: BuildRunRecord =
+            serde_json::from_str(&output).expect("build run-next output should decode");
+        let expected_log_path = config
+            .directories
+            .runs_dir
+            .join(format!("release-run-{}", release_run_id))
+            .join("logs")
+            .join("01-checkout-repository.log")
+            .display()
+            .to_string();
+
+        assert_eq!(record.status, BuildStatus::Failed.as_str());
+        assert!(record.started_at.is_some());
+        assert_eq!(record.log_path.as_deref(), Some(expected_log_path.as_str()));
+
+        let runtime_events = read_runtime_event_batch(&storage.runtime_events_path, 0)
+            .expect("runtime event stream should read");
+        assert!(
+            !runtime_events
+                .events
+                .iter()
+                .any(|event| event.topic == EVENT_TOPIC_BUILD_RUN_STARTED),
+            "checkout failures must not emit build.run_started before the ref is fully materialized"
+        );
+        assert!(
+            runtime_events.events.iter().any(|event| {
+                event.topic == EVENT_TOPIC_BUILD_RUN_STAGE_UPDATED
+                    && event.payload["stage_key"] == "checkout-repository"
+            }),
+            "checkout progress must emit stage updates before any build start event"
+        );
+        assert!(
+            runtime_events
+                .events
+                .iter()
+                .any(|event| event.topic == EVENT_TOPIC_BUILD_RUN_FINISHED),
+            "failed checkout attempts should still emit the terminal build event"
+        );
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -3880,13 +4292,14 @@ mod tests {
         let stages = runtime_store::LocalCoordinator::new(&storage)
             .list_build_run_stages(record.id)
             .expect("build stages should load");
-        assert_eq!(stages.len(), 4);
+        assert_eq!(stages.len(), 5);
         assert_eq!(
             stages
                 .iter()
                 .map(|stage| stage.step_key.as_str())
                 .collect::<Vec<_>>(),
             vec![
+                "checkout-repository",
                 "validate-build-context",
                 "unity-build",
                 "package-artifact",
@@ -3894,7 +4307,7 @@ mod tests {
             ]
         );
         assert!(stages.iter().all(|stage| stage.status == "succeeded"));
-        assert_eq!(stages[1].log_path, log_path.display().to_string());
+        assert_eq!(stages[2].log_path, log_path.display().to_string());
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
     }
@@ -4238,7 +4651,7 @@ mod tests {
         let stages = runtime_store::LocalCoordinator::new(&storage)
             .list_build_run_stages(record.id)
             .expect("build stages should load");
-        assert_eq!(stages.len(), 3);
+        assert_eq!(stages.len(), 4);
         assert_eq!(
             stages
                 .iter()
@@ -4251,16 +4664,21 @@ mod tests {
             vec![
                 (
                     1,
+                        String::from("checkout-repository"),
+                        checkout_log_path.display().to_string(),
+                    ),
+                    (
+                        2,
                     String::from("validate-build-context"),
                     validate_log_path.display().to_string(),
                 ),
                 (
-                    2,
+                        3,
                     String::from("unity-build"),
                     unity_log_path.display().to_string(),
                 ),
                 (
-                    3,
+                        4,
                     String::from("register-artifacts"),
                     register_log_path.display().to_string(),
                 ),
@@ -4629,6 +5047,203 @@ mod tests {
         assert_eq!(publish_run_count_for_build_run(&connection, record.id), 0);
         assert_eq!(queue_message_count(&connection, "build-runs"), 0);
         assert_eq!(queue_message_count(&connection, "publish-runs"), 0);
+        drop(connection);
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn build_run_next_command_returns_canceled_record_when_operator_interrupts_active_build() {
+        let root = test_root("runtime-bin-build-run-next-operator-cancel");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let repository_url = create_tagged_unity_repository(
+            &root.join("runtime-bin-build-run-next-operator-cancel-source"),
+            "v13.0.3",
+            "2021.3.33f1",
+        );
+        let script_path =
+            create_fake_unity_script(&root, "run-next-operator-cancel", ScriptKind::Slow);
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let repository_id = seed_repository_with_url(
+            &connection,
+            "runtime-bin-build-run-next-operator-cancel",
+            &repository_url,
+        );
+        seed_host_native_build_target(
+            &connection,
+            repository_id,
+            "linux-player",
+            "linux",
+            "Builder.PerformLinux",
+            &script_path,
+        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v13.0.3", "2021.3.33f1");
+        drop(connection);
+
+        let planner_output = run_release_plan_command(
+            &[String::from("--release-run-id"), release_run_id.to_string()],
+            &storage,
+        )
+        .expect("release plan command should succeed");
+        let planned_runs: Vec<BuildRunRecord> =
+            serde_json::from_str(&planner_output).expect("planned runs should decode");
+        let build_run_id = planned_runs[0].id;
+
+        let thread_root = root.clone();
+        let worker = std::thread::spawn(move || -> Result<String, String> {
+            let thread_config = RuntimeConfig::from_root(&thread_root);
+            let thread_storage = StorageLayout::from_directories(&thread_config.directories);
+            run_build_run_next_command(&[], &thread_config, &thread_storage)
+                .map_err(|error| error.to_string())
+        });
+
+        let coordinator = LocalCoordinator::new(&storage);
+        let started_at = std::time::Instant::now();
+        loop {
+            let stages = coordinator
+                .list_build_run_stages(build_run_id)
+                .expect("build stages should load while the build is running");
+            if stages.iter().any(|stage| stage.step_key == "unity-build") {
+                break;
+            }
+            if started_at.elapsed() > Duration::from_secs(5) {
+                panic!("timed out waiting for the unity build stage to start");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        coordinator
+            .cancel_release_run(
+                release_run_id,
+                CancelReleaseRunInput {
+                    error_message: String::from(
+                        "Canceled by operator. Entire release process was interrupted.",
+                    ),
+                },
+            )
+            .expect("operator cancel should persist");
+
+        let output = worker
+            .join()
+            .expect("build worker thread should join")
+            .expect("build run-next should return a canceled record");
+        let record: BuildRunRecord =
+            serde_json::from_str(&output).expect("build run-next output should decode");
+
+        assert_eq!(record.status, "canceled");
+        assert!(record
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Canceled by operator"));
+
+        let workspace_path = PathBuf::from(
+            record
+                .workspace_path
+                .clone()
+                .expect("workspace path should persist"),
+        );
+        let report = load_build_execution_report(&workspace_path);
+        assert_eq!(report.build_run.status, "canceled");
+        assert_eq!(report.cleanup.status, "completed");
+        assert!(build_execution_logs_archive_path(&workspace_path).is_file());
+
+        std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");
+    }
+
+    #[test]
+    fn build_run_next_command_returns_null_when_runtime_shutdown_is_requested() {
+        let root = test_root("runtime-bin-build-run-next-shutdown");
+        let config = RuntimeConfig::from_root(&root);
+        let storage = StorageLayout::from_directories(&config.directories);
+        initialize_database(&storage).expect("database bootstrap should succeed");
+
+        let repository_url = create_tagged_unity_repository(
+            &root.join("runtime-bin-build-run-next-shutdown-source"),
+            "v13.0.4",
+            "2021.3.33f1",
+        );
+        let script_path =
+            create_fake_unity_script(&root, "run-next-shutdown", ScriptKind::Slow);
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        let repository_id = seed_repository_with_url(
+            &connection,
+            "runtime-bin-build-run-next-shutdown",
+            &repository_url,
+        );
+        seed_host_native_build_target(
+            &connection,
+            repository_id,
+            "linux-player",
+            "linux",
+            "Builder.PerformLinux",
+            &script_path,
+        );
+        let release_run_id =
+            seed_queued_release(&connection, repository_id, "v13.0.4", "2021.3.33f1");
+        drop(connection);
+
+        let planner_output = run_release_plan_command(
+            &[String::from("--release-run-id"), release_run_id.to_string()],
+            &storage,
+        )
+        .expect("release plan command should succeed");
+        let planned_runs: Vec<BuildRunRecord> =
+            serde_json::from_str(&planner_output).expect("planned runs should decode");
+        let build_run_id = planned_runs[0].id;
+
+        let thread_root = root.clone();
+        let worker = std::thread::spawn(move || -> Result<String, String> {
+            let thread_config = RuntimeConfig::from_root(&thread_root);
+            let thread_storage = StorageLayout::from_directories(&thread_config.directories);
+            run_build_run_next_command(&[], &thread_config, &thread_storage)
+                .map_err(|error| error.to_string())
+        });
+
+        let coordinator = LocalCoordinator::new(&storage);
+        let started_at = std::time::Instant::now();
+        loop {
+            let stages = coordinator
+                .list_build_run_stages(build_run_id)
+                .expect("build stages should load while the build is running");
+            if stages.iter().any(|stage| stage.step_key == "unity-build") {
+                break;
+            }
+            if started_at.elapsed() > Duration::from_secs(5) {
+                panic!("timed out waiting for the unity build stage to start");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        shutdown_runtime(&config, &storage).expect("shutdown marker should persist");
+
+        let output = worker
+            .join()
+            .expect("build worker thread should join")
+            .expect("build run-next should stop cleanly on shutdown");
+        assert_eq!(output, "null");
+
+        let record = coordinator
+            .get_build_run_record(build_run_id)
+            .expect("build run record should remain queryable");
+        assert_eq!(record.status, "running");
+
+        let connection = Connection::open(&storage.database_path).expect("connection should open");
+        assert_eq!(queue_message_count(&connection, "build-runs"), 1);
+        let leased_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(1) FROM worker_queue_messages WHERE queue_name = ? AND lease_token IS NOT NULL",
+                ["build-runs"],
+                |row| row.get(0),
+            )
+            .expect("leased build queue message count should load");
+        assert_eq!(leased_count, 0);
         drop(connection);
 
         std::fs::remove_dir_all(root).expect("temporary runtime root should be removable");

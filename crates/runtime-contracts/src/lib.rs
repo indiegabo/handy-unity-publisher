@@ -170,9 +170,87 @@ impl From<BuildKind> for String {
     }
 }
 
+/// Identifies the host scheduling priority requested for one release process
+/// and the child jobs that launch external tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessPriority {
+    #[default]
+    Low,
+    Normal,
+    High,
+}
+
+impl ProcessPriority {
+    /// Returns the stable slug used across runtime persistence and JSON payloads.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::High => "high",
+        }
+    }
+
+    /// Parses one persisted or user-authored priority slug into the shared contract enum.
+    pub fn parse(value: &str) -> Result<Self, ParseContractKindError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "low" => Ok(Self::Low),
+            "normal" => Ok(Self::Normal),
+            "high" => Ok(Self::High),
+            _ => Err(ParseContractKindError::new("process_priority", value)),
+        }
+    }
+
+    /// Parses one priority and preserves the runtime default of `low` for blank values.
+    pub fn parse_or_default(value: &str) -> Result<Self, ParseContractKindError> {
+        if value.trim().is_empty() {
+            Ok(Self::Low)
+        } else {
+            Self::parse(value)
+        }
+    }
+
+    #[cfg(windows)]
+    pub const fn creation_flags(self) -> u32 {
+        match self {
+            Self::Low => 0x0000_4000,
+            Self::Normal => 0x0000_0020,
+            Self::High => 0x0000_0080,
+        }
+    }
+}
+
+impl fmt::Display for ProcessPriority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for ProcessPriority {
+    type Error = ParseContractKindError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl TryFrom<String> for ProcessPriority {
+    type Error = ParseContractKindError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<ProcessPriority> for String {
+    fn from(value: ProcessPriority) -> Self {
+        String::from(value.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BuildKind, EngineKind};
+    use super::{BuildKind, EngineKind, ProcessPriority};
 
     #[test]
     fn engine_kind_parses_supported_slugs() {
@@ -186,5 +264,23 @@ mod tests {
     #[test]
     fn build_kind_defaults_empty_values_to_player() {
         assert_eq!(BuildKind::parse_or_default("").unwrap(), BuildKind::Player);
+    }
+
+    #[test]
+    fn process_priority_defaults_empty_values_to_low() {
+        assert_eq!(
+            ProcessPriority::parse_or_default("").unwrap(),
+            ProcessPriority::Low
+        );
+    }
+
+    #[test]
+    fn process_priority_parses_supported_slugs() {
+        assert_eq!(ProcessPriority::parse("low").unwrap(), ProcessPriority::Low);
+        assert_eq!(
+            ProcessPriority::parse("normal").unwrap(),
+            ProcessPriority::Normal
+        );
+        assert_eq!(ProcessPriority::parse("high").unwrap(), ProcessPriority::High);
     }
 }
