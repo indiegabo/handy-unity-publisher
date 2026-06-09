@@ -1,13 +1,17 @@
+import { useEffect, useState } from "react";
 import { Badge, SummaryStrip } from "./Surface";
 import type { IconName } from "./Icon";
 import { Button, IconButton } from "./Button";
 import { VerticalAccordion } from "./VerticalAccordion";
 import { useLocalization } from "../LocalizationProvider";
+import { subscribeToProcessElapsedClock } from "../services/runtimeEvents";
 import {
   formatLocalizedProcessFeedBuildCount,
   formatLocalizedProcessFeedEngineKindBadge,
   formatLocalizedProcessFeedEngineVersionBadge,
   normalizeProcessFeedDisplayStatus,
+  resolveProcessFeedElapsedClock,
+  resolveProcessFeedStepDetail,
   resolveLocalizedProcessFeedStepLabel,
   type ProcessFeedRecord,
 } from "./processFeedPresentation";
@@ -30,12 +34,61 @@ export function ProcessFeedItem({
     process.display_status,
   );
   const isOnHold = normalizedStatus === "on_hold";
+  const canRequestCancel = isActiveProcessStatus(normalizedStatus);
   const currentStep = resolveLocalizedProcessFeedStepLabel(
     t,
     process,
     normalizedStatus,
   );
   const onHoldReason = isOnHold ? resolveOnHoldReasonLabel(t, process) : null;
+  const stepDetail = isOnHold ? null : resolveProcessFeedStepDetail(process);
+  const [elapsedClock, setElapsedClock] = useState(() =>
+    resolveProcessFeedElapsedClock(process),
+  );
+
+  useEffect(() => {
+    setElapsedClock(resolveProcessFeedElapsedClock(process));
+  }, [
+    process.created_at,
+    process.display_status,
+    process.finished_at,
+    process.release_run_id,
+    process.started_at,
+  ]);
+
+  useEffect(() => {
+    if (!canRequestCancel) {
+      return;
+    }
+
+    let disposed = false;
+    let unsubscribe: (() => void) | undefined;
+
+    void subscribeToProcessElapsedClock(
+      process.release_run_id,
+      (nextElapsedClock) => {
+        if (disposed) {
+          return;
+        }
+
+        setElapsedClock(nextElapsedClock);
+      },
+    )
+      .then((dispose) => {
+        if (disposed) {
+          dispose();
+          return;
+        }
+
+        unsubscribe = dispose;
+      })
+      .catch(() => {});
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [canRequestCancel, process.release_run_id]);
 
   return (
     <article>
@@ -59,17 +112,23 @@ export function ProcessFeedItem({
         header={
           <div className="process-item__summary">
             <div className="process-item__summary-main">
-              <h3 className="process-item__title">
-                <span className="process-item__index">
-                  #{process.release_run_id}
-                </span>
-                <span className="process-item__project-name">
-                  {process.repository_name}
-                </span>
-              </h3>
+              <div className="process-item__title-row">
+                <h3 className="process-item__title">
+                  <span className="process-item__index">
+                    #{process.release_run_id}
+                  </span>
+                  <span className="process-item__project-name">
+                    {process.repository_name}
+                  </span>
+                </h3>
+
+                {elapsedClock ? (
+                  <p className="process-item__elapsed">{elapsedClock}</p>
+                ) : null}
+              </div>
 
               <div className="process-item__summary-actions">
-                {isOnHold && onRequestCancel ? (
+                {canRequestCancel && onRequestCancel ? (
                   <Button
                     className="process-item__cancel-button"
                     disabled={isCanceling}
@@ -81,8 +140,14 @@ export function ProcessFeedItem({
                     variant="secondary"
                   >
                     {isCanceling
-                      ? t("process_feed.item.actions.canceling", "Canceling...")
-                      : t("process_feed.item.actions.cancel", "Cancel process")}
+                      ? t(
+                          "process_feed.item.actions.canceling",
+                          "Interrupting...",
+                        )
+                      : t(
+                          "process_feed.item.actions.cancel",
+                          "Interrupt process",
+                        )}
                   </Button>
                 ) : null}
 
@@ -138,7 +203,13 @@ export function ProcessFeedItem({
         triggerMode="button"
       >
         <div className="process-item__body">
-          <p className="process-item__step">{currentStep}</p>
+          <div className="process-item__step-row">
+            <p className="process-item__step">{currentStep}</p>
+          </div>
+
+          {stepDetail ? (
+            <p className="process-item__step-detail">{stepDetail}</p>
+          ) : null}
         </div>
       </VerticalAccordion>
     </article>
@@ -174,7 +245,16 @@ function resolveOnHoldReasonLabel(
 
   return translate(
     "process_feed.on_hold.reason",
-    "On hold because Unity Editor is open for this local workspace. Close Unity to resume, or cancel this process.",
+    "On hold because Unity Editor is open for this local workspace. Close Unity to resume, or interrupt this process.",
+  );
+}
+
+function isActiveProcessStatus(status: string) {
+  const normalizedStatus = normalizeProcessFeedDisplayStatus(status);
+  return (
+    normalizedStatus !== "succeeded" &&
+    normalizedStatus !== "failed" &&
+    normalizedStatus !== "canceled"
   );
 }
 

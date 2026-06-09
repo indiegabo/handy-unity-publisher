@@ -10,6 +10,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
+  cancelReleaseProcessMock,
   createRepositoryProjectMock,
   detectRepositoryProviderMock,
   getCurrentWindowMock,
@@ -43,6 +44,7 @@ const {
   subscribeToRuntimeEventsMock,
   validateUnityExecutablePathMock,
 } = vi.hoisted(() => ({
+  cancelReleaseProcessMock: vi.fn(),
   createRepositoryProjectMock: vi.fn(),
   detectRepositoryProviderMock: vi.fn(),
   getCurrentWindowMock: vi.fn(),
@@ -110,6 +112,7 @@ vi.mock("./services/runtimeEvents", () => ({
 }));
 
 vi.mock("./services/processDetail", () => ({
+  cancelReleaseProcess: cancelReleaseProcessMock,
   readHostTextFile: readHostTextFileMock,
   rerunReleaseProcess: rerunReleaseProcessMock,
 }));
@@ -133,6 +136,7 @@ vi.mock("./services/runtime", () => ({
 import App from "./App";
 import { LocalizationProvider } from "./LocalizationProvider";
 import OverlayProvider, { useOverlay } from "./components/OverlayManager";
+import type { ProcessFeedRecord } from "./components/processFeedPresentation";
 
 const EMPTY_PROCESS_FEED_PAGE = {
   generated_at: "2026-05-19T00:00:00Z",
@@ -145,7 +149,7 @@ const EMPTY_PROCESS_FEED_PAGE = {
   total_pages: 0,
 };
 
-const COMPLETED_PROCESS = {
+const COMPLETED_PROCESS: ProcessFeedRecord = {
   canceled_build_runs: 0,
   canceled_publish_runs: 0,
   created_at: "2026-05-19T00:00:00Z",
@@ -175,6 +179,20 @@ const COMPLETED_PROCESS = {
   total_build_runs: 1,
   total_publish_runs: 1,
   updated_at: "2026-05-19T00:12:00Z",
+};
+
+const ON_HOLD_PROCESS: ProcessFeedRecord = {
+  ...COMPLETED_PROCESS,
+  current_step_detail:
+    "Process on hold because Unity Editor appears to be open for the local workspace.",
+  current_step_label: "Awaiting Unity editor lock release",
+  current_step_status: "on_hold",
+  display_status: "on_hold",
+  finished_at: null,
+  running_build_runs: 1,
+  succeeded_build_runs: 0,
+  succeeded_publish_runs: 0,
+  updated_at: "2026-05-19T00:03:00Z",
 };
 
 afterEach(() => {
@@ -239,6 +257,7 @@ beforeEach(() => {
   loadProcessFeedMock.mockResolvedValue(EMPTY_PROCESS_FEED_PAGE);
   openExternalUrlMock.mockResolvedValue(undefined);
   openHostPathMock.mockResolvedValue(undefined);
+  cancelReleaseProcessMock.mockResolvedValue(undefined);
   readHostTextFileMock.mockImplementation(async (path: string) => {
     if (path.endsWith("en.json")) {
       return buildHostTextFilePayload(
@@ -296,6 +315,76 @@ beforeEach(() => {
 });
 
 describe("App shell overlays", () => {
+  it("shows a bootstrap loading screen before the main shell becomes interactive", async () => {
+    let resolveProcessFeed:
+      | ((value: typeof EMPTY_PROCESS_FEED_PAGE) => void)
+      | null = null;
+    let resolveRepositoryInspection:
+      | ((value: {
+          repositories: ReturnType<typeof buildRepositoryInspectionEntry>[];
+        }) => void)
+      | null = null;
+
+    invokeMock.mockImplementation((command: string) => {
+      switch (command) {
+        case "main_window_pin_state":
+          return Promise.resolve(false);
+        case "process_feed":
+          return new Promise<typeof EMPTY_PROCESS_FEED_PAGE>((resolve) => {
+            resolveProcessFeed = resolve;
+          });
+        case "transition_window_focus":
+        case "close_main_window":
+          return Promise.resolve(undefined);
+        case "set_main_window_pinned":
+          return Promise.resolve(true);
+        default:
+          throw new Error(`Unexpected invoke command: ${command}`);
+      }
+    });
+
+    loadRepositoryInspectionMock.mockImplementation(
+      () =>
+        new Promise<{
+          repositories: ReturnType<typeof buildRepositoryInspectionEntry>[];
+        }>((resolve) => {
+          resolveRepositoryInspection = resolve;
+        }),
+    );
+
+    render(
+      <OverlayProvider>
+        <App />
+      </OverlayProvider>,
+    );
+
+    expect(
+      await screen.findByText("Loading active workers..."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The shell is querying the runtime for queued, running, or on-hold work.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Projects" }),
+    ).not.toBeInTheDocument();
+
+    act(() => {
+      resolveRepositoryInspection?.({
+        repositories: [buildRepositoryInspectionEntry()],
+      });
+      resolveProcessFeed?.(EMPTY_PROCESS_FEED_PAGE);
+    });
+
+    expect(
+      await screen.findByRole("button", { name: "Projects" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Loading active workers..."),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders translated main-shell navigation when the localization provider is active", async () => {
     loadLocalizationSettingsMock.mockResolvedValueOnce(
       buildLocalizationSettings({
@@ -1481,6 +1570,62 @@ describe("App shell overlays", () => {
     } finally {
       requestAnimationFrameSpy.mockRestore();
     }
+  });
+
+  it("confirms an interrupt from the feed before requesting cancellation", async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      switch (command) {
+        case "main_window_pin_state":
+          return false;
+        case "process_feed":
+          return {
+            ...EMPTY_PROCESS_FEED_PAGE,
+            items: [ON_HOLD_PROCESS],
+            total_items: 1,
+            total_pages: 1,
+          };
+        case "transition_window_focus":
+        case "close_main_window":
+          return undefined;
+        case "set_main_window_pinned":
+          return true;
+        default:
+          throw new Error(`Unexpected invoke command: ${command}`);
+      }
+    });
+    loadProcessFeedMock.mockResolvedValue(
+      buildProcessFeedPage({
+        items: [ON_HOLD_PROCESS],
+        total_items: 1,
+        total_pages: 1,
+      }),
+    );
+
+    render(
+      <OverlayProvider>
+        <App />
+      </OverlayProvider>,
+    );
+
+    const interruptButton = await screen.findByRole("button", {
+      name: "Interrupt process",
+    });
+    expect(interruptButton).toBeInTheDocument();
+
+    fireEvent.click(interruptButton);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Interrupt process?",
+    });
+    expect(cancelReleaseProcessMock).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Interrupt process" }),
+    );
+
+    await waitFor(() => {
+      expect(cancelReleaseProcessMock).toHaveBeenCalledWith(77);
+    });
   });
 
   it("skips shell blank-frame waiting when reduced motion is requested", async () => {

@@ -22,3 +22,27 @@ export async function subscribeToRuntimeEvents(
         listener(event.payload);
     });
 }
+
+export function buildProcessElapsedRuntimeEventTopic(releaseRunId: number) {
+    return `process.${releaseRunId}.elapsed_time`;
+}
+
+export async function subscribeToProcessElapsedClock(
+    releaseRunId: number,
+    listener: (elapsedClock: string) => void,
+): Promise<UnlistenFn> {
+    const topic = buildProcessElapsedRuntimeEventTopic(releaseRunId);
+
+    return subscribeToRuntimeEvents((event) => {
+        if (event.topic !== topic || event.release_run_id !== releaseRunId) {
+            return;
+        }
+
+        const elapsedClock = event.payload.elapsed_clock;
+        if (typeof elapsedClock !== "string" || !elapsedClock.trim()) {
+            return;
+        }
+
+        listener(elapsedClock);
+    });
+}

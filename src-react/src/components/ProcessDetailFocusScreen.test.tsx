@@ -336,7 +336,7 @@ describe("ProcessDetailFocusScreen", () => {
     });
   });
 
-  it("renders on-hold guidance and requires confirmation before canceling", async () => {
+  it("renders on-hold guidance and requires confirmation before interrupting", async () => {
     const requestCancelMock = vi.fn().mockResolvedValue(undefined);
 
     render(
@@ -355,22 +355,22 @@ describe("ProcessDetailFocusScreen", () => {
       ),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Cancel process" }));
+    fireEvent.click(screen.getByRole("button", { name: "Interrupt process" }));
 
     const dialog = await screen.findByRole("dialog", {
-      name: "Cancel process?",
+      name: "Interrupt process?",
     });
 
     expect(dialog).toBeInTheDocument();
     expect(requestCancelMock).not.toHaveBeenCalled();
     expect(
       within(dialog).getByText(
-        "Use this when you do not want to close Unity right now. To continue this run, close Unity Editor and HGP will resume from the on-hold gate.",
+        "Use this to stop the current process immediately. HGP will interrupt active child processes, write the final logs, and clean the current workspace before the runtime settles on the canceled state.",
       ),
     ).toBeInTheDocument();
 
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Cancel process" }),
+      within(dialog).getByRole("button", { name: "Interrupt process" }),
     );
 
     await waitFor(() => {
@@ -379,7 +379,7 @@ describe("ProcessDetailFocusScreen", () => {
 
     expect(
       await screen.findByText(
-        "Cancel request accepted. The process feed will refresh as soon as the runtime snapshot advances.",
+        "Interrupt request accepted. The process feed will refresh as soon as the runtime snapshot advances.",
       ),
     ).toBeInTheDocument();
   });

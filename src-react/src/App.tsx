@@ -248,11 +248,14 @@ function App() {
     EMPTY_PROCESS_FEED_PAGE,
   );
   const [isLoadingFeed, setIsLoadingFeed] = useState(true);
+  const [hasLoadedInitialFeed, setHasLoadedInitialFeed] = useState(false);
   const [, setIsRefreshingFeed] = useState(false);
   const [feedError, setFeedError] = useState<string | null>(null);
   const [workerSnapshot, setWorkerSnapshot] = useState<WorkerStatusSnapshot>(
     EMPTY_WORKER_STATUS_SNAPSHOT,
   );
+  const [hasLoadedInitialWorkerStatus, setHasLoadedInitialWorkerStatus] =
+    useState(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [workerActionError, setWorkerActionError] = useState<string | null>(
     null,
@@ -295,6 +298,22 @@ function App() {
     t,
     workerSnapshot.automationMode,
     projectWorkers,
+  );
+  const isShellBootLoading =
+    activeScreen.kind === "main" &&
+    (!hasLoadedInitialFeed || !hasLoadedInitialWorkerStatus);
+  const shellBootstrapTitle = resolveShellBootstrapTitle(
+    t,
+    workerStatus.label,
+    hasLoadedInitialFeed,
+    hasLoadedInitialWorkerStatus,
+  );
+  const shellBootstrapMessages = buildShellBootstrapMessages(
+    t,
+    workerStatus.label,
+    workerStatusDescription,
+    hasLoadedInitialFeed,
+    hasLoadedInitialWorkerStatus,
   );
   const activeProcessDetail =
     activeScreen.kind === "process-detail"
@@ -403,6 +422,7 @@ function App() {
           setProcessPage(response);
           setFeedError(null);
           setIsLoadingFeed(false);
+          setHasLoadedInitialFeed(true);
           setIsRefreshingFeed(false);
           setPage(response.page);
         });
@@ -414,6 +434,7 @@ function App() {
         startTransition(() => {
           setFeedError(buildInvokeErrorMessage(error));
           setIsLoadingFeed(false);
+          setHasLoadedInitialFeed(true);
           setIsRefreshingFeed(false);
         });
       }
@@ -565,6 +586,10 @@ function App() {
 
   const loadWorkerStatus = useEffectEvent(async () => {
     await Promise.all([loadWorkerRepositories(), loadRuntimeStatus()]);
+
+    startTransition(() => {
+      setHasLoadedInitialWorkerStatus(true);
+    });
   });
 
   const loadShellVersion = useEffectEvent(async () => {
@@ -808,7 +833,7 @@ function App() {
     },
   );
 
-  const handleCancelProcess = useEffectEvent(
+  const performCancelProcess = useEffectEvent(
     async (process: ProcessFeedRecord) => {
       startTransition(() => {
         setPendingFeedCancelReleaseRunId(process.release_run_id);
@@ -825,6 +850,37 @@ function App() {
           );
         });
       }
+    },
+  );
+
+  const handleCancelProcess = useEffectEvent(
+    async (process: ProcessFeedRecord) => {
+      const shouldCancel = await openOverlay<boolean>(ConfirmDialog, {
+        cancelLabel: t(
+          "process_detail.confirm.cancel.cancel",
+          "Keep process running",
+        ),
+        confirmLabel: t(
+          "process_detail.confirm.cancel.confirm",
+          "Interrupt process",
+        ),
+        confirmVariant: "secondary",
+        description: t(
+          "process_detail.confirm.cancel.description",
+          "This interrupts the active process, finalizes the current logs, and runs cleanup for any in-flight build or publish work.",
+        ),
+        message: t(
+          "process_detail.confirm.cancel.message",
+          "Use this to stop the current process immediately. HGP will interrupt active child processes, write the final logs, and clean the current workspace before the runtime settles on the canceled state.",
+        ),
+        title: t("process_detail.confirm.cancel.title", "Interrupt process?"),
+      });
+
+      if (!shouldCancel) {
+        return;
+      }
+
+      await performCancelProcess(process);
     },
   );
 
@@ -914,7 +970,7 @@ function App() {
           gitTag,
           message: t(
             "app.main.quick_release.queued",
-            "Queued local release {{gitTag}} for {{repositoryName}}.",
+            "Queued release {{gitTag}} for {{repositoryName}}.",
             { gitTag, repositoryName },
           ),
           repositoryName,
@@ -1470,7 +1526,26 @@ function App() {
       </header>
 
       <div className="app-shell__content">
-        {isScreenBlank ? null : activeScreen.kind === "main" ? (
+        {isScreenBlank ? null : isShellBootLoading ? (
+          <div className="shell-bootstrap" aria-busy="true" aria-live="polite">
+            <div className="shell-bootstrap__panel">
+              <div className="shell-bootstrap__signal" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </div>
+              <p className="shell-bootstrap__eyebrow">{productName}</p>
+              <p className="shell-bootstrap__title">{shellBootstrapTitle}</p>
+              <div className="shell-bootstrap__messages">
+                {shellBootstrapMessages.map((message) => (
+                  <p className="shell-bootstrap__message" key={message}>
+                    {message}
+                  </p>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : activeScreen.kind === "main" ? (
           <div className="home-frame">
             <section
               className="action-bar"
@@ -1763,7 +1838,7 @@ function App() {
 
                 {activeScreen.kind === "process-detail" ? (
                   <ProcessDetailFocusScreen
-                    onRequestCancel={handleCancelProcess}
+                    onRequestCancel={performCancelProcess}
                     onRequestRerun={handleRerunProcess}
                     process={activeProcessDetail}
                     usesLiveSnapshot={activeProcessDetailUsesLiveSnapshot}
@@ -2371,6 +2446,68 @@ function buildWorkerStatusTooltip(
   }
 
   return repositoryNames;
+}
+
+function resolveShellBootstrapTitle(
+  t: Translate,
+  workerStatusLabel: string,
+  hasLoadedInitialFeed: boolean,
+  hasLoadedInitialWorkerStatus: boolean,
+) {
+  if (!hasLoadedInitialWorkerStatus) {
+    return t(
+      "app.main.worker_description.loading",
+      "Loading active workers...",
+    );
+  }
+
+  if (!hasLoadedInitialFeed) {
+    return t("app.main.feed.loading.title", "Loading current processes...");
+  }
+
+  return workerStatusLabel;
+}
+
+function buildShellBootstrapMessages(
+  t: Translate,
+  workerStatusLabel: string,
+  workerStatusDescription: string,
+  hasLoadedInitialFeed: boolean,
+  hasLoadedInitialWorkerStatus: boolean,
+) {
+  const messages: string[] = [];
+  const loadingWorkersMessage = t(
+    "app.main.worker_description.loading",
+    "Loading active workers...",
+  ).trim();
+
+  if (!hasLoadedInitialWorkerStatus) {
+    if (
+      workerStatusLabel.trim() &&
+      workerStatusLabel.trim() !== loadingWorkersMessage
+    ) {
+      messages.push(workerStatusLabel.trim());
+    }
+
+    if (
+      workerStatusDescription.trim() &&
+      workerStatusDescription.trim() !== workerStatusLabel.trim() &&
+      workerStatusDescription.trim() !== loadingWorkersMessage
+    ) {
+      messages.push(workerStatusDescription.trim());
+    }
+  }
+
+  if (!hasLoadedInitialFeed) {
+    messages.push(
+      t(
+        "app.main.feed.loading.copy",
+        "The shell is querying the runtime for queued, running, or on-hold work.",
+      ),
+    );
+  }
+
+  return messages;
 }
 
 function resolveAutomationToggleLabel(

@@ -134,15 +134,15 @@ beforeEach(() => {
         JSON.stringify({
           messages: {
             "process_detail.actions.cancel_requested":
-              "Cancel request accepted. The process feed will refresh as soon as the runtime snapshot advances.",
+              "Interrupt request accepted. The process feed will refresh as soon as the runtime snapshot advances.",
             "process_detail.confirm.cancel.cancel": "Keep process running",
-            "process_detail.confirm.cancel.confirm": "Cancel process",
+            "process_detail.confirm.cancel.confirm": "Interrupt process",
             "process_detail.confirm.cancel.description":
-              "This cancels the active process and marks the in-flight build as canceled.",
+              "This interrupts the active process, finalizes the current logs, and runs cleanup for any in-flight build or publish work.",
             "process_detail.confirm.cancel.message":
-              "Use this when you do not want to close Unity right now. To continue this run, close Unity Editor and HGP will resume from the on-hold gate.",
-            "process_detail.confirm.cancel.title": "Cancel process?",
-            "process_detail.current_step.actions.cancel": "Cancel process",
+              "Use this to stop the current process immediately. HGP will interrupt active child processes, write the final logs, and clean the current workspace before the runtime settles on the canceled state.",
+            "process_detail.confirm.cancel.title": "Interrupt process?",
+            "process_detail.current_step.actions.cancel": "Interrupt process",
             "process_detail.current_step.on_hold.guidance":
               "Close Unity Editor to continue this process. HGP blocks this step intentionally to keep automation consistent, because changing files while a local snapshot is being prepared can invalidate build inputs.",
             "process_detail.final_outcome.title": "Final Outcome",
@@ -163,16 +163,17 @@ beforeEach(() => {
         JSON.stringify({
           messages: {
             "process_detail.actions.cancel_requested":
-              "Solicitação de cancelamento aceita. O feed de processos será atualizado assim que o snapshot do runtime avançar.",
+              "Solicitação de interrupção aceita. O feed de processos será atualizado assim que o snapshot do runtime avançar.",
             "process_detail.confirm.cancel.cancel":
               "Manter processo em execução",
-            "process_detail.confirm.cancel.confirm": "Cancelar processo",
+            "process_detail.confirm.cancel.confirm": "Interromper processo",
             "process_detail.confirm.cancel.description":
-              "Isto cancela o processo ativo e marca a build em andamento como cancelada.",
+              "Isto interrompe o processo ativo, finaliza os logs atuais e executa a limpeza de qualquer build ou publicação ainda em andamento.",
             "process_detail.confirm.cancel.message":
-              "Use isto quando você não quiser fechar a Unity agora. Para continuar esta execução, feche o Unity Editor e o HGP retomará a partir do gate de espera.",
-            "process_detail.confirm.cancel.title": "Cancelar processo?",
-            "process_detail.current_step.actions.cancel": "Cancelar processo",
+              "Use isto para parar o processo atual imediatamente. O HGP vai interromper os processos filhos ativos, gravar os logs finais e limpar o workspace atual antes que o runtime estabilize no estado cancelado.",
+            "process_detail.confirm.cancel.title": "Interromper processo?",
+            "process_detail.current_step.actions.cancel":
+              "Interromper processo",
             "process_detail.current_step.on_hold.guidance":
               "Feche o Unity Editor para continuar este processo. O HGP bloqueia esta etapa intencionalmente para manter a automação consistente, porque alterar arquivos enquanto um snapshot local está sendo preparado pode invalidar os insumos da build.",
             "process_detail.final_outcome.title": "Resultado Final",
@@ -290,7 +291,7 @@ describe("ProcessDetailFocusScreen localization", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders localized on-hold guidance and cancel confirmation flow", async () => {
+  it("renders localized on-hold guidance and interrupt confirmation flow", async () => {
     const requestCancelMock = vi.fn().mockResolvedValue(undefined);
 
     render(
@@ -312,25 +313,27 @@ describe("ProcessDetailFocusScreen localization", () => {
       ),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Cancelar processo" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Interromper processo" }),
+    );
 
     const dialog = await screen.findByRole("dialog", {
-      name: "Cancelar processo?",
+      name: "Interromper processo?",
     });
 
     expect(
       within(dialog).getByText(
-        "Isto cancela o processo ativo e marca a build em andamento como cancelada.",
+        "Isto interrompe o processo ativo, finaliza os logs atuais e executa a limpeza de qualquer build ou publicação ainda em andamento.",
       ),
     ).toBeInTheDocument();
     expect(
       within(dialog).getByText(
-        "Use isto quando você não quiser fechar a Unity agora. Para continuar esta execução, feche o Unity Editor e o HGP retomará a partir do gate de espera.",
+        "Use isto para parar o processo atual imediatamente. O HGP vai interromper os processos filhos ativos, gravar os logs finais e limpar o workspace atual antes que o runtime estabilize no estado cancelado.",
       ),
     ).toBeInTheDocument();
 
     fireEvent.click(
-      within(dialog).getByRole("button", { name: "Cancelar processo" }),
+      within(dialog).getByRole("button", { name: "Interromper processo" }),
     );
 
     await waitFor(() => {
@@ -338,7 +341,7 @@ describe("ProcessDetailFocusScreen localization", () => {
     });
     expect(
       await screen.findByText(
-        "Solicitação de cancelamento aceita. O feed de processos será atualizado assim que o snapshot do runtime avançar.",
+        "Solicitação de interrupção aceita. O feed de processos será atualizado assim que o snapshot do runtime avançar.",
       ),
     ).toBeInTheDocument();
   });

@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const EMPTY_PROCESS_FEED_PAGE = {
@@ -96,7 +102,11 @@ vi.mock("./services/runtime", () => ({
 }));
 
 vi.mock("./components/CreateProjectWizard", () => ({
-  CreateProjectWizard: ({ onCreated }: { onCreated: (repositoryId: number) => void }) => (
+  CreateProjectWizard: ({
+    onCreated,
+  }: {
+    onCreated: (repositoryId: number) => void;
+  }) => (
     <button onClick={() => onCreated(7)} type="button">
       Complete project creation
     </button>
@@ -268,15 +278,13 @@ describe("App project creation refresh", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Start release" }));
 
-      expect(
-        await screen.findByText("Revolutions"),
-      ).toBeInTheDocument();
+      expect(await screen.findByText("Revolutions")).toBeInTheDocument();
     } finally {
       requestAnimationFrameSpy.mockRestore();
     }
   });
 
-  it("clears the queued local release banner once the process starts running", async () => {
+  it("clears the queued release banner once the process starts running", async () => {
     const requestAnimationFrameSpy = vi
       .spyOn(window, "requestAnimationFrame")
       .mockImplementation((callback: FrameRequestCallback) => {
@@ -345,7 +353,9 @@ describe("App project creation refresh", () => {
       );
 
       await waitFor(() => {
-        expect(screen.queryByText("Queued local release vT for Revolutions.")).not.toBeInTheDocument();
+        expect(
+          screen.queryByText("Queued release vT for Revolutions."),
+        ).not.toBeInTheDocument();
       });
 
       expect(await screen.findByText("Building Windows")).toBeInTheDocument();

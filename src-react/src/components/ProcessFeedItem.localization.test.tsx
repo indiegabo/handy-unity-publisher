@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ProcessFeedRecord } from "./processFeedPresentation";
 
+const runtimeElapsedMocks = vi.hoisted(() => ({
+  subscribeToProcessElapsedClockMock: vi.fn(async () => () => {}),
+}));
+
 const { loadLocalizationSettingsMock, readHostTextFileMock } = vi.hoisted(
   () => ({
     loadLocalizationSettingsMock: vi.fn(),
@@ -16,6 +20,11 @@ vi.mock("../services/runtime", () => ({
 
 vi.mock("../services/processDetail", () => ({
   readHostTextFile: readHostTextFileMock,
+}));
+
+vi.mock("../services/runtimeEvents", () => ({
+  subscribeToProcessElapsedClock:
+    runtimeElapsedMocks.subscribeToProcessElapsedClockMock,
 }));
 
 import { LocalizationProvider } from "../LocalizationProvider";
@@ -67,11 +76,11 @@ beforeEach(() => {
               "Collapse process #{{releaseRunId}}",
             "process_feed.item.accordion.expand":
               "Expand process #{{releaseRunId}}",
-            "process_feed.item.actions.cancel": "Cancel process",
+            "process_feed.item.actions.cancel": "Interrupt process",
             "process_feed.item.actions.open_detail":
               "Open process detail #{{releaseRunId}}",
             "process_feed.on_hold.reason":
-              "On hold because Unity Editor is open for this local workspace. Close Unity to resume, or cancel this process.",
+              "On hold because Unity Editor is open for this local workspace. Close Unity to resume, or interrupt this process.",
             "process_feed.status.on_hold": "On hold",
           },
         }),
@@ -94,11 +103,11 @@ beforeEach(() => {
               "Recolher processo #{{releaseRunId}}",
             "process_feed.item.accordion.expand":
               "Expandir processo #{{releaseRunId}}",
-            "process_feed.item.actions.cancel": "Cancelar processo",
+            "process_feed.item.actions.cancel": "Interromper processo",
             "process_feed.item.actions.open_detail":
               "Abrir detalhe do processo #{{releaseRunId}}",
             "process_feed.on_hold.reason":
-              "Em espera porque o Unity Editor está aberto para este workspace local. Feche o Unity para retomar ou cancele este processo.",
+              "Em espera porque o Unity Editor está aberto para este workspace local. Feche o Unity para retomar ou interrompa este processo.",
             "process_feed.status.on_hold": "Em espera",
           },
         }),
@@ -120,6 +129,8 @@ describe("ProcessFeedItem localization", () => {
     );
 
     expect(await screen.findByText("Engine pendente")).toBeInTheDocument();
+    expect(screen.queryByText("Elapsed Time")).not.toBeInTheDocument();
+    expect(screen.getByText("00:12:00")).toBeInTheDocument();
     expect(
       screen.getByText(
         "Todo o trabalho registrado para este processo terminou com sucesso.",
@@ -157,7 +168,7 @@ describe("ProcessFeedItem localization", () => {
     );
 
     expect(
-      await screen.findByRole("button", { name: "Cancelar processo" }),
+      await screen.findByRole("button", { name: "Interromper processo" }),
     ).toBeInTheDocument();
 
     fireEvent.click(
@@ -166,11 +177,13 @@ describe("ProcessFeedItem localization", () => {
 
     expect(
       await screen.findByText(
-        "Em espera porque o Unity Editor está aberto para este workspace local. Feche o Unity para retomar ou cancele este processo.",
+        "Em espera porque o Unity Editor está aberto para este workspace local. Feche o Unity para retomar ou interrompa este processo.",
       ),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Cancelar processo" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Interromper processo" }),
+    );
     expect(onRequestCancel).toHaveBeenCalledTimes(1);
   });
 });

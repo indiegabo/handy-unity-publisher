@@ -50,6 +50,7 @@ import {
   formatRepositoryEngineKindLabel,
   formatRepositoryAccessSummary,
   looksLikeAbsolutePath,
+  normalizeBuildProcessPriority,
   normalizeUnityTargetPlatformValue,
   ProjectIdentityStep,
   ProjectLocalAccessStep,
@@ -132,6 +133,11 @@ type InitialUnityExecutableState = {
   sharedPath: string;
 };
 
+type InitialProcessPriorityState = {
+  hasMixedValues: boolean;
+  sharedPriority: "low" | "normal" | "high";
+};
+
 type ProjectRemovalOverlayProps = {
   hasPendingChanges: boolean;
   onResolve?: (value?: RemoveRepositoryProjectStrategy | null) => void;
@@ -149,6 +155,7 @@ const EMPTY_ATTEMPTED_STEPS: Record<WizardStepKey, boolean> = {
 
 const DEFAULT_ACTIVE_STEP: WizardStepKey = "identity";
 const MIN_PROJECT_POLL_INTERVAL_SECONDS = 5;
+const REPOSITORY_ACCESS_ASSESSMENT_DEBOUNCE_MS = 800;
 
 function translateMessage(
   t: Translate | undefined,
@@ -184,6 +191,11 @@ export function RepositoryProjectDetail({
     useState<InitialUnityExecutableState>({
       hasMixedValues: false,
       sharedPath: "",
+    });
+  const [initialProcessPriorityState, setInitialProcessPriorityState] =
+    useState<InitialProcessPriorityState>({
+      hasMixedValues: false,
+      sharedPriority: "low",
     });
   const [activeStepKey, setActiveStepKey] =
     useState<WizardStepKey>(DEFAULT_ACTIVE_STEP);
@@ -379,12 +391,16 @@ export function RepositoryProjectDetail({
       const nextUnityState = resolveInitialUnityExecutableState(
         nextDraft.buildTargets,
       );
+      const nextProcessPriorityState = resolveInitialProcessPriorityState(
+        nextDraft.buildTargets,
+      );
 
       startTransition(() => {
         setRepository(matchingRepository);
         setDraft(nextDraft);
         setPersistedDraftKey(nextDraftKey);
         setInitialUnityExecutableState(nextUnityState);
+        setInitialProcessPriorityState(nextProcessPriorityState);
         setValidationState(createEmptyValidationState());
         setTouchedFields({});
         setAttemptedSteps({
@@ -408,13 +424,7 @@ export function RepositoryProjectDetail({
           resolveInitialUnityExecutableDiagnostics(nextDraft.buildTargets),
         );
         setIsValidatingUnityExecutable(false);
-        setPendingBuildTargetRemovalId(null);
-        setError(null);
         setIsLoading(false);
-        if (showLoading) {
-          setSaveError(null);
-          setSaveMessage(null);
-        }
       });
 
       nextBuildTargetIdRef.current = resolveNextBuildTargetIndex(
@@ -460,6 +470,10 @@ export function RepositoryProjectDetail({
       setInitialUnityExecutableState({
         hasMixedValues: false,
         sharedPath: "",
+      });
+      setInitialProcessPriorityState({
+        hasMixedValues: false,
+        sharedPriority: "low",
       });
     });
 
@@ -610,12 +624,13 @@ export function RepositoryProjectDetail({
     });
 
     accessAssessmentTimerRef.current = window.setTimeout(() => {
+      accessAssessmentTimerRef.current = undefined;
       void requestRepositoryAccessAssessment(
         repositoryUrl,
         draft.repositoryVisibility,
         assessmentToken,
       );
-    }, 250);
+    }, REPOSITORY_ACCESS_ASSESSMENT_DEBOUNCE_MS);
 
     return () => {
       if (accessAssessmentTimerRef.current !== undefined) {
@@ -628,7 +643,6 @@ export function RepositoryProjectDetail({
     draft?.projectKind,
     draft?.repositoryUrl,
     draft?.repositoryVisibility,
-    requestRepositoryAccessAssessment,
   ]);
 
   const markFieldTouched = useEffectEvent((fieldName: string) => {
@@ -720,12 +734,7 @@ export function RepositoryProjectDetail({
   );
 
   const handleProjectPathCleared = useEffectEvent(
-    (
-      fieldName:
-        | "localPath"
-        | "artifactsRootOverride"
-        | "workspaceRootOverride",
-    ) => {
+    (fieldName: "localPath" | "workspaceRootOverride") => {
       handleDraftFieldChange(fieldName, "");
       markFieldTouched(fieldName);
     },
@@ -733,10 +742,7 @@ export function RepositoryProjectDetail({
 
   const handleProjectPathPicked = useEffectEvent(
     (
-      fieldName:
-        | "localPath"
-        | "artifactsRootOverride"
-        | "workspaceRootOverride",
+      fieldName: "localPath" | "workspaceRootOverride",
       selectedPath: string,
     ) => {
       handleDraftFieldChange(fieldName, selectedPath);
@@ -1103,6 +1109,7 @@ export function RepositoryProjectDetail({
             ? repositoryAccessAssessment
             : null,
           initialUnityExecutableState,
+          initialProcessPriorityState,
         ),
       );
 
@@ -1722,6 +1729,7 @@ export function RepositoryProjectDetail({
                       credentials={publishCredentials}
                       destinations={draft.publishDestinations}
                       disabled={isSaving}
+                      editingMode="overlay"
                       errors={
                         attemptedSteps.publish
                           ? validationState.publish
@@ -1750,26 +1758,7 @@ export function RepositoryProjectDetail({
 
                   {tab.key === "paths" ? (
                     <ProjectPathsStep
-                      artifactsRootOverride={draft.artifactsRootOverride}
-                      artifactsRootOverrideError={
-                        shouldShowFieldError(
-                          attemptedSteps.paths,
-                          touchedFields,
-                          "artifactsRootOverride",
-                        )
-                          ? validationState.paths.artifactsRootOverride
-                          : undefined
-                      }
                       disabled={isSaving}
-                      onArtifactsRootClear={() =>
-                        handleProjectPathCleared("artifactsRootOverride")
-                      }
-                      onArtifactsRootPicked={(selectedPath) =>
-                        handleProjectPathPicked(
-                          "artifactsRootOverride",
-                          selectedPath,
-                        )
-                      }
                       onPathPickError={handlePathPickerError}
                       onWorkspaceRootClear={() =>
                         handleProjectPathCleared("workspaceRootOverride")
@@ -2239,17 +2228,6 @@ function buildStepSummary(
           <MetaItem
             label={translateMessage(
               t,
-              "project_detail.step.paths.artifacts",
-              "Artifacts",
-            )}
-          >
-            {draft.artifactsRootOverride.trim()
-              ? translateMessage(t, "project_detail.state.override", "Override")
-              : translateMessage(t, "project_detail.state.default", "Default")}
-          </MetaItem>
-          <MetaItem
-            label={translateMessage(
-              t,
               "project_detail.step.paths.workspace",
               "Workspace",
             )}
@@ -2390,10 +2368,7 @@ function buildAttemptedStepsForValidation(validationState: ValidationState) {
       ),
     ),
     publish: hasPublishDestinationValidationErrors(validationState.publish),
-    paths: Boolean(
-      validationState.paths.artifactsRootOverride ||
-      validationState.paths.workspaceRootOverride,
-    ),
+    paths: Boolean(validationState.paths.workspaceRootOverride),
     review: false,
   };
 }
@@ -2435,10 +2410,7 @@ function findFirstInvalidStep(
     return "publish";
   }
 
-  if (
-    validationState.paths.artifactsRootOverride ||
-    validationState.paths.workspaceRootOverride
-  ) {
+  if (validationState.paths.workspaceRootOverride) {
     return "paths";
   }
 
@@ -2743,7 +2715,7 @@ function validateTargetsStep(
       fieldErrors.buildMethod = translateMessage(
         t,
         "create_project.validation.targets.build_method_format",
-        "Use a full static method path such as Builder.PerformWindows.",
+        "Use a full static method path such as HGPBuilder.PerformWindows64.",
       );
     }
 
@@ -2783,19 +2755,7 @@ function validateTargetsStep(
 
 function validatePathStep(draft: ProjectDraft, t?: Translate): PathStepErrors {
   const errors: PathStepErrors = {};
-  const normalizedArtifactsRoot = draft.artifactsRootOverride.trim();
   const normalizedWorkspaceRoot = draft.workspaceRootOverride.trim();
-
-  if (
-    normalizedArtifactsRoot &&
-    !looksLikeAbsolutePath(normalizedArtifactsRoot)
-  ) {
-    errors.artifactsRootOverride = translateMessage(
-      t,
-      "create_project.validation.paths.artifacts_absolute",
-      "Artifacts root override must be an absolute path.",
-    );
-  }
 
   if (
     normalizedWorkspaceRoot &&
@@ -2821,6 +2781,9 @@ function buildRepositoryProjectDraft(
       buildMethod: target.unity_build_method ?? "",
       buildTargetId: target.build_target_id,
       name: target.target_name,
+      processPriority: normalizeBuildProcessPriority(
+        target.host_native_diagnostics?.process_priority,
+      ),
       targetPlatform: normalizeUnityTargetPlatformValue(
         target.unity_target_platform,
       ),
@@ -2828,6 +2791,8 @@ function buildRepositoryProjectDraft(
         target.host_native_diagnostics?.unity_executable_path ?? "",
     }));
   const initialUnityState = resolveInitialUnityExecutableState(buildTargets);
+  const initialProcessPriorityState =
+    resolveInitialProcessPriorityState(buildTargets);
 
   return {
     projectKind:
@@ -2847,8 +2812,8 @@ function buildRepositoryProjectDraft(
       repository.source_mode === "managed_repository"
         ? String(repository.polling_interval_seconds)
         : "0",
-    artifactsRootOverride: repository.artifacts_root_override ?? "",
     workspaceRootOverride: repository.workspace_root_override ?? "",
+    processPriority: initialProcessPriorityState.sharedPriority,
     unityExecutablePath: initialUnityState.sharedPath,
     buildTargets,
     publishDestinations: buildPublishDestinationDrafts(
@@ -2867,6 +2832,7 @@ function buildRepositoryProjectUpdateInput(
   draft: ProjectDraft,
   repositoryAccessAssessment: RepositoryAccessAssessment | null,
   initialUnityExecutableState: InitialUnityExecutableState,
+  initialProcessPriorityState: InitialProcessPriorityState,
 ): UpdateRepositoryProjectInput {
   const sourceMode =
     draft.projectKind === "repository"
@@ -2875,6 +2841,8 @@ function buildRepositoryProjectUpdateInput(
   const sharedUnityPathChanged =
     draft.unityExecutablePath.trim() !==
     initialUnityExecutableState.sharedPath.trim();
+  const sharedProcessPriorityChanged =
+    draft.processPriority !== initialProcessPriorityState.sharedPriority;
 
   return {
     repository_id: repository.repository_id,
@@ -2889,9 +2857,6 @@ function buildRepositoryProjectUpdateInput(
       sourceMode === "managed_repository" ? repositoryAccessAssessment : null,
     default_branch: normalizeOptionalDraftValue(
       repository.default_branch ?? "",
-    ),
-    artifacts_root_override: normalizeOptionalDraftValue(
-      draft.artifactsRootOverride,
     ),
     workspace_root_override: normalizeOptionalDraftValue(
       draft.workspaceRootOverride,
@@ -2912,6 +2877,11 @@ function buildRepositoryProjectUpdateInput(
           build_method: target.buildMethod.trim(),
         },
       },
+      process_priority:
+        sharedProcessPriorityChanged ||
+        !initialProcessPriorityState.hasMixedValues
+          ? draft.processPriority
+          : normalizeBuildProcessPriority(target.processPriority),
       unity_executable_path:
         sharedUnityPathChanged || !initialUnityExecutableState.hasMixedValues
           ? draft.unityExecutablePath.trim()
@@ -3221,6 +3191,26 @@ function resolveInitialUnityExecutableState(buildTargets: BuildTargetDraft[]) {
   };
 }
 
+function resolveInitialProcessPriorityState(buildTargets: BuildTargetDraft[]) {
+  if (buildTargets.length === 0) {
+    return {
+      hasMixedValues: false,
+      sharedPriority: "low",
+    } as const;
+  }
+
+  const normalizedValues = buildTargets.map((target) =>
+    normalizeBuildProcessPriority(target.processPriority),
+  );
+  const firstValue = normalizedValues[0] ?? "low";
+  const hasMixedValues = normalizedValues.some((value) => value !== firstValue);
+
+  return {
+    hasMixedValues,
+    sharedPriority: firstValue,
+  } as const;
+}
+
 function resolveInitialUnityExecutableDiagnostics(
   buildTargets: BuildTargetDraft[],
 ) {
@@ -3235,6 +3225,9 @@ function resolveInitialUnityExecutableDiagnostics(
   return {
     runner_family: "host-native",
     unity_executable_path: matchingTarget.unityExecutablePath?.trim() ?? "",
+    process_priority: normalizeBuildProcessPriority(
+      matchingTarget.processPriority,
+    ),
     unity_executable_exists: true,
     unity_executable_is_file: true,
     additional_argument_count: 0,

@@ -7,6 +7,7 @@ import {
   PublishDestinationsEditor,
   buildPublishDestinationReviewSummary,
   listUnboundBuildTargetNames,
+  type PublishDestinationEditingMode,
   type ProjectBuildTargetReference,
   type PublishDestinationDraft,
   type PublishDestinationValidationErrors,
@@ -15,6 +16,7 @@ import { RepositoryEngineField } from "../RepositoryEngineField";
 import { Badge, MetaItem, MetaRow, SurfacePanel } from "../Surface";
 import { type AuthProviderStatus } from "../../services/auth";
 import {
+  type BuildProcessPriority,
   type DiscoveredUnityEditor,
   type RepositoryAccessAssessment,
   type RepositoryEngineKind,
@@ -35,6 +37,7 @@ export type BuildTargetDraft = {
   targetPlatform: string;
   buildMethod: string;
   buildTargetId?: number | null;
+  processPriority?: BuildProcessPriority;
   unityExecutablePath?: string;
 };
 
@@ -46,8 +49,8 @@ export type ProjectDraft = {
   localPath: string;
   repositoryVisibility: "public" | "private";
   pollingIntervalSeconds: string;
-  artifactsRootOverride: string;
   workspaceRootOverride: string;
+  processPriority: BuildProcessPriority;
   unityExecutablePath: string;
   buildTargets: BuildTargetDraft[];
   publishDestinations: PublishDestinationDraft[];
@@ -501,8 +504,8 @@ export function createInitialProjectDraft(): ProjectDraft {
     localPath: "",
     repositoryVisibility: "public",
     pollingIntervalSeconds: "300",
-    artifactsRootOverride: "",
     workspaceRootOverride: "",
+    processPriority: "low",
     unityExecutablePath: "",
     buildTargets: [],
     publishDestinations: [],
@@ -1313,6 +1316,45 @@ export function resolveDetectedUnityEditorValue(
   )
     ? normalizedPath
     : "";
+}
+
+export function normalizeBuildProcessPriority(
+  value: string | null | undefined,
+): BuildProcessPriority {
+  switch ((value ?? "").trim()) {
+    case "normal":
+      return "normal";
+    case "high":
+      return "high";
+    default:
+      return "low";
+  }
+}
+
+export function formatBuildProcessPriorityLabel(
+  priority: BuildProcessPriority,
+  t?: Translate,
+) {
+  switch (priority) {
+    case "normal":
+      return translateMessage(
+        t,
+        "project_shared.build_target.process_priority.normal",
+        "Normal",
+      );
+    case "high":
+      return translateMessage(
+        t,
+        "project_shared.build_target.process_priority.high",
+        "High",
+      );
+    default:
+      return translateMessage(
+        t,
+        "project_shared.build_target.process_priority.low",
+        "Low",
+      );
+  }
 }
 
 export function formatBuildTargetExecutableSummary(
@@ -2174,6 +2216,7 @@ type ProjectPublishStepProps = {
   credentials: SecretCredentialSetting[];
   destinations: PublishDestinationDraft[];
   disabled: boolean;
+  editingMode?: PublishDestinationEditingMode;
   errors?: PublishDestinationValidationErrors;
   showItchUserversionTemplate: boolean;
   onChange: (nextPublishDestinations: PublishDestinationDraft[]) => void;
@@ -2188,6 +2231,7 @@ export function ProjectPublishStep({
   credentials,
   destinations,
   disabled,
+  editingMode = "inline",
   errors,
   showItchUserversionTemplate,
   onChange,
@@ -2199,11 +2243,11 @@ export function ProjectPublishStep({
       credentials={credentials}
       destinations={destinations}
       disabled={disabled}
-      editingMode="overlay"
+      editingMode={editingMode}
       errors={errors}
       onChange={onChange}
-      showItchUserversionTemplate={showItchUserversionTemplate}
       onSaveCredential={onSaveCredential}
+      showItchUserversionTemplate={showItchUserversionTemplate}
     />
   );
 }

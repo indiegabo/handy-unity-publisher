@@ -49,6 +49,7 @@ import {
   loadUnityAdapterSettings,
   saveSecretCredential,
   validateUnityExecutablePath,
+  type BuildProcessPriority,
   type CreateRepositoryProjectInput,
   type DiscoveredUnityEditor,
   type RepositoryAccessAssessment,
@@ -81,8 +82,8 @@ export type ProjectDraft = {
   localPath: string;
   repositoryVisibility: "public" | "private";
   pollingIntervalSeconds: string;
-  artifactsRootOverride: string;
   workspaceRootOverride: string;
+  processPriority: BuildProcessPriority;
   unityExecutablePath: string;
   buildTargets: BuildTargetDraft[];
   publishDestinations: PublishDestinationDraft[];
@@ -108,7 +109,6 @@ type TargetStepErrors = {
 };
 
 type PathStepErrors = {
-  artifactsRootOverride?: string;
   workspaceRootOverride?: string;
 };
 
@@ -123,10 +123,7 @@ export type CreateProjectWizardSnapshot = {
   touchedFields: Record<string, boolean>;
 };
 
-type ProjectPathFieldName =
-  | "localPath"
-  | "artifactsRootOverride"
-  | "workspaceRootOverride";
+type ProjectPathFieldName = "localPath" | "workspaceRootOverride";
 
 type CreateProjectWizardProps = {
   authProviderResult?: AuthProviderConnectionResult | null;
@@ -182,6 +179,7 @@ const EMPTY_VALIDATION_ATTEMPTS: Record<WizardStepKey, boolean> = {
   paths: false,
   review: false,
 };
+const REPOSITORY_ACCESS_ASSESSMENT_DEBOUNCE_MS = 800;
 
 const INITIAL_PROJECT_DRAFT = createInitialProjectDraft();
 const INITIAL_PROJECT_DRAFT_DIRTY_KEY = buildProjectDraftDirtyKey(
@@ -789,12 +787,13 @@ export function CreateProjectWizard({
     });
 
     accessAssessmentTimerRef.current = window.setTimeout(() => {
+      accessAssessmentTimerRef.current = undefined;
       void loadRepositoryAccessAssessmentEffect(
         normalizedUrl,
         repositoryVisibility,
         assessmentToken,
       );
-    }, 250);
+    }, REPOSITORY_ACCESS_ASSESSMENT_DEBOUNCE_MS);
 
     return () => {
       if (accessAssessmentTimerRef.current !== undefined) {
@@ -1617,6 +1616,7 @@ export function CreateProjectWizard({
                   credentials={publishCredentials}
                   destinations={draft.publishDestinations}
                   disabled={isSubmitting}
+                  editingMode="overlay"
                   errors={
                     attemptedSteps.publish
                       ? publishDestinationErrors
@@ -1639,26 +1639,7 @@ export function CreateProjectWizard({
 
               {currentStep.key === "paths" ? (
                 <ProjectPathsStep
-                  artifactsRootOverride={draft.artifactsRootOverride}
-                  artifactsRootOverrideError={
-                    shouldShowFieldError(
-                      attemptedSteps.paths,
-                      touchedFields,
-                      "artifactsRootOverride",
-                    )
-                      ? pathErrors.artifactsRootOverride
-                      : undefined
-                  }
                   disabled={isSubmitting}
-                  onArtifactsRootClear={() =>
-                    handleProjectPathCleared("artifactsRootOverride")
-                  }
-                  onArtifactsRootPicked={(selectedPath) =>
-                    handleProjectPathPicked(
-                      "artifactsRootOverride",
-                      selectedPath,
-                    )
-                  }
                   onPathPickError={handlePathPickerError}
                   onWorkspaceRootClear={() =>
                     handleProjectPathCleared("workspaceRootOverride")
@@ -2064,8 +2045,8 @@ function createInitialProjectDraft(): ProjectDraft {
     localPath: "",
     repositoryVisibility: "public",
     pollingIntervalSeconds: "300",
-    artifactsRootOverride: "",
     workspaceRootOverride: "",
+    processPriority: "low",
     unityExecutablePath: "",
     buildTargets: [],
     publishDestinations: [],
@@ -2462,7 +2443,7 @@ function validateTargetsStep(
       fieldErrors.buildMethod = translateMessage(
         t,
         "create_project.validation.targets.build_method_format",
-        "Use a full static method path such as Builder.PerformWindows.",
+        "Use a full static method path such as HGPBuilder.PerformWindows64.",
       );
     }
 
@@ -2502,18 +2483,7 @@ function validateTargetsStep(
 
 function validatePathStep(draft: ProjectDraft, t?: Translate): PathStepErrors {
   const errors: PathStepErrors = {};
-  const normalizedArtifactsRoot = draft.artifactsRootOverride.trim();
   const normalizedWorkspaceRoot = draft.workspaceRootOverride.trim();
-  if (
-    normalizedArtifactsRoot &&
-    !looksLikeAbsolutePath(normalizedArtifactsRoot)
-  ) {
-    errors.artifactsRootOverride = translateMessage(
-      t,
-      "create_project.validation.paths.artifacts_absolute",
-      "Artifacts root override must be an absolute path.",
-    );
-  }
   if (
     normalizedWorkspaceRoot &&
     !looksLikeAbsolutePath(normalizedWorkspaceRoot)
@@ -2577,7 +2547,7 @@ function mergeExpandedTargetIds(
 }
 
 function hasPathErrors(errors: PathStepErrors) {
-  return Boolean(errors.artifactsRootOverride || errors.workspaceRootOverride);
+  return Boolean(errors.workspaceRootOverride);
 }
 
 function findFirstInvalidStep(input: {
@@ -2635,7 +2605,6 @@ function buildCreateProjectInput(
     repository_credentials_id: isRepositoryProject
       ? repositoryCredentialId
       : null,
-    artifacts_root_override: optionalTrimmedString(draft.artifactsRootOverride),
     workspace_root_override: optionalTrimmedString(draft.workspaceRootOverride),
     polling_interval_seconds: isRepositoryProject
       ? Number(draft.pollingIntervalSeconds.trim())
@@ -2644,6 +2613,7 @@ function buildCreateProjectInput(
       buildCreateProjectBuildTargetInput(
         draft.engineKind,
         target,
+        draft.processPriority,
         draft.unityExecutablePath,
       ),
     ),
@@ -2661,6 +2631,7 @@ function buildCreateProjectInput(
 function buildCreateProjectBuildTargetInput(
   engineKind: RepositoryEngineKind,
   target: BuildTargetDraft,
+  processPriority: BuildProcessPriority,
   unityExecutablePath: string,
 ) {
   if (engineKind !== "unity") {
@@ -2679,6 +2650,7 @@ function buildCreateProjectBuildTargetInput(
         build_method: target.buildMethod.trim(),
       },
     },
+    process_priority: processPriority,
     unity_executable_path: unityExecutablePath.trim(),
   };
 }

@@ -150,6 +150,7 @@ export function ProcessDetailFocusScreen({
   const stepDetail = resolveProcessFeedStepDetail(process);
   const isCompletedMode = isTerminalProcessStatus(normalizedStatus);
   const isOnHold = isProcessOnHold(process);
+  const canRequestCancel = !isCompletedMode;
 
   const loadCompletedSnapshot = useEffectEvent(async (releaseRunId: number) => {
     const requestId = latestCompletedSnapshotRequestIdRef.current + 1;
@@ -542,17 +543,17 @@ export function ProcessDetailFocusScreen({
       ),
       confirmLabel: t(
         "process_detail.confirm.cancel.confirm",
-        "Cancel process",
+        "Interrupt process",
       ),
       description: t(
         "process_detail.confirm.cancel.description",
-        "This cancels the active process and marks the in-flight build as canceled.",
+        "This interrupts the active process, finalizes the current logs, and runs cleanup for any in-flight build or publish work.",
       ),
       message: t(
         "process_detail.confirm.cancel.message",
-        "Use this when you do not want to close Unity right now. To continue this run, close Unity Editor and HGP will resume from the on-hold gate.",
+        "Use this to stop the current process immediately. HGP will interrupt active child processes, write the final logs, and clean the current workspace before the runtime settles on the canceled state.",
       ),
-      title: t("process_detail.confirm.cancel.title", "Cancel process?"),
+      title: t("process_detail.confirm.cancel.title", "Interrupt process?"),
     });
 
     if (!shouldCancel) {
@@ -573,7 +574,7 @@ export function ProcessDetailFocusScreen({
         setActionMessage(
           t(
             "process_detail.actions.cancel_requested",
-            "Cancel request accepted. The process feed will refresh as soon as the runtime snapshot advances.",
+            "Interrupt request accepted. The process feed will refresh as soon as the runtime snapshot advances.",
           ),
         );
       });
@@ -1063,7 +1064,7 @@ export function ProcessDetailFocusScreen({
             </MetaRow>
           }
           actions={
-            isOnHold ? (
+            canRequestCancel ? (
               <div className="process-detail-toolbar">
                 <Button
                   disabled={isCancelingProcess || !onRequestCancel}
@@ -1077,11 +1078,11 @@ export function ProcessDetailFocusScreen({
                   {isCancelingProcess
                     ? t(
                         "process_detail.current_step.actions.canceling",
-                        "Canceling...",
+                        "Interrupting...",
                       )
                     : t(
                         "process_detail.current_step.actions.cancel",
-                        "Cancel process",
+                        "Interrupt process",
                       )}
                 </Button>
               </div>

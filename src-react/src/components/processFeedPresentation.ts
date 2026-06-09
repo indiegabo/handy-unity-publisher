@@ -74,6 +74,46 @@ export function resolveProcessFeedStepDetail(process: ProcessFeedRecord) {
   return detail;
 }
 
+export function resolveProcessFeedElapsedClock(
+  process: ProcessFeedRecord,
+  nowMs = Date.now(),
+) {
+  const elapsedSeconds = resolveProcessFeedElapsedSeconds(process, nowMs);
+  if (elapsedSeconds === null) {
+    return null;
+  }
+
+  return formatProcessFeedElapsedClock(elapsedSeconds);
+}
+
+export function resolveProcessFeedElapsedSeconds(
+  process: ProcessFeedRecord,
+  nowMs = Date.now(),
+) {
+  const startedAtMs =
+    parseProcessFeedTimestamp(process.created_at) ??
+    parseProcessFeedTimestamp(process.started_at);
+  if (startedAtMs === null) {
+    return null;
+  }
+
+  const finishedAtMs = parseProcessFeedTimestamp(process.finished_at);
+  const endAtMs = finishedAtMs ?? nowMs;
+
+  return Math.max(0, Math.floor((endAtMs - startedAtMs) / 1000));
+}
+
+export function formatProcessFeedElapsedClock(totalSeconds: number) {
+  const normalizedSeconds = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(normalizedSeconds / 3600);
+  const minutes = Math.floor((normalizedSeconds % 3600) / 60);
+  const seconds = normalizedSeconds % 60;
+
+  return [hours, minutes, seconds]
+    .map((value) => value.toString().padStart(2, "0"))
+    .join(":");
+}
+
 export function formatProcessFeedEngineVersionBadge(engineVersion: string | null) {
   if (engineVersion?.trim()) {
     return `Engine ${engineVersion.trim()}`;
@@ -246,6 +286,20 @@ export function formatLocalizedProcessFeedMetaValue(
   emptyFallback = "pending",
 ) {
   return value?.trim() || translate(emptyKey, emptyFallback);
+}
+
+function parseProcessFeedTimestamp(value: string | null | undefined) {
+  const normalizedValue = value?.trim();
+  if (!normalizedValue) {
+    return null;
+  }
+
+  const timestamp = Date.parse(normalizedValue);
+  if (Number.isNaN(timestamp)) {
+    return null;
+  }
+
+  return timestamp;
 }
 
 function buildFallbackStep(status: string) {

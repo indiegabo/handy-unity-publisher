@@ -80,7 +80,7 @@ const UNITY_TARGET_GROUP_ORDER: readonly UnityTargetGroupId[] = [
 const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   {
     aliases: ["windows32", "windows 32-bit", "windows x86"],
-    buildMethod: "Builder.PerformWindows32",
+    buildMethod: "HGPBuilder.PerformWindows32",
     fallbackLabel: "Windows 32-bit",
     group: "desktop",
     key: "build_target_editor.target_platform.windows_32",
@@ -89,7 +89,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["windows", "windows64", "windows 64-bit"],
-    buildMethod: "Builder.PerformWindows64",
+    buildMethod: "HGPBuilder.PerformWindows64",
     fallbackLabel: "Windows 64-bit",
     group: "desktop",
     key: "build_target_editor.target_platform.windows_64",
@@ -98,7 +98,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["mac", "macos", "osx"],
-    buildMethod: "Builder.PerformMacOS",
+    buildMethod: "HGPBuilder.PerformMacOS",
     fallbackLabel: "macOS",
     group: "desktop",
     key: "build_target_editor.target_platform.macos",
@@ -107,7 +107,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["linux", "linux64", "linux 64-bit"],
-    buildMethod: "Builder.PerformLinux64",
+    buildMethod: "HGPBuilder.PerformLinux64",
     fallbackLabel: "Linux 64-bit",
     group: "desktop",
     key: "build_target_editor.target_platform.linux_64",
@@ -116,7 +116,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["ios"],
-    buildMethod: "Builder.PerformIOS",
+    buildMethod: "HGPBuilder.PerformIOS",
     fallbackLabel: "iOS",
     group: "mobileAndXr",
     key: "build_target_editor.target_platform.ios",
@@ -125,7 +125,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["android"],
-    buildMethod: "Builder.PerformAndroid",
+    buildMethod: "HGPBuilder.PerformAndroid",
     fallbackLabel: "Android",
     group: "mobileAndXr",
     key: "build_target_editor.target_platform.android",
@@ -134,7 +134,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["tvos"],
-    buildMethod: "Builder.PerformTvOS",
+    buildMethod: "HGPBuilder.PerformTvOS",
     fallbackLabel: "tvOS",
     group: "mobileAndXr",
     key: "build_target_editor.target_platform.tvos",
@@ -143,7 +143,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["vision os", "visionos"],
-    buildMethod: "Builder.PerformVisionOS",
+    buildMethod: "HGPBuilder.PerformVisionOS",
     fallbackLabel: "visionOS",
     group: "mobileAndXr",
     key: "build_target_editor.target_platform.visionos",
@@ -152,7 +152,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["webgl"],
-    buildMethod: "Builder.PerformWebGL",
+    buildMethod: "HGPBuilder.PerformWebGL",
     fallbackLabel: "WebGL",
     group: "webAndStore",
     key: "build_target_editor.target_platform.webgl",
@@ -161,7 +161,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["uwp", "wsa", "wsaplayer"],
-    buildMethod: "Builder.PerformUWP",
+    buildMethod: "HGPBuilder.PerformUWP",
     fallbackLabel: "UWP",
     group: "webAndStore",
     key: "build_target_editor.target_platform.uwp",
@@ -170,7 +170,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["ps4"],
-    buildMethod: "Builder.PerformPS4",
+    buildMethod: "HGPBuilder.PerformPS4",
     fallbackLabel: "PS4",
     group: "consoles",
     key: "build_target_editor.target_platform.ps4",
@@ -179,7 +179,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["ps5"],
-    buildMethod: "Builder.PerformPS5",
+    buildMethod: "HGPBuilder.PerformPS5",
     fallbackLabel: "PS5",
     group: "consoles",
     key: "build_target_editor.target_platform.ps5",
@@ -188,7 +188,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["xbox one", "xboxone"],
-    buildMethod: "Builder.PerformXboxOne",
+    buildMethod: "HGPBuilder.PerformXboxOne",
     fallbackLabel: "Xbox One",
     group: "consoles",
     key: "build_target_editor.target_platform.xbox_one",
@@ -197,7 +197,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["gamecore xbox one", "gamecorexboxone"],
-    buildMethod: "Builder.PerformGameCoreXboxOne",
+    buildMethod: "HGPBuilder.PerformGameCoreXboxOne",
     fallbackLabel: "GameCore Xbox One",
     group: "consoles",
     key: "build_target_editor.target_platform.gamecore_xbox_one",
@@ -206,7 +206,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["gamecore xbox series", "gamecorexboxseries", "xbox series"],
-    buildMethod: "Builder.PerformGameCoreXboxSeries",
+    buildMethod: "HGPBuilder.PerformGameCoreXboxSeries",
     fallbackLabel: "GameCore Xbox Series",
     group: "consoles",
     key: "build_target_editor.target_platform.gamecore_xbox_series",
@@ -215,7 +215,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
   },
   {
     aliases: ["nintendo switch", "switch"],
-    buildMethod: "Builder.PerformSwitch",
+    buildMethod: "HGPBuilder.PerformSwitch",
     fallbackLabel: "Nintendo Switch",
     group: "consoles",
     key: "build_target_editor.target_platform.switch",
@@ -229,7 +229,7 @@ const UNITY_TARGET_CATALOG: readonly UnityTargetCatalogEntry[] = [
       "linux dedicated server",
       "linuxheadlesssimulation",
     ],
-    buildMethod: "Builder.PerformDedicatedServerLinux",
+    buildMethod: "HGPBuilder.PerformDedicatedServerLinux",
     fallbackLabel: "Dedicated Server Linux",
     group: "servers",
     key: "build_target_editor.target_platform.dedicated_server_linux",
@@ -535,7 +535,7 @@ export function BuildTargetEditorOverlay({
                   buildMethod: nextBuildMethod,
                 }));
               }}
-              placeholder={suggestedBuildMethod ?? "Builder.PerformWindows64"}
+              placeholder={suggestedBuildMethod ?? "HGPBuilder.PerformWindows64"}
               value={draft.buildMethod}
             />
           </>
@@ -587,7 +587,7 @@ function validateBuildTargetDraftForOverlay(
     } else if (!target.buildMethod.includes(".")) {
       errors.buildMethod = t(
         "build_target_editor.validation.custom_method_format",
-        "Use a full static method path such as Builder.PerformWindows64.",
+        "Use a full static method path such as HGPBuilder.PerformWindows64.",
       );
     }
   } else if (!options.suggestedBuildMethod) {

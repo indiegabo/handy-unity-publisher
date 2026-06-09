@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -52,6 +53,7 @@ vi.mock("../services/auth", () => ({
 }));
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.clearAllMocks();
 });
@@ -107,6 +109,55 @@ describe("CreateProjectWizard", () => {
     expect(
       screen.queryByRole("textbox", { name: "Default branch" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("debounces repository access detection until typing settles", async () => {
+    render(<CreateProjectWizard onCreated={vi.fn()} onManageAuth={vi.fn()} />);
+
+    fireEvent.change(await screen.findByLabelText("Project name"), {
+      target: { value: "Red Horizon" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    const repositoryUrlInput = await screen.findByRole("textbox", {
+      name: "Repository URL",
+    });
+
+    vi.useFakeTimers();
+
+    fireEvent.change(repositoryUrlInput, {
+      target: { value: "https://github.com/indiegabo/red" },
+    });
+    fireEvent.change(repositoryUrlInput, {
+      target: { value: "https://github.com/indiegabo/red-horizon" },
+    });
+    fireEvent.change(repositoryUrlInput, {
+      target: { value: "https://github.com/indiegabo/red-horizon.git" },
+    });
+
+    expect(detectRepositoryProviderMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(799);
+    });
+
+    expect(detectRepositoryProviderMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(detectRepositoryProviderMock).toHaveBeenCalledTimes(1);
+    expect(detectRepositoryProviderMock).toHaveBeenLastCalledWith(
+      "https://github.com/indiegabo/red-horizon.git",
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    expect(detectRepositoryProviderMock).toHaveBeenCalledTimes(1);
   });
 
   it("shows local workspace fields instead of repository access fields for local workspace access", async () => {
@@ -183,7 +234,7 @@ describe("CreateProjectWizard", () => {
     ).toBeInTheDocument();
     expect(
       within(dialog).getByText(
-        "Default build method: Builder.PerformWindows64",
+        "Default build method: HGPBuilder.PerformWindows64",
       ),
     ).toBeInTheDocument();
 
@@ -199,7 +250,7 @@ describe("CreateProjectWizard", () => {
       await screen.findByRole("heading", { name: "Windows 64-bit" }),
     ).toBeInTheDocument();
     expect(
-      screen.getAllByText(/Builder\.PerformWindows64/).length,
+      screen.getAllByText(/HGPBuilder\.PerformWindows64/).length,
     ).toBeGreaterThan(0);
   });
 
@@ -294,7 +345,7 @@ describe("CreateProjectWizard", () => {
       within(dialog).getByText("Default target name: PS5"),
     ).toBeInTheDocument();
     expect(
-      within(dialog).getByText("Default build method: Builder.PerformPS5"),
+      within(dialog).getByText("Default build method: HGPBuilder.PerformPS5"),
     ).toBeInTheDocument();
   });
 
@@ -329,7 +380,7 @@ describe("CreateProjectWizard", () => {
 
     expect(
       within(dialog).getByLabelText("Custom build method"),
-    ).toHaveAttribute("placeholder", "Builder.PerformWindows32");
+    ).toHaveAttribute("placeholder", "HGPBuilder.PerformWindows32");
   });
 
   it("keeps the current target available while editing and blocks the others", async () => {
@@ -386,7 +437,9 @@ describe("CreateProjectWizard", () => {
     });
 
     expect(
-      within(dialog).getByText("Default build method: Builder.PerformLinux64"),
+      within(dialog).getByText(
+        "Default build method: HGPBuilder.PerformLinux64",
+      ),
     ).toBeInTheDocument();
 
     fireEvent.click(
@@ -683,6 +736,7 @@ describe("CreateProjectWizard", () => {
       expect(payload?.repository_url ?? null).toBeNull();
       expect(payload?.repository_access_assessment ?? null).toBeNull();
       expect(payload?.repository_credentials_id ?? null).toBeNull();
+      expect(payload?.build_targets?.[0]?.process_priority).toBe("low");
       expect(onCreated).toHaveBeenCalledWith(1);
     });
   });
@@ -701,7 +755,7 @@ describe("CreateProjectWizard", () => {
     await waitFor(() => {
       expect(screen.getByText("5. Paths")).toBeInTheDocument();
       expect(
-        screen.getByText("Artifacts root override must be an absolute path."),
+        screen.getByText("Workspace root override must be an absolute path."),
       ).toBeInTheDocument();
     });
 
@@ -711,6 +765,32 @@ describe("CreateProjectWizard", () => {
         "I reviewed the repository access, targets, publish destinations, and path overrides for this project.",
       ),
     ).not.toBeInTheDocument();
+  });
+
+  it("opens the publish destination overlay flow from the publish step", async () => {
+    render(
+      <OverlayProvider>
+        <CreateProjectWizard
+          initialSnapshot={buildPublishStepSnapshot()}
+          onCreated={vi.fn()}
+          onManageAuth={vi.fn()}
+        />
+      </OverlayProvider>,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Add destination" }),
+    );
+
+    expect(
+      screen.getByRole("menu", { name: "Destination list" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Itch" }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "Add Itch destination" }),
+    ).toBeInTheDocument();
   });
 });
 
@@ -726,10 +806,9 @@ function buildReviewSnapshot(): CreateProjectWizardSnapshot {
     },
     currentStepIndex: 5,
     draft: {
-      artifactsRootOverride: "",
       buildTargets: [
         {
-          buildMethod: "Builder.PerformWindows",
+          buildMethod: "HGPBuilder.PerformWindows64",
           id: "target-1",
           name: "Windows",
           targetPlatform: "StandaloneWindows64",
@@ -740,6 +819,7 @@ function buildReviewSnapshot(): CreateProjectWizardSnapshot {
       name: "Red Horizon",
       pollingIntervalSeconds: "300",
       projectKind: "repository",
+      processPriority: "low",
       publishDestinations: [],
       repositoryUrl: "https://github.com/indiegabo/red-horizon.git",
       repositoryVisibility: "public",
@@ -765,8 +845,15 @@ function buildInvalidPathStepSnapshot(): CreateProjectWizardSnapshot {
     currentStepIndex: 4,
     draft: {
       ...snapshot.draft,
-      artifactsRootOverride: "relative/artifacts",
+      workspaceRootOverride: "relative/workspace",
     },
+  };
+}
+
+function buildPublishStepSnapshot(): CreateProjectWizardSnapshot {
+  return {
+    ...buildReviewSnapshot(),
+    currentStepIndex: 3,
   };
 }
 
@@ -852,13 +939,13 @@ function buildTargetsStepSnapshotWithMultipleTargets(): CreateProjectWizardSnaps
       ...snapshot.draft,
       buildTargets: [
         {
-          buildMethod: "Builder.PerformWindows64",
+          buildMethod: "HGPBuilder.PerformWindows64",
           id: "target-1",
           name: "Windows 64-bit",
           targetPlatform: "StandaloneWindows64",
         },
         {
-          buildMethod: "Builder.PerformMacOS",
+          buildMethod: "HGPBuilder.PerformMacOS",
           id: "target-2",
           name: "macOS",
           targetPlatform: "StandaloneOSX",
@@ -999,6 +1086,7 @@ function buildUnityExecutableValidation() {
     additional_argument_count: 0,
     environment_variable_count: 0,
     message: "Unity executable is ready.",
+    process_priority: "low" as const,
     runner_family: "host-native",
     status: "ready",
     unity_executable_exists: true,

@@ -1,4 +1,11 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import OverlayProvider from "./OverlayManager";
@@ -60,6 +67,7 @@ vi.mock("../services/auth", () => ({
 }));
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.clearAllMocks();
 });
@@ -106,6 +114,51 @@ describe("RepositoryProjectDetail", () => {
     expect(
       screen.queryByText("Artifacts root override"),
     ).not.toBeInTheDocument();
+  });
+
+  it("debounces repository URL access checks and does not loop after the result arrives", async () => {
+    renderProjectDetail();
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Repository" }));
+
+    const repositoryUrlInput = await screen.findByRole("textbox", {
+      name: "Repository URL",
+    });
+
+    vi.useFakeTimers();
+
+    fireEvent.change(repositoryUrlInput, {
+      target: { value: "https://github.com/indiegabo/rev" },
+    });
+    fireEvent.change(repositoryUrlInput, {
+      target: { value: "https://github.com/indiegabo/revolutions" },
+    });
+    fireEvent.change(repositoryUrlInput, {
+      target: { value: "https://github.com/indiegabo/revolutions-next.git" },
+    });
+
+    expect(detectRepositoryProviderMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(799);
+    });
+
+    expect(detectRepositoryProviderMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    expect(detectRepositoryProviderMock).toHaveBeenCalledTimes(1);
+    expect(detectRepositoryProviderMock).toHaveBeenLastCalledWith(
+      "https://github.com/indiegabo/revolutions-next.git",
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+    });
+
+    expect(detectRepositoryProviderMock).toHaveBeenCalledTimes(1);
   });
 
   it("renders wizard step tabs for repository projects", async () => {
@@ -161,6 +214,28 @@ describe("RepositoryProjectDetail", () => {
     ).toBeNull();
   });
 
+  it("opens the publish destination overlay flow from the publish tab", async () => {
+    renderProjectDetail();
+
+    fireEvent.click(
+      await screen.findByRole("tab", { name: "Publish Destinations" }),
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Add destination" }),
+    );
+
+    expect(
+      screen.getByRole("menu", { name: "Destination list" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Itch" }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "Add Itch destination" }),
+    ).toBeInTheDocument();
+  });
+
   it("locks the rebuilt editor when repository processes are running", async () => {
     loadRepositoryProjectDetailMock.mockResolvedValue(
       buildRepositoryDetail({
@@ -199,6 +274,20 @@ describe("RepositoryProjectDetail", () => {
       screen.getByRole("button", { name: "Remove Project" }),
     ).toBeDisabled();
     expect(screen.getByRole("tab", { name: "Build Targets" })).toBeDisabled();
+  });
+
+  it("does not render a project-level process priority control in the targets tab", async () => {
+    renderProjectDetail();
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Build Targets" }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("combobox", {
+          name: "Build process priority",
+        }),
+      ).not.toBeInTheDocument();
+    });
   });
 });
 
@@ -389,6 +478,7 @@ function buildUnityExecutableValidation() {
     additional_argument_count: 0,
     environment_variable_count: 0,
     message: "Unity executable is ready.",
+    process_priority: "low",
     runner_family: "host-native",
     status: "ready",
     unity_executable_exists: true,

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export type UnityExecutableValidation = {
     runner_family: string;
     unity_executable_path: string | null;
+    process_priority?: BuildProcessPriority | null;
     unity_executable_exists: boolean;
     unity_executable_is_file: boolean;
     additional_argument_count: number;
@@ -10,6 +11,10 @@ export type UnityExecutableValidation = {
     status: string;
     message: string;
 };
+
+export type ProcessPriority = "low" | "normal" | "high";
+
+export type BuildProcessPriority = ProcessPriority;
 
 export type DiscoveredUnityEditor = {
     version: string;
@@ -222,6 +227,7 @@ export type CreateRepositoryProjectBuildTargetInput = {
     name: string;
     contract: BuildContractInput;
     unity_executable_path: string;
+    process_priority: BuildProcessPriority;
 };
 
 export type CreateRepositoryProjectPublishBindingInput = {
@@ -248,7 +254,6 @@ export type CreateRepositoryProjectInput = {
     repository_access_assessment?: RepositoryAccessAssessment | null;
     repository_credentials_id?: number | null;
     default_branch?: string | null;
-    artifacts_root_override?: string | null;
     workspace_root_override?: string | null;
     polling_interval_seconds: number;
     build_targets: CreateRepositoryProjectBuildTargetInput[];
@@ -260,6 +265,7 @@ export type UpdateRepositoryProjectBuildTargetInput = {
     name: string;
     contract: BuildContractInput;
     unity_executable_path: string;
+    process_priority: BuildProcessPriority;
 };
 
 export type UpdateRepositoryProjectPublishBindingInput = {
@@ -295,7 +301,6 @@ export type UpdateRepositoryProjectInput = {
     local_path?: string | null;
     repository_access_assessment?: RepositoryAccessAssessment | null;
     default_branch?: string | null;
-    artifacts_root_override?: string | null;
     workspace_root_override?: string | null;
     polling_interval_seconds: number;
     enabled: boolean;
@@ -325,7 +330,10 @@ export type RemoveRepositoryProjectReport = {
     skipped_paths: string[];
 };
 
-export type OnDemandReleaseVersionSource = "manual" | "project_settings";
+export type OnDemandReleaseVersionSource =
+    | "manual"
+    | "project_settings"
+    | "source_tag";
 
 export type OnDemandReleaseSourceKind =
     | "managed_tag"
@@ -339,7 +347,26 @@ export type OnDemandReleaseProcessInput = {
     source_kind: OnDemandReleaseSourceKind;
     source_ref?: string | null;
     local_path?: string | null;
+    process_priority?: ProcessPriority | null;
     unity_executable_path_override?: string | null;
+};
+
+export type OnDemandReleaseVersionPreviewInput = {
+    repository_id: number;
+    version_source: OnDemandReleaseVersionSource;
+    source_kind: OnDemandReleaseSourceKind;
+    source_ref?: string | null;
+    local_path?: string | null;
+};
+
+export type OnDemandReleaseRemoteRefsInput = {
+    repository_id: number;
+    source_kind: Extract<OnDemandReleaseSourceKind, "managed_ref" | "managed_tag">;
+};
+
+export type OnDemandReleaseRemoteRef = {
+    name: string;
+    commit: string;
 };
 
 export type QueuedReleaseRunRecord = {
@@ -453,6 +480,22 @@ export async function dispatchOnDemandReleaseProcess(
     input: OnDemandReleaseProcessInput,
 ): Promise<QueuedReleaseRunRecord> {
     return invoke<QueuedReleaseRunRecord>("dispatch_on_demand_release_process", {
+        input,
+    });
+}
+
+export async function previewOnDemandReleaseVersion(
+    input: OnDemandReleaseVersionPreviewInput,
+): Promise<string> {
+    return invoke<string>("preview_on_demand_release_version", {
+        input,
+    });
+}
+
+export async function listOnDemandReleaseRemoteRefs(
+    input: OnDemandReleaseRemoteRefsInput,
+): Promise<OnDemandReleaseRemoteRef[]> {
+    return invoke<OnDemandReleaseRemoteRef[]>("list_on_demand_release_remote_refs", {
         input,
     });
 }
