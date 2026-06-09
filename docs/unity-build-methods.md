@@ -76,11 +76,11 @@ current manifest contract and the recommended method names used in this guide.
 
 | Unity Contract `targetPlatform` | Unity BuildTarget     | Recommended build method |
 | ------------------------------- | --------------------- | ------------------------ |
-| `StandaloneLinux64`             | `StandaloneLinux64`   | `Builder.PerformLinux`   |
-| `StandaloneWindows64`           | `StandaloneWindows64` | `Builder.PerformWindows` |
-| `StandaloneOSX`                 | `StandaloneOSX`       | `Builder.PerformMacOS`   |
-| `WebGL`                         | `WebGL`               | `Builder.PerformWebGL`   |
-| `Android`                       | `Android`             | `Builder.PerformAndroid` |
+| `StandaloneLinux64`             | `StandaloneLinux64`   | `HGPBuilder.PerformLinux64`   |
+| `StandaloneWindows64`           | `StandaloneWindows64` | `HGPBuilder.PerformWindows64` |
+| `StandaloneOSX`                 | `StandaloneOSX`       | `HGPBuilder.PerformMacOS`     |
+| `WebGL`                         | `WebGL`               | `HGPBuilder.PerformWebGL`     |
+| `Android`                       | `Android`             | `HGPBuilder.PerformAndroid`   |
 
 HGP now suggests these method names automatically in the build-target UI based
 on the selected `targetPlatform`. This suggestion is only a convention for a
@@ -95,7 +95,7 @@ overlay whenever a project uses a non-standard method path.
 Place the build script inside the Unity project at:
 
 ```text
-Assets/Editor/Builder.cs
+Assets/Editor/HGPBuilder.cs
 ```
 
 Unity loads static build entrypoints from Editor assemblies, so the methods
@@ -125,7 +125,7 @@ using System.Linq;
 using UnityEditor;
 using UnityEditor.Build.Reporting;
 
-public static class Builder
+public static class HGPBuilder
 {
     private static readonly string[] ArchiveExclusionSuffixes =
     {
@@ -148,12 +148,12 @@ public static class Builder
         ".symbols.json",
     };
 
-    public static void PerformLinux()
+    public static void PerformLinux64()
     {
         BuildStandalone(BuildTarget.StandaloneLinux64, ".x86_64", "Linux");
     }
 
-    public static void PerformWindows()
+    public static void PerformWindows64()
     {
         BuildStandalone(BuildTarget.StandaloneWindows64, ".exe", "Windows");
     }
@@ -556,7 +556,7 @@ spec:
                 contract:
                     unity:
                         targetPlatform: StandaloneLinux64
-                        buildMethod: Builder.PerformLinux
+                        buildMethod: HGPBuilder.PerformLinux64
                         editorVersion: 2022.3.14f1
                 runner:
                     type: host-native
@@ -579,7 +579,7 @@ spec:
                 contract:
                     unity:
                         targetPlatform: StandaloneWindows64
-                        buildMethod: Builder.PerformWindows
+                        buildMethod: HGPBuilder.PerformWindows64
                         editorVersion: 2022.3.14f1
                 runner:
                     type: host-native
@@ -602,7 +602,7 @@ spec:
                 contract:
                     unity:
                         targetPlatform: StandaloneOSX
-                        buildMethod: Builder.PerformMacOS
+                        buildMethod: HGPBuilder.PerformMacOS
                         editorVersion: 2022.3.14f1
                 runner:
                     type: host-native
@@ -625,7 +625,7 @@ spec:
                 contract:
                     unity:
                         targetPlatform: WebGL
-                        buildMethod: Builder.PerformWebGL
+                        buildMethod: HGPBuilder.PerformWebGL
                         editorVersion: 2022.3.14f1
                 runner:
                     type: host-native
@@ -648,7 +648,7 @@ spec:
                 contract:
                     unity:
                         targetPlatform: Android
-                        buildMethod: Builder.PerformAndroid
+                        buildMethod: HGPBuilder.PerformAndroid
                         editorVersion: 2022.3.14f1
                 runner:
                     type: host-native
@@ -671,7 +671,7 @@ spec:
                 contract:
                     unity:
                         targetPlatform: WebGL
-                        buildMethod: Builder.PerformWebGL
+                        buildMethod: HGPBuilder.PerformWebGL
                         editorVersion: 2022.3.14f1
                 runner:
                     type: host-native
@@ -682,7 +682,7 @@ spec:
                 config: {}
 ```
 
-The `Builder.PerformWebGL` method above automatically produces a zip file when
+The `HGPBuilder.PerformWebGL` method above automatically produces a zip file when
 `output.kind: archive`. HGP configuration should express archive
 behavior through `output.kind: archive` and a non-zip requested path.
 

@@ -70,12 +70,18 @@ targets comuns de standalone, mobile, WebGL e plataformas de console.
 
 ## Classe de build Unity de exemplo
 
-Salve a classe abaixo em uma pasta `Assets/Editor` do seu projeto Unity e
-depois mantenha os nomes de método sugeridos ou renomeie para combinar com os
-métodos de build que você configurou no HGP.
+Salve a classe abaixo como `Assets/Editor/HGPBuilder.cs` no seu projeto Unity
+e depois mantenha os nomes de método sugeridos em `HGPBuilder.Perform...` ou
+renomeie para combinar com os métodos de build que você configurou no HGP.
 
 Baixe o arquivo bruto:
-<a href="../../../../assets/code/UnityBuilderExample.cs">UnityBuilderExample.cs</a>
+<a href="../../../../assets/code/HGPBuilder.cs">HGPBuilder.cs</a>
+
+Além do contrato mínimo acima, este exemplo também mostra alguns reforços
+práticos: um log diagnóstico lateral para falhas em batch mode, uma checagem
+explícita de suporte ao target antes de invocar o pipeline e scripting defines
+opcionais consumidos de `HGB_EXTRA_SCRIPTING_DEFINES` ou
+`-hgbExtraScriptingDefines` quando a sua própria automação os fornecer.
 
 ```csharp
 using System;
@@ -86,14 +92,40 @@ using UnityEditor.Build.Reporting;
 using UnityEngine;
 
 /// <summary>
-/// Example Unity Editor entrypoints that show how an HGP-integrated Unity
-/// project can expose one executeMethod target per officially documented Unity
-/// BuildTarget value in the public scripting API.
+/// Provides example Unity Editor executeMethod entrypoints for an
+/// HGP-integrated project across publicly documented Unity build targets.
 /// Closed-platform examples still require the corresponding Unity module and
 /// vendor access in the installed editor.
 /// </summary>
-public static class UnityBuilderExample
+/// <remarks>
+/// The type name is not part of the build contract. HGP resolves whichever
+/// <c>&lt;TypeName&gt;.&lt;MethodName&gt;</c> pair is configured by the
+/// application, so integrators may rename this class to match their own
+/// naming conventions.
+/// Most <c>Perform*</c> methods are illustrative templates that map public
+/// <see cref="BuildTarget"/> values to a consistent example build flow.
+/// The entrypoints validated in practice for this sample are the Windows
+/// standalone, Linux64, and WebGL variants.
+/// Treat this class as a strong starting point for project-specific build
+/// orchestration rather than a fixed framework requirement.
+/// </remarks>
+public static class HGPBuilder
 {
+    private const string OutputPathEnvironmentVariableName = "HGB_OUTPUT_PATH";
+
+    private const string OutputPathArgumentName = "-hgbOutputPath";
+
+    private const string ExtraDefinesEnvironmentVariableName =
+        "HGB_EXTRA_SCRIPTING_DEFINES";
+
+    private const string ExtraDefinesArgumentName =
+        "-hgbExtraScriptingDefines";
+
+    private static readonly string DiagnosticLogPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Temp",
+        $"{SafeProductName()}-hgp-builder-diagnostics.log");
+
     #region API
 
     /// <summary>
@@ -101,7 +133,8 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformMacOS()
     {
-        BuildStandalone(
+        RunStandaloneBuild(
+            nameof(PerformMacOS),
             BuildTarget.StandaloneOSX,
             ".app",
             "macOS");
@@ -112,7 +145,8 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformWindows32()
     {
-        BuildStandalone(
+        RunStandaloneBuild(
+            nameof(PerformWindows32),
             BuildTarget.StandaloneWindows,
             ".exe",
             "Windows32");
@@ -123,7 +157,10 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformIOS()
     {
-        BuildDirectoryTarget(BuildTarget.iOS, "iOS");
+        RunDirectoryBuild(
+            nameof(PerformIOS),
+            BuildTarget.iOS,
+            "iOS");
     }
 
     /// <summary>
@@ -131,7 +168,8 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformAndroid()
     {
-        BuildStandalone(
+        RunStandaloneBuild(
+            nameof(PerformAndroid),
             BuildTarget.Android,
             ".apk",
             "Android");
@@ -142,7 +180,8 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformWindows64()
     {
-        BuildStandalone(
+        RunStandaloneBuild(
+            nameof(PerformWindows64),
             BuildTarget.StandaloneWindows64,
             ".exe",
             "Windows64");
@@ -153,7 +192,10 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformWebGL()
     {
-        BuildDirectoryTarget(BuildTarget.WebGL, "WebGL");
+        RunDirectoryBuild(
+            nameof(PerformWebGL),
+            BuildTarget.WebGL,
+            "WebGL");
     }
 
     /// <summary>
@@ -161,7 +203,10 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformUWP()
     {
-        BuildDirectoryTarget(BuildTarget.WSAPlayer, "UWP");
+        RunDirectoryBuild(
+            nameof(PerformUWP),
+            BuildTarget.WSAPlayer,
+            "UWP");
     }
 
     /// <summary>
@@ -169,7 +214,8 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformLinux64()
     {
-        BuildStandalone(
+        RunStandaloneBuild(
+            nameof(PerformLinux64),
             BuildTarget.StandaloneLinux64,
             ".x86_64",
             "Linux64");
@@ -180,7 +226,10 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformPS4()
     {
-        BuildDirectoryTarget(BuildTarget.PS4, "PS4");
+        RunDirectoryBuild(
+            nameof(PerformPS4),
+            BuildTarget.PS4,
+            "PS4");
     }
 
     /// <summary>
@@ -188,7 +237,10 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformXboxOne()
     {
-        BuildDirectoryTarget(BuildTarget.XboxOne, "XboxOne");
+        RunDirectoryBuild(
+            nameof(PerformXboxOne),
+            BuildTarget.XboxOne,
+            "XboxOne");
     }
 
     /// <summary>
@@ -196,7 +248,10 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformTvOS()
     {
-        BuildDirectoryTarget(BuildTarget.tvOS, "tvOS");
+        RunDirectoryBuild(
+            nameof(PerformTvOS),
+            BuildTarget.tvOS,
+            "tvOS");
     }
 
     /// <summary>
@@ -204,7 +259,10 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformSwitch()
     {
-        BuildDirectoryTarget(BuildTarget.Switch, "Switch");
+        RunDirectoryBuild(
+            nameof(PerformSwitch),
+            BuildTarget.Switch,
+            "Switch");
     }
 
     /// <summary>
@@ -212,7 +270,8 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformDedicatedServerLinux()
     {
-        BuildStandalone(
+        RunStandaloneBuild(
+            nameof(PerformDedicatedServerLinux),
             BuildTarget.LinuxHeadlessSimulation,
             ".x86_64",
             "DedicatedServerLinux");
@@ -223,7 +282,8 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformGameCoreXboxSeries()
     {
-        BuildDirectoryTarget(
+        RunDirectoryBuild(
+            nameof(PerformGameCoreXboxSeries),
             BuildTarget.GameCoreXboxSeries,
             "GameCoreXboxSeries");
     }
@@ -233,7 +293,8 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformGameCoreXboxOne()
     {
-        BuildDirectoryTarget(
+        RunDirectoryBuild(
+            nameof(PerformGameCoreXboxOne),
             BuildTarget.GameCoreXboxOne,
             "GameCoreXboxOne");
     }
@@ -243,7 +304,10 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformPS5()
     {
-        BuildDirectoryTarget(BuildTarget.PS5, "PS5");
+        RunDirectoryBuild(
+            nameof(PerformPS5),
+            BuildTarget.PS5,
+            "PS5");
     }
 
     /// <summary>
@@ -251,12 +315,86 @@ public static class UnityBuilderExample
     /// </summary>
     public static void PerformVisionOS()
     {
-        BuildDirectoryTarget(BuildTarget.VisionOS, "visionOS");
+        RunDirectoryBuild(
+            nameof(PerformVisionOS),
+            BuildTarget.VisionOS,
+            "visionOS");
     }
 
     #endregion
 
     #region Build Flow
+
+    /// <summary>
+    /// Wraps one batch entrypoint with a side-channel diagnostic log so batch
+    /// failures that terminate before Unity flushes the main log can still be
+    /// inspected after the process exits.
+    /// </summary>
+    /// <param name="operationName">Logical build operation label.</param>
+    /// <param name="action">Operation body to execute.</param>
+    private static void RunWithDiagnostics(
+        string operationName,
+        Action action)
+    {
+        ResetDiagnosticLog();
+        AppendDiagnostic($"{operationName} started.");
+
+        try
+        {
+            action();
+            AppendDiagnostic($"{operationName} completed successfully.");
+        }
+        catch (Exception exception)
+        {
+            AppendDiagnostic(
+                $"{operationName} failed: {exception}");
+
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Executes one standalone-style build entrypoint with consistent
+    /// diagnostics so batch callers receive the same behavior regardless of
+    /// target.
+    /// </summary>
+    /// <param name="operationName">Logical build operation label.</param>
+    /// <param name="target">Unity build target to compile.</param>
+    /// <param name="playerExtension">Executable extension for the player.</param>
+    /// <param name="defaultFolderName">Fallback output folder label.</param>
+    private static void RunStandaloneBuild(
+        string operationName,
+        BuildTarget target,
+        string playerExtension,
+        string defaultFolderName)
+    {
+        RunWithDiagnostics(
+            operationName,
+            () => BuildStandalone(
+                target,
+                playerExtension,
+                defaultFolderName));
+    }
+
+    /// <summary>
+    /// Executes one directory-style build entrypoint with consistent
+    /// diagnostics so batch callers receive the same behavior regardless of
+    /// target.
+    /// </summary>
+    /// <param name="operationName">Logical build operation label.</param>
+    /// <param name="target">Unity build target to compile.</param>
+    /// <param name="defaultFolderName">Fallback output folder label.</param>
+    private static void RunDirectoryBuild(
+        string operationName,
+        BuildTarget target,
+        string defaultFolderName)
+    {
+        RunWithDiagnostics(
+            operationName,
+            () => BuildDirectoryTarget(
+                target,
+                defaultFolderName));
+    }
 
     /// <summary>
     /// Illustrates how the example routes standalone-style targets to a player
@@ -276,6 +414,7 @@ public static class UnityBuilderExample
         string playerOutputPath = NormalizeStandaloneOutputPath(
             requestedPath,
             playerExtension);
+
 
         RunBuild(target, playerOutputPath);
     }
@@ -308,10 +447,15 @@ public static class UnityBuilderExample
     /// </param>
     private static void RunBuild(BuildTarget target, string locationPathName)
     {
+        AppendDiagnostic(
+            $"RunBuild invoked for target '{target}' to '{locationPathName}'.");
+
         if (string.IsNullOrWhiteSpace(locationPathName))
         {
             throw new Exception("Build output path must not be empty.");
         }
+
+        EnsureBuildTargetSupport(target);
 
         string[] scenes = GetEnabledScenes();
         string directory = Path.GetDirectoryName(locationPathName);
@@ -324,15 +468,17 @@ public static class UnityBuilderExample
         Debug.Log(
             $"Starting {target} build to '{locationPathName}' with {scenes.Length} scene(s).");
 
-        BuildPlayerOptions options = new BuildPlayerOptions
-        {
-            scenes = scenes,
-            target = target,
-            locationPathName = locationPathName,
-            options = BuildOptions.None,
-        };
+        BuildPlayerOptions options = CreateBuildPlayerOptions(
+            scenes,
+            target,
+            locationPathName);
 
         BuildReport report = BuildPipeline.BuildPlayer(options);
+
+        AppendDiagnostic(
+            $"BuildPipeline.BuildPlayer result: {report.summary.result}. " +
+            $"Errors={report.summary.totalErrors}, " +
+            $"Warnings={report.summary.totalWarnings}.");
 
         if (report.summary.result != BuildResult.Succeeded)
         {
@@ -345,6 +491,76 @@ public static class UnityBuilderExample
         Debug.Log(
             $"Completed {target} build at '{locationPathName}'. " +
             $"Size: {report.summary.totalSize} bytes.");
+    }
+
+    /// <summary>
+    /// Creates the player build options used by the batch example and injects
+    /// optional scripting defines from HGP-specific environment variables or
+    /// command-line arguments without assuming project-local assets.
+    /// </summary>
+    /// <param name="scenes">Enabled scene asset paths to include.</param>
+    /// <param name="target">Unity build target to compile.</param>
+    /// <param name="locationPathName">Target output path.</param>
+    /// <returns>The configured build options.</returns>
+    private static BuildPlayerOptions CreateBuildPlayerOptions(
+        string[] scenes,
+        BuildTarget target,
+        string locationPathName)
+    {
+        string[] extraScriptingDefines = ReadAdditionalScriptingDefines();
+
+        AppendDiagnostic(
+            $"Editor active build target before build: '{EditorUserBuildSettings.activeBuildTarget}'.");
+        AppendDiagnostic(
+            "Editor active build target group before build: '" +
+            BuildPipeline.GetBuildTargetGroup(
+                EditorUserBuildSettings.activeBuildTarget) +
+            "'.");
+
+        if (extraScriptingDefines.Length > 0)
+        {
+            AppendDiagnostic(
+                "Applying additional scripting defines: " +
+                string.Join(", ", extraScriptingDefines));
+        }
+
+        return new BuildPlayerOptions
+        {
+            scenes = scenes,
+            target = target,
+            locationPathName = locationPathName,
+            options = BuildOptions.None,
+            extraScriptingDefines =
+                extraScriptingDefines.Length > 0
+                    ? extraScriptingDefines
+                    : null,
+        };
+    }
+
+    /// <summary>
+    /// Verifies that the installed Unity editor can build the requested target
+    /// before the example attempts to invoke the build pipeline.
+    /// </summary>
+    /// <param name="target">Unity build target to validate.</param>
+    private static void EnsureBuildTargetSupport(BuildTarget target)
+    {
+        BuildTargetGroup targetGroup = BuildPipeline.GetBuildTargetGroup(target);
+        BuildTargetGroup supportGroup = targetGroup == BuildTargetGroup.Unknown
+            ? BuildTargetGroup.Unknown
+            : targetGroup;
+
+        AppendDiagnostic(
+            $"Resolved build target group '{supportGroup}' for target '{target}'.");
+
+        if (BuildPipeline.IsBuildTargetSupported(supportGroup, target))
+        {
+            return;
+        }
+
+        throw new Exception(
+            $"The installed Unity editor does not support the '{target}' " +
+            "build target. Install the corresponding platform module " +
+            "or run this method in an editor that already includes it.");
     }
 
     #endregion
@@ -386,14 +602,14 @@ public static class UnityBuilderExample
     private static string ResolveOutputPath(string fallbackPath)
     {
         string fromEnvironment = Environment.GetEnvironmentVariable(
-            "HGB_OUTPUT_PATH");
+            OutputPathEnvironmentVariableName);
 
         if (!string.IsNullOrWhiteSpace(fromEnvironment))
         {
             return NormalizePath(fromEnvironment);
         }
 
-        string fromCommandLine = ReadNamedArgument("-hgbOutputPath");
+        string fromCommandLine = ReadNamedArgument(OutputPathArgumentName);
 
         if (!string.IsNullOrWhiteSpace(fromCommandLine))
         {
@@ -428,6 +644,37 @@ public static class UnityBuilderExample
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Reads optional extra scripting defines supplied by HGP callers so the
+    /// example builder can remain self-contained while still supporting
+    /// project-specific compile flags when needed.
+    /// </summary>
+    /// <returns>The distinct additional scripting defines to apply.</returns>
+    private static string[] ReadAdditionalScriptingDefines()
+    {
+        string fromEnvironment = Environment.GetEnvironmentVariable(
+            ExtraDefinesEnvironmentVariableName);
+        string fromCommandLine = ReadNamedArgument(ExtraDefinesArgumentName);
+
+        return new[]
+            {
+                fromEnvironment,
+                fromCommandLine,
+            }
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .SelectMany(value => value.Split(
+                new[]
+                {
+                    ';',
+                    ',',
+                },
+                StringSplitOptions.RemoveEmptyEntries))
+            .Select(value => value.Trim())
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
     }
 
     /// <summary>
@@ -485,6 +732,33 @@ public static class UnityBuilderExample
     #region Filesystem Helpers
 
     /// <summary>
+    /// Recreates the side-channel diagnostic file used by batch entrypoints.
+    /// </summary>
+    private static void ResetDiagnosticLog()
+    {
+        string directory = Path.GetDirectoryName(DiagnosticLogPath);
+
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        File.WriteAllText(DiagnosticLogPath, string.Empty);
+    }
+
+    /// <summary>
+    /// Appends one timestamped diagnostic line to the side-channel batch log.
+    /// </summary>
+    /// <param name="message">Diagnostic payload to append.</param>
+    private static void AppendDiagnostic(string message)
+    {
+        string line =
+            $"[{DateTime.UtcNow:O}] {message}{Environment.NewLine}";
+
+        File.AppendAllText(DiagnosticLogPath, line);
+    }
+
+    /// <summary>
     /// Ensures an example output directory exists before Unity writes build
     /// artifacts into it.
     /// </summary>
@@ -510,11 +784,6 @@ public static class UnityBuilderExample
         if (string.IsNullOrWhiteSpace(productName))
         {
             productName = Application.productName;
-        }
-
-        if (string.IsNullOrWhiteSpace(productName))
-        {
-            productName = "Revolutions";
         }
 
         char[] invalidCharacters = Path.GetInvalidFileNameChars();
